@@ -1,0 +1,19 @@
+# Local notes that may contain credentials
+需求.md
+.local/
+
+# Build output
+build/bin/
+dist/
+*.exe
+*.dmg
+*.zip
+
+# Go
+/vendor/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
