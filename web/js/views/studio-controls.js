@@ -167,7 +167,8 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
     if (c) catCounts.set(c, (catCounts.get(c) || 0) + 1);
   });
 
-  const choose = (id) => { onSelect(id); closeModal(); };
+  let closeCurrent = closeModal;
+  const choose = (id) => { onSelect(id); closeCurrent(); };
 
   const renderCats = () => {
     clear(catBar);
@@ -218,10 +219,34 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
     count,
     grid
   );
-  showModal(`选择${title}`, body, [
+  const footer = [
     empty ? el("button", { type: "button", class: "btn", onClick: () => choose("") }, empty) : null,
-    el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
-  ].filter(Boolean));
+    el("button", { type: "button", class: "btn", onClick: () => closeCurrent() }, "取消"),
+  ].filter(Boolean);
+
+  // If #app-dialog is already open (e.g. inside slot prompt or settings dialog),
+  // stack a dedicated native top-layer <dialog> instead of overwriting it.
+  if (document.getElementById("app-dialog")?.open) {
+    const titleId = `nested-dlg-title-${++fieldSequence}`;
+    const nested = el("dialog", { class: "modal", closedby: "any", "aria-labelledby": titleId },
+      el("div", { class: "modal-inner" },
+        el("div", { class: "modal-head" },
+          el("h2", { id: titleId, class: "modal-title" }, `选择${title}`),
+          el("form", { method: "dialog" },
+            el("button", { class: "icon-btn", value: "close", "aria-label": "关闭" }, "✕")
+          )
+        ),
+        el("div", { class: "modal-body" }, body),
+        el("div", { class: "modal-foot" }, ...footer)
+      )
+    );
+    closeCurrent = () => { if (nested.open) nested.close(""); };
+    nested.addEventListener("close", () => nested.remove());
+    document.body.appendChild(nested);
+    nested.showModal();
+  } else {
+    showModal(`选择${title}`, body, footer);
+  }
   renderCats();
   renderGrid();
   search.focus();
