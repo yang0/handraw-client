@@ -1,28 +1,27 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, showModal, toast } from "../api.js";
 import { buildGroupedModelSelect } from "./create.js";
+import { extraInstructions, field, ratioControl, recipeControls, studioMount, studioSession } from "./studio-controls.js";
 
-function normalizeArticleRatio(r) {
-  if (!r || r === "2.35:1") return "21:9";
-  return r;
-}
 
 export async function renderArticle(root, ctx, params = {}) {
-  clear(root);
+  const host = studioMount(root);
 
-  const [stylesRes, colorsRes, tonesRes, modRes, draftsRes] = await Promise.all([
+  const [stylesRes, colorsRes, tonesRes, modRes, draftsRes, layoutsRes] = await Promise.all([
     api("GET", "/api/resources/styles").catch(() => ({ items: [] })),
     api("GET", "/api/resources/colors").catch(() => ({ items: [] })),
     api("GET", "/api/resources/tones").catch(() => ({ items: [] })),
     api("GET", "/api/models").catch(() => ({ site: [], providers: [] })),
     api("GET", "/api/docs/article").catch(() => ({ items: [] })),
+    api("GET", "/api/resources/layouts").catch(() => ({ items: [] })),
   ]);
+  if (!host.isConnected) return;
 
   const styles = stylesRes.items || [];
   const colors = colorsRes.items || [];
   const tones = tonesRes.items || [];
   let drafts = draftsRes.items || [];
 
-  const state = {
+  const session = studioSession(host, "article", {
     docId: params.docId || "",
     title: "",
     content: "",
@@ -30,28 +29,35 @@ export async function renderArticle(root, ctx, params = {}) {
     color: "",
     tone: "",
     mode: "graphic-text",
+    style2: "", layout: "", mood: "",
+    coverRatio: "2.35:1", inlineRatio: "4:3", includeCover: true,
     resolution: "2k",
     modelRef: modRes.defaultModel || "site:seedream-4.5",
-    recommendedStyles: ["FA-013", "FB-001", "FE-001"],
+    recommendedStyles: [],
     slots: [],
     previewTab: "wechat", // markdown | wechat
     activeRun: null,
-    slotMap: [], // index -> slot index in state.slots
-  };
+    slotMap: [], // stable slot IDs, independent of reordering or deletion
+  });
+  root = session.root;
+  const state = session.state;
+  let submitting = false, planning = false;
+  const slotRatios = new Map();
+  const slotSignature = (sl) => JSON.stringify([sl.role, sl.anchor, sl.theme, sl.ratio, sl.layout, state.style, state.fusion ? state.style2 : "", state.color, state.tone, state.mood, state.mode, extraInstructions(state)]);
 
   root.appendChild(el("div", { class: "page-head" },
     el("div", { class: "row" },
-      el("h1", { class: "page-title" }, "文章到图文"),
+      el("h1", { class: "page-title" }, "文章配图"),
       el("span", { class: "muted" }, "导入长文或链接，一键规划封面与正文锚点配图并导出公众号排版")
     ),
     el("div", { class: "row" },
-      el("button", { type: "button", class: "btn btn-sm", onClick: saveDraft }, "💾 保存文稿"),
+      el("button", { type: "button", class: "btn btn-sm", onClick: saveDraft }, "保存文章"),
       el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("works") }, "查看作品库")
     )
   ));
 
   // Top import/plan toolbar
-  const titleIn = el("input", { class: "input", style: { flex: "1", minWidth: "200px" }, placeholder: "输入文章标题…" });
+  const titleIn = el("input", { class: "input", value: state.title, style: { flex: "1", minWidth: "200px" }, placeholder: "输入文章标题…" });
   titleIn.addEventListener("input", () => { state.title = titleIn.value; renderPreview(); });
 
   const draftSel = el("select", { class: "select select-sm", style: { maxWidth: "180px" } });
@@ -62,24 +68,23 @@ export async function renderArticle(root, ctx, params = {}) {
     if (state.docId) draftSel.value = state.docId;
   };
   refreshDraftSel();
-  draftSel.addEventListener("change", async () => {
-    if (!draftSel.value) return;
+  draftSel.addEventListener("change", () => loadDraft(draftSel.value));
+  async function loadDraft(id) {
+    if (!id) return;
     try {
-      const r = await api("GET", `/api/docs/article/${encodeURIComponent(draftSel.value)}`);
+      const r = await api("GET", `/api/docs/article/${encodeURIComponent(id)}`);
       const data = typeof r.doc?.data === "string" ? JSON.parse(r.doc.data) : (r.doc?.data || {});
-      state.docId = r.doc.id;
+      Object.assign(state, data, { docId: r.doc.id, activeRun: null, slotMap: [] });
+      state.fusion = data.fusion ?? Boolean(data.style2);
       state.title = data.title || r.doc.name || "";
-      state.content = data.content || "";
-      state.style = data.style || state.style;
-      state.color = data.color || "";
-      state.tone = data.tone || "";
       state.slots = Array.isArray(data.slots) ? data.slots : [];
       syncInputs();
       renderSlots();
       renderPreview();
+      session.persist();
       toast("已加载文章草稿");
     } catch (e) { toast(e.message); }
-  });
+  }
 
   const fileIn = el("input", { type: "file", accept: ".md,.markdown,.txt,.docx", class: "hidden" });
   fileIn.addEventListener("change", async () => {
@@ -93,17 +98,18 @@ export async function renderArticle(root, ctx, params = {}) {
       state.content = res.content || "";
       syncInputs();
       renderPreview();
+      session.persist();
       toast("已导入文稿");
     } catch (e) { toast(e.message); }
     fileIn.value = "";
   });
 
-  const planBtn = el("button", { type: "button", class: "btn btn-primary", onClick: planArticle }, "🧭 智能规划配图位");
+  const planBtn = el("button", { type: "button", class: "btn btn-primary", onClick: planArticle }, "AI 规划配图");
 
   root.appendChild(el("section", { class: "card col", style: { marginBottom: "14px" } },
     el("div", { class: "row" },
-      titleIn,
-      draftSel,
+      field("文章标题", titleIn),
+      field("文章草稿", draftSel),
       fileIn,
       el("button", { type: "button", class: "btn", onClick: () => fileIn.click() }, "📄 导入 MD/TXT/DOCX"),
       el("button", { type: "button", class: "btn", onClick: openURLImportDialog }, "🔗 抓取网页链接"),
@@ -111,68 +117,47 @@ export async function renderArticle(root, ctx, params = {}) {
     )
   ));
 
-  // Style & model strip
-  const recChips = el("div", { class: "row" });
-  const styleSel = el("select", { class: "select select-sm" });
-  styles.forEach((s) => styleSel.appendChild(el("option", { value: s.number }, `${s.number} · ${s.nameZh || s.generation_name}`)));
-  styleSel.value = state.style;
-  styleSel.addEventListener("change", () => { state.style = styleSel.value; renderRecChips(); });
-
-  const colorSel = el("select", { class: "select select-sm" }, el("option", { value: "" }, "配色随画风"));
-  colors.forEach((c) => colorSel.appendChild(el("option", { value: c.id }, `${c.id} · ${c.name_zh || c.name_en}`)));
-  colorSel.addEventListener("change", () => { state.color = colorSel.value; });
-
-  const toneSel = el("select", { class: "select select-sm" }, el("option", { value: "" }, "自然影调"));
-  tones.forEach((t) => toneSel.appendChild(el("option", { value: t.id }, `${t.id} · ${t.name_zh || t.name_en}`)));
-  toneSel.addEventListener("change", () => { state.tone = toneSel.value; });
-
+  const controls = recipeControls(state, { styles, colors, tones, layouts: layoutsRes.items || [] }, () => session.persist(), { article: true });
+  const coverRatio = ratioControl("封面比例", state.coverRatio, (v) => { state.coverRatio = v; });
+  const inlineRatio = ratioControl("章节插图比例", state.inlineRatio, (v) => { state.inlineRatio = v; });
+  const coverCheck = el("input", { type: "checkbox", checked: state.includeCover !== false });
+  coverCheck.addEventListener("change", () => { state.includeCover = coverCheck.checked; });
   const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
   state.modelRef = modelSel.value;
   modelSel.addEventListener("change", () => { state.modelRef = modelSel.value; });
-
-  function renderRecChips() {
-    clear(recChips);
-    recChips.appendChild(el("span", { class: "muted" }, "推荐画风："));
-    (state.recommendedStyles || []).forEach((id) => {
-      recChips.appendChild(el("button", {
-        type: "button",
-        class: "pill-btn" + (state.style === id ? " pill-accent" : ""),
-        onClick: () => { state.style = id; styleSel.value = id; renderRecChips(); },
-      }, id));
-    });
-  }
-  renderRecChips();
-
-  root.appendChild(el("section", { class: "card row", style: { marginBottom: "14px", justifyContent: "space-between" } },
-    el("div", { class: "row" }, recChips, styleSel, colorSel, toneSel, modelSel),
-    el("div", { class: "row" },
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => runGenerate(true, false) }, "① 先出封面样张"),
-      el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => runGenerate(false, false) }, "② 生成全部配图")
-    )
-  ));
+  const resSel = el("select", { class: "select" }, ...["1k", "2k", "4k"].map((v) => el("option", { value: v }, v.toUpperCase())));
+  resSel.value = state.resolution;
+  resSel.addEventListener("change", () => { state.resolution = resSel.value; });
+  const planNotice = el("p", { class: "studio-notice", role: "status" });
+  const sampleBtn = el("button", { type: "button", class: "btn", onClick: () => runGenerate(true, false) }, "先出封面样张");
+  const batchBtn = el("button", { type: "button", class: "btn btn-primary", onClick: () => runGenerate(false, false) }, "生成选中配图");
+  root.appendChild(el("details", { class: "card article-settings" }, el("summary", null, "配图设置"), controls.node,
+    el("div", { class: "col" }, coverRatio, inlineRatio, el("label", { class: "row" }, coverCheck, "规划包含封面")),
+    el("p", { class: "muted" }, "这些设置用于新规划的配图；已有配图可逐张调整。")));
+  root.appendChild(planNotice);
 
   // Split: left editor + slots, right dual preview + export
   const contentArea = el("textarea", {
     class: "textarea",
-    rows: "12",
+    rows: "12", value: state.content,
     placeholder: "在此粘贴或编写 Markdown 正文，规划配图后将按锚点自动插图…",
   });
   contentArea.addEventListener("input", () => { state.content = contentArea.value; renderPreview(); });
 
   const slotsBox = el("div", { class: "col", style: { marginTop: "10px" } });
   const leftCol = el("div", { class: "card col" },
-    el("strong", null, "文章正文"),
-    contentArea,
+    field("文章正文", contentArea),
     el("div", { class: "row", style: { justifyContent: "space-between", marginTop: "6px" } },
-      el("strong", null, "配图规划槽位"),
+      el("strong", null, "配图位"),
       el("button", {
         type: "button",
         class: "btn btn-sm",
         onClick: () => {
-          state.slots.push({ id: `slot_${Date.now()}`, role: state.slots.length === 0 ? "cover" : "inline", anchor: "", title: `配图 ${state.slots.length + 1}`, theme: "", ratio: state.slots.length === 0 ? "2.35:1" : "16:9", imagePath: "" });
-          renderSlots();
+          const isCover = state.slots.length === 0 && state.includeCover;
+          state.slots.push({ id: crypto.randomUUID(), role: isCover ? "cover" : "inline", anchor: "", title: `配图 ${state.slots.length + 1}`, theme: "", ratio: isCover ? state.coverRatio : state.inlineRatio, imagePath: "", selected: true });
+          renderSlots(); renderPreview();
         },
-      }, "+ 添加槽位")
+      }, "+ 添加配图位")
     ),
     slotsBox
   );
@@ -192,48 +177,62 @@ export async function renderArticle(root, ctx, params = {}) {
     previewBody
   );
 
-  root.appendChild(el("div", { class: "split" }, leftCol, rightCol));
+  root.appendChild(el("div", { class: "article-layout" }, leftCol, rightCol));
+  root.appendChild(el("div", { class: "studio-bar" }, field("模型", modelSel), field("分辨率", resSel), sampleBtn, batchBtn));
+  root.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveDraft(); }
+  });
 
   function syncInputs() {
     titleIn.value = state.title || "";
     contentArea.value = state.content || "";
-    styleSel.value = state.style || "";
-    colorSel.value = state.color || "";
-    toneSel.value = state.tone || "";
+    controls.sync();
+    coverRatio.sync(state.coverRatio); inlineRatio.sync(state.inlineRatio);
+    coverCheck.checked = state.includeCover !== false;
+    modelSel.value = state.modelRef; resSel.value = state.resolution;
   }
 
   function renderSlots() {
     clear(slotsBox);
+    slotRatios.clear();
     if (!state.slots.length) {
-      slotsBox.appendChild(el("div", { class: "muted" }, "点击右上角「智能规划配图位」，或手动「+ 添加槽位」。"));
+      slotsBox.appendChild(el("p", { class: "muted" }, "编辑文章后点击 AI 规划配图，或手动添加配图位。"));
       return;
     }
+    const pending = state.slots.filter((sl) => !sl.imagePath);
+    const selectAll = el("input", { type: "checkbox", checked: pending.length > 0 && pending.every((sl) => sl.selected !== false) });
+    selectAll.indeterminate = pending.some((sl) => sl.selected !== false) && pending.some((sl) => sl.selected === false);
+    selectAll.addEventListener("change", () => { pending.forEach((sl) => { sl.selected = selectAll.checked; }); renderSlots(); });
+    slotsBox.appendChild(el("label", { class: "row" }, selectAll, "全选待生成配图（已有图片自动跳过）"));
     state.slots.forEach((sl, idx) => {
-      const roleSel = el("select", { class: "select select-sm", style: { width: "90px" } },
-        el("option", { value: "cover", selected: sl.role === "cover" }, "封面"),
-        el("option", { value: "inline", selected: sl.role !== "cover" }, "正文")
-      );
-      roleSel.addEventListener("change", () => { sl.role = roleSel.value; renderPreview(); });
-
-      const anchorIn = el("input", { class: "input", style: { maxWidth: "170px" }, value: sl.anchor || "", placeholder: "锚点原文片段（可空）" });
-      anchorIn.addEventListener("input", () => { sl.anchor = anchorIn.value; renderPreview(); });
-
-      const themeIn = el("input", { class: "input", style: { flex: "1", minWidth: "180px" }, value: sl.theme || "", placeholder: "配图画面描述" });
-      themeIn.addEventListener("input", () => { sl.theme = themeIn.value; });
-
-      const ratioSel = el("select", { class: "select select-sm", style: { width: "86px" } },
-        ...["2.35:1", "21:9", "16:9", "4:3", "3:4", "1:1"].map((r) => el("option", { value: r, selected: (sl.ratio || "16:9") === r }, r))
-      );
-      ratioSel.addEventListener("change", () => { sl.ratio = ratioSel.value; });
-
-      slotsBox.appendChild(el("div", { class: "card row", style: { padding: "8px 10px", background: "var(--paper)" } },
-        sl.imagePath ? el("img", { src: localImg(sl.imagePath), alt: sl.title || "", style: { width: "44px", height: "44px", objectFit: "cover", borderRadius: "6px" } }) : el("span", { class: "badge" }, `#${idx + 1}`),
-        roleSel,
-        anchorIn,
-        themeIn,
-        ratioSel,
-        el("button", { type: "button", class: "btn btn-sm btn-danger", onClick: () => { state.slots.splice(idx, 1); renderSlots(); renderPreview(); } }, "删除")
-      ));
+      if (!sl.id) sl.id = crypto.randomUUID();
+      const selected = el("input", { type: "checkbox", checked: sl.selected !== false, disabled: Boolean(sl.imagePath) });
+      selected.addEventListener("change", () => { sl.selected = selected.checked; });
+      const role = el("select", { class: "select" }, el("option", { value: "cover" }, "封面"), el("option", { value: "inline" }, "正文"));
+      role.value = sl.role;
+      role.addEventListener("change", () => { sl.role = role.value; sl.ratio = role.value === "cover" ? state.coverRatio : state.inlineRatio; renderSlots(); renderPreview(); });
+      const anchor = el("input", { class: "input", value: sl.anchor || "", placeholder: "插在这段原文之后" });
+      anchor.addEventListener("input", () => { sl.anchor = anchor.value; renderPreview(); });
+      const theme = el("textarea", { class: "textarea", rows: "3", value: sl.theme || "", placeholder: "配图画面描述" });
+      theme.value = sl.theme || "";
+      theme.addEventListener("input", () => { sl.theme = theme.value; renderPreview(); });
+      const ratio = ratioControl("本图比例", sl.ratio || (sl.role === "cover" ? state.coverRatio : state.inlineRatio), (v) => { sl.ratio = v; }, { compact: true });
+      slotRatios.set(sl.id, ratio);
+      const layout = el("select", { class: "select" }, el("option", { value: "" }, "沿用文章图型"),
+        ...(layoutsRes.items || []).map((l) => el("option", { value: l.id }, `${l.id} · ${l.name}`)));
+      layout.value = sl.layout || "";
+      layout.addEventListener("change", () => { sl.layout = layout.value; });
+      const mismatch = sl.role !== "cover" && (!sl.anchor || !state.content.includes(sl.anchor));
+      slotsBox.appendChild(el("section", { class: "card col article-slot" },
+        el("div", { class: "row" }, el("label", { class: "row" }, selected, sl.title || `配图 ${idx + 1}`),
+          sl.imagePath ? el("img", { src: localImg(sl.imagePath), alt: sl.title || "配图", style: { width: "80px", height: "60px", objectFit: "cover" } }) : null),
+        el("div", { class: "row" }, field("配图类型", role), field("本图图型", layout)),
+        field("配图主题", theme), sl.role === "cover" ? null : field("正文锚点", anchor), ratio,
+        el("span", { class: "article-slot-status" }, sl.imagePath ? "已采用图片" : (sl.error || "待生成")),
+        mismatch ? el("span", { class: "badge badge-warn" }, "待重新定位：请填写正文中存在的原文片段") : null,
+        el("div", { class: "row" },
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => { if (ratio.validate()) runGenerate(sl.id, false); } }, sl.imagePath ? "重新生成本图" : "生成本图"),
+          el("button", { type: "button", class: "btn btn-sm btn-danger", onClick: () => { state.slots = state.slots.filter((s) => s.id !== sl.id); renderSlots(); renderPreview(); } }, "删除配图位"))));
     });
   }
 
@@ -315,88 +314,83 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   async function planArticle() {
-    if (!state.content.trim()) {
-      toast("请先输入或导入文章正文");
-      return;
-    }
-    planBtn.disabled = true;
+    if (planning) return;
+    if (!state.content.trim()) { toast("请先输入或导入文章正文"); contentArea.focus(); return; }
+    if (!coverRatio.validate() || !inlineRatio.validate()) return;
+    planning = true; planBtn.disabled = true; planNotice.textContent = "正在分析文章结构与配图位置…";
+    const request = { title: state.title, content: state.content, styleId: state.style,
+      coverRatio: state.coverRatio, inlineRatio: state.inlineRatio, includeCover: state.includeCover };
     try {
-      const res = await api("POST", "/api/article/plan", { title: state.title, content: state.content, count: 5 });
-      const rec = res.recommendedStyles || res.raw?.recommendedStyles;
-      const slots = res.slots || res.raw?.slots || [];
-      if (Array.isArray(rec) && rec.length) {
-        state.recommendedStyles = rec;
-        if (!params.keepStyle) {
-          state.style = rec[0];
-          styleSel.value = rec[0];
-        }
-        renderRecChips();
+      const res = await api("POST", "/api/article/plan", request);
+      if (request.content !== state.content || request.title !== state.title) {
+        planNotice.textContent = "文章已修改，请按当前正文重新规划。"; return;
       }
-      state.slots = slots.map((s, i) => ({
-        id: s.id || `slot_${i}`,
-        role: s.role || (i === 0 ? "cover" : "inline"),
-        anchor: s.anchor || "",
-        title: s.title || (i === 0 ? "文章封面" : `正文配图 ${i}`),
-        theme: s.theme || "",
-        ratio: s.ratio || (i === 0 ? "2.35:1" : "16:9"),
-        imagePath: "",
-      }));
-      renderSlots();
-      renderPreview();
-      toast(`已规划 ${state.slots.length} 个配图位`);
-    } catch (e) { toast(e.message); } finally {
-      planBtn.disabled = false;
-    }
+      const fresh = (res.slots || []).map((sl) => ({ ...sl, id: crypto.randomUUID(), imagePath: "", selected: true }));
+      const apply = () => {
+        const used = new Set();
+        const merged = fresh.map((sl) => {
+          const matches = state.slots.filter((old) => !used.has(old.id) && old.role === sl.role && (sl.role === "cover" || (sl.anchor && old.anchor === sl.anchor)));
+          if (matches.length !== 1) return sl;
+          const old = matches[0]; used.add(old.id); return old;
+        });
+        // Keep unmatched positions and existing adopted images until explicitly deleted.
+        state.slots = [...merged, ...state.slots.filter((sl) => !used.has(sl.id))];
+        state.recommendedStyles = res.recommendedStyles || [];
+        planNotice.textContent = res.source === "local" ? "已使用本地模板规划，可调整主题和位置后生成。" : "配图规划完成，可逐张调整；已有配图已保留。";
+        renderSlots(); renderPreview(); session.persist();
+      };
+      if (state.slots.length) {
+        showModal("更新配图规划", el("div", { class: "col" }, el("p", null, "匹配的配图位保留已有设置和图片，未匹配的旧图位也会保留，可自行删除。"),
+          ...fresh.map((sl) => el("p", null, `${sl.role === "cover" ? "封面" : "正文"}：${sl.theme}`))), [
+          el("button", { type: "button", class: "btn", onClick: closeModal }, "保留当前规划"),
+          el("button", { type: "button", class: "btn btn-primary", onClick: () => { closeModal(); apply(); } }, "更新规划")]);
+        planNotice.textContent = "新规划已就绪，等待应用。";
+      } else apply();
+    } catch (e) { planNotice.textContent = e.message; } finally { planning = false; planBtn.disabled = false; }
   }
 
-  async function runGenerate(coverOnly, confirmed) {
-    if (!state.slots.length) {
-      toast("请先规划配图位或添加至少一个槽位");
-      return;
+  async function runGenerate(target, confirmed) {
+    if (submitting) return;
+    if (state.activeRun?.images?.some((im) => im.status === "queued" || im.status === "running")) {
+      toast("本篇文章的配图仍在生成，请等待当前批次完成"); return;
     }
-    const indices = [];
-    const items = [];
-    state.slots.forEach((sl, idx) => {
-      if (coverOnly && idx > 0 && sl.role !== "cover") return;
-      if (coverOnly && items.length >= 1) return;
-      if (!sl.theme.trim()) return;
-      indices.push(idx);
-      items.push({
-        theme: sl.theme.trim(),
-        style: state.style,
-        color: state.color,
-        tone: state.tone,
-        ratio: normalizeArticleRatio(sl.ratio),
-        mode: state.mode,
-      });
-    });
-    if (!items.length) {
-      toast("请先为配图槽位填写画面描述");
-      return;
+    if (!controls.validate()) { toast("请为双画风融合选择两种画风"); return; }
+    const single = typeof target === "string";
+    const slots = single ? state.slots.filter((sl) => sl.id === target) : target === true
+      ? state.slots.filter((sl) => sl.role === "cover" && !sl.imagePath).slice(0, 1)
+      : state.slots.filter((sl) => sl.selected !== false && !sl.imagePath);
+    if (!slots.length) { toast(target === true ? "没有待生成的封面，请先规划封面或在配图位中重新生成" : "没有选中的待生成配图"); return; }
+    if (slots.some((sl) => slotRatios.get(sl.id) && !slotRatios.get(sl.id).validate())) return;
+    if (slots.some((sl) => !sl.theme?.trim())) { toast("请先填写选中配图的主题"); return; }
+    if (slots.some((sl) => sl.role !== "cover" && (!sl.anchor || !state.content.includes(sl.anchor)))) {
+      toast("请先为正文配图填写有效的正文锚点"); return;
     }
+    const signatures = slots.map(slotSignature);
+    submitting = true; sampleBtn.disabled = true; batchBtn.disabled = true;
     try {
       const res = await api("POST", "/api/generate", {
-        mode: "article",
-        title: (state.title || "文章配图") + (coverOnly ? " · 封面样张" : ""),
-        modelRef: state.modelRef,
-        resolution: state.resolution,
-        confirmed,
-        items,
+        mode: "article", title: state.title || "文章配图", modelRef: state.modelRef, resolution: state.resolution, confirmed,
+        items: slots.map((sl) => ({ theme: sl.theme.trim(), style: state.style, style2: state.fusion ? state.style2 : "",
+          layout: sl.layout || state.layout, color: state.color, tone: state.tone, mood: state.mood,
+          ratio: sl.ratio || (sl.role === "cover" ? state.coverRatio : state.inlineRatio), mode: state.mode, extra: extraInstructions(state) })),
       });
       if (res.needConfirm) {
-        showModal("生成费用确认", el("p", null, `预计消耗网站额度 ${money(res.totalCents)}（${res.count} 张）。继续生成？`), [
+        showModal("生成费用确认", el("p", null, `本次 ${res.count} 张，预计 ${money(res.totalCents)}，继续生成？`), [
           el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
-          el("button", { type: "button", class: "btn btn-primary", onClick: () => { closeModal(); runGenerate(coverOnly, true); } }, "确认继续"),
-        ]);
+          el("button", { type: "button", class: "btn btn-primary", onClick: () => { closeModal(); runGenerate(target, true); } }, "确认生成")]);
         return;
       }
       state.activeRun = { ...res.run, images: res.images };
-      state.slotMap = indices;
-      toast(coverOnly ? "封面样张已加入队列" : `全部 ${items.length} 张配图已加入队列`);
-    } catch (e) { toast(e.message); }
+      state.slotMap = slots.map((sl, i) => ({ id: sl.id, signature: signatures[i] }));
+      planNotice.textContent = `已提交 ${slots.length} 张配图，完成后自动插入。`;
+      session.persist();
+    } catch (e) { toast(e.message); } finally { submitting = false; sampleBtn.disabled = false; batchBtn.disabled = false; }
   }
 
   async function doExport(format, copyToClipboard) {
+    if (state.slots.some((sl) => sl.imagePath && sl.role !== "cover" && (!sl.anchor || !state.content.includes(sl.anchor)))) {
+      toast("已有配图需要重新定位，请先修正正文锚点再导出"); return;
+    }
     try {
       const res = await api("POST", "/api/article/export", {
         title: state.title,
@@ -417,16 +411,33 @@ export async function renderArticle(root, ctx, params = {}) {
     try {
       const res = await api("PUT", `/api/docs/article/${encodeURIComponent(state.docId || "new")}`, {
         name: state.title || "未命名文章",
-        data: { title: state.title, content: state.content, style: state.style, color: state.color, tone: state.tone, slots: state.slots },
+        data: { ...state, activeRun: null, slotMap: [] },
       });
       state.docId = res.doc.id;
       const dRes = await api("GET", "/api/docs/article").catch(() => ({ items: [] }));
       drafts = dRes.items || [];
       refreshDraftSel();
+      session.persist();
       toast("文稿与配图位已保存");
     } catch (e) { toast(e.message); }
   }
 
+  async function refreshRun() {
+    const runId = state.activeRun?.id;
+    if (!runId) return;
+    const detail = await api("GET", `/api/works/${encodeURIComponent(runId)}`);
+    if (state.activeRun?.id !== runId) return;
+    state.activeRun = detail.run;
+    (detail.run.images || []).forEach((im, i) => {
+      const mapped = state.slotMap[i];
+      const slot = state.slots.find((sl) => sl.id === mapped?.id);
+      if (slot && slotSignature(slot) === mapped.signature) {
+        if (im.status === "done" && im.path) { slot.imagePath = im.path; slot.error = ""; }
+        if (im.status === "failed") slot.error = im.error || "生成失败，可重试；已有图片已保留";
+      }
+    });
+    renderSlots(); renderPreview(); session.persist();
+  }
   const unsub = onEvent(async (msg) => {
     if (!root.isConnected) {
       unsub();
@@ -435,20 +446,14 @@ export async function renderArticle(root, ctx, params = {}) {
     const rid = msg.data?.runId || msg.data?.id;
     if ((msg.type === "job" || msg.type === "run") && state.activeRun && rid === state.activeRun.id) {
       try {
-        const detail = await api("GET", `/api/works/${encodeURIComponent(state.activeRun.id)}`);
-        state.activeRun = detail.run;
-        (detail.run.images || []).forEach((im, i) => {
-          const slotIdx = state.slotMap[i];
-          if (slotIdx !== undefined && state.slots[slotIdx] && im.status === "done" && im.path) {
-            state.slots[slotIdx].imagePath = im.path;
-          }
-        });
-        renderSlots();
-        renderPreview();
+        await refreshRun();
       } catch {}
     }
   });
 
+  syncInputs();
   renderSlots();
   renderPreview();
+  refreshRun().catch(() => {});
+  if (params.docId) await loadDraft(params.docId);
 }

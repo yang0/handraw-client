@@ -1,0 +1,66 @@
+.creation-page { min-width: 0; }
+.studio-recipe-controls { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.studio-choices { display: flex; gap: 6px; flex-wrap: wrap; border: 0; padding: 0; margin: 0; min-width: 0; }
+.studio-choices legend { font-size: 12px; font-weight: 600; color: var(--ink-muted); margin-bottom: 7px; }
+.studio-choice { position: relative; cursor: pointer; font-size: 12px; }
+.studio-choice input { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+.studio-choice span { display: block; padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.studio-choice input:checked + span { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.studio-choice input:focus-visible + span, .creation-page :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.studio-resource-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.studio-resource { width: 100%; display: flex; align-items: center; gap: 10px; padding: 9px; text-align: left; color: var(--ink); border: 1px solid var(--line); border-radius: 9px; background: var(--surface); cursor: pointer; min-width: 0; font: inherit; }
+.studio-resource:hover { border-color: var(--accent); }
+.studio-resource img, .studio-resource-placeholder { width: 54px; height: 62px; object-fit: cover; border-radius: 5px; flex-shrink: 0; background: var(--surface-2); }
+.studio-resource-placeholder { display: grid; place-items: center; font-size: 24px; color: var(--ink-muted); }
+.studio-resource-meta { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
+.studio-resource-meta strong { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-resource-meta small { font-size: 10px; color: var(--ink-muted); }
+.studio-resource-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; max-height: 52vh; overflow-y: auto; }
+.studio-resource-option { display: flex; flex-direction: column; text-align: left; gap: 4px; border: 1px solid var(--line); border-radius: 8px; padding: 6px; background: var(--paper); color: var(--ink); cursor: pointer; }
+.studio-resource-option img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; }
+.studio-resource-option strong { font-size: 12px; }
+.studio-resource-option[aria-pressed="true"] { border: 2px solid var(--accent); }
+.studio-ratio { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+.studio-ratio .field { margin: 0; }
+.studio-ratio-input { width: 100px; }
+.studio-ratio .studio-choices { flex: 1; }
+.studio-more { border-top: 1px solid var(--line); padding-top: 12px; }
+.studio-more summary { cursor: pointer; font-size: 12px; font-weight: 600; }
+.studio-more > .col { padding-top: 14px; }
+.creation-page .studio-bar { position: sticky; bottom: -20px; z-index: 2; flex-wrap: wrap; }
+.creation-page .studio-shell { grid-template-columns: 310px minmax(0, 1fr) 92px; }
+.creation-page .studio-pane { min-width: 0; }
+.creation-page .studio-stage { min-width: 0; }
+.creation-page .studio-bar .field { margin: 0; }
+.creation-single .studio-bar .field:first-child { flex: 1; min-width: 220px; }
+.creation-page .studio-shell { height: min(720px, calc(100vh - 270px)); min-height: 420px; }
+.series-workspace { display: grid; grid-template-columns: 310px minmax(0, 1fr); gap: 16px; align-items: start; }
+.series-properties { display: flex; flex-direction: column; gap: 18px; }
+.series-thumbs { display: flex; gap: 8px; overflow-x: auto; padding: 8px 2px; }
+.series-thumbs button { flex-shrink: 0; }
+.series-editor { min-height: 250px; }
+.series-plan-form { display: flex; flex-direction: column; gap: 12px; }
+.series-plan-form .field { margin: 0; }
+.studio-notice { font-size: 12px; color: var(--ink-muted); margin: 4px 0; }
+.article-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.article-slot { padding: 12px; background: var(--paper); }
+.article-slot .row { align-items: start; }
+.article-slot .field { flex: 1; min-width: 120px; }
+.article-slot-status { display: block; margin-block: 6px; color: var(--ink-muted); font-size: 12px; }
+.article-settings { margin-block: 14px; }
+.article-settings .studio-recipe-controls { padding: 16px 0; }
+.article-settings > summary { cursor: pointer; font-weight: 600; }
+.creation-page textarea { resize: vertical; }
+@media (max-width: 1200px) {
+  .creation-page .studio-shell { grid-template-columns: 290px minmax(0, 1fr); height: auto; }
+  .creation-page .studio-shell > aside:last-child { display: none; }
+}
+@media (max-width: 900px) {
+  .series-workspace, .article-layout { grid-template-columns: 1fr; }
+  .creation-page .studio-shell { grid-template-columns: 1fr; }
+  .creation-page .studio-pane, .creation-page .studio-stage { max-height: none; overflow: visible; }
+  .creation-page .studio-bar { bottom: -12px; }
+}
+@media (pointer: coarse) {
+  .studio-choice span, .studio-resource-option, .creation-page .btn { min-height: 44px; }
+}

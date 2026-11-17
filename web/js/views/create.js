@@ -1,6 +1,7 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
 import { openRecipeEditor } from "./recipes.js";
 import { mountSlotPanels } from "../plugins-host.js";
+import { extraInstructions, field, recipeControls, studioMount, studioSession } from "./studio-controls.js";
 
 export function buildGroupedModelSelect(modelsData = {}, currentRef = "") {
   const sel = el("select", { class: "select select-sm", style: { maxWidth: "220px" } });
@@ -49,7 +50,7 @@ export function buildGroupedModelSelect(modelsData = {}, currentRef = "") {
 }
 
 export async function renderCreate(root, ctx, params = {}) {
-  clear(root);
+  const host = studioMount(root);
 
   const [stylesRes, layoutsRes, colorsRes, tonesRes, recRes, modRes, settRes, recentRes] = await Promise.all([
     api("GET", "/api/resources/styles").catch(() => ({ items: [] })),
@@ -61,6 +62,7 @@ export async function renderCreate(root, ctx, params = {}) {
     api("GET", "/api/settings").catch(() => ({ settings: {} })),
     api("GET", "/api/works?limit=12").catch(() => ({ items: [] })),
   ]);
+  if (!host.isConnected) return;
 
   const styles = stylesRes.items || [];
   const layouts = layoutsRes.items || [];
@@ -70,7 +72,7 @@ export async function renderCreate(root, ctx, params = {}) {
   const settings = settRes.settings || {};
 
   const p = params.preset || params.recipe || {};
-  const state = {
+  const session = studioSession(host, "single", {
     recipeId: params.recipe?.id || "",
     style: params.style || p.style || p.styleIds?.[0] || styles[0]?.number || "FA-013",
     style2: params.style2 || p.style2 || p.styleIds?.[1] || "",
@@ -97,12 +99,31 @@ export async function renderCreate(root, ctx, params = {}) {
     recentRuns: recentRes.items || [],
     parentId: params.parentId || "",
     groupId: params.groupId || "",
-  };
+  });
+  root = session.root;
+  const state = session.state;
+  if (Object.keys(params).length) {
+    Object.assign(state, { theme: params.theme ?? state.theme, text: params.text ?? state.text });
+    for (const key of ["style", "style2", "layout", "color", "tone", "mood", "mode", "ratio", "resolution", "modelRef", "parentId", "groupId"]) {
+      const value = params[key] ?? p[key];
+      if (value !== undefined) state[key] = value;
+    }
+    if (p.styleIds) { state.style = p.styleIds[0] || ""; state.style2 = p.styleIds[1] || ""; }
+    if (p.layoutId !== undefined) state.layout = p.layoutId;
+    if (p.colors) state.color = p.colors.join(" + ");
+    if (p.tones) state.tone = p.tones[0] || "";
+    if (params.refs || params.editImage) state.refs = params.refs || [params.editImage];
+    if (params.promptText) { state.customPrompt = params.promptText; state.promptCustomized = true; }
+    if (params.run) state.activeRun = params.run;
+    if (params.recipe?.id) state.recipeId = params.recipe.id;
+    if (!params.promptText) state.promptCustomized = false;
+    state.fusion = Boolean(state.style2);
+  }
 
   root.appendChild(el("div", { class: "page-head" },
     el("div", { class: "row" },
       el("h1", { class: "page-title" }, "单图创作"),
-      el("span", { class: "muted" }, "左侧实时零费用预览组合；Ctrl/⌘ + Enter 生图")
+      el("span", { class: "muted" }, "选择画风与图型，描述主题后生成；Ctrl/⌘ + Enter")
     ),
     el("div", { class: "row" },
       el("button", { type: "button", class: "btn btn-sm", onClick: rollDice }, "🎲 摇灵感"),
@@ -122,6 +143,7 @@ export async function renderCreate(root, ctx, params = {}) {
     state.recipeId = r.id;
     if (r.styleIds?.[0]) state.style = r.styleIds[0];
     state.style2 = r.styleIds?.[1] || "";
+    state.fusion = Boolean(state.style2);
     state.layout = r.layoutId || "";
     state.color = r.colors?.[0] || "";
     state.tone = r.tones?.[0] || "";
@@ -133,55 +155,22 @@ export async function renderCreate(root, ctx, params = {}) {
     refreshPromptAndQuote();
   });
 
-  const mkSelect = (items, value, emptyLabel, getId, getLabel, onChange) => {
-    const sel = el("select", { class: "select" });
-    if (emptyLabel) sel.appendChild(el("option", { value: "" }, emptyLabel));
-    items.forEach((it) => sel.appendChild(el("option", { value: getId(it) }, getLabel(it))));
-    sel.value = value || "";
-    sel.addEventListener("change", () => onChange(sel.value));
-    return sel;
-  };
-
-  const styleSel = mkSelect(styles, state.style, "", (s) => s.number, (s) => `${s.number} · ${s.nameZh || s.generation_name}`, (v) => { state.style = v; state.promptCustomized = false; refreshPromptAndQuote(); });
-  const style2Sel = mkSelect(styles, state.style2, "（无第二画风 / 不混合）", (s) => s.number, (s) => `${s.number} · ${s.nameZh || s.generation_name}`, (v) => { state.style2 = v; state.promptCustomized = false; refreshPromptAndQuote(); });
-  const layoutSel = mkSelect(layouts, state.layout, "（不限图型，由画面自由构图）", (l) => l.id, (l) => `${l.id} · ${l.name}`, (v) => { state.layout = v; state.promptCustomized = false; refreshPromptAndQuote(); });
-  const colorSel = mkSelect(colors, state.color, "（随画风原色）", (c) => c.id, (c) => `${c.id} · ${c.name_zh || c.name_en}`, (v) => { state.color = v; state.promptCustomized = false; refreshPromptAndQuote(); });
-  const toneSel = mkSelect(tones, state.tone, "（自然光影）", (t) => t.id, (t) => `${t.id} · ${t.name_zh || t.name_en}`, (v) => { state.tone = v; state.promptCustomized = false; refreshPromptAndQuote(); });
-
-  const moodInput = el("input", { class: "input", type: "text", value: state.mood, placeholder: "例如：宁静微醺 / 通透学术" });
-  moodInput.addEventListener("input", () => { state.mood = moodInput.value; state.promptCustomized = false; scheduleRefresh(); });
-
-  const modeSel = el("select", { class: "select" },
-    el("option", { value: "graphic-text" }, "图文信息型（含文字标注）"),
-    el("option", { value: "pure-image" }, "纯画面（不出现文字）")
-  );
-  modeSel.value = state.mode === "pure-image" ? "pure-image" : "graphic-text";
-  state.mode = modeSel.value;
-  modeSel.addEventListener("change", () => { state.mode = modeSel.value; state.promptCustomized = false; updateTextVisibility(); refreshPromptAndQuote(); });
-
-  const ratioSel = el("select", { class: "select" },
-    ...["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"].map((r) => el("option", { value: r }, r))
-  );
-  ratioSel.value = state.ratio;
-  ratioSel.addEventListener("change", () => { state.ratio = ratioSel.value; state.promptCustomized = false; refreshPromptAndQuote(); });
-
+  const controls = recipeControls(state, { styles, layouts, colors, tones }, () => {
+    state.promptCustomized = false;
+    updateTextVisibility();
+    scheduleRefresh();
+    session.persist();
+  });
   const resSel = el("select", { class: "select" },
-    el("option", { value: "1k" }, "1K（标准）"),
-    el("option", { value: "2k" }, "2K（清晰推荐）"),
-    el("option", { value: "4k" }, "4K（超清）")
-  );
+    ...["1k", "2k", "4k"].map((v) => el("option", { value: v }, v.toUpperCase())));
   resSel.value = state.resolution;
   resSel.addEventListener("change", () => { state.resolution = resSel.value; refreshQuote(); });
-
   const qualSel = el("select", { class: "select" },
-    el("option", { value: "standard" }, "标准质感"),
-    el("option", { value: "high" }, "精细手绘质感")
-  );
+    el("option", { value: "standard" }, "标准"), el("option", { value: "high" }, "高质量"));
   qualSel.value = state.quality;
   qualSel.addEventListener("change", () => { state.quality = qualSel.value; refreshQuote(); });
-
   const redrawChk = el("input", { type: "checkbox", checked: state.redraw });
-  redrawChk.addEventListener("change", () => { state.redraw = redrawChk.checked; state.promptCustomized = false; refreshPromptAndQuote(); });
+  redrawChk.addEventListener("change", () => { state.redraw = redrawChk.checked; state.promptCustomized = false; scheduleRefresh(); });
 
   const refsBox = el("div", { class: "row", style: { marginTop: "6px" } });
   const fileInput = el("input", { type: "file", accept: "image/*", class: "hidden" });
@@ -194,6 +183,7 @@ export async function renderCreate(root, ctx, params = {}) {
       const res = await api("POST", "/api/images/import", fd);
       state.refs.push(res.path);
       renderRefs();
+      session.persist();
       toast("已添加参考图");
     } catch (e) { toast(e.message); }
     fileInput.value = "";
@@ -218,42 +208,16 @@ export async function renderCreate(root, ctx, params = {}) {
   renderRefs();
 
   function syncFormInputs() {
-    styleSel.value = state.style || "";
-    style2Sel.value = state.style2 || "";
-    layoutSel.value = state.layout || "";
-    colorSel.value = state.color || "";
-    toneSel.value = state.tone || "";
-    moodInput.value = state.mood || "";
-    modeSel.value = state.mode === "pure-image" ? "pure-image" : "graphic-text";
-    ratioSel.value = state.ratio || "3:4";
+    controls.sync();
     redrawChk.checked = Boolean(state.redraw);
     updateTextVisibility();
   }
 
   const leftPane = el("aside", { class: "studio-pane" },
-    el("div", { class: "field" }, el("label", null, "快速套用配方"), recSel),
-    el("div", { class: "field" }, el("label", null, "主画风"), styleSel),
-    el("div", { class: "field" }, el("label", null, "混合第二画风（可选）"), style2Sel),
-    el("div", { class: "field" }, el("label", null, "图型 / 构图"), layoutSel),
-    el("div", { class: "field" }, el("label", null, "主题色"), colorSel),
-    el("div", { class: "field" }, el("label", null, "影调"), toneSel),
-    el("div", { class: "field" }, el("label", null, "情绪氛围"), moodInput),
-    el("div", { class: "split", style: { gap: "8px", gridTemplateColumns: "1fr 1fr" } },
-      el("div", { class: "field" }, el("label", null, "画面模式"), modeSel),
-      el("div", { class: "field" }, el("label", null, "画幅比例"), ratioSel)
-    ),
-    el("div", { class: "split", style: { gap: "8px", gridTemplateColumns: "1fr 1fr" } },
-      el("div", { class: "field" }, el("label", null, "分辨率"), resSel),
-      el("div", { class: "field" }, el("label", null, "生成质量"), qualSel)
-    ),
-    el("div", { class: "field" },
-      el("label", null, "参考图 / 照片重绘"),
-      refsBox,
-      el("label", { class: "row", style: { marginTop: "8px", cursor: "pointer", fontWeight: 400 } },
-        redrawChk,
-        el("span", { style: { fontSize: "12px", color: "var(--ink)" } }, "照片重绘轮廓（不叠滤镜）")
-      )
-    )
+    field("快速套用配方", recSel), controls.node,
+    el("div", { class: "studio-more" }, field("分辨率", resSel), field("生成质量", qualSel)),
+    el("div", { class: "field" }, el("strong", null, "参考图"), refsBox,
+      el("label", { class: "row" }, redrawChk, el("span", null, "照片重绘")))
   );
 
   const previewCard = el("div", { class: "card", style: { padding: "10px 12px" } });
@@ -360,7 +324,7 @@ export async function renderCreate(root, ctx, params = {}) {
           el("p", { class: "muted", style: { margin: 0, maxWidth: "460px" } }, styleObj?.traits || "在下方输入画面主题后点击「生成」，所有生成图片默认仅保存在本地工作区。"),
           el("div", { class: "row" },
             el("span", { class: "badge" }, `比例 ${state.ratio}`),
-            el("span", { class: "badge" }, state.mode === "pure-image" ? "纯画面" : "图文信息"),
+            el("span", { class: "badge" }, state.mode === "pure-image" ? "纯图" : (state.mode === "poster" ? "海报" : "图文")),
             el("span", { class: "badge" }, state.resolution.toUpperCase())
           )
         )
@@ -476,13 +440,15 @@ export async function renderCreate(root, ctx, params = {}) {
   });
 
   function updateTextVisibility() {
-    textInput.classList.toggle("hidden", state.mode !== "graphic-text");
+    textField.classList.toggle("hidden", state.mode === "pure-image");
   }
+  const textField = field("画面文字（可选）", textInput);
   updateTextVisibility();
 
   const countSel = el("select", { class: "select select-sm" },
     ...[1, 2, 3, 4].map((n) => el("option", { value: String(n) }, `${n} 张`))
   );
+  countSel.value = String(state.count);
   countSel.addEventListener("change", () => { state.count = Number(countSel.value); refreshQuote(); });
 
   const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
@@ -494,18 +460,20 @@ export async function renderCreate(root, ctx, params = {}) {
   });
 
   const quoteBadge = el("span", { class: "badge", title: "生成前预估费用" }, "报价计算中…");
-  const genBtn = el("button", { type: "button", class: "btn btn-primary", onClick: () => doGenerate(false) }, "🎨 生成");
+  const genBtn = el("button", { type: "button", class: "btn btn-primary" }, "开始生成");
 
   themeInput.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       doGenerate(false);
     }
   });
 
-  const bar = el("div", { class: "studio-bar", style: { flexWrap: "wrap" } },
-    themeInput, textInput, countSel, modelSel, quoteBadge, genBtn
+  const bar = el("form", { class: "studio-bar", action: "/api/generate", method: "post" },
+    field("创作主题", themeInput), textField, field("张数", countSel), field("模型", modelSel), quoteBadge, genBtn
   );
+  genBtn.type = "submit";
+  bar.addEventListener("submit", (e) => { e.preventDefault(); doGenerate(false); });
 
   const studioShell = el("div", { class: "studio-shell" }, leftPane, centerStage, rightRail);
   const slotContainer = el("div", { style: { marginTop: "12px" } });
@@ -516,11 +484,12 @@ export async function renderCreate(root, ctx, params = {}) {
 
   mountSlotPanels(slotContainer, "create-footer", {
     view: "create",
-    recipe: () => ({ style: state.style, style2: state.style2, layout: state.layout, color: state.color, tone: state.tone, mode: state.mode, ratio: state.ratio }),
+    recipe: () => ({ style: state.style, style2: state.fusion ? state.style2 : "", layout: state.layout, color: state.color, tone: state.tone, mode: state.mode, ratio: state.ratio }),
     applyTheme: (t) => { themeInput.value = t; state.theme = t; refreshPromptAndQuote(); },
   });
 
   let refreshTimer = null;
+  let promptRevision = 0;
   function scheduleRefresh() {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(refreshPromptAndQuote, 180);
@@ -532,21 +501,24 @@ export async function renderCreate(root, ctx, params = {}) {
   }
 
   async function refreshPromptAndQuote() {
+    const revision = ++promptRevision;
     try {
       const res = await api("POST", "/api/prompt", {
         style: state.style,
-        style2: state.style2,
+        style2: state.fusion ? state.style2 : "",
         layout: state.layout,
         color: state.color,
         tone: state.tone,
         mood: state.mood,
         theme: state.theme || "手绘视觉主题展示",
         ratio: state.ratio,
-        text: state.text,
+        text: state.mode === "pure-image" ? "" : state.text,
         model: rawModelFromRef(state.modelRef),
         mode: state.mode,
         redraw: Boolean(state.redraw),
+        extra: extraInstructions(state),
       });
+      if (revision !== promptRevision || !root.isConnected) return;
       state.compiled = res.result;
       state.preview = res.preview;
       if (!state.promptCustomized) {
@@ -599,7 +571,7 @@ export async function renderCreate(root, ctx, params = {}) {
   function saveCurrentRecipe() {
     openRecipeEditor({
       name: `${state.style}${state.layout ? " + " + state.layout : ""}`,
-      styleIds: [state.style, state.style2].filter(Boolean),
+      styleIds: [state.style, state.fusion ? state.style2 : ""].filter(Boolean),
       layoutId: state.layout,
       colors: state.color ? [state.color] : [],
       tones: state.tone ? [state.tone] : [],
@@ -639,11 +611,13 @@ export async function renderCreate(root, ctx, params = {}) {
   }
 
   async function doGenerate(confirmed) {
-    if (!state.theme.trim() && !promptEdit.value.trim()) {
+    if (!state.theme.trim() && !(state.promptCustomized && promptEdit.value.trim())) {
       toast("请输入想要创作的画面主题");
       themeInput.focus();
       return;
     }
+    if (genBtn.disabled) return;
+    if (!controls.validate()) { toast("请填写有效比例，并为双画风融合选择两种画风"); return; }
     genBtn.disabled = true;
     try {
       const res = await api("POST", "/api/generate", {
@@ -661,20 +635,21 @@ export async function renderCreate(root, ctx, params = {}) {
         refs: state.refs,
         input: {
           style: state.style,
-          style2: state.style2,
+          style2: state.fusion ? state.style2 : "",
           layout: state.layout,
           color: state.color,
           tone: state.tone,
           mood: state.mood,
           theme: state.theme,
           ratio: state.ratio,
-          text: state.text,
+          text: state.mode === "pure-image" ? "" : state.text,
           mode: state.mode,
           redraw: Boolean(state.redraw),
+          extra: extraInstructions(state),
         },
         recipe: {
           id: state.recipeId,
-          styleIds: [state.style, state.style2].filter(Boolean),
+          styleIds: [state.style, state.fusion ? state.style2 : ""].filter(Boolean),
           layoutId: state.layout,
           color: state.color,
           tone: state.tone,
@@ -700,6 +675,7 @@ export async function renderCreate(root, ctx, params = {}) {
       toast("已提交生成队列，完成后自动显影");
     } catch (e) { toast(e.message); } finally {
       genBtn.disabled = false;
+      session.persist();
     }
   }
 

@@ -61,10 +61,10 @@ func RulesFrom(raw json.RawMessage) Rules {
 		Redraw       map[string]string `json:"redraw_instruction"`
 		Placeholder  map[string]string `json:"theme_placeholder"`
 		TraitsFilter struct {
-			NegativeWords  []string `json:"negative_words"`
-			NegativeRegex  string   `json:"negative_regex"`
-			KeepRawStyles  []string `json:"keep_raw_styles"`
-			KeepRawLegacy  []string `json:"keep_raw_legacy"`
+			NegativeWords []string `json:"negative_words"`
+			NegativeRegex string   `json:"negative_regex"`
+			KeepRawStyles []string `json:"keep_raw_styles"`
+			KeepRawLegacy []string `json:"keep_raw_legacy"`
 		} `json:"traits_filter"`
 	}
 	if json.Unmarshal(raw, &nested) == nil && nested.RefIso != nil {
@@ -123,7 +123,7 @@ type Input struct {
 	Model    string `json:"model"`
 	Mode     string `json:"mode"` // pure-image | graphic-text
 	Redraw   bool   `json:"redraw"`
-	Language string `json:"language"` // auto | zh | en (only affects layout prompts)
+	Language string `json:"language"`        // auto | zh | en (only affects layout prompts)
 	Extra    string `json:"extra,omitempty"` // free-form additions (client extension)
 }
 
@@ -357,6 +357,11 @@ func Build(p *resources.Pack, r Rules, in Input) (Result, error) {
 	res := Result{Labels: []string{}}
 	if in.Mode == "" {
 		in.Mode = "pure-image"
+	}
+	// Poster shares the graphic-text engine; its composition instructions
+	// arrive in Extra, while the saved recipe retains the poster selection.
+	if in.Mode == "poster" {
+		in.Mode = "graphic-text"
 	}
 	if in.Language == "" {
 		in.Language = "auto"

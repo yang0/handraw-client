@@ -284,13 +284,13 @@ func (s *Server) quote(w http.ResponseWriter, r *http.Request) (any, error) {
 		_ = json.Unmarshal(raw, &q)
 		limit := settings.Get().CostLimitCents
 		return map[string]any{
-			"source":    "site",
-			"quoteId":   q.QuoteID,
+			"source":     "site",
+			"quoteId":    q.QuoteID,
 			"totalCents": q.TotalCents,
-			"freeCount": q.FreeCount,
-			"overLimit": limit > 0 && q.TotalCents > limit,
+			"freeCount":  q.FreeCount,
+			"overLimit":  limit > 0 && q.TotalCents > limit,
 			"limitCents": limit,
-			"raw":       raw,
+			"raw":        raw,
 		}, nil
 	}
 	pid, mid, _ := strings.Cut(body.ModelRef, ":")
@@ -318,7 +318,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		return nil, err
 	}
 	var body struct {
-		Mode             string           `json:"mode"`     // quick | single | series | article | canvas | edit | compare
+		Mode             string           `json:"mode"` // quick | single | series | article | canvas | edit | compare
 		Title            string           `json:"title"`
 		ModelRef         string           `json:"modelRef"` // site:<id> | <providerId>:<modelId>
 		Resolution       string           `json:"resolution"`
@@ -583,9 +583,13 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 
 func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
-		Topic string `json:"topic"`
-		CSV   string `json:"csv"`
-		Count int    `json:"count"`
+		Topic             string `json:"topic"`
+		CSV               string `json:"csv"`
+		Count             int    `json:"count"`
+		LayoutMode        string `json:"layoutMode"`
+		FixedLayout       string `json:"fixedLayout"`
+		LayoutRequirement string `json:"layoutRequirement"`
+		StyleID           string `json:"styleId"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -627,19 +631,39 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 		}
 		return map[string]any{"cards": cards, "source": "csv"}, nil
 	}
+	if strings.TrimSpace(body.Topic) == "" {
+		return nil, bad("请先填写整套母题")
+	}
 	if body.Count <= 0 || body.Count > 20 {
-		body.Count = 5
+		body.Count = 3
+	}
+	if body.LayoutMode != "fixed" {
+		body.LayoutMode = "ai"
 	}
 	if s.Site.LoggedIn() {
-		if raw, err := s.Site.BatchPlan(r.Context(), map[string]any{"topic": body.Topic, "count": body.Count}); err == nil {
-			return map[string]any{"raw": raw, "source": "site"}, nil
+		if raw, err := s.Site.BatchPlan(r.Context(), map[string]any{
+			"seed": body.Topic, "count": body.Count, "layoutMode": body.LayoutMode,
+			"fixedLayout": body.FixedLayout, "layoutRequirement": body.LayoutRequirement, "styleId": body.StyleID,
+		}); err == nil {
+			if cards := seriesCards(raw); len(cards) > 0 {
+				if body.LayoutMode == "fixed" {
+					for _, c := range cards {
+						c["layout"] = body.FixedLayout
+					}
+				}
+				return map[string]any{"cards": cards, "source": planningSource(raw)}, nil
+			}
 		}
 	}
 	if tp, model, ok := findTextProvider(); ok {
-		promptTxt := fmt.Sprintf("将主题「%s」拆分为 %d 张连贯系列插画分镜，返回 JSON 数组：[{\"title\":\"\",\"theme\":\"\",\"text\":\"\"}]", body.Topic, body.Count)
+		promptTxt := fmt.Sprintf("将主题「%s」拆分为 %d 张连贯系列插画分镜。图型策略 %s，固定图型 %s，图型要求 %s。返回 JSON 数组：[{\"title\":\"\",\"theme\":\"\",\"text\":\"\",\"layout\":\"\"}]", body.Topic, body.Count, body.LayoutMode, body.FixedLayout, body.LayoutRequirement)
 		if reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: promptTxt}}, false); err == nil {
-			var cards []map[string]string
-			if json.Unmarshal([]byte(extractJSON(reply)), &cards) == nil && len(cards) > 0 {
+			if cards := seriesCards(json.RawMessage(extractJSON(reply))); len(cards) > 0 {
+				if body.LayoutMode == "fixed" {
+					for _, c := range cards {
+						c["layout"] = body.FixedLayout
+					}
+				}
 				return map[string]any{"cards": cards, "source": "provider"}, nil
 			}
 		}
@@ -649,6 +673,12 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 		cards = append(cards, map[string]string{
 			"title": fmt.Sprintf("第 %d 张", i+1),
 			"theme": fmt.Sprintf("%s · 核心场景 %d", strings.TrimSpace(body.Topic), i+1),
+			"layout": func() string {
+				if body.LayoutMode == "fixed" {
+					return body.FixedLayout
+				}
+				return ""
+			}(),
 		})
 	}
 	return map[string]any{"cards": cards, "source": "local"}, nil
@@ -656,9 +686,13 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 
 func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
-		Title   string `json:"title"`
-		Content string `json:"content"`
-		Count   int    `json:"count"`
+		Title        string `json:"title"`
+		Content      string `json:"content"`
+		Count        int    `json:"count"`
+		StyleID      string `json:"styleId"`
+		CoverRatio   string `json:"coverRatio"`
+		InlineRatio  string `json:"inlineRatio"`
+		IncludeCover *bool  `json:"includeCover"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -666,27 +700,34 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 	if strings.TrimSpace(body.Content) == "" {
 		return nil, bad("请先输入或导入文章正文")
 	}
+	body.CoverRatio = firstStr(body.CoverRatio, "2.35:1")
+	body.InlineRatio = firstStr(body.InlineRatio, "4:3")
+	includeCover := body.IncludeCover == nil || *body.IncludeCover
 	if s.Site.LoggedIn() {
-		if raw, err := s.Site.ArticlePlan(r.Context(), map[string]any{"title": body.Title, "content": body.Content, "count": body.Count}); err == nil {
-			return map[string]any{"raw": raw, "source": "site"}, nil
+		request := articlePlanRequest(body.Title, body.Content, body.StyleID, body.CoverRatio, body.InlineRatio, includeCover)
+		if raw, err := s.Site.ArticlePlan(r.Context(), request); err == nil {
+			if slots, styles := articleSlots(raw, body.Content, body.CoverRatio, body.InlineRatio, includeCover); len(slots) > 0 {
+				return map[string]any{"slots": slots, "recommendedStyles": styles, "source": planningSource(raw)}, nil
+			}
 		}
 	}
 	if tp, model, ok := findTextProvider(); ok {
-		ask := "分析下面文章，规划 1 张封面和若干正文配图位，并返回 3 个推荐画风编号（如 FA-013, FB-001, FE-001）。返回严格 JSON: {\"recommendedStyles\":[],\"slots\":[{\"role\":\"cover|inline\",\"anchor\":\"\",\"title\":\"\",\"theme\":\"\"}]}\n\n标题：" + body.Title + "\n正文：" + body.Content
+		ask := fmt.Sprintf("分析下面文章，规划配图位（包含封面：%t）。正文 anchor 必须引用正文中的原文。返回严格 JSON: {\"recommendedStyles\":[],\"slots\":[{\"role\":\"cover|inline\",\"anchor\":\"\",\"title\":\"\",\"theme\":\"\"}]}\n\n标题：%s\n正文：%s", includeCover, body.Title, body.Content)
 		if reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: ask}}, true); err == nil {
-			var plan map[string]any
-			if json.Unmarshal([]byte(extractJSON(reply)), &plan) == nil {
-				plan["source"] = "provider"
-				return plan, nil
+			if slots, styles := articleSlots(json.RawMessage(extractJSON(reply)), body.Content, body.CoverRatio, body.InlineRatio, includeCover); len(slots) > 0 {
+				return map[string]any{"slots": slots, "recommendedStyles": styles, "source": "provider"}, nil
 			}
 		}
 	}
 	// Heuristic local fallback: split headings/paragraphs into cover + inline illustration slots.
 	paras := splitParagraphs(body.Content)
-	slots := []map[string]any{{
-		"id": "slot_cover", "role": "cover", "anchor": body.Title, "title": "文章封面",
-		"theme": firstStr(body.Title, firstNRunes(body.Content, 40)), "ratio": "2.35:1",
-	}}
+	slots := []map[string]any{}
+	if includeCover {
+		slots = append(slots, map[string]any{
+			"id": "slot_cover", "role": "cover", "anchor": body.Title, "title": "文章封面",
+			"theme": firstStr(body.Title, firstNRunes(body.Content, 40)), "ratio": body.CoverRatio,
+		})
+	}
 	step := 1
 	if len(paras) > 5 {
 		step = len(paras) / 4
@@ -695,7 +736,7 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 		slots = append(slots, map[string]any{
 			"id": fmt.Sprintf("slot_%d", len(slots)), "role": "inline",
 			"anchor": firstNRunes(paras[i], 28), "title": fmt.Sprintf("正文配图 %d", len(slots)),
-			"theme": firstNRunes(paras[i], 80), "ratio": "16:9",
+			"theme": firstNRunes(paras[i], 80), "ratio": body.InlineRatio,
 		})
 	}
 	return map[string]any{
