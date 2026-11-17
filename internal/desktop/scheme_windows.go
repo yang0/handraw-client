@@ -1,0 +1,34 @@
+//go:build windows && !nogui
+
+package desktop
+
+import (
+	"os"
+
+	"golang.org/x/sys/windows/registry"
+)
+
+// registerScheme registers handraw:// deep links under HKCU for OAuth/browser callbacks.
+func registerScheme() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	k, _, err := registry.CreateKey(registry.CURRENT_USER, `Software\Classes\handraw`, registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	_ = k.SetStringValue("", "URL:handraw")
+	_ = k.SetStringValue("URL Protocol", "")
+	if icon, _, err := registry.CreateKey(k, `DefaultIcon`, registry.SET_VALUE); err == nil {
+		_ = icon.SetStringValue("", `"`+exe+`",0`)
+		icon.Close()
+	}
+	cmd, _, err := registry.CreateKey(k, `shell\open\command`, registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer cmd.Close()
+	return cmd.SetStringValue("", `"`+exe+`" "%1"`)
+}
