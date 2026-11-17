@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, localImg, onEvent, openURL, showModal, toast } from "../api.js";
+import { api, clear, closeModal, el, localImg, onEvent, openURL, remoteThumb, showModal, toast } from "../api.js";
 
 const state = {
   tab: "local", // local | history | collections
@@ -270,7 +270,7 @@ async function drawSiteHistory(stage, ctx) {
     list.forEach((it) => {
       const imgs = it.images || (it.imageUrl ? [it.imageUrl] : (it.coverUrl ? [it.coverUrl] : []));
       const urls = imgs.map((x) => (typeof x === "string" ? x : (x.url || x.imageUrl || ""))).filter(Boolean);
-      const fullURL = urls[0] ? (urls[0].startsWith("http") ? urls[0] : base + urls[0]) : "/img/logo.svg";
+      const fullURL = urls[0] ? remoteThumb(urls[0], 480, base) : "/img/logo.svg";
       const pageURL = it.url || (it.workId ? `${base}/t/work-${it.workId}` : `${base}/studio`);
       grid.appendChild(el("div", { class: "style-card" },
         el("img", { class: "style-thumb", src: fullURL, alt: it.title || it.originalRequest || "", loading: "lazy" }),
@@ -323,7 +323,7 @@ async function drawSiteCollections(stage, ctx) {
     const grid = el("div", { class: "grid-cards" });
     list.forEach((it) => {
       const thumb = it.coverUrl || it.imageUrl || it.image || "/img/logo.svg";
-      const src = thumb.startsWith("http") || thumb.startsWith("/") ? (thumb.startsWith("/") ? base + thumb : thumb) : thumb;
+      const src = thumb === "/img/logo.svg" ? thumb : remoteThumb(thumb, 480, base);
       const pageURL = it.url || (it.workId ? `${base}/t/work-${it.workId}` : (it.id ? `${base}/t/${it.id}` : base));
       grid.appendChild(el("div", { class: "style-card" },
         el("img", { class: "style-thumb", src, alt: it.title || it.name || "", loading: "lazy" }),

@@ -34,6 +34,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/resources/random", s.h(s.resRandom))
 	m.HandleFunc("GET /files/pack/", s.filePack)
 	m.HandleFunc("GET /files/local", s.fileLocal)
+	m.HandleFunc("GET /files/remote", s.fileRemote)
 	m.HandleFunc("GET /files/plugin/{id}/", s.filePlugin)
 
 	// my styles / layouts / recipes

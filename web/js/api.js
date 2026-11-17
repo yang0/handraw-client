@@ -93,6 +93,19 @@ export function localImg(p) {
   return "/files/local?p=" + encodeURIComponent(p) + "&t=" + encodeURIComponent(getToken());
 }
 
+export function remoteThumb(src, width = 480, siteBase = "") {
+  if (!src) return "/img/logo.svg";
+  if (src.startsWith("/img/") || src.startsWith("/files/") || src.startsWith("data:")) return src;
+  let full = src;
+  if (src.startsWith("/")) {
+    full = (siteBase ? siteBase.replace(/\/+$/, "") : "") + src;
+  }
+  if (!full.startsWith("http://") && !full.startsWith("https://") && !full.startsWith("/")) {
+    return src;
+  }
+  return `/files/remote?url=${encodeURIComponent(full)}&w=${encodeURIComponent(width)}&t=${encodeURIComponent(getToken())}`;
+}
+
 export function money(cents) {
   return "¥" + (Number(cents || 0) / 100).toFixed(2);
 }

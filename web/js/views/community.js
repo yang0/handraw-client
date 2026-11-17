@@ -1,4 +1,4 @@
-import { api, clear, el, openURL, toast } from "../api.js";
+import { api, clear, el, openURL, remoteThumb, toast } from "../api.js";
 
 export async function renderCommunity(root, ctx) {
   clear(root);
@@ -45,7 +45,7 @@ export async function renderCommunity(root, ctx) {
         const grid = el("div", { class: "grid-cards" });
         works.forEach((w) => {
           const rawThumb = w.coverUrl || w.imageUrl || w.thumbnailUrl || w.image || "/img/logo.svg";
-          const thumb = rawThumb.startsWith("/") && !rawThumb.startsWith("/img/") ? base + rawThumb : rawThumb;
+          const thumb = remoteThumb(rawThumb, 480, base);
           const workURL = w.url ? (w.url.startsWith("/") ? base + w.url : w.url) : (w.id ? `${base}/t/work-${w.id}` : base);
           const styleId = w.styleId || w.style || w.styleNumber || w.recipe?.styleIds?.[0] || "FA-013";
           const layoutId = w.layoutId || w.layout || w.recipe?.layoutId || "";

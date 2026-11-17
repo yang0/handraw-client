@@ -1,4 +1,4 @@
-import { api, clear, el, localImg, openURL, packImg, toast } from "../api.js";
+import { api, clear, el, localImg, openURL, packImg, remoteThumb, toast } from "../api.js";
 import { mountSlotPanels } from "../plugins-host.js";
 
 export async function renderHome(root, ctx) {
@@ -135,7 +135,7 @@ export async function renderHome(root, ctx) {
         class: "style-card",
         onClick: () => openURL(`${hotRes.siteBase || "https://handraw-style.com"}/t/work-${encodeURIComponent(w.id)}`),
       },
-      el("img", { class: "style-thumb", src: img.startsWith("/") ? (hotRes.siteBase + img) : img, alt: w.title, loading: "lazy" }),
+      el("img", { class: "style-thumb", src: remoteThumb(img, 480, hotRes.siteBase || "https://handraw-style.com"), alt: w.title, loading: "lazy" }),
       el("div", { class: "style-body" },
         el("div", { class: "style-name" }, w.title || "社区作品"),
         el("div", { class: "muted" }, `${w.authorName || w.author || ""} · ♥ ${w.likes || 0}`)

@@ -424,3 +424,44 @@ func TestSiteModelsNormalization(t *testing.T) {
 		t.Fatalf("unexpected normalized site models: %+v", out.Site)
 	}
 }
+
+func TestRemoteMediaProxyAndCache(t *testing.T) {
+	pngBytes := tinyPNG(t)
+	var hits atomic.Int32
+	var gotW string
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/uploads/demo.png" {
+			hits.Add(1)
+			gotW = r.URL.Query().Get("w")
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(pngBytes)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mock.Close()
+
+	srv, _ := setupTestServer(t, mock.URL)
+	h := srv.Handler()
+
+	// 1. Disallow arbitrary third-party image hosts (SSRF protection).
+	rrEvil := doReq(t, h, srv.Token, "GET", "/files/remote?url=https%3A%2F%2Fevil.example%2Fa.png", nil)
+	if rrEvil.Code != 403 {
+		t.Fatalf("expected 403 for untrusted host, got %d %s", rrEvil.Code, rrEvil.Body.String())
+	}
+
+	// 2. First fetch requests ?w=480 from origin and caches on disk.
+	rr1 := doReq(t, h, srv.Token, "GET", "/files/remote?url=%2Fuploads%2Fdemo.png&w=480", nil)
+	if rr1.Code != 200 || gotW != "480" || rr1.Header().Get("X-Handraw-Cache") != "miss" {
+		t.Fatalf("unexpected first fetch: code=%d w=%q cache=%q body=%s", rr1.Code, gotW, rr1.Header().Get("X-Handraw-Cache"), rr1.Body.String())
+	}
+	if !bytes.Equal(rr1.Body.Bytes(), pngBytes) {
+		t.Fatal("cached image bytes mismatch on miss")
+	}
+
+	// 3. Second fetch hits local cache with zero origin requests.
+	rr2 := doReq(t, h, srv.Token, "GET", "/files/remote?url=%2Fuploads%2Fdemo.png&w=480", nil)
+	if rr2.Code != 200 || rr2.Header().Get("X-Handraw-Cache") != "hit" || hits.Load() != 1 {
+		t.Fatalf("expected disk cache hit with 1 origin hit, got code=%d cache=%q hits=%d", rr2.Code, rr2.Header().Get("X-Handraw-Cache"), hits.Load())
+	}
+}
