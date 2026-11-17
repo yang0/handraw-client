@@ -13,11 +13,12 @@ import (
 )
 
 var (
-	user32                  = windows.NewLazySystemDLL("user32.dll")
-	procRegisterHotKey      = user32.NewProc("RegisterHotKey")
-	procUnregisterHotKey    = user32.NewProc("UnregisterHotKey")
-	procGetMessageW         = user32.NewProc("GetMessageW")
-	procPostThreadMessageW  = user32.NewProc("PostThreadMessageW")
+	user32                 = windows.NewLazySystemDLL("user32.dll")
+	procRegisterHotKey     = user32.NewProc("RegisterHotKey")
+	procUnregisterHotKey   = user32.NewProc("UnregisterHotKey")
+	procGetMessageW        = user32.NewProc("GetMessageW")
+	procPeekMessageW       = user32.NewProc("PeekMessageW")
+	procPostThreadMessageW = user32.NewProc("PostThreadMessageW")
 )
 
 const (
@@ -64,7 +65,11 @@ func (m *hotkeyManager) Set(spec string) error {
 		return err
 	}
 
-	ready := make(chan error, 1)
+	type registration struct {
+		tid uint32
+		err error
+	}
+	ready := make(chan registration, 1)
 	done := make(chan struct{})
 	m.done = done
 
@@ -74,19 +79,21 @@ func (m *hotkeyManager) Set(spec string) error {
 		defer close(done)
 
 		tid := windows.GetCurrentThreadId()
+		// Create the queue before publishing readiness so an immediate Stop
+		// can post WM_QUIT even before GetMessage starts waiting.
+		var msg winMSG
+		procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, 0)
 		r1, _, callErr := procRegisterHotKey.Call(0, 1, uintptr(mods|modNoRep), uintptr(vk))
 		if r1 == 0 {
-			ready <- fmt.Errorf("注册快捷键 %s 失败：%w", spec, callErr)
+			ready <- registration{err: fmt.Errorf("注册快捷键 %s 失败：%w", spec, callErr)}
 			return
 		}
-		m.mu.Lock()
-		m.tid = tid
-		m.mu.Unlock()
-		ready <- nil
 
 		defer procUnregisterHotKey.Call(0, 1)
+		// Set owns m.mu while waiting. Return the thread ID through the
+		// channel instead of acquiring that mutex on the message thread.
+		ready <- registration{tid: tid}
 
-		var msg winMSG
 		for {
 			ret, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
 			if int32(ret) <= 0 {
@@ -98,7 +105,14 @@ func (m *hotkeyManager) Set(spec string) error {
 		}
 	}()
 
-	return <-ready
+	result := <-ready
+	if result.err != nil {
+		<-done
+		m.done = nil
+		return result.err
+	}
+	m.tid = result.tid
+	return nil
 }
 
 func (m *hotkeyManager) Stop() {
