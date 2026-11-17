@@ -327,7 +327,8 @@ kbd {
 
 /* Keep the atlas layout; only tint the existing menu states. */
 .atlas-head { justify-content: flex-start; }
-.atlas-toolbar { flex: 1; min-inline-size: 0; }
+.atlas-toolbar { flex: 1; min-inline-size: 0; justify-content: center; }
+.atlas-toolbar > .atlas-tabs { justify-content: center; }
 .atlas-toolbar > .input { max-inline-size: 100%; }
 .atlas-tabs .tab:hover { background: var(--accent-soft); color: var(--ink); }
 .atlas-tabs .tab.active { background: var(--accent-soft); color: light-dark(#A43822, #F18A70); }
