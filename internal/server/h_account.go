@@ -46,6 +46,7 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request) (any, error) {
 		if site.IsAuthError(err) {
 			_ = secrets.Delete(secrets.SiteToken)
 			_ = s.DB.SetKV("account_user", map[string]any{})
+			_ = s.DB.SetKV("balance_cache", map[string]any{})
 			return map[string]any{
 				"loggedIn":      false,
 				"expired":       true,
@@ -255,16 +256,50 @@ func (s *Server) balance(w http.ResponseWriter, r *http.Request) (any, error) {
 	if err != nil {
 		if site.IsAuthError(err) {
 			_ = secrets.Delete(secrets.SiteToken)
-			return nil, err
+			_ = s.DB.SetKV("account_user", map[string]any{})
+			_ = s.DB.SetKV("balance_cache", map[string]any{})
+			return map[string]any{
+				"loggedIn": false,
+				"expired":  true,
+				"error":    "登录授权已失效，请重新登录（本地创作不受影响）",
+			}, nil
+		}
+		var ae *site.APIError
+		errCode := ""
+		scopeDenied := false
+		if errors.As(err, &ae) {
+			errCode = ae.Code
+			scopeDenied = ae.Status == http.StatusForbidden || ae.Code == "token_scope_denied"
 		}
 		var cached json.RawMessage
-		if s.DB.GetKV("balance_cache", &cached) == nil && len(cached) > 0 {
-			return map[string]any{"loggedIn": true, "offline": true, "economy": cached, "error": err.Error()}, nil
+		if s.DB.GetKV("balance_cache", &cached) == nil && hasNonEmptyJSONObject(cached) {
+			return map[string]any{
+				"loggedIn":    true,
+				"offline":     true,
+				"scopeDenied": scopeDenied,
+				"code":        errCode,
+				"economy":     cached,
+				"error":       err.Error(),
+			}, nil
 		}
-		return nil, err
+		return map[string]any{
+			"loggedIn":    true,
+			"unavailable": true,
+			"scopeDenied": scopeDenied,
+			"code":        errCode,
+			"error":       err.Error(),
+		}, nil
 	}
 	_ = s.DB.SetKV("balance_cache", raw)
 	return map[string]any{"loggedIn": true, "economy": raw}, nil
+}
+
+func hasNonEmptyJSONObject(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var obj map[string]any
+	return json.Unmarshal(raw, &obj) == nil && len(obj) > 0
 }
 
 func (s *Server) siteCollections(w http.ResponseWriter, r *http.Request) (any, error) {

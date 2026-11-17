@@ -1,4 +1,5 @@
-import { api, clear, closeModal, connectEvents, el, getToken, installDialogLightDismiss, onEvent, setColorScheme, setToken, showModal } from "./api.js";
+import { api, clear, closeModal, connectEvents, el, getToken, installDialogLightDismiss, money, onEvent, openURL, setColorScheme, setToken, showModal, toast } from "./api.js";
+import { economySyncHint, formatEconomyPillText, parseEconomy } from "./economy.js";
 import { initPalette } from "./palette.js";
 import { mountPluginFrame } from "./plugins-host.js";
 import { renderHome } from "./views/home.js";
@@ -156,16 +157,36 @@ async function start() {
   }
 
   async function refreshTopbar() {
-    const [acc, queue, upd] = await Promise.all([
+    const [acc, bal, queue, upd] = await Promise.all([
       api("GET", "/api/account").catch(() => ({ loggedIn: false })),
+      api("GET", "/api/account/balance").catch((e) => ({ loggedIn: false, error: e?.message || "" })),
       api("GET", "/api/queue").catch(() => ({ active: 0 })),
       api("GET", "/api/update").catch(() => ({})),
     ]);
 
     const accBtn = document.getElementById("btn-account");
+    const ecoBtn = document.getElementById("btn-economy");
+    const ecoPop = document.getElementById("economy-popover");
     const qBtn = document.getElementById("btn-queue");
     const qCnt = document.getElementById("queue-count");
     const updBtn = document.getElementById("btn-update");
+    const siteBase = acc.siteBase || "https://handraw-style.com";
+
+    if (ecoBtn && ecoPop) {
+      if (!acc.loggedIn) {
+        ecoBtn.classList.add("hidden");
+        if (typeof ecoPop.hidePopover === "function") {
+          try { ecoPop.hidePopover(); } catch {}
+        }
+        clear(ecoPop);
+      } else {
+        const eco = parseEconomy({ ...bal, loggedIn: true });
+        ecoBtn.classList.remove("hidden");
+        ecoBtn.classList.toggle("is-muted", !eco.hasData);
+        ecoBtn.textContent = formatEconomyPillText(eco);
+        renderEconomyPopover(ecoPop, eco, siteBase);
+      }
+    }
 
     if (accBtn) {
       const name = acc.user?.displayName || acc.user?.username || acc.user?.name || "用户";
@@ -207,9 +228,94 @@ async function start() {
     }
   }
 
+  function buildEconomyDetailsNode(eco, siteBase, onClose) {
+    const wrap = el("div", { class: "col", style: { gap: "10px" } });
+    if (eco.hasData) {
+      const grid = el("div", { class: "economy-pop-grid" },
+        el("div", { class: "economy-stat" },
+          el("span", { class: "muted" }, "可用余额"),
+          el("strong", null, eco.balanceCents !== null ? money(eco.balanceCents) : "--"),
+          eco.heldCents > 0 ? el("span", { class: "muted" }, `冻结中 ${money(eco.heldCents)}`) : null
+        ),
+        el("div", { class: "economy-stat" },
+          el("span", { class: "muted" }, "社区积分"),
+          el("strong", null, eco.points !== null ? String(eco.points) : "--"),
+          eco.pendingPoints > 0 ? el("span", { class: "muted" }, `待结算 +${eco.pendingPoints}`) : null
+        )
+      );
+      wrap.appendChild(grid);
+
+      if (eco.quotaTiers.length) {
+        const qList = el("div", { class: "row", style: { gap: "6px" } },
+          ...eco.quotaTiers.map((q) => el("span", { class: "badge" + (q.remaining > 0 ? " badge-ok" : "") }, `${q.resolution} 剩 ${q.remaining}`))
+        );
+        wrap.appendChild(el("div", { class: "col", style: { gap: "4px" } },
+          el("span", { class: "muted" }, "免费生图额度"),
+          qList
+        ));
+      }
+      if (eco.aiBonusObj) {
+        wrap.appendChild(el("div", { class: "row", style: { justifyContent: "space-between" } },
+          el("span", { class: "muted" }, "AI 体验金"),
+          el("strong", null, money(eco.aiBonusCents))
+        ));
+      }
+    }
+    const hint = economySyncHint(eco);
+    if (hint) {
+      wrap.appendChild(el("div", { class: "economy-hint" }, hint));
+    }
+    wrap.appendChild(el("div", { class: "row", style: { justifyContent: "flex-end", paddingTop: "4px", borderTop: "1px solid var(--line)" } },
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: async () => {
+          await refreshTopbar();
+          toast("已刷新资产状态");
+        },
+      }, "刷新"),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: () => openURL(`${siteBase.replace(/\/+$/, "")}/?view=wallet`),
+      }, "充值钱包 ↗"),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        onClick: () => {
+          onClose?.();
+          go("settings", { anchor: "settings-account" });
+        },
+      }, "账户设置")
+    ));
+    return wrap;
+  }
+
+  function renderEconomyPopover(popEl, eco, siteBase) {
+    clear(popEl);
+    popEl.appendChild(el("div", { class: "economy-pop-head" },
+      el("strong", null, "账户资产明细"),
+      eco.offline ? el("span", { class: "badge badge-warn" }, "离线缓存") : null
+    ));
+    popEl.appendChild(buildEconomyDetailsNode(eco, siteBase, () => {
+      if (typeof popEl.hidePopover === "function") {
+        try { popEl.hidePopover(); } catch {}
+      }
+    }));
+  }
+
+  const ecoBtnEl = document.getElementById("btn-economy");
+  const ecoPopEl = document.getElementById("economy-popover");
+  if (ecoBtnEl && ecoPopEl && !("popover" in HTMLElement.prototype)) {
+    ecoBtnEl.addEventListener("click", () => {
+      const clone = el("div", { class: "col" }, ...Array.from(ecoPopEl.childNodes).map((n) => n.cloneNode(true)));
+      showModal("账户资产明细", clone, [el("button", { type: "button", class: "btn btn-primary", onClick: closeModal }, "关闭")]);
+    });
+  }
+
   settingsNavBtn?.addEventListener("click", () => go("settings"));
-  document.getElementById("btn-account")?.addEventListener("click", () => go("settings"));
-  document.getElementById("btn-update")?.addEventListener("click", () => go("settings"));
+  document.getElementById("btn-account")?.addEventListener("click", () => go("settings", { anchor: "settings-account" }));
+  document.getElementById("btn-update")?.addEventListener("click", () => go("settings", { anchor: "settings-updates" }));
   document.getElementById("btn-queue")?.addEventListener("click", async () => {
     const running = await api("GET", "/api/works?limit=12").catch(() => ({ items: [] }));
     const body = el("div", { class: "col" });
@@ -252,8 +358,12 @@ async function start() {
   await refreshTopbar();
 
   const qView = new URLSearchParams(location.search).get("view");
-  const initialView = (location.hash && location.hash.slice(1)) || qView || "home";
-  await go(initialView);
+  const rawInitial = (location.hash && location.hash.slice(1)) || qView || "home";
+  if (rawInitial.startsWith("settings-")) {
+    await go("settings", { anchor: rawInitial });
+  } else {
+    await go(rawInitial);
+  }
 }
 
 start();
