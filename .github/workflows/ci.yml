@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run Go tests
+        run: go test -v ./...
+      - name: Build GUI binary (Windows)
+        run: go build -ldflags "-s -w -X main.Version=${{ github.ref_name }}" -o dist/handraw.exe ./cmd/handraw
+      - name: Check binary size (<= 35 MB)
+        shell: pwsh
+        run: |
+          $bytes = (Get-Item dist/handraw.exe).Length
+          $mb = [math]::Round($bytes / 1MB, 2)
+          Write-Host "Windows binary size: $mb MB ($bytes bytes)"
+          if ($bytes -gt 35MB) { throw "Binary exceeds 35 MB: $mb MB" }
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run Go tests
+        run: go test -v ./...
+      - name: Build GUI binary (macOS)
+        run: go build -ldflags "-s -w -X main.Version=${{ github.ref_name }}" -o dist/handraw ./cmd/handraw
+      - name: Check binary size (<= 35 MB)
+        run: |
+          bytes=$(stat -f%z dist/handraw)
+          echo "macOS binary size: $bytes bytes"
+          test "$bytes" -le $((35 * 1024 * 1024))
+
+  test-linux-nogui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run headless tests (nogui)
+        run: go test -tags nogui -v ./...
+      - name: Build headless binary (nogui)
+        run: go build -tags nogui -ldflags "-s -w" -o dist/handraw ./cmd/handraw
