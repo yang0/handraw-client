@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      var s = localStorage.getItem("color-scheme");
+      if (s === "light" || s === "dark") document.querySelector('meta[name="color-scheme"]').content = s;
+    } catch (e) {}
+  </script>
+  <title>手绘风 · 快门</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body class="quick-body">
+  <div class="quick-card">
+    <div class="quick-head">
+      <div class="quick-brand">
+        <img src="/img/logo.svg" alt="" class="brand-logo-sm">
+        <span>手绘风 · 快门</span>
+      </div>
+      <div class="quick-hints">
+        <span><kbd>Tab</kbd> 换配方</span>
+        <span><kbd>Enter</kbd> 生成</span>
+        <span><kbd>Esc</kbd> 收起</span>
+      </div>
+      <button id="q-hide" class="icon-btn" type="button" aria-label="收起">✕</button>
+    </div>
+
+    <div class="quick-input-row">
+      <input id="q-theme" class="input quick-input" type="text" placeholder="输入想画的画面主题…（选中文本后唤起将自动填入）" autofocus>
+      <button id="q-go" class="btn btn-primary" type="button">生成</button>
+    </div>
+
+    <div class="quick-meta">
+      <button id="q-recipe" class="pill-btn" type="button">配方：加载中…</button>
+      <select id="q-model" class="select select-sm" aria-label="生图模型"></select>
+      <span id="q-price" class="muted"></span>
+    </div>
+
+    <div id="q-stage" class="quick-stage hidden"></div>
+  </div>
+  <script type="module" src="/js/quick.js"></script>
+</body>
+</html>

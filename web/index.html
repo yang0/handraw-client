@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      var s = localStorage.getItem("color-scheme");
+      if (s === "light" || s === "dark") document.querySelector('meta[name="color-scheme"]').content = s;
+    } catch (e) {}
+  </script>
+  <title>手绘风生图工作台</title>
+  <link rel="icon" href="/img/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <div id="shell" class="shell">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button id="btn-nav-toggle" class="icon-btn" type="button" title="展开/收起导航" aria-label="展开或收起导航">☰</button>
+        <div class="brand">
+          <img src="/img/logo.svg" alt="" class="brand-logo">
+          <span class="brand-name">手绘风</span>
+        </div>
+        <button id="btn-cmd" class="cmd-trigger" type="button">
+          <span>搜索画风、配方、作品或输入命令…</span>
+          <kbd>⌘K</kbd>
+        </button>
+      </div>
+      <div class="topbar-right">
+        <button id="btn-queue" class="pill-btn hidden" type="button" title="后台任务队列">
+          <span class="dot-pulse"></span>
+          <span id="queue-count">0</span>
+        </button>
+        <button id="btn-balance" class="pill-btn" type="button" title="余额与免费额度">
+          <span id="balance-text">未登录</span>
+        </button>
+        <button id="btn-update" class="pill-btn pill-accent hidden" type="button">⬆ 更新</button>
+        <button id="btn-account" class="account-btn" type="button">登录</button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside id="sidebar" class="sidebar" aria-label="主导航">
+        <nav id="nav-list" class="nav-list"></nav>
+        <div class="sidebar-foot">
+          <button class="nav-item" data-view="settings" type="button">
+            <span class="nav-ico">⚙</span>
+            <span class="nav-label">设置</span>
+          </button>
+        </div>
+      </aside>
+
+      <main id="main" class="main" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <dialog id="cmd-dialog" class="modal modal-cmd" closedby="any" aria-labelledby="cmd-title">
+    <div class="cmd-box">
+      <h2 id="cmd-title" class="sr-only">命令面板</h2>
+      <input id="cmd-input" class="cmd-input" type="text" placeholder="输入 FA-013 直达画风，/配方名 主题 快速生成，或搜作品/命令…" autocomplete="off" autofocus>
+      <div id="cmd-results" class="cmd-results"></div>
+    </div>
+  </dialog>
+
+  <dialog id="app-dialog" class="modal" closedby="any" aria-labelledby="app-dialog-title">
+    <div class="modal-inner">
+      <div class="modal-head">
+        <h2 id="app-dialog-title" class="modal-title"></h2>
+        <form method="dialog"><button class="icon-btn" value="close" aria-label="关闭">✕</button></form>
+      </div>
+      <div id="app-dialog-body" class="modal-body"></div>
+      <div id="app-dialog-foot" class="modal-foot"></div>
+    </div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
