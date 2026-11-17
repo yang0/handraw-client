@@ -1,4 +1,4 @@
-import { api, clear, closeModal, connectEvents, el, getToken, installDialogLightDismiss, localImg, money, onEvent, setColorScheme, setToken, showModal, toast } from "./api.js";
+import { api, clear, closeModal, connectEvents, el, getToken, installDialogLightDismiss, onEvent, setColorScheme, setToken, showModal } from "./api.js";
 import { initPalette } from "./palette.js";
 import { mountPluginFrame } from "./plugins-host.js";
 import { renderHome } from "./views/home.js";
@@ -155,35 +155,45 @@ async function start() {
     }
   }
 
-  async function refreshTopbar(forceBalance = false) {
-    const [acc, bal, queue, upd] = await Promise.all([
+  async function refreshTopbar() {
+    const [acc, queue, upd] = await Promise.all([
       api("GET", "/api/account").catch(() => ({ loggedIn: false })),
-      api("GET", "/api/account/balance").catch(() => ({ loggedIn: false })),
       api("GET", "/api/queue").catch(() => ({ active: 0 })),
       api("GET", "/api/update").catch(() => ({})),
     ]);
 
     const accBtn = document.getElementById("btn-account");
-    const balBtn = document.getElementById("btn-balance");
-    const balText = document.getElementById("balance-text");
     const qBtn = document.getElementById("btn-queue");
     const qCnt = document.getElementById("queue-count");
     const updBtn = document.getElementById("btn-update");
 
     if (accBtn) {
-      accBtn.textContent = acc.loggedIn ? (acc.user?.username || acc.user?.name || "已登录") : "登录";
-    }
-    if (balBtn && balText) {
-      if (!acc.loggedIn) {
-        balText.textContent = "未登录";
+      const name = acc.user?.displayName || acc.user?.username || acc.user?.name || "用户";
+      const label = acc.loggedIn ? `${name} · 账号设置` : "登录";
+      accBtn.classList.toggle("account-avatar", Boolean(acc.loggedIn));
+      accBtn.setAttribute("aria-label", label);
+      accBtn.title = label;
+      clear(accBtn);
+      if (acc.loggedIn) {
+        const fallback = el("span", { "aria-hidden": "true" }, Array.from(name.trim())[0]?.toUpperCase() || "用");
+        accBtn.appendChild(fallback);
+        if (acc.user?.avatarUrl) {
+          try {
+            const src = new URL(acc.user.avatarUrl, acc.siteBase);
+            if (src.protocol === "https:" || src.protocol === "http:") {
+              const img = el("img", {
+                src: src.href, alt: "", class: "account-avatar-img",
+                referrerpolicy: "no-referrer",
+                onLoad: () => fallback.classList.add("hidden"),
+                onError: () => { img.remove(); fallback.classList.remove("hidden"); },
+              });
+              accBtn.appendChild(img);
+            }
+          } catch {}
+        }
       } else {
-        const eco = bal.economy || {};
-        const cents = eco.balanceCents ?? eco.walletBalanceCents ?? eco.balance;
-        const free = eco.freeRemaining ?? eco.dailyFreeRemaining ?? eco.freeQuotaRemaining;
-        const txt = [cents != null ? money(cents) : "已连接", free != null ? `免额 ${free}` : ""].filter(Boolean).join(" · ");
-        balText.textContent = txt + (bal.offline ? " (离线)" : "");
+        accBtn.textContent = "登录";
       }
-      if (forceBalance) balBtn.title = "刚刚已同步额度";
     }
     if (qBtn && qCnt) {
       const cnt = Number(queue.active || queue.count || 0);
@@ -199,10 +209,6 @@ async function start() {
 
   settingsNavBtn?.addEventListener("click", () => go("settings"));
   document.getElementById("btn-account")?.addEventListener("click", () => go("settings"));
-  document.getElementById("btn-balance")?.addEventListener("click", async () => {
-    await refreshTopbar(true);
-    toast("已同步账号额度信息");
-  });
   document.getElementById("btn-update")?.addEventListener("click", () => go("settings"));
   document.getElementById("btn-queue")?.addEventListener("click", async () => {
     const running = await api("GET", "/api/works?limit=12").catch(() => ({ items: [] }));
@@ -225,12 +231,12 @@ async function start() {
     const now = Date.now();
     if (now - lastFocusRefresh < 15000) return;
     lastFocusRefresh = now;
-    refreshTopbar(false);
+    refreshTopbar();
   });
 
   onEvent((msg) => {
     if (msg.type === "account" || msg.type === "balance" || msg.type === "job" || msg.type === "run" || msg.type === "update") {
-      refreshTopbar(false);
+      refreshTopbar();
     }
     if (msg.type === "plugins") {
       refreshNav();
@@ -243,7 +249,7 @@ async function start() {
   connectEvents();
   initPalette(ctx);
   await refreshNav();
-  await refreshTopbar(false);
+  await refreshTopbar();
 
   const qView = new URLSearchParams(location.search).get("view");
   const initialView = (location.hash && location.hash.slice(1)) || qView || "home";

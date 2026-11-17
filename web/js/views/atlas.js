@@ -3,10 +3,66 @@ import { api, clear, closeModal, el, localImg, money, packImg, showModal, toast 
 const state = {
   tab: "styles", // styles | layouts | colors | tones | assets | mine | compare | dice | find
   group: "",
+  groups: { layouts: "", colors: "", tones: "", assets: "" },
   q: "",
   compareIds: [],
   dice: { style: null, layout: null, color: null, lockStyle: false, lockLayout: false, lockColor: false },
 };
+
+const layoutNames = {
+  "comic-storyboard": "漫画分镜", ecommerce: "电商图型",
+  infographic: "信息图", "ip-character": "角色设计", "social-card": "社媒卡片",
+};
+const assetNames = { character: "角色", prop: "道具", scene: "场景" };
+
+function categoryName(value) {
+  return String(value || "其他").replace(/^[A-Z]{1,4}(?:-\d+)?[\s·:：、-]+(?=[\u3400-\u9fff])/, "");
+}
+
+// Add categories using the existing atlas sidebar and card styles.
+function drawCatalog(stage, { kind, title, allLabel, items, groupKey, groupLabel, groups = [], card, before, empty }) {
+  const categories = new Map(groups.map((g) => [g.key, { ...g, count: 0 }]));
+  for (const item of items) {
+    const key = groupKey(item) || "other";
+    if (!categories.has(key)) categories.set(key, { key, label: groupLabel(item), count: 0 });
+    categories.get(key).count++;
+  }
+  if (state.groups[kind] && !categories.has(state.groups[kind])) state.groups[kind] = "";
+  const nav = el("div", { class: "atlas-groups", role: "group", "aria-label": `${title}分类` });
+  const right = el("div");
+  const grid = el("div", { class: "grid-cards" });
+  if (before) right.appendChild(before);
+  right.appendChild(grid);
+  if (categories.size > 1) stage.appendChild(el("div", { class: "atlas-wrap" }, nav, right));
+  else stage.appendChild(right);
+
+  for (const group of [{ key: "", label: allLabel, count: items.length }, ...categories.values()]) {
+    nav.appendChild(el("button", {
+      type: "button", class: "group-btn", dataset: { group: group.key },
+      onClick: () => { state.groups[kind] = group.key; paint(); },
+    }, el("span", null, categoryName(group.label)), el("span", { class: "muted" }, String(group.count))));
+  }
+  function paint() {
+    nav.querySelectorAll("button").forEach((button) => {
+      const selected = button.dataset.group === state.groups[kind];
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    });
+    clear(grid);
+    const query = state.q.trim().toLowerCase();
+    const selected = state.groups[kind];
+    const visible = items.filter((item) =>
+      (!selected || (groupKey(item) || "other") === selected) &&
+      (!query || JSON.stringify(item).toLowerCase().includes(query))
+    );
+    if (!visible.length) {
+      grid.appendChild(el("div", { class: "card muted" }, query ? "没有找到匹配的资源" : (empty || "这个分类暂时没有资源")));
+    } else {
+      visible.forEach((item) => grid.appendChild(card(item)));
+    }
+  }
+  paint();
+}
 
 export async function renderAtlas(root, ctx, params = {}) {
   if (params.tab) state.tab = params.tab;
@@ -19,18 +75,19 @@ export async function renderAtlas(root, ctx, params = {}) {
     ["layouts", `图型 (${summary.counts?.layouts || 0})`],
     ["colors", `主题色 (${summary.counts?.colors || 0})`],
     ["tones", `影调 (${summary.counts?.tones || 0})`],
-    ["assets", "角色/道具/场景"],
+    ["assets", "自建图库"],
     ["mine", "我的资源"],
     ["compare", `对比台 (${state.compareIds.length}/4)`],
     ["find", "以图找风格"],
     ["dice", "画风骰子"],
   ];
 
-  const tabBar = el("div", { class: "tabs" });
+  const tabBar = el("div", { class: "tabs atlas-tabs" });
   tabs.forEach(([k, label]) => {
     tabBar.appendChild(el("button", {
       type: "button",
       class: "tab" + (state.tab === k ? " active" : ""),
+      "aria-pressed": String(state.tab === k),
       onClick: () => { state.tab = k; renderAtlas(root, ctx); },
     }, label));
   });
@@ -48,9 +105,9 @@ export async function renderAtlas(root, ctx, params = {}) {
     timer = setTimeout(() => { state.q = searchInput.value; drawContent(); }, 180);
   });
 
-  root.appendChild(el("div", { class: "page-head" },
+  root.appendChild(el("div", { class: "page-head atlas-head" },
     el("h1", { class: "page-title" }, "风格画册"),
-    el("div", { class: "row" }, tabBar, searchInput)
+    el("div", { class: "row atlas-toolbar" }, tabBar, searchInput)
   ));
 
   const stage = el("div");
@@ -82,14 +139,14 @@ async function drawStyles(stage, groups, ctx) {
       type: "button",
       class: "group-btn" + (state.group === "" ? " active" : ""),
       onClick: () => { state.group = ""; drawStylesWrap(); },
-    }, el("span", null, "全部流派"), el("span", { class: "muted" }, String(items.length)))
+    }, el("span", null, "全部流派"), el("span", { class: "muted" }, String(groups.reduce((total, g) => total + g.count, 0))))
   );
   groups.forEach((g) => {
     groupNav.appendChild(el("button", {
       type: "button",
       class: "group-btn" + (state.group === g.code ? " active" : ""),
       onClick: () => { state.group = g.code; drawStylesWrap(); },
-    }, el("span", null, `${g.code} ${g.zh || g.en}`), el("span", { class: "muted" }, String(g.count))));
+    }, el("span", null, categoryName(g.zh || g.en)), el("span", { class: "muted" }, String(g.count))));
   });
 
   function drawStylesWrap() {
@@ -211,10 +268,11 @@ async function openStyleDetail(id, ctx, onRefresh) {
 }
 
 async function drawLayouts(stage, ctx) {
-  const res = await api("GET", `/api/resources/layouts?q=${encodeURIComponent(state.q)}`);
-  const grid = el("div", { class: "grid-cards" });
-  (res.items || []).forEach((l) => {
-    grid.appendChild(el("div", { class: "style-card" },
+  const res = await api("GET", "/api/resources/layouts");
+  drawCatalog(stage, {
+    kind: "layouts", title: "图型", allLabel: "全部图型", items: res.items || [],
+    groupKey: (l) => l.category, groupLabel: (l) => layoutNames[l.category] || l.category,
+    card: (l) => el("div", { class: "style-card" },
       el("img", { class: "style-thumb", src: packImg(l.image), alt: l.name, loading: "lazy" }),
       el("div", { class: "style-body" },
         el("div", { class: "style-code" }, `${l.id} · ${l.category}`),
@@ -224,16 +282,16 @@ async function drawLayouts(stage, ctx) {
       el("div", { class: "style-actions" },
         el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { layout: l.id }) }, "用于创作")
       )
-    ));
+    ),
   });
-  stage.appendChild(grid);
 }
 
 async function drawColors(stage, ctx) {
-  const res = await api("GET", `/api/resources/colors?q=${encodeURIComponent(state.q)}`);
-  const grid = el("div", { class: "grid-cards" });
-  (res.items || []).forEach((c) => {
-    grid.appendChild(el("div", { class: "style-card" },
+  const res = await api("GET", "/api/resources/colors");
+  drawCatalog(stage, {
+    kind: "colors", title: "主题色", allLabel: "全部主题色", items: res.items || [],
+    groupKey: (c) => c.category, groupLabel: (c) => c.category_zh || c.category,
+    card: (c) => el("div", { class: "style-card" },
       el("img", { class: "style-thumb", src: packImg(c.image), alt: c.name_zh, loading: "lazy" }),
       el("div", { class: "style-body" },
         el("div", { class: "style-code" }, `${c.id} · ${c.category_zh}`),
@@ -243,16 +301,16 @@ async function drawColors(stage, ctx) {
       el("div", { class: "style-actions" },
         el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { color: c.id }) }, "选用配色")
       )
-    ));
+    ),
   });
-  stage.appendChild(grid);
 }
 
 async function drawTones(stage, ctx) {
-  const res = await api("GET", `/api/resources/tones?q=${encodeURIComponent(state.q)}`);
-  const grid = el("div", { class: "grid-cards" });
-  (res.items || []).forEach((t) => {
-    grid.appendChild(el("div", { class: "style-card" },
+  const res = await api("GET", "/api/resources/tones");
+  drawCatalog(stage, {
+    kind: "tones", title: "影调", allLabel: "全部影调", items: res.items || [],
+    groupKey: (t) => t.category, groupLabel: (t) => t.category_zh || t.category,
+    card: (t) => el("div", { class: "style-card" },
       el("img", { class: "style-thumb", src: packImg(t.image), alt: t.name_zh, loading: "lazy" }),
       el("div", { class: "style-body" },
         el("div", { class: "style-code" }, `${t.id} · ${t.category_zh}`),
@@ -262,9 +320,8 @@ async function drawTones(stage, ctx) {
       el("div", { class: "style-actions" },
         el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { tone: t.id }) }, "选用影调")
       )
-    ));
+    ),
   });
-  stage.appendChild(grid);
 }
 
 async function drawAssets(stage) {
@@ -282,22 +339,23 @@ async function drawAssets(stage) {
     class: "btn btn-primary btn-sm",
     onClick: () => openAssetDialog(() => { clear(stage); drawAssets(stage); }),
   }, "+ 添加角色/道具/场景参考图");
-  stage.appendChild(el("div", { class: "row", style: { marginBottom: "12px", justifyContent: "space-between" } },
-    el("span", { class: "muted" }, "支持本地图库与 Skill ~/.handraw-style 图库同步读取"),
-    addBtn
-  ));
-  const grid = el("div", { class: "grid-cards" });
-  items.forEach((a) => {
-    const src = a.image ? (a.image.startsWith("images/") ? packImg(a.image) : localImg(a.image)) : "/img/logo.svg";
-    grid.appendChild(el("div", { class: "style-card" },
-      el("img", { class: "style-thumb", src, alt: a.name, loading: "lazy" }),
+  drawCatalog(stage, {
+    kind: "assets", title: "自建图库", allLabel: "全部图库", items,
+    groupKey: (a) => a.kind, groupLabel: (a) => assetNames[a.kind] || "其他",
+    groups: Object.entries(assetNames).map(([key, label]) => ({ key, label })),
+    before: el("div", { class: "row", style: { marginBottom: "12px", justifyContent: "space-between" } },
+      el("span", { class: "muted" }, "支持本地图库与 Skill ~/.handraw-style 图库同步读取"),
+      addBtn
+    ),
+    empty: "还没有参考图",
+    card: (a) => el("div", { class: "style-card" },
+      el("img", { class: "style-thumb", src: a.image ? localImg(a.image) : "/img/logo.svg", alt: a.name, loading: "lazy" }),
       el("div", { class: "style-body" },
         el("div", { class: "style-code" }, `${a.id} · ${a.kind}`),
         el("div", { class: "style-name" }, a.name)
       )
-    ));
+    ),
   });
-  stage.appendChild(grid);
 }
 
 function openAssetDialog(onSaved) {
