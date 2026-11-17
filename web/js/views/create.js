@@ -1,10 +1,10 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
 import { openRecipeEditor } from "./recipes.js";
 import { mountSlotPanels } from "../plugins-host.js";
-import { extraInstructions, field, recipeControls, studioMount, studioSession } from "./studio-controls.js";
+import { choices, extraInstructions, field, ratioToCss, recipeControls, studioMount, studioSession } from "./studio-controls.js";
 
 export function buildGroupedModelSelect(modelsData = {}, currentRef = "") {
-  const sel = el("select", { class: "select select-sm", style: { maxWidth: "220px" } });
+  const sel = el("select", { class: "select select-sm", style: { maxWidth: "220px" }, "aria-label": "生图模型" });
   const rawSite = modelsData.site;
   const siteModels = Array.isArray(rawSite)
     ? rawSite
@@ -123,7 +123,7 @@ export async function renderCreate(root, ctx, params = {}) {
   root.appendChild(el("div", { class: "page-head" },
     el("div", { class: "row" },
       el("h1", { class: "page-title" }, "单图创作"),
-      el("span", { class: "muted" }, "选择画风与图型，描述主题后生成；Ctrl/⌘ + Enter")
+      el("span", { class: "muted" }, "调配画风、图型与主题色，在右侧直接输入画面描述出图")
     ),
     el("div", { class: "row" },
       el("button", { type: "button", class: "btn btn-sm", onClick: rollDice }, "🎲 摇灵感"),
@@ -132,8 +132,9 @@ export async function renderCreate(root, ctx, params = {}) {
     )
   ));
 
-  const recSel = el("select", { class: "select", style: { marginBottom: "8px" } },
-    el("option", { value: "" }, "— 从常用配方套用 —"),
+  // Left: Website-parity Properties Panel
+  const recSel = el("select", { class: "select select-sm", style: { flex: "1" }, "aria-label": "快速套用配方" },
+    el("option", { value: "" }, "— 套用常用配方 —"),
     ...recipes.map((r) => el("option", { value: r.id }, `${r.name} (${(r.styleIds || []).join("+")})`))
   );
   if (state.recipeId) recSel.value = state.recipeId;
@@ -161,18 +162,128 @@ export async function renderCreate(root, ctx, params = {}) {
     scheduleRefresh();
     session.persist();
   });
-  const resSel = el("select", { class: "select" },
-    ...["1k", "2k", "4k"].map((v) => el("option", { value: v }, v.toUpperCase())));
-  resSel.value = state.resolution;
-  resSel.addEventListener("change", () => { state.resolution = resSel.value; refreshQuote(); });
-  const qualSel = el("select", { class: "select" },
-    el("option", { value: "standard" }, "标准"), el("option", { value: "high" }, "高质量"));
-  qualSel.value = state.quality;
-  qualSel.addEventListener("change", () => { state.quality = qualSel.value; refreshQuote(); });
-  const redrawChk = el("input", { type: "checkbox", checked: state.redraw });
-  redrawChk.addEventListener("change", () => { state.redraw = redrawChk.checked; state.promptCustomized = false; scheduleRefresh(); });
 
-  const refsBox = el("div", { class: "row", style: { marginTop: "6px" } });
+  const resChoices = choices("清晰度", [["1k", "1K"], ["2k", "2K"], ["4k", "4K"]], state.resolution, (v) => {
+    state.resolution = v;
+    refreshQuote();
+    session.persist();
+  }, { inline: true });
+
+  const qualChoices = choices("质量", [["standard", "标准"], ["high", "高质量"]], state.quality, (v) => {
+    state.quality = v;
+    refreshQuote();
+    session.persist();
+  }, { inline: true });
+
+  const textInput = el("input", {
+    class: "input",
+    type: "text",
+    value: state.text,
+    placeholder: "画面内要写出的主/副标题文字（可留空）",
+  });
+  textInput.addEventListener("input", () => {
+    state.text = textInput.value;
+    if (!state.promptCustomized) scheduleRefresh();
+  });
+  const textField = field("画面文字（可选）", textInput);
+  function updateTextVisibility() {
+    textField.classList.toggle("hidden", state.mode === "pure-image");
+  }
+  updateTextVisibility();
+
+  const redrawChk = el("input", { type: "checkbox", checked: state.redraw });
+  redrawChk.addEventListener("change", () => {
+    state.redraw = redrawChk.checked;
+    state.promptCustomized = false;
+    scheduleRefresh();
+  });
+
+  // Prompt preview accordion (inside Properties pane, just like handraw-web)
+  const promptEdit = el("textarea", { class: "textarea mono", rows: "4", style: { fontSize: "12px" } });
+  if (state.customPrompt) promptEdit.value = state.customPrompt;
+  promptEdit.addEventListener("input", () => {
+    state.customPrompt = promptEdit.value;
+    state.promptCustomized = true;
+  });
+  const promptNote = el("span", { class: "muted" }, "按所选模型自动切换中/英文提示词");
+  const expandBtn = el("button", { type: "button", class: "btn btn-sm", onClick: handleExpandTheme }, "✨ AI 扩写");
+  const resetPromptBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    onClick: () => { state.promptCustomized = false; refreshPromptAndQuote(); },
+  }, "重置");
+
+  const promptDetails = el("details", { class: "studio-more-card" },
+    el("summary", { class: "studio-more-summary" },
+      el("span", null, "提示词预览与微调"),
+      el("span", { class: "studio-more-chevron", "aria-hidden": "true" })
+    ),
+    el("div", { class: "studio-more-body" },
+      el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap" } },
+        promptNote,
+        el("div", { class: "row" }, expandBtn, resetPromptBtn)
+      ),
+      promptEdit
+    )
+  );
+
+  const recentBox = el("div", { class: "studio-recent-strip" });
+  function renderRecentRuns() {
+    clear(recentBox);
+    const list = (state.recentRuns || []).slice(0, 8);
+    if (!list.length) {
+      recentBox.appendChild(el("span", { class: "muted", style: { gridColumn: "1 / -1" } }, "暂无历史草稿"));
+      return;
+    }
+    list.forEach((run) => {
+      const im = run.images?.[0];
+      const src = im?.thumb ? localImg(im.thumb) : (im?.path ? localImg(im.path) : "/img/logo.svg");
+      const active = state.activeRun?.id === run.id;
+      recentBox.appendChild(el("button", {
+        type: "button",
+        class: "studio-recent-thumb" + (active ? " is-active" : ""),
+        title: run.title || run.originalRequest || "作品",
+        onClick: async () => {
+          try {
+            const detail = await api("GET", `/api/works/${encodeURIComponent(run.id)}`);
+            state.activeRun = detail.run;
+            renderViewer();
+            renderRecentRuns();
+          } catch (e) { toast(e.message); }
+        },
+      },
+        el("img", { src, alt: run.title || "" }),
+        el("span", null, run.title || "未命名")
+      ));
+    });
+  }
+
+  const leftPane = el("section", { class: "make-image-properties", "aria-label": "画面属性" },
+    el("div", { class: "studio-more-row" },
+      el("span", { class: "studio-row-label" }, "配方"),
+      recSel
+    ),
+    controls.node,
+    textField,
+    resChoices,
+    qualChoices,
+    el("label", { class: "row", style: { cursor: "pointer" } }, redrawChk, el("span", null, "照片重绘（参考原图结构重绘）")),
+    promptDetails,
+    el("details", { class: "studio-more-card" },
+      el("summary", { class: "studio-more-summary" },
+        el("span", null, `最近创作 (${Math.min(8, (state.recentRuns || []).length)})`),
+        el("span", { class: "studio-more-chevron", "aria-hidden": "true" })
+      ),
+      el("div", { class: "studio-more-body" }, recentBox)
+    )
+  );
+
+  // Right: Output scroll + Chat-like Composer
+  const previewStrip = el("div", { class: "make-image-recipe-strip" });
+  const viewer = el("div", { class: "make-image-results-grid" });
+  const outputScroll = el("div", { class: "make-image-output-scroll" }, previewStrip, viewer);
+
+  const refsStrip = el("div", { class: "make-image-composer-attachments" });
   const fileInput = el("input", { type: "file", accept: "image/*", class: "hidden" });
   fileInput.addEventListener("change", async () => {
     const f = fileInput.files?.[0];
@@ -190,102 +301,124 @@ export async function renderCreate(root, ctx, params = {}) {
   });
 
   function renderRefs() {
-    clear(refsBox);
+    clear(refsStrip);
+    refsStrip.classList.toggle("hidden", state.refs.length === 0);
     state.refs.forEach((rp, idx) => {
-      refsBox.appendChild(el("div", { style: { position: "relative", width: "54px", height: "54px" } },
-        el("img", { src: localImg(rp), alt: "参考图", style: { width: "54px", height: "54px", objectFit: "cover", borderRadius: "8px", border: "1px solid var(--line)" } }),
+      refsStrip.appendChild(el("div", { class: "make-image-ref-thumb" },
+        el("img", { src: localImg(rp), alt: `参考图 ${idx + 1}` }),
         el("button", {
           type: "button",
-          class: "icon-btn",
-          style: { position: "absolute", top: "-6px", right: "-6px", width: "18px", height: "18px", fontSize: "11px", background: "var(--surface)" },
-          onClick: () => { state.refs.splice(idx, 1); renderRefs(); },
+          "aria-label": `移除参考图 ${idx + 1}`,
+          title: "移除参考图",
+          onClick: () => { state.refs.splice(idx, 1); renderRefs(); session.persist(); },
         }, "×")
       ));
     });
-    refsBox.appendChild(el("button", { type: "button", class: "btn btn-sm", onClick: () => fileInput.click() }, "+ 上传参考图"));
-    refsBox.appendChild(fileInput);
   }
   renderRefs();
 
+  const themeInput = el("textarea", {
+    class: "make-image-composer-subject",
+    rows: "3",
+    "aria-label": "画面主题描述",
+    placeholder: "描述想要创作的画面主题或故事，例如：周末早晨阳光洒进窗台的手冲咖啡桌…（Ctrl/⌘ + Enter 立即生成）",
+  });
+  themeInput.value = state.theme;
+  themeInput.addEventListener("input", () => {
+    state.theme = themeInput.value;
+    if (!state.promptCustomized) scheduleRefresh();
+  });
+  themeInput.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !e.isComposing && e.keyCode !== 229) {
+      e.preventDefault();
+      doGenerate(false);
+    }
+  });
+
+  const addRefBtn = el("button", {
+    type: "button",
+    class: "make-image-add-reference",
+    title: "添加参考图",
+    "aria-label": "添加参考图",
+    onClick: () => fileInput.click(),
+  }, "+");
+
+  const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
+  state.modelRef = modelSel.value;
+  modelSel.addEventListener("change", () => {
+    state.modelRef = modelSel.value;
+    state.promptCustomized = false;
+    refreshPromptAndQuote();
+  });
+
+  const countSel = el("select", { class: "select select-sm", "aria-label": "生成张数" },
+    ...[1, 2, 3, 4].map((n) => el("option", { value: String(n) }, `${n} 张`))
+  );
+  countSel.value = String(state.count);
+  countSel.addEventListener("change", () => { state.count = Number(countSel.value); refreshQuote(); });
+
+  const quoteBadge = el("span", { class: "badge", title: "生成前预估费用" }, "报价计算中…");
+  const resetBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    onClick: () => {
+      state.theme = "";
+      state.text = "";
+      state.refs = [];
+      state.promptCustomized = false;
+      state.customPrompt = "";
+      state.activeRun = null;
+      themeInput.value = "";
+      textInput.value = "";
+      renderRefs();
+      renderViewer();
+      refreshPromptAndQuote();
+      session.persist();
+    },
+  }, "清空");
+  const genBtn = el("button", { type: "submit", class: "btn btn-primary" }, "开始生成");
+
+  const composer = el("form", { class: "make-image-composer", action: "/api/generate", method: "post" },
+    fileInput,
+    refsStrip,
+    themeInput,
+    el("div", { class: "make-image-composer-bottom" },
+      addRefBtn,
+      modelSel,
+      countSel,
+      quoteBadge,
+      el("div", { class: "make-image-composer-actions" }, resetBtn, genBtn)
+    )
+  );
+  composer.addEventListener("submit", (e) => { e.preventDefault(); doGenerate(false); });
+
+  const conversation = el("section", { class: "make-image-conversation", "aria-label": "画面输出与输入" },
+    outputScroll,
+    composer
+  );
+
+  const workspace = el("div", { class: "make-image-chat-workspace" }, leftPane, conversation);
+  const slotContainer = el("div", { style: { marginTop: "4px" } });
+
+  root.append(workspace, slotContainer);
+
+  mountSlotPanels(slotContainer, "create-footer", {
+    view: "create",
+    recipe: () => ({ style: state.style, style2: state.fusion ? state.style2 : "", layout: state.layout, color: state.color, tone: state.tone, mode: state.mode, ratio: state.ratio }),
+    applyTheme: (t) => { themeInput.value = t; state.theme = t; refreshPromptAndQuote(); },
+  });
+
   function syncFormInputs() {
     controls.sync();
+    resChoices.sync(state.resolution);
+    qualChoices.sync(state.quality);
+    textInput.value = state.text || "";
     redrawChk.checked = Boolean(state.redraw);
     updateTextVisibility();
   }
 
-  const leftPane = el("aside", { class: "studio-pane" },
-    field("快速套用配方", recSel), controls.node,
-    el("div", { class: "studio-more" }, field("分辨率", resSel), field("生成质量", qualSel)),
-    el("div", { class: "field" }, el("strong", null, "参考图"), refsBox,
-      el("label", { class: "row" }, redrawChk, el("span", null, "照片重绘")))
-  );
-
-  const previewCard = el("div", { class: "card", style: { padding: "10px 12px" } });
-  const promptEdit = el("textarea", { class: "textarea mono", rows: "4", style: { fontSize: "12px" } });
-  if (state.customPrompt) promptEdit.value = state.customPrompt;
-  promptEdit.addEventListener("input", () => {
-    state.customPrompt = promptEdit.value;
-    state.promptCustomized = true;
-  });
-  const promptNote = el("span", { class: "muted" }, "系统按当前模型自动选择中文/英文提示词");
-  const expandBtn = el("button", { type: "button", class: "btn btn-sm", onClick: handleExpandTheme }, "✨ AI 扩写主题");
-  const resetPromptBtn = el("button", {
-    type: "button",
-    class: "btn btn-sm",
-    onClick: () => { state.promptCustomized = false; refreshPromptAndQuote(); },
-  }, "重置为自动编译");
-
-  const promptDetails = el("details", { class: "card", style: { padding: "8px 12px" } },
-    el("summary", { style: { cursor: "pointer", fontWeight: 600, fontSize: "13px" } }, "查看 / 手动微调完整提示词"),
-    el("div", { class: "col", style: { marginTop: "8px" } },
-      el("div", { class: "row", style: { justifyContent: "space-between" } },
-        promptNote,
-        el("div", { class: "row" }, expandBtn, resetPromptBtn)
-      ),
-      promptEdit
-    )
-  );
-
-  const viewer = el("div", { class: "studio-viewer" });
-  const centerStage = el("section", { class: "studio-stage" }, previewCard, promptDetails, viewer);
-
-  const rightRail = el("aside", { class: "studio-pane", style: { padding: "8px", display: "flex", flexDirection: "column", gap: "8px" } },
-    el("div", { class: "muted", style: { textAlign: "center", fontWeight: 600 } }, "最近草稿")
-  );
-
-  function renderRightRail() {
-    while (rightRail.children.length > 1) rightRail.lastChild.remove();
-    const list = state.recentRuns.slice(0, 10);
-    if (!list.length) {
-      rightRail.appendChild(el("div", { class: "muted", style: { textAlign: "center", marginTop: "12px" } }, "暂无"));
-      return;
-    }
-    list.forEach((run) => {
-      const im = run.images?.[0];
-      const src = im?.thumb ? localImg(im.thumb) : (im?.path ? localImg(im.path) : "/img/logo.svg");
-      const active = state.activeRun?.id === run.id;
-      rightRail.appendChild(el("button", {
-        type: "button",
-        class: "btn",
-        style: { padding: "4px", flexDirection: "column", borderColor: active ? "var(--accent)" : "var(--line)" },
-        title: run.title || run.originalRequest || "作品",
-        onClick: async () => {
-          try {
-            const detail = await api("GET", `/api/works/${encodeURIComponent(run.id)}`);
-            state.activeRun = detail.run;
-            renderViewer();
-            renderRightRail();
-          } catch (e) { toast(e.message); }
-        },
-      },
-        el("img", { src, alt: run.title || "", style: { width: "100%", height: "68px", objectFit: "cover", borderRadius: "6px" } }),
-        el("span", { class: "muted", style: { width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "11px" } }, run.title || "未命名")
-      ));
-    });
-  }
-
   function renderPreview() {
-    clear(previewCard);
+    clear(previewStrip);
     const prev = state.preview || {};
     const c = state.compiled || {};
     const chips = [
@@ -296,18 +429,19 @@ export async function renderCreate(root, ctx, params = {}) {
       prev.toneImage && { img: packImg(prev.toneImage), label: state.tone },
     ].filter(Boolean);
 
-    previewCard.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center" } },
-      el("div", { class: "row", style: { gap: "10px" } },
-        ...chips.map((ch) => el("div", { class: "row", style: { gap: "6px", background: "var(--paper)", padding: "4px 8px", borderRadius: "8px", border: "1px solid var(--line)" } },
-          el("img", { src: ch.img, alt: ch.label, style: { width: "28px", height: "28px", objectFit: "cover", borderRadius: "5px" } }),
-          el("span", { style: { fontSize: "12px", fontWeight: 500 } }, ch.label)
+    previewStrip.append(
+      el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+        ...chips.map((ch) => el("div", { class: "make-image-chip" },
+          el("img", { src: ch.img, alt: "" }),
+          el("span", null, ch.label)
         ))
       ),
       el("div", { class: "row" },
-        c.useReference ? el("span", { class: "badge badge-accent" }, "参考图模式") : null,
-        c.activation ? el("span", { class: "badge badge-warn", title: c.activation }, "需启用激活说明") : null
+        el("span", { class: "badge" }, `${state.ratio} · ${state.resolution.toUpperCase()}`),
+        c.useReference ? el("span", { class: "badge badge-accent" }, "参考图激活") : null,
+        c.activation ? el("span", { class: "badge badge-warn", title: c.activation }, "带激活词") : null
       )
-    ));
+    );
   }
 
   function renderViewer() {
@@ -316,13 +450,13 @@ export async function renderCreate(root, ctx, params = {}) {
     if (!run) {
       const styleObj = styles.find((x) => x.number === state.style);
       const thumb = styleObj?.image ? packImg(styleObj.image) : "/img/logo.svg";
-      viewer.appendChild(el("div", { class: "card", style: { gridColumn: "1 / -1", display: "flex", gap: "18px", alignItems: "center", padding: "22px", flexWrap: "wrap" } },
-        el("img", { src: thumb, alt: styleObj?.generation_name || "", style: { width: "160px", height: "160px", objectFit: "cover", borderRadius: "10px", border: "1px solid var(--line)" } }),
-        el("div", { class: "col" },
-          el("span", { class: "style-code" }, state.style),
-          el("h3", { style: { margin: 0 } }, `${styleObj?.nameZh || styleObj?.generation_name || "就绪"} · 零费用配方预览`),
-          el("p", { class: "muted", style: { margin: 0, maxWidth: "460px" } }, styleObj?.traits || "在下方输入画面主题后点击「生成」，所有生成图片默认仅保存在本地工作区。"),
-          el("div", { class: "row" },
+      viewer.appendChild(el("div", { class: "make-image-ready-card", style: { gridColumn: "1 / -1" } },
+        el("img", { src: thumb, alt: styleObj?.generation_name || "", style: { width: "132px", height: "132px", objectFit: "cover", borderRadius: "10px", border: "1px solid var(--line)" } }),
+        el("div", { class: "col", style: { flex: "1", minWidth: "200px" } },
+          el("span", { class: "style-code" }, state.style || "就绪"),
+          el("h3", { style: { margin: 0 } }, `${styleObj?.nameZh || styleObj?.generation_name || "准备就绪"} · 零费用配方预览`),
+          el("p", { class: "muted", style: { margin: 0, maxWidth: "520px" } }, styleObj?.traits || "在下方输入框描述画面主题后点击「开始生成」，生成图像默认保存在本地工作区。"),
+          el("div", { class: "row", style: { marginTop: "4px" } },
             el("span", { class: "badge" }, `比例 ${state.ratio}`),
             el("span", { class: "badge" }, state.mode === "pure-image" ? "纯图" : (state.mode === "poster" ? "海报" : "图文")),
             el("span", { class: "badge" }, state.resolution.toUpperCase())
@@ -334,7 +468,7 @@ export async function renderCreate(root, ctx, params = {}) {
 
     (run.images || []).forEach((im, idx) => {
       if (im.status === "queued" || im.status === "running") {
-        viewer.appendChild(el("div", { class: "sketch-loader" },
+        viewer.appendChild(el("div", { class: "sketch-loader", style: { aspectRatio: ratioToCss(state.ratio) } },
           el("span", { class: "dot-pulse" }),
           el("strong", null, `第 ${idx + 1} 张 · ${im.status === "running" ? "正在绘制…" : "排队中…"}`),
           el("span", { class: "muted" }, run.modelLabel || run.model),
@@ -360,7 +494,7 @@ export async function renderCreate(root, ctx, params = {}) {
         return;
       }
 
-      viewer.appendChild(el("div", { class: "style-card", style: { display: "flex", flexDirection: "column" } },
+      viewer.appendChild(el("div", { class: "style-card" },
         el("img", {
           class: "reveal-img",
           src: localImg(im.path),
@@ -383,7 +517,7 @@ export async function renderCreate(root, ctx, params = {}) {
               type: "button",
               class: "btn btn-sm",
               onClick: () => ctx.go("annotate", { runId: run.id }),
-            }, "📌 批注精修"),
+            }, "📌 批注"),
             el("button", {
               type: "button",
               class: "btn btn-sm",
@@ -392,12 +526,12 @@ export async function renderCreate(root, ctx, params = {}) {
                 renderRefs();
                 toast("已将成图设为参考图");
               },
-            }, "🔁 垫图再改"),
+            }, "🔁 垫图"),
             el("button", {
               type: "button",
               class: "btn btn-sm",
               onClick: () => ctx.go("works", { openRun: run.id }),
-            }, "☁ 发布 / 详情")
+            }, "☁ 发布")
           )
         )
       ));
@@ -414,79 +548,6 @@ export async function renderCreate(root, ctx, params = {}) {
       el("button", { type: "button", class: "btn btn-primary", onClick: closeModal }, "关闭"),
     ]);
   }
-
-  const themeInput = el("textarea", {
-    class: "textarea",
-    rows: "2",
-    style: { flex: "1", minWidth: "220px", minHeight: "46px" },
-    placeholder: "输入画面主题或描述，按 Ctrl/⌘ + Enter 立即生成…",
-  });
-  themeInput.value = state.theme;
-  themeInput.addEventListener("input", () => {
-    state.theme = themeInput.value;
-    if (!state.promptCustomized) scheduleRefresh();
-  });
-
-  const textInput = el("input", {
-    class: "input",
-    type: "text",
-    value: state.text,
-    placeholder: "画面内要写出的标题/标注文字（可留空）",
-    style: { maxWidth: "230px" },
-  });
-  textInput.addEventListener("input", () => {
-    state.text = textInput.value;
-    if (!state.promptCustomized) scheduleRefresh();
-  });
-
-  function updateTextVisibility() {
-    textField.classList.toggle("hidden", state.mode === "pure-image");
-  }
-  const textField = field("画面文字（可选）", textInput);
-  updateTextVisibility();
-
-  const countSel = el("select", { class: "select select-sm" },
-    ...[1, 2, 3, 4].map((n) => el("option", { value: String(n) }, `${n} 张`))
-  );
-  countSel.value = String(state.count);
-  countSel.addEventListener("change", () => { state.count = Number(countSel.value); refreshQuote(); });
-
-  const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
-  state.modelRef = modelSel.value;
-  modelSel.addEventListener("change", () => {
-    state.modelRef = modelSel.value;
-    state.promptCustomized = false;
-    refreshPromptAndQuote();
-  });
-
-  const quoteBadge = el("span", { class: "badge", title: "生成前预估费用" }, "报价计算中…");
-  const genBtn = el("button", { type: "button", class: "btn btn-primary" }, "开始生成");
-
-  themeInput.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !e.isComposing && e.keyCode !== 229) {
-      e.preventDefault();
-      doGenerate(false);
-    }
-  });
-
-  const bar = el("form", { class: "studio-bar", action: "/api/generate", method: "post" },
-    field("创作主题", themeInput), textField, field("张数", countSel), field("模型", modelSel), quoteBadge, genBtn
-  );
-  genBtn.type = "submit";
-  bar.addEventListener("submit", (e) => { e.preventDefault(); doGenerate(false); });
-
-  const studioShell = el("div", { class: "studio-shell" }, leftPane, centerStage, rightRail);
-  const slotContainer = el("div", { style: { marginTop: "12px" } });
-
-  root.appendChild(studioShell);
-  root.appendChild(bar);
-  root.appendChild(slotContainer);
-
-  mountSlotPanels(slotContainer, "create-footer", {
-    view: "create",
-    recipe: () => ({ style: state.style, style2: state.fusion ? state.style2 : "", layout: state.layout, color: state.color, tone: state.tone, mode: state.mode, ratio: state.ratio }),
-    applyTheme: (t) => { themeInput.value = t; state.theme = t; refreshPromptAndQuote(); },
-  });
 
   let refreshTimer = null;
   let promptRevision = 0;
@@ -544,7 +605,7 @@ export async function renderCreate(root, ctx, params = {}) {
       if (q.source === "provider") {
         quoteBadge.textContent = "自带接口直出";
       } else if (q.freeCount > 0 && q.totalCents === 0) {
-        quoteBadge.textContent = `使用免费额度（${q.freeCount} 次）`;
+        quoteBadge.textContent = `免费额度（${q.freeCount} 次）`;
       } else {
         quoteBadge.textContent = `预计 ${money(q.totalCents)}` + (q.freeCount > 0 ? `（含免费 ${q.freeCount} 次）` : "");
       }
@@ -581,7 +642,7 @@ export async function renderCreate(root, ctx, params = {}) {
     }, async () => {
       const r = await api("GET", "/api/mine/recipes").catch(() => ({ items: [] }));
       clear(recSel);
-      recSel.appendChild(el("option", { value: "" }, "— 从常用配方套用 —"));
+      recSel.appendChild(el("option", { value: "" }, "— 套用常用配方 —"));
       (r.items || []).forEach((x) => recSel.appendChild(el("option", { value: x.id }, `${x.name} (${(x.styleIds || []).join("+")})`)));
     });
   }
@@ -671,7 +732,7 @@ export async function renderCreate(root, ctx, params = {}) {
       state.activeRun = { ...res.run, images: res.images };
       state.recentRuns = [state.activeRun, ...state.recentRuns.filter((r) => r.id !== state.activeRun.id)];
       renderViewer();
-      renderRightRail();
+      renderRecentRuns();
       toast("已提交生成队列，完成后自动显影");
     } catch (e) { toast(e.message); } finally {
       genBtn.disabled = false;
@@ -694,7 +755,7 @@ export async function renderCreate(root, ctx, params = {}) {
     }
   });
 
-  renderRightRail();
+  renderRecentRuns();
   await refreshPromptAndQuote();
   if (state.activeRun) renderViewer();
 }
