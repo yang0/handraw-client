@@ -280,6 +280,25 @@ kbd {
   min-width: 0;
 }
 
+.masonry-grid {
+  position: relative;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr));
+  align-items: start;
+}
+.masonry-grid.masonry-ready { display: block; }
+.masonry-grid.masonry-ready > * { position: absolute; margin: 0; }
+.masonry-grid > .card:only-child { grid-column: 1 / -1; }
+.masonry-grid .style-thumb, .masonry-grid .discover-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: none;
+  aspect-ratio: auto 4 / 3;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+.masonry-grid .style-card:hover { transform: none; }
+
 .style-card {
   position: relative;
   display: flex;
@@ -306,13 +325,10 @@ kbd {
 .style-name { font-weight: 600; font-size: 13.5px; margin: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .style-traits { font-size: 12px; color: var(--ink-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .discover-section h2 { margin: 0; font-size: 17px; }
-.discover-grid { columns: 210px 5; column-gap: 14px; }
+.discover-grid { gap: 14px; }
 .discover-card {
-  display: inline-block;
+  display: block;
   width: 100%;
-  margin: 0 0 14px;
-  vertical-align: top;
-  break-inside: avoid;
   color: inherit;
   text-decoration: none;
 }
@@ -325,7 +341,6 @@ kbd {
 .discover-image {
   display: block;
   width: 100%;
-  max-height: 380px;
   object-fit: contain;
   background: var(--surface-2);
 }

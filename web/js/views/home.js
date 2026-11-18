@@ -1,5 +1,6 @@
 import { api, clear, el, localImg, openURL, remoteThumb, toast } from "../api.js";
 import { mountSlotPanels } from "../plugins-host.js";
+import { masonry } from "../masonry.js";
 
 const discoveryLabels = { work: "作品", style: "画风", layout: "图型", topic: "论坛" };
 
@@ -15,7 +16,7 @@ function discoveryCard(item, siteBase) {
       const ratio = Math.min(3, Math.max(0.5, Number(item.aspectRatio) || (item.kind === "topic" ? 4 / 3 : 3 / 4)));
       image = el("img", {
         class: "discover-image", src: remoteThumb(src.href, 480), alt: "", loading: "lazy", decoding: "async",
-        style: { aspectRatio: String(ratio) },
+        style: { aspectRatio: `auto ${ratio}` },
         onError: (event) => event.currentTarget.remove(),
       });
     }
@@ -69,7 +70,7 @@ function mountDiscovery(root, initialBase) {
         return;
       }
       if (feed.offline) stage.appendChild(el("p", { class: "muted" }, "暂时无法连接网站，正在显示本地缓存。"));
-      stage.appendChild(el("div", { class: "discover-grid" }, feed.items.map((item) => discoveryCard(item, siteBase))));
+      stage.appendChild(masonry({ class: "discover-grid" }, feed.items.map((item) => discoveryCard(item, siteBase))));
     } catch {
       clear(stage);
       unavailable();
@@ -163,7 +164,7 @@ export async function renderHome(container, ctx) {
   if (recentWorks.length === 0) {
     secRecent.appendChild(el("div", { class: "card muted" }, "还没有本地生图记录。在上方输入主题，或点击「风格画册」挑选一种画风开始第一张创作吧。"));
   } else {
-    const grid = el("div", { class: "grid-cards" });
+    const grid = masonry();
     recentWorks.forEach((run) => {
       const im = run.images?.[0];
       const src = im?.thumb ? localImg(im.thumb) : (im?.path ? localImg(im.path) : "/img/logo.svg");

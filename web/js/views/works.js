@@ -1,4 +1,5 @@
 import { api, clear, closeModal, el, localImg, onEvent, openURL, remoteThumb, showModal, toast } from "../api.js";
+import { masonry } from "../masonry.js";
 
 const state = {
   tab: "local", // local | history | collections
@@ -70,7 +71,7 @@ async function drawLocal(stage, ctx, root) {
   pubSel.addEventListener("change", () => { state.published = pubSel.value; loadGrid(); });
 
   const filterBar = el("div", { class: "row", style: { marginBottom: "14px" } }, searchIn, modeSel, pubSel, starBtn);
-  const grid = el("div", { class: "grid-cards" });
+  const grid = masonry();
   stage.appendChild(filterBar);
   stage.appendChild(grid);
 
@@ -266,7 +267,7 @@ async function drawSiteHistory(stage, ctx) {
       stage.appendChild(el("div", { class: "card muted" }, "暂无网站生图历史。"));
       return;
     }
-    const grid = el("div", { class: "grid-cards" });
+    const grid = masonry();
     list.forEach((it) => {
       const imgs = it.images || (it.imageUrl ? [it.imageUrl] : (it.coverUrl ? [it.coverUrl] : []));
       const urls = imgs.map((x) => (typeof x === "string" ? x : (x.url || x.imageUrl || ""))).filter(Boolean);
@@ -320,7 +321,7 @@ async function drawSiteCollections(stage, ctx) {
       stage.appendChild(el("div", { class: "card muted" }, "暂无网站收藏。"));
       return;
     }
-    const grid = el("div", { class: "grid-cards" });
+    const grid = masonry();
     list.forEach((it) => {
       const thumb = it.coverUrl || it.imageUrl || it.image || "/img/logo.svg";
       const src = thumb === "/img/logo.svg" ? thumb : remoteThumb(thumb, 480, base);

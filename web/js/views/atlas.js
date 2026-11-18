@@ -1,5 +1,6 @@
 import { api, clear, closeModal, el, localImg, money, packImg, showModal, toast } from "../api.js";
 import { buildGroupedAIModelSelect } from "./create.js";
+import { masonry } from "../masonry.js";
 
 const state = {
   tab: "styles", // styles | layouts | colors | tones | assets | mine | compare | dice | find
@@ -31,7 +32,7 @@ function drawCatalog(stage, { kind, title, allLabel, items, groupKey, groupLabel
   if (state.groups[kind] && !categories.has(state.groups[kind])) state.groups[kind] = "";
   const nav = el("div", { class: "atlas-groups", role: "group", "aria-label": `${title}分类` });
   const right = el("div");
-  const grid = el("div", { class: "grid-cards" });
+  const grid = masonry();
   if (before) right.appendChild(before);
   right.appendChild(grid);
   if (categories.size > 1) stage.appendChild(el("div", { class: "atlas-wrap" }, nav, right));
@@ -155,7 +156,7 @@ async function drawStyles(stage, groups, ctx) {
     drawStyles(stage, groups, ctx);
   }
 
-  const grid = el("div", { class: "grid-cards" });
+  const grid = masonry();
   const sentinel = el("div", { style: { height: "20px" } });
   let offset = 0;
   const batchSize = 36;
@@ -426,7 +427,7 @@ async function drawMine(stage, ctx) {
     stage.appendChild(el("div", { class: "card muted" }, "暂无自定义画风或图型。点击上方按钮创建，登录后将默认同步到你的网站私有库。"));
     return;
   }
-  const grid = el("div", { class: "grid-cards" });
+  const grid = masonry();
   styles.forEach((s) => {
     grid.appendChild(el("div", { class: "style-card" },
       el("img", { class: "style-thumb", src: s.image ? localImg(s.image) : "/img/logo.svg", alt: s.generation_name }),
@@ -631,7 +632,7 @@ async function drawCompare(stage, ctx) {
   }, `用同一主题生成 ${styles.length} 张对比`);
 
   stage.appendChild(el("div", { class: "card row", style: { marginBottom: "14px" } }, themeIn, genBtn));
-  const grid = el("div", { class: "grid-cards" });
+  const grid = masonry();
   styles.forEach((s) => {
     grid.appendChild(el("div", { class: "style-card" },
       el("img", { class: "style-thumb", src: packImg(s.image), alt: s.generation_name }),
@@ -688,7 +689,7 @@ async function drawFindByImage(stage, ctx) {
           }, "据此新建我的画风")
         )
       ));
-      const grid = el("div", { class: "grid-cards" });
+      const grid = masonry();
       (res.matches || []).forEach((s) => {
         grid.appendChild(el("div", { class: "style-card" },
           el("img", { class: "style-thumb", src: packImg(s.image), alt: s.generation_name }),
@@ -766,7 +767,7 @@ async function drawDice(stage, ctx) {
     }, "带入单图工作区 →")
   ));
 
-  stage.appendChild(el("div", { class: "grid-cards" },
+  stage.appendChild(masonry({},
     d.style ? el("div", { class: "style-card" },
       el("img", { class: "style-thumb", src: packImg(d.style.image) }),
       el("div", { class: "style-body" },
