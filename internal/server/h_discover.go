@@ -13,7 +13,7 @@ import (
 
 const (
 	discoveryLimit    = 50
-	discoveryCacheKey = "site_discovery_v1"
+	discoveryCacheKey = "site_discovery_v2"
 	discoveryCacheTTL = 5 * time.Minute
 )
 
@@ -24,7 +24,9 @@ type discoverySourceItem struct {
 	Title              string
 	Name               string
 	Author             string
+	AuthorUsername     string `json:"author_username"`
 	AuthorName         string
+	ExtraWorkCount     int
 	Category           string
 	WorkID             string
 	ResourceDiscussion struct{ Kind string }
@@ -45,15 +47,18 @@ type discoveryBoot struct {
 }
 
 type discoveryCard struct {
-	ID            string  `json:"id"`
-	Kind          string  `json:"kind"`
-	Title         string  `json:"title"`
-	Href          string  `json:"href"`
-	Image         string  `json:"image,omitempty"`
-	AspectRatio   float64 `json:"aspectRatio,omitempty"`
-	Author        string  `json:"author,omitempty"`
-	Summary       string  `json:"summary,omitempty"`
-	PublishedAtMs int64   `json:"publishedAtMs,omitempty"`
+	ID             string  `json:"id"`
+	Kind           string  `json:"kind"`
+	Title          string  `json:"title"`
+	Href           string  `json:"href"`
+	Image          string  `json:"image,omitempty"`
+	AspectRatio    float64 `json:"aspectRatio,omitempty"`
+	Author         string  `json:"author,omitempty"`
+	AuthorKey      string  `json:"authorKey,omitempty"`
+	ExtraWorkCount int     `json:"extraWorkCount,omitempty"`
+	MoreHref       string  `json:"moreHref,omitempty"`
+	Summary        string  `json:"summary,omitempty"`
+	PublishedAtMs  int64   `json:"publishedAtMs,omitempty"`
 }
 
 type discoveryFeed struct {
@@ -120,7 +125,9 @@ func buildDiscoveryCards(base string, works []discoverySourceItem, boot discover
 		buckets[kind] = append(buckets[kind], discoveryCard{
 			ID: item.ID, Kind: kind, Title: firstDiscoveryText(item.Title, item.Name, item.ID),
 			Href: discoveryLink(base, kind, item.ID), Image: image, AspectRatio: item.AspectRatio,
-			Author: firstDiscoveryText(item.AuthorName, item.Author), Summary: item.Summary, PublishedAtMs: item.PublishedAtMs,
+			Author:    firstDiscoveryText(item.AuthorName, item.Author, item.AuthorUsername),
+			AuthorKey: firstDiscoveryText(item.Author, item.AuthorUsername), ExtraWorkCount: max(0, item.ExtraWorkCount),
+			Summary: item.Summary, PublishedAtMs: item.PublishedAtMs,
 		})
 	}
 	for _, item := range works {
@@ -158,6 +165,7 @@ func buildDiscoveryCards(base string, works []discoverySourceItem, boot discover
 			return bucket[left].PublishedAtMs > bucket[right].PublishedAtMs
 		})
 	}
+	buckets["work"] = collapseDiscoveryWorks(base, buckets["work"])
 
 	pattern := []string{"work", "work", "work", "style", "work", "work", "work", "topic", "work", "work", "work", "layout", "work", "work", "work", "topic"}
 	items := make([]discoveryCard, 0, discoveryLimit)
@@ -177,6 +185,39 @@ func buildDiscoveryCards(base string, works []discoverySourceItem, boot discover
 		}
 	}
 	return items
+}
+
+// The home feed shows one representative work per author. Group after sorting
+// and before mixing/limiting, so one prolific author cannot fill the homepage.
+func collapseDiscoveryWorks(base string, works []discoveryCard) []discoveryCard {
+	result := make([]discoveryCard, 0, len(works))
+	type authorGroup struct{ index, extra int }
+	groups := map[string]authorGroup{}
+	for _, work := range works {
+		key := strings.ToLower(firstDiscoveryText(work.AuthorKey, work.Author, work.ID))
+		if group, exists := groups[key]; exists {
+			group.extra++
+			result[group.index].ExtraWorkCount = max(result[group.index].ExtraWorkCount, group.extra)
+			groups[key] = group
+			continue
+		}
+		groups[key] = authorGroup{index: len(result)}
+		if work.AuthorKey != "" {
+			work.MoreHref = discoveryAuthorLink(base, work.AuthorKey)
+		}
+		result = append(result, work)
+	}
+	return result
+}
+
+func discoveryAuthorLink(base, author string) string {
+	root, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	root.Path, root.RawPath, root.Fragment = "/", "", ""
+	root.RawQuery = url.Values{"view": {"works"}, "author": {author}}.Encode()
+	return root.String()
 }
 
 func discoveryImage(item discoverySourceItem) string {

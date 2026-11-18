@@ -126,3 +126,109 @@ func TestDiscoveryLinksMatchWebsite(t *testing.T) {
 		}
 	}
 }
+
+func TestDiscoveryFoldsWorksByAuthorBeforeMixing(t *testing.T) {
+	works := []discoverySourceItem{
+		{ID: "alice_old", Author: "alice", AuthorName: "同名", PublishedAtMs: 1, Images: []json.RawMessage{json.RawMessage(`"/old.png"`)}},
+		{ID: "alice_new", Author: " Alice ", AuthorName: "同名", PublishedAtMs: 5, Images: []json.RawMessage{json.RawMessage(`"/one.png"`), json.RawMessage(`"/two.png"`)}},
+		{ID: "alice_middle", AuthorUsername: "ALICE", PublishedAtMs: 3, Image: "/middle.png"},
+		{ID: "alice_new", Author: "alice", PublishedAtMs: 5, Image: "/duplicate.png"},
+		{ID: "bob", Author: "bob", AuthorName: "同名", PublishedAtMs: 4, Image: "/bob.png"},
+		{ID: "unknown_1", PublishedAtMs: 2, Image: "/unknown1.png"},
+		{ID: "unknown_2", PublishedAtMs: 1, Image: "/unknown2.png"},
+		{ID: "hidden", Author: "alice", Status: "deleted", Image: "/hidden.png"},
+		{ID: "no_image", Author: "alice", PublishedAtMs: 6},
+	}
+	feed := buildDiscoveryCards("https://handraw-style.com", works, discoveryBoot{}, nil)
+	if len(feed) != 4 {
+		t.Fatalf("expected alice, bob and two independent unknown authors: %+v", feed)
+	}
+	alice := feed[0]
+	if alice.ID != "alice_new" || alice.ExtraWorkCount != 2 || alice.AuthorKey != "Alice" || alice.Author != "同名" {
+		t.Fatalf("wrong representative/count/identity: %+v", alice)
+	}
+	if alice.Image != "/one.png" || alice.MoreHref != "https://handraw-style.com/?author=Alice&view=works" {
+		t.Fatalf("multi-image work was expanded or author destination is wrong: %+v", alice)
+	}
+	if feed[1].ID != "bob" || feed[1].ExtraWorkCount != 0 {
+		t.Fatalf("distinct usernames with the same display name were folded together: %+v", feed[1])
+	}
+	for _, item := range feed[2:] {
+		if item.ExtraWorkCount != 0 || item.MoreHref != "" {
+			t.Fatalf("unidentified works were folded or given an invented account: %+v", item)
+		}
+	}
+}
+
+func TestDiscoveryAuthorFoldKeepsOtherAuthorsAndResources(t *testing.T) {
+	works := make([]discoverySourceItem, 0, 80)
+	for index := range 55 {
+		works = append(works, discoverySourceItem{
+			ID: fmt.Sprintf("prolific_%d", index), Author: "prolific", PublishedAtMs: int64(100 + index), Image: "/work.png",
+		})
+	}
+	for index := range 25 {
+		works = append(works, discoverySourceItem{
+			ID: fmt.Sprintf("other_%d", index), Author: fmt.Sprintf("user_%d", index), PublishedAtMs: int64(index + 1), Image: "/work.png",
+		})
+	}
+	resources := []discoverySourceItem{
+		{ID: "FA-001", Kind: "style", Author: "prolific", Image: "/style.png"},
+		{ID: "FA-002", Kind: "style", Author: "prolific", Image: "/style.png"},
+	}
+	feed := buildDiscoveryCards("https://handraw-style.com", works, discoveryBoot{
+		Topics: []discoverySourceItem{{ID: "discussion", Title: "独立讨论", Author: "prolific"}},
+	}, resources)
+	if len(feed) != 29 || feed[0].ExtraWorkCount != 54 {
+		t.Fatalf("folding must precede the 50-card limit: %d cards, representative=%+v", len(feed), feed[0])
+	}
+	counts := map[string]int{}
+	for _, card := range feed {
+		counts[card.Kind]++
+	}
+	if counts["work"] != 26 || counts["style"] != 2 || counts["topic"] != 1 {
+		t.Fatalf("other authors or non-work content were lost: %v", counts)
+	}
+}
+
+func TestDiscoveryFoldCountUsesWebsiteMaximum(t *testing.T) {
+	feed := buildDiscoveryCards("https://handraw-style.com", []discoverySourceItem{
+		{ID: "one", Author: "alice", ExtraWorkCount: 8, PublishedAtMs: 3, Image: "/1.png"},
+		{ID: "two", Author: "alice", PublishedAtMs: 2, Image: "/2.png"},
+		{ID: "three", Author: "alice", PublishedAtMs: 1, Image: "/3.png"},
+	}, discoveryBoot{}, nil)
+	if len(feed) != 1 || feed[0].ExtraWorkCount != 8 {
+		t.Fatalf("upstream and local counts must not be added twice: %+v", feed)
+	}
+	var source discoverySourceItem
+	if err := json.Unmarshal([]byte(`{"id":"legacy","author_username":"alice +bob","authorName":"作者","images":["/image.png"]}`), &source); err != nil {
+		t.Fatal(err)
+	}
+	fallback := buildDiscoveryCards("https://handraw-style.com", []discoverySourceItem{source}, discoveryBoot{}, nil)
+	if fallback[0].AuthorKey != "alice +bob" || fallback[0].MoreHref != "https://handraw-style.com/?author=alice+%2Bbob&view=works" {
+		t.Fatalf("legacy author field or query escaping lost: %+v", fallback)
+	}
+}
+
+func TestDiscoveryReplacesPreviousUnfoldedCache(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/works/feed":
+			fmt.Fprint(w, `{"items":[{"id":"new","author":"alice","images":["/new.png"],"publishedAtMs":2},{"id":"old","author":"alice","images":["/old.png"],"publishedAtMs":1}]}`)
+		case "/api/boot":
+			fmt.Fprint(w, `{"topics":[]}`)
+		case "/data/catalog.json":
+			fmt.Fprint(w, `{"resources":[]}`)
+		}
+	}))
+	defer mock.Close()
+	srv, _ := setupTestServer(t, mock.URL)
+	_ = srv.DB.SetKV("site_discovery_v1", discoveryFeed{
+		SiteBase: mock.URL, CachedAt: time.Now(), Items: []discoveryCard{{ID: "stale_unfolded"}},
+	})
+	resp := doReq(t, srv.Handler(), srv.Token, "GET", "/api/site/discover", nil)
+	var feed discoveryFeed
+	if resp.Code != 200 || json.Unmarshal(resp.Body.Bytes(), &feed) != nil || len(feed.Items) != 1 || feed.Items[0].ID != "new" || feed.Items[0].ExtraWorkCount != 1 {
+		t.Fatalf("old unfolded cache was not replaced: %d %s", resp.Code, resp.Body.String())
+	}
+}

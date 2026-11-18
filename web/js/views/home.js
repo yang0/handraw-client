@@ -22,8 +22,8 @@ function discoveryCard(item, siteBase) {
   }
   const resource = item.kind === "style" || item.kind === "layout";
   const summary = item.summary?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 110);
-  return el("a", {
-    class: "style-card discover-card discover-" + item.kind, href: item.href,
+  const primary = el("a", {
+    class: "discover-primary", href: item.href,
     onClick: (event) => { event.preventDefault(); openWebsite(item.href); },
   }, image, el("div", { class: "style-body" },
     el("span", { class: "style-code" }, discoveryLabels[item.kind] + (resource ? ` · ${item.id}` : "")),
@@ -31,6 +31,15 @@ function discoveryCard(item, siteBase) {
     summary ? el("p", { class: "style-traits discover-excerpt" }, summary) : null,
     item.author ? el("div", { class: "muted discover-author" }, item.author) : null
   ));
+  return el("article", { class: "style-card discover-card discover-" + item.kind }, primary,
+    item.kind === "work" && item.extraWorkCount > 0 && item.moreHref
+      ? el("footer", { class: "discover-footer" }, el("a", {
+        class: "discover-more", href: item.moreHref,
+        "aria-label": `更多 +${item.extraWorkCount}，查看 ${item.author || item.authorKey} 的全部作品`,
+        onClick: (event) => { event.preventDefault(); openWebsite(item.moreHref); },
+      }, `更多 +${item.extraWorkCount}`))
+      : null
+  );
 }
 
 function mountDiscovery(root, initialBase) {
