@@ -1,4 +1,5 @@
 import { api, clear, closeModal, el, localImg, money, packImg, showModal, toast } from "../api.js";
+import { buildGroupedAIModelSelect } from "./create.js";
 
 const state = {
   tab: "styles", // styles | layouts | colors | tones | assets | mine | compare | dice | find
@@ -489,6 +490,17 @@ export function openEditStyleDialog(initial = {}, onSaved) {
     }
   });
 
+  let selectedVisionRef = "";
+  const visionWrap = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } },
+    el("span", { class: "muted", style: { fontSize: "12px" } }, "视觉模型：")
+  );
+  api("GET", "/api/models").then((modRes) => {
+    const sel = buildGroupedAIModelSelect(modRes, modRes.defaultVisionModel || "", "vision");
+    selectedVisionRef = sel.value;
+    sel.addEventListener("change", () => { selectedVisionRef = sel.value; });
+    visionWrap.appendChild(sel);
+  }).catch(() => {});
+
   const analyzeBtn = el("button", {
     type: "button",
     class: "btn btn-sm",
@@ -497,7 +509,11 @@ export function openEditStyleDialog(initial = {}, onSaved) {
       analyzeBtn.disabled = true;
       analyzeBtn.textContent = "提取特征中…";
       try {
-        const res = await api("POST", "/api/mine/analyze", { images: uploadedPaths, purpose: "create" });
+        const res = await api("POST", "/api/mine/analyze", {
+          images: uploadedPaths,
+          purpose: "create",
+          modelRef: selectedVisionRef,
+        });
         if (res.traitsZh) zhIn.value = res.traitsZh;
         if (res.traitsEn) enIn.value = res.traitsEn;
         if (res.name && !nameIn.value) nameIn.value = res.name;
@@ -513,7 +529,12 @@ export function openEditStyleDialog(initial = {}, onSaved) {
   }, "✨ 从参考图提取纯视觉特征");
 
   showModal(initial.docId ? "编辑自定义画风" : "新建自定义画风", el("div", null,
-    el("div", { class: "field" }, el("label", null, "参考图（可选 1–5 张，用于提取视觉特征）"), fileIn, previewRow, el("div", { style: { marginTop: "6px" } }, analyzeBtn)),
+    el("div", { class: "field" },
+      el("label", null, "参考图（可选 1–5 张，用于提取视觉特征）"),
+      fileIn,
+      previewRow,
+      el("div", { class: "row", style: { marginTop: "6px", justifyContent: "space-between", flexWrap: "wrap" } }, analyzeBtn, visionWrap)
+    ),
     el("div", { class: "field" }, el("label", null, "画风名称"), nameIn),
     el("div", { class: "field" }, el("label", null, "中文视觉特征（严禁出现具体人物/物品/场景）"), zhIn),
     el("div", { class: "field" }, el("label", null, "英文视觉特征"), enIn),
@@ -632,6 +653,8 @@ async function drawCompare(stage, ctx) {
 }
 
 async function drawFindByImage(stage, ctx) {
+  const modRes = await api("GET", "/api/models").catch(() => ({ siteAI: [], textProviders: [] }));
+  const visionSel = buildGroupedAIModelSelect(modRes, modRes.defaultVisionModel || "", "vision");
   const fileIn = el("input", { type: "file", accept: "image/*" });
   const resultBox = el("div", { style: { marginTop: "14px" } });
   const analyzeFile = async (f) => {
@@ -641,10 +664,20 @@ async function drawFindByImage(stage, ctx) {
     resultBox.appendChild(el("div", { class: "sketch-loader" }, el("span", null, "正在分析参考图视觉语言并匹配最相近画风…")));
     try {
       const up = await api("POST", "/api/mine/upload", fd);
-      const res = await api("POST", "/api/mine/analyze", { images: [up.path], purpose: "find" });
+      const res = await api("POST", "/api/mine/analyze", {
+        images: [up.path],
+        purpose: "find",
+        modelRef: visionSel.value,
+      });
       clear(resultBox);
+      const srcLabel = res.source === "site"
+        ? (res.model ? `网站线上接口 · ${res.model}` : "网站线上接口")
+        : (res.model ? `第三方接口 · ${res.model}` : "第三方接口");
       resultBox.appendChild(el("div", { class: "card", style: { marginBottom: "12px" } },
-        el("strong", null, "提取的视觉语言特征"),
+        el("div", { class: "row", style: { justifyContent: "space-between", marginBottom: "4px" } },
+          el("strong", null, "提取的视觉语言特征"),
+          el("span", { class: "badge" }, srcLabel)
+        ),
         el("p", { style: { margin: "6px 0" } }, res.traitsZh || "—"),
         el("p", { class: "muted", style: { margin: 0 } }, res.traitsEn || ""),
         el("div", { style: { marginTop: "8px" } },
@@ -677,9 +710,16 @@ async function drawFindByImage(stage, ctx) {
   };
   fileIn.addEventListener("change", () => { if (fileIn.files?.[0]) analyzeFile(fileIn.files[0]); });
 
-  const drop = el("div", { class: "card", style: { textAlign: "center", padding: "28px", borderStyle: "dashed" } },
-    el("p", null, "拖入任意参考图片，或点击选择文件：提取纯视觉语言并找出最接近的 5 种画风"),
-    fileIn
+  const drop = el("div", { class: "card", style: { textAlign: "center", padding: "24px", borderStyle: "dashed" } },
+    el("p", { style: { marginTop: 0 } }, "拖入任意参考图片，或点击选择文件：提取纯视觉语言并找出最接近的 5 种画风"),
+    el("div", { class: "row", style: { justifyContent: "center", flexWrap: "wrap", gap: "10px", marginBottom: "8px" } },
+      fileIn,
+      el("label", { class: "row", style: { gap: "6px", fontSize: "12.5px" } },
+        el("span", { class: "muted" }, "视觉解析模型"),
+        visionSel
+      )
+    ),
+    el("div", { class: "muted", style: { fontSize: "12px" } }, "支持直接使用网站线上接口，或在「设置 → 模型与接口配置」添加第三方中转站")
   );
   drop.addEventListener("dragover", (e) => e.preventDefault());
   drop.addEventListener("drop", (e) => {

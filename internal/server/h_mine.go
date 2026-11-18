@@ -654,8 +654,9 @@ func (s *Server) syncResourcesInternal(ctx context.Context) (map[string]any, err
 
 func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
-		Images  []string `json:"images"`
-		Purpose string   `json:"purpose"` // find | create
+		Images   []string `json:"images"`
+		Purpose  string   `json:"purpose"` // find | create
+		ModelRef string   `json:"modelRef"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -663,18 +664,26 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 	if len(body.Images) == 0 {
 		return nil, bad("请先选择或拖入参考图")
 	}
+	route, err := resolveAIRoute("vision", body.ModelRef)
+	if err != nil {
+		return nil, err
+	}
 	dataURLs := make([]string, 0, len(body.Images))
 	for _, img := range body.Images {
 		if strings.HasPrefix(img, "data:image/") {
 			dataURLs = append(dataURLs, img)
 			continue
 		}
-		b, err := os.ReadFile(img)
+		path := normalizeLocalRef(img)
+		if path == "" {
+			path = img
+		}
+		b, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("无法读取图片 %s：%w", filepath.Base(img), err)
+			return nil, fmt.Errorf("无法读取图片 %s：%w", filepath.Base(path), err)
 		}
 		mime := "image/png"
-		switch strings.ToLower(filepath.Ext(img)) {
+		switch strings.ToLower(filepath.Ext(path)) {
 		case ".jpg", ".jpeg":
 			mime = "image/jpeg"
 		case ".webp":
@@ -687,37 +696,41 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 	if err != nil {
 		return nil, err
 	}
-	// 1. Prefer site visual analysis endpoint (W8) when logged in.
-	if s.Site.LoggedIn() {
-		raw, err := s.Site.AnalyzeStyle(r.Context(), dataURLs, firstStr(body.Purpose, "find"))
-		if err == nil {
-			var parsed struct {
-				TraitsZh string   `json:"traitsZh"`
-				TraitsEn string   `json:"traitsEn"`
-				Matches  []string `json:"matches"`
-			}
-			_ = json.Unmarshal(raw, &parsed)
-			var matched []resources.Style
-			for _, id := range parsed.Matches {
-				if st, ok := p.Style(id); ok {
-					matched = append(matched, st)
-				}
-			}
-			if len(matched) == 0 && parsed.TraitsZh+parsed.TraitsEn != "" {
-				matched = p.SearchStyles(parsed.TraitsZh+" "+parsed.TraitsEn, 5)
-			}
-			return map[string]any{
-				"source":     "site",
-				"traitsZh":   parsed.TraitsZh,
-				"traitsEn":   parsed.TraitsEn,
-				"matches":    matched,
-				"violations": prompt.CheckTraitViolations(parsed.TraitsZh + " " + parsed.TraitsEn),
-			}, nil
+	purpose := firstStr(body.Purpose, "find")
+
+	analyzeWithSite := func(siteModel string) (map[string]any, error) {
+		raw, err := s.Site.AnalyzeStyle(r.Context(), dataURLs, purpose, siteModel)
+		if err != nil {
+			return nil, err
 		}
+		var parsed struct {
+			Name     string   `json:"name"`
+			TraitsZh string   `json:"traitsZh"`
+			TraitsEn string   `json:"traitsEn"`
+			Matches  []string `json:"matches"`
+		}
+		_ = json.Unmarshal(raw, &parsed)
+		var matched []resources.Style
+		for _, id := range parsed.Matches {
+			if st, ok := p.Style(id); ok {
+				matched = append(matched, st)
+			}
+		}
+		if len(matched) == 0 && parsed.TraitsZh+parsed.TraitsEn != "" {
+			matched = p.SearchStyles(parsed.TraitsZh+" "+parsed.TraitsEn, 5)
+		}
+		return map[string]any{
+			"source":     "site",
+			"model":      siteModel,
+			"name":       parsed.Name,
+			"traitsZh":   parsed.TraitsZh,
+			"traitsEn":   parsed.TraitsEn,
+			"matches":    matched,
+			"violations": prompt.CheckTraitViolations(parsed.TraitsZh + " " + parsed.TraitsEn),
+		}, nil
 	}
 
-	// 2. Fall back to a user-configured text/vision provider.
-	if tp, model, ok := findTextProvider(); ok {
+	analyzeWithProvider := func(tp settings.Provider, model string) (map[string]any, error) {
 		parts := []any{map[string]any{
 			"type": "text",
 			"text": "请仅提取以下参考图的纯粹视觉艺术语言（媒介、线条、材质、色彩倾向、光影质感、空间构图机制）。严禁描述任何具体人物、性别、发型、服饰、动物、道具、建筑或场景故事。返回严格 JSON: {\"name\":\"\",\"traitsZh\":\"\",\"traitsEn\":\"\"}",
@@ -726,31 +739,80 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": du}})
 		}
 		reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: parts}}, true)
-		if err == nil {
-			var out struct {
-				Name     string `json:"name"`
-				TraitsZh string `json:"traitsZh"`
-				TraitsEn string `json:"traitsEn"`
-			}
-			if json.Unmarshal([]byte(extractJSON(reply)), &out) == nil && (out.TraitsZh != "" || out.TraitsEn != "") {
-				matched := p.SearchStyles(out.TraitsZh+" "+out.TraitsEn, 5)
-				return map[string]any{
-					"source":     "provider",
-					"name":       out.Name,
-					"traitsZh":   out.TraitsZh,
-					"traitsEn":   out.TraitsEn,
-					"matches":    matched,
-					"violations": prompt.CheckTraitViolations(out.TraitsZh + " " + out.TraitsEn),
-				}, nil
-			}
+		if err != nil {
+			return nil, err
 		}
+		var out struct {
+			Name     string `json:"name"`
+			TraitsZh string `json:"traitsZh"`
+			TraitsEn string `json:"traitsEn"`
+		}
+		if json.Unmarshal([]byte(extractJSON(reply)), &out) != nil || (out.TraitsZh == "" && out.TraitsEn == "") {
+			return nil, bad("视觉解析模型返回格式无法解析，请确认所选模型支持视觉识图（Vision）")
+		}
+		matched := p.SearchStyles(out.TraitsZh+" "+out.TraitsEn, 5)
+		return map[string]any{
+			"source":     "provider",
+			"model":      tp.Name + ":" + model,
+			"name":       out.Name,
+			"traitsZh":   out.TraitsZh,
+			"traitsEn":   out.TraitsEn,
+			"matches":    matched,
+			"violations": prompt.CheckTraitViolations(out.TraitsZh + " " + out.TraitsEn),
+		}, nil
 	}
 
-	return nil, &apiError{
-		Status: 503,
-		Code:   "analyze_unavailable",
-		Msg:    "请先登录手绘风账号（使用网站免费视觉分析），或在「设置 → 我的接口」配置支持识图的文字模型",
+	switch route.Mode {
+	case "provider":
+		return analyzeWithProvider(route.Provider, route.Model)
+	case "site_explicit":
+		if !s.Site.LoggedIn() {
+			return nil, site.ErrNotLoggedIn
+		}
+		res, err := analyzeWithSite(route.SiteModel)
+		if err != nil {
+			return nil, analyzeSiteError(err)
+		}
+		return res, nil
+	default:
+		var siteErr error
+		if s.Site.LoggedIn() {
+			res, err := analyzeWithSite("")
+			if err == nil {
+				return res, nil
+			}
+			siteErr = err
+		}
+		if tp, model, ok := findTextProviderFor("vision"); ok {
+			res, err := analyzeWithProvider(tp, model)
+			if err == nil {
+				return res, nil
+			}
+			if siteErr == nil {
+				return nil, err
+			}
+		}
+		if siteErr != nil {
+			return nil, analyzeSiteError(siteErr)
+		}
+		return nil, &apiError{
+			Status: 503,
+			Code:   "analyze_unavailable",
+			Msg:    "请先登录手绘风账号（使用网站线上视觉接口），或在「设置 → 模型与接口配置」添加支持视觉识图的第三方中转站",
+		}
 	}
+}
+
+func analyzeSiteError(err error) error {
+	var ae *site.APIError
+	if errors.As(err, &ae) && (ae.Status == 404 || ae.Code == "token_scope_denied") {
+		return &apiError{
+			Status: 503,
+			Code:   "analyze_unavailable",
+			Msg:    "网站线上视觉分析接口暂未对桌面端开放，请在「设置 → 模型与接口配置」添加或切换支持视觉识图的第三方中转站",
+		}
+	}
+	return err
 }
 
 type uploadedFile struct {
@@ -837,25 +899,18 @@ func decodeDataURL(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(b64)
 }
 
-func findTextProvider() (settings.Provider, string, bool) {
-	for _, p := range settings.Get().Providers {
-		if p.Enabled && p.Purpose == "text" && len(p.Models) > 0 {
-			return p, p.Models[0].ID, true
-		}
-	}
-	return settings.Provider{}, "", false
-}
-
 func extractJSON(s string) string {
 	s = strings.TrimSpace(s)
-	if idx := strings.Index(s, "{"); idx >= 0 {
-		if end := strings.LastIndex(s, "}"); end > idx {
-			return s[idx : end+1]
+	objIdx := strings.Index(s, "{")
+	arrIdx := strings.Index(s, "[")
+	if arrIdx >= 0 && (objIdx < 0 || arrIdx < objIdx) {
+		if end := strings.LastIndex(s, "]"); end > arrIdx {
+			return s[arrIdx : end+1]
 		}
 	}
-	if idx := strings.Index(s, "["); idx >= 0 {
-		if end := strings.LastIndex(s, "]"); end > idx {
-			return s[idx : end+1]
+	if objIdx >= 0 {
+		if end := strings.LastIndex(s, "}"); end > objIdx {
+			return s[objIdx : end+1]
 		}
 	}
 	return s

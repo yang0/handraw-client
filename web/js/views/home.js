@@ -1,13 +1,82 @@
-import { api, clear, el, localImg, openURL, packImg, remoteThumb, toast } from "../api.js";
+import { api, clear, el, localImg, openURL, remoteThumb, toast } from "../api.js";
 import { mountSlotPanels } from "../plugins-host.js";
 
-export async function renderHome(root, ctx) {
-  clear(root);
-  const [recRes, sumRes, worksRes, hotRes, settRes] = await Promise.all([
+const discoveryLabels = { work: "作品", style: "画风", layout: "图型", topic: "论坛" };
+
+function openWebsite(url) {
+  void openURL(url).catch((error) => toast(error.message));
+}
+
+function discoveryCard(item, siteBase) {
+  let image;
+  if (item.image) {
+    const src = new URL(item.image, `${siteBase.replace(/\/+$/, "")}/`);
+    if (src.protocol === "https:" || src.protocol === "http:") {
+      const ratio = Math.min(3, Math.max(0.5, Number(item.aspectRatio) || (item.kind === "topic" ? 4 / 3 : 3 / 4)));
+      image = el("img", {
+        class: "discover-image", src: remoteThumb(src.href, 480), alt: "", loading: "lazy", decoding: "async",
+        style: { aspectRatio: String(ratio) },
+        onError: (event) => event.currentTarget.remove(),
+      });
+    }
+  }
+  const resource = item.kind === "style" || item.kind === "layout";
+  const summary = item.summary?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 110);
+  return el("a", {
+    class: "style-card discover-card discover-" + item.kind, href: item.href,
+    onClick: (event) => { event.preventDefault(); openWebsite(item.href); },
+  }, image, el("div", { class: "style-body" },
+    el("span", { class: "style-code" }, discoveryLabels[item.kind] + (resource ? ` · ${item.id}` : "")),
+    el("h3", { class: "style-name", title: item.title }, item.title),
+    summary ? el("p", { class: "style-traits discover-excerpt" }, summary) : null,
+    item.author ? el("div", { class: "muted discover-author" }, item.author) : null
+  ));
+}
+
+function mountDiscovery(root, initialBase) {
+  let siteBase = initialBase || "https://handraw-style.com";
+  const stage = el("div", { "aria-live": "polite" });
+  root.appendChild(el("section", { class: "discover-section", "aria-labelledby": "discover-title" },
+    el("div", { class: "page-head" },
+      el("h2", { id: "discover-title" }, "发现"),
+      el("button", { type: "button", class: "btn btn-sm", onClick: () => openWebsite(`${siteBase.replace(/\/+$/, "")}/`) }, "浏览全部 ↗")
+    ), stage
+  ));
+
+  function unavailable() {
+    stage.appendChild(el("div", { class: "card row muted" }, "暂时无法加载网站内容。",
+      el("button", { type: "button", class: "btn btn-sm", onClick: load }, "重试")));
+  }
+
+  async function load() {
+    stage.replaceChildren(el("p", { class: "muted" }, "正在加载发现内容…"));
+    try {
+      const feed = await api("GET", "/api/site/discover");
+      siteBase = feed.siteBase || siteBase;
+      clear(stage);
+      if (!feed.items?.length) {
+        if (feed.offline) unavailable();
+        else stage.appendChild(el("p", { class: "muted" }, "暂无发现内容。"));
+        return;
+      }
+      if (feed.offline) stage.appendChild(el("p", { class: "muted" }, "暂时无法连接网站，正在显示本地缓存。"));
+      stage.appendChild(el("div", { class: "discover-grid" }, feed.items.map((item) => discoveryCard(item, siteBase))));
+    } catch {
+      clear(stage);
+      unavailable();
+    }
+  }
+
+  void load();
+}
+
+export async function renderHome(container, ctx) {
+  const root = el("div");
+  container.replaceChildren(root);
+  const [recRes, sumRes, worksRes, settRes] = await Promise.all([
     api("GET", "/api/mine/recipes").catch(() => ({ items: [] })),
     api("GET", "/api/resources/summary").catch(() => ({ counts: {} })),
     api("GET", "/api/works?limit=6").catch(() => ({ items: [] })),
-    api("GET", "/api/site/hot").catch(() => ({ works: [], topics: [] })),
     api("GET", "/api/settings").catch(() => ({ settings: {} })),
   ]);
 
@@ -101,54 +170,7 @@ export async function renderHome(root, ctx) {
   }
   root.appendChild(secRecent);
 
-  // Featured styles
-  const stRes = await api("GET", "/api/resources/styles").catch(() => ({ items: [] }));
-  const featured = (stRes.items || []).slice(0, 6);
-  if (featured.length > 0) {
-    const grid = el("div", { class: "grid-cards" });
-    featured.forEach((s) => {
-      grid.appendChild(el("div", { class: "style-card", onClick: () => ctx.go("atlas", { openStyle: s.number }) },
-        el("img", { class: "style-thumb", src: packImg(s.image), alt: s.generation_name, loading: "lazy" }),
-        el("div", { class: "style-body" },
-          el("div", { class: "style-code" }, s.number),
-          el("div", { class: "style-name" }, s.nameZh || s.generation_name),
-          el("div", { class: "style-traits" }, s.traits)
-        )
-      ));
-    });
-    root.appendChild(el("section", { style: { marginBottom: "22px" } },
-      el("div", { class: "page-head" },
-        el("h2", { style: { margin: 0, fontSize: "16px" } }, "精选画风"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("atlas") }, "浏览全部 →")
-      ),
-      grid
-    ));
-  }
-
-  // Community preview
-  const hotWorks = Array.isArray(hotRes.works) ? hotRes.works : (hotRes.works?.items || []);
-  if (hotWorks.length > 0) {
-    const grid = el("div", { class: "grid-cards" });
-    hotWorks.slice(0, 6).forEach((w) => {
-      const img = w.coverUrl || (w.images && w.images[0]) || "";
-      grid.appendChild(el("div", {
-        class: "style-card",
-        onClick: () => openURL(`${hotRes.siteBase || "https://handraw-style.com"}/t/work-${encodeURIComponent(w.id)}`),
-      },
-      el("img", { class: "style-thumb", src: remoteThumb(img, 480, hotRes.siteBase || "https://handraw-style.com"), alt: w.title, loading: "lazy" }),
-      el("div", { class: "style-body" },
-        el("div", { class: "style-name" }, w.title || "社区作品"),
-        el("div", { class: "muted" }, `${w.authorName || w.author || ""} · ♥ ${w.likes || 0}`)
-      )));
-    });
-    root.appendChild(el("section", null,
-      el("div", { class: "page-head" },
-        el("h2", { style: { margin: 0, fontSize: "16px" } }, "社区热门"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("community") }, "查看更多 →")
-      ),
-      grid
-    ));
-  }
-
+  if (!root.isConnected) return;
+  mountDiscovery(root, settRes.settings?.siteBase);
   await mountSlotPanels(root, "home", { view: "home" });
 }

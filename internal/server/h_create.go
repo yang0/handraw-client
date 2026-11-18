@@ -76,9 +76,10 @@ func (s *Server) buildPrompt(w http.ResponseWriter, r *http.Request) (any, error
 
 func (s *Server) expandTheme(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
-		Theme string `json:"theme"`
-		Style string `json:"style"`
-		Mode  string `json:"mode"`
+		Theme    string `json:"theme"`
+		Style    string `json:"style"`
+		Mode     string `json:"mode"`
+		ModelRef string `json:"modelRef"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -86,38 +87,83 @@ func (s *Server) expandTheme(w http.ResponseWriter, r *http.Request) (any, error
 	if strings.TrimSpace(body.Theme) == "" {
 		return nil, bad("请输入要扩写的主题")
 	}
-	if tp, model, ok := findTextProvider(); ok {
+	route, err := resolveAIRoute("text", body.ModelRef)
+	if err != nil {
+		return nil, err
+	}
+	expandWithProvider := func(tp settings.Provider, model string) (string, error) {
 		sys := "你是手绘插画画面构思助手。将用户简短主题扩写成丰富、具体、有画面感的中文场景描述（不超过 120 字），只补充主体动作、环境氛围、视角细节，不要指定画风或色彩术语。"
 		reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{
 			{Role: "system", Content: sys},
 			{Role: "user", Content: body.Theme},
 		}, false)
-		if err == nil && strings.TrimSpace(reply) != "" {
-			return map[string]any{"theme": strings.TrimSpace(reply), "source": "provider"}, nil
+		if err != nil {
+			return "", err
 		}
+		if strings.TrimSpace(reply) == "" {
+			return "", bad("文字模型返回内容为空")
+		}
+		return strings.TrimSpace(reply), nil
 	}
-	if s.Site.LoggedIn() {
-		raw, err := s.Site.BatchPlan(r.Context(), map[string]any{"topic": body.Theme, "count": 1})
-		if err == nil {
-			var res struct {
-				Items []struct {
-					Theme  string `json:"theme"`
-					Prompt string `json:"prompt"`
-				} `json:"items"`
-			}
-			if json.Unmarshal(raw, &res) == nil && len(res.Items) > 0 {
-				t := firstStr(res.Items[0].Theme, res.Items[0].Prompt)
-				if t != "" {
-					return map[string]any{"theme": t, "source": "site"}, nil
-				}
+	expandWithSite := func(siteModel string) (string, error) {
+		req := map[string]any{"seed": body.Theme, "count": 1, "layoutMode": "fixed"}
+		if strings.TrimSpace(body.Style) != "" {
+			req["styleId"] = strings.TrimSpace(body.Style)
+		}
+		if siteModel != "" {
+			req["model"] = siteModel
+		}
+		raw, err := s.Site.BatchPlan(r.Context(), req)
+		if err != nil {
+			return "", err
+		}
+		var res struct {
+			Items []struct {
+				Subject string `json:"subject"`
+				Theme   string `json:"theme"`
+				Prompt  string `json:"prompt"`
+			} `json:"items"`
+		}
+		if json.Unmarshal(raw, &res) == nil && len(res.Items) > 0 {
+			if t := firstStr(res.Items[0].Subject, res.Items[0].Theme, res.Items[0].Prompt); t != "" {
+				return t, nil
 			}
 		}
+		return "", bad("线上接口未能生成扩写内容")
 	}
-	// Deterministic fallback enrichment when no text model is available.
-	return map[string]any{
-		"theme":  strings.TrimSpace(body.Theme) + "，前景主体鲜明生动，中景有生活气息的小细节，背景柔和透气形成层次感",
-		"source": "local",
-	}, nil
+	switch route.Mode {
+	case "provider":
+		txt, err := expandWithProvider(route.Provider, route.Model)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"theme": txt, "source": "provider"}, nil
+	case "site_explicit":
+		if !s.Site.LoggedIn() {
+			return nil, site.ErrNotLoggedIn
+		}
+		txt, err := expandWithSite(route.SiteModel)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"theme": txt, "source": "site"}, nil
+	default:
+		if s.Site.LoggedIn() {
+			if txt, err := expandWithSite(""); err == nil {
+				return map[string]any{"theme": txt, "source": "site"}, nil
+			}
+		}
+		if tp, model, ok := findTextProviderFor("text"); ok {
+			if txt, err := expandWithProvider(tp, model); err == nil {
+				return map[string]any{"theme": txt, "source": "provider"}, nil
+			}
+		}
+		// Deterministic fallback enrichment when no text model is available.
+		return map[string]any{
+			"theme":  strings.TrimSpace(body.Theme) + "，前景主体鲜明生动，中景有生活气息的小细节，背景柔和透气形成层次感",
+			"source": "local",
+		}, nil
+	}
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -138,7 +184,7 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) (any, error) {
 		if !p.Enabled {
 			continue
 		}
-		if p.Purpose == "text" {
+		if isTextOrVisionPurpose(p.Purpose) {
 			txtProvs = append(txtProvs, p)
 		} else {
 			imgProvs = append(imgProvs, p)
@@ -154,12 +200,15 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) (any, error) {
 		txtProvs = []settings.Provider{}
 	}
 	return map[string]any{
-		"site":           normalizeSiteModels(siteModels),
-		"providers":      imgProvs,
-		"textProviders":  txtProvs,
-		"defaultModel":   st.DefaultModel,
-		"costLimitCents": st.CostLimitCents,
-		"loggedIn":       s.Site.LoggedIn(),
+		"site":               normalizeSiteModels(siteModels),
+		"siteAI":             normalizeSiteAIModels(siteModels),
+		"providers":          imgProvs,
+		"textProviders":      txtProvs,
+		"defaultModel":       st.DefaultModel,
+		"defaultTextModel":   st.DefaultTextModel,
+		"defaultVisionModel": st.DefaultVisionModel,
+		"costLimitCents":     st.CostLimitCents,
+		"loggedIn":           s.Site.LoggedIn(),
 	}, nil
 }
 
@@ -590,6 +639,7 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 		FixedLayout       string `json:"fixedLayout"`
 		LayoutRequirement string `json:"layoutRequirement"`
 		StyleID           string `json:"styleId"`
+		ModelRef          string `json:"modelRef"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -640,31 +690,66 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 	if body.LayoutMode != "fixed" {
 		body.LayoutMode = "ai"
 	}
-	if s.Site.LoggedIn() {
-		if raw, err := s.Site.BatchPlan(r.Context(), map[string]any{
-			"seed": body.Topic, "count": body.Count, "layoutMode": body.LayoutMode,
-			"fixedLayout": body.FixedLayout, "layoutRequirement": body.LayoutRequirement, "styleId": body.StyleID,
-		}); err == nil {
-			if cards := seriesCards(raw); len(cards) > 0 {
-				if body.LayoutMode == "fixed" {
-					for _, c := range cards {
-						c["layout"] = body.FixedLayout
-					}
-				}
-				return map[string]any{"cards": cards, "source": planningSource(raw)}, nil
+	route, err := resolveAIRoute("text", body.ModelRef)
+	if err != nil {
+		return nil, err
+	}
+	applyFixed := func(cards []map[string]string) {
+		if body.LayoutMode == "fixed" {
+			for _, c := range cards {
+				c["layout"] = body.FixedLayout
 			}
 		}
 	}
-	if tp, model, ok := findTextProvider(); ok {
+	planWithSite := func(siteModel string) (map[string]any, error) {
+		req := map[string]any{
+			"seed": body.Topic, "count": body.Count, "layoutMode": body.LayoutMode,
+			"fixedLayout": body.FixedLayout, "layoutRequirement": body.LayoutRequirement, "styleId": body.StyleID,
+		}
+		if siteModel != "" {
+			req["model"] = siteModel
+		}
+		raw, err := s.Site.BatchPlan(r.Context(), req)
+		if err != nil {
+			return nil, err
+		}
+		cards := seriesCards(raw)
+		if len(cards) == 0 {
+			return nil, bad("线上规划返回为空")
+		}
+		applyFixed(cards)
+		return map[string]any{"cards": cards, "source": planningSource(raw)}, nil
+	}
+	planWithProvider := func(tp settings.Provider, model string) (map[string]any, error) {
 		promptTxt := fmt.Sprintf("将主题「%s」拆分为 %d 张连贯系列插画分镜。图型策略 %s，固定图型 %s，图型要求 %s。返回 JSON 数组：[{\"title\":\"\",\"theme\":\"\",\"text\":\"\",\"layout\":\"\"}]", body.Topic, body.Count, body.LayoutMode, body.FixedLayout, body.LayoutRequirement)
-		if reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: promptTxt}}, false); err == nil {
-			if cards := seriesCards(json.RawMessage(extractJSON(reply))); len(cards) > 0 {
-				if body.LayoutMode == "fixed" {
-					for _, c := range cards {
-						c["layout"] = body.FixedLayout
-					}
-				}
-				return map[string]any{"cards": cards, "source": "provider"}, nil
+		reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: promptTxt}}, false)
+		if err != nil {
+			return nil, err
+		}
+		cards := seriesCards(json.RawMessage(extractJSON(reply)))
+		if len(cards) == 0 {
+			return nil, bad("自定义文本模型返回的分镜格式无法解析")
+		}
+		applyFixed(cards)
+		return map[string]any{"cards": cards, "source": "provider"}, nil
+	}
+	switch route.Mode {
+	case "provider":
+		return planWithProvider(route.Provider, route.Model)
+	case "site_explicit":
+		if !s.Site.LoggedIn() {
+			return nil, site.ErrNotLoggedIn
+		}
+		return planWithSite(route.SiteModel)
+	default:
+		if s.Site.LoggedIn() {
+			if res, err := planWithSite(""); err == nil {
+				return res, nil
+			}
+		}
+		if tp, model, ok := findTextProviderFor("text"); ok {
+			if res, err := planWithProvider(tp, model); err == nil {
+				return res, nil
 			}
 		}
 	}
@@ -693,6 +778,7 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 		CoverRatio   string `json:"coverRatio"`
 		InlineRatio  string `json:"inlineRatio"`
 		IncludeCover *bool  `json:"includeCover"`
+		ModelRef     string `json:"modelRef"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -703,19 +789,54 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 	body.CoverRatio = firstStr(body.CoverRatio, "2.35:1")
 	body.InlineRatio = firstStr(body.InlineRatio, "4:3")
 	includeCover := body.IncludeCover == nil || *body.IncludeCover
-	if s.Site.LoggedIn() {
+	route, err := resolveAIRoute("text", body.ModelRef)
+	if err != nil {
+		return nil, err
+	}
+	planWithSite := func(siteModel string) (map[string]any, error) {
 		request := articlePlanRequest(body.Title, body.Content, body.StyleID, body.CoverRatio, body.InlineRatio, includeCover)
-		if raw, err := s.Site.ArticlePlan(r.Context(), request); err == nil {
-			if slots, styles := articleSlots(raw, body.Content, body.CoverRatio, body.InlineRatio, includeCover); len(slots) > 0 {
-				return map[string]any{"slots": slots, "recommendedStyles": styles, "source": planningSource(raw)}, nil
+		if siteModel != "" {
+			request["model"] = siteModel
+		}
+		raw, err := s.Site.ArticlePlan(r.Context(), request)
+		if err != nil {
+			return nil, err
+		}
+		slots, styles := articleSlots(raw, body.Content, body.CoverRatio, body.InlineRatio, includeCover)
+		if len(slots) == 0 {
+			return nil, bad("线上接口未能规划出有效配图位")
+		}
+		return map[string]any{"slots": slots, "recommendedStyles": styles, "source": planningSource(raw)}, nil
+	}
+	planWithProvider := func(tp settings.Provider, model string) (map[string]any, error) {
+		ask := fmt.Sprintf("分析下面文章，规划配图位（包含封面：%t）。正文 anchor 必须引用正文中的原文。返回严格 JSON: {\"recommendedStyles\":[],\"slots\":[{\"role\":\"cover|inline\",\"anchor\":\"\",\"title\":\"\",\"theme\":\"\"}]}\n\n标题：%s\n正文：%s", includeCover, body.Title, body.Content)
+		reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: ask}}, true)
+		if err != nil {
+			return nil, err
+		}
+		slots, styles := articleSlots(json.RawMessage(extractJSON(reply)), body.Content, body.CoverRatio, body.InlineRatio, includeCover)
+		if len(slots) == 0 {
+			return nil, bad("自定义文本模型返回的配图规划无法解析")
+		}
+		return map[string]any{"slots": slots, "recommendedStyles": styles, "source": "provider"}, nil
+	}
+	switch route.Mode {
+	case "provider":
+		return planWithProvider(route.Provider, route.Model)
+	case "site_explicit":
+		if !s.Site.LoggedIn() {
+			return nil, site.ErrNotLoggedIn
+		}
+		return planWithSite(route.SiteModel)
+	default:
+		if s.Site.LoggedIn() {
+			if res, err := planWithSite(""); err == nil {
+				return res, nil
 			}
 		}
-	}
-	if tp, model, ok := findTextProvider(); ok {
-		ask := fmt.Sprintf("分析下面文章，规划配图位（包含封面：%t）。正文 anchor 必须引用正文中的原文。返回严格 JSON: {\"recommendedStyles\":[],\"slots\":[{\"role\":\"cover|inline\",\"anchor\":\"\",\"title\":\"\",\"theme\":\"\"}]}\n\n标题：%s\n正文：%s", includeCover, body.Title, body.Content)
-		if reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: ask}}, true); err == nil {
-			if slots, styles := articleSlots(json.RawMessage(extractJSON(reply)), body.Content, body.CoverRatio, body.InlineRatio, includeCover); len(slots) > 0 {
-				return map[string]any{"slots": slots, "recommendedStyles": styles, "source": "provider"}, nil
+		if tp, model, ok := findTextProviderFor("text"); ok {
+			if res, err := planWithProvider(tp, model); err == nil {
+				return res, nil
 			}
 		}
 	}
@@ -898,7 +1019,8 @@ func (s *Server) articleExport(w http.ResponseWriter, r *http.Request) (any, err
 
 func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
-		Prompt string `json:"prompt"`
+		Prompt   string `json:"prompt"`
+		ModelRef string `json:"modelRef"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -906,18 +1028,51 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 	if strings.TrimSpace(body.Prompt) == "" {
 		return nil, bad("请描述你想搭建的画布流程")
 	}
-	if s.Site.LoggedIn() {
-		if raw, err := s.Site.CanvasAssistant(r.Context(), map[string]any{"prompt": body.Prompt}); err == nil {
-			return map[string]any{"raw": raw, "source": "site"}, nil
-		}
+	route, err := resolveAIRoute("text", body.ModelRef)
+	if err != nil {
+		return nil, err
 	}
-	if tp, model, ok := findTextProvider(); ok {
+	buildWithSite := func(siteModel string) (map[string]any, error) {
+		req := map[string]any{"prompt": body.Prompt}
+		if siteModel != "" {
+			req["model"] = siteModel
+		}
+		raw, err := s.Site.CanvasAssistant(r.Context(), req)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"raw": raw, "source": "site"}, nil
+	}
+	buildWithProvider := func(tp settings.Provider, model string) (map[string]any, error) {
 		ask := fmt.Sprintf("根据用户需求「%s」生成节点画布工作流 JSON：{\"nodes\":[{\"id\":\"n1\",\"type\":\"themes|recipe|styles|generate|export\",\"x\":80,\"y\":120,\"data\":{\"label\":\"\",\"items\":[]}}],\"edges\":[{\"id\":\"e1\",\"from\":\"n1\",\"to\":\"n2\"}]}", body.Prompt)
-		if reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: ask}}, true); err == nil {
-			var g map[string]any
-			if json.Unmarshal([]byte(extractJSON(reply)), &g) == nil {
-				g["source"] = "provider"
-				return g, nil
+		reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: ask}}, true)
+		if err != nil {
+			return nil, err
+		}
+		var g map[string]any
+		if json.Unmarshal([]byte(extractJSON(reply)), &g) != nil {
+			return nil, bad("自定义文本模型返回的画布 JSON 无法解析")
+		}
+		g["source"] = "provider"
+		return g, nil
+	}
+	switch route.Mode {
+	case "provider":
+		return buildWithProvider(route.Provider, route.Model)
+	case "site_explicit":
+		if !s.Site.LoggedIn() {
+			return nil, site.ErrNotLoggedIn
+		}
+		return buildWithSite(route.SiteModel)
+	default:
+		if s.Site.LoggedIn() {
+			if res, err := buildWithSite(""); err == nil {
+				return res, nil
+			}
+		}
+		if tp, model, ok := findTextProviderFor("text"); ok {
+			if res, err := buildWithProvider(tp, model); err == nil {
+				return res, nil
 			}
 		}
 	}

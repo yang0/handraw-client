@@ -394,59 +394,6 @@ func (s *Server) siteHistoryDownload(w http.ResponseWriter, r *http.Request) (an
 	return map[string]any{"run": run}, nil
 }
 
-func (s *Server) siteHot(w http.ResponseWriter, r *http.Request) (any, error) {
-	force := r.URL.Query().Get("refresh") == "1"
-	type hotCache struct {
-		At     time.Time       `json:"at"`
-		Works  json.RawMessage `json:"works"`
-		Topics json.RawMessage `json:"topics"`
-	}
-	var cached hotCache
-	_ = s.DB.GetKV("site_hot_cache", &cached)
-	if !force && !cached.At.IsZero() && time.Since(cached.At) < 30*time.Minute && len(cached.Works) > 0 {
-		return map[string]any{"works": cached.Works, "topics": cached.Topics, "cachedAt": cached.At, "siteBase": s.Site.Base()}, nil
-	}
-	var worksRaw, topicsRaw json.RawMessage
-	var err error
-	if s.Site.LoggedIn() {
-		worksRaw, err = s.Site.Get(r.Context(), "/api/works/feed?sort=popular&limit=18")
-	} else {
-		worksRaw, err = s.Site.GetPublic(r.Context(), "/api/works/feed?sort=popular&limit=18")
-	}
-	if err != nil && len(cached.Works) > 0 {
-		return map[string]any{"works": cached.Works, "topics": cached.Topics, "cachedAt": cached.At, "offline": true, "error": err.Error(), "siteBase": s.Site.Base()}, nil
-	}
-	if s.Site.LoggedIn() {
-		topicsRaw, _ = s.Site.Get(r.Context(), "/api/forum/topics?sort=popular&limit=20")
-	} else {
-		topicsRaw, _ = s.Site.GetPublic(r.Context(), "/api/forum/topics?sort=popular&limit=20")
-	}
-	// Fallback: derive popular topics from /api/boot?surface=discover if W4 is not deployed yet.
-	if len(topicsRaw) == 0 {
-		var bootRaw json.RawMessage
-		if s.Site.LoggedIn() {
-			bootRaw, _ = s.Site.Get(r.Context(), "/api/boot?surface=discover")
-		} else {
-			bootRaw, _ = s.Site.GetPublic(r.Context(), "/api/boot?surface=discover")
-		}
-		var boot struct {
-			Topics json.RawMessage `json:"topics"`
-		}
-		if json.Unmarshal(bootRaw, &boot) == nil && len(boot.Topics) > 0 {
-			topicsRaw = boot.Topics
-		}
-	}
-	if len(worksRaw) == 0 {
-		worksRaw = json.RawMessage("[]")
-	}
-	if len(topicsRaw) == 0 {
-		topicsRaw = json.RawMessage("[]")
-	}
-	cached = hotCache{At: time.Now(), Works: worksRaw, Topics: topicsRaw}
-	_ = s.DB.SetKV("site_hot_cache", cached)
-	return map[string]any{"works": worksRaw, "topics": topicsRaw, "cachedAt": cached.At, "siteBase": s.Site.Base()}, nil
-}
-
 func (s *Server) open(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
 		URL  string `json:"url"`

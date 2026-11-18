@@ -119,7 +119,7 @@ export async function renderSettings(root, ctx, params = {}) {
   if (accRes.loggedIn) {
     const displayName = accRes.user?.displayName || accRes.user?.username || accRes.user?.name || "手绘风用户";
     const username = accRes.user?.username || "";
-    const identitySub = username && username !== displayName ? `@${username}` : (accRes.offline ? "当前处于离线模式，已读取本地账号缓存" : "已连接手绘风网站账号");
+    const identitySub = username && username !== displayName ? `@${username}` : "";
 
     accSection.appendChild(el("div", { class: "settings-account-bar" },
       el("div", { class: "row", style: { gap: "12px", minWidth: 0 } },
@@ -140,7 +140,7 @@ export async function renderSettings(root, ctx, params = {}) {
           },
         }, "刷新额度"),
         el("button", { type: "button", class: "btn btn-sm", onClick: () => openURL(`${siteBase}/?view=wallet`) }, "充值钱包 ↗"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => openURL(siteBase) }, "账号控制台 ↗"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => openURL(`${siteBase}/?view=profile`) }, "账号控制台 ↗"),
         el("button", {
           type: "button",
           class: "btn btn-sm btn-danger",
@@ -774,6 +774,85 @@ function openProviderModal(existing, onSaved) {
   const manualIdIn = el("input", { class: "input", placeholder: "手动添加模型 ID（回车或点添加）", autocorrect: "off", autocapitalize: "none", spellcheck: "false" });
   const fetchedWrap = el("div", { class: "col hidden", style: { gap: "6px", padding: "8px", border: "1px solid var(--line)", borderRadius: "8px", background: "var(--paper)" } });
   let fetchedModels = [];
+  const testStates = new Map();
+  const testViews = new Map();
+  let testTimer = null;
+  let dialogClosed = false;
+
+  const hasRunningTest = () => [...testStates.values()].some((test) => test.running);
+  const elapsedLabel = (ms) => ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)} 秒`;
+
+  function stopTestClock() {
+    clearInterval(testTimer);
+    testTimer = null;
+  }
+
+  function revealTestFeedback(id) {
+    requestAnimationFrame(() => {
+      if (!dialogClosed) testViews.get(id)?.feedback.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  }
+
+  function updateTestViews() {
+    if (dialogClosed) return;
+    const busy = hasRunningTest();
+    for (const [id, view] of testViews) {
+      const test = testStates.get(id);
+      view.button.disabled = busy;
+      view.button.textContent = test?.running ? "测试中…" : "测试";
+      view.button.setAttribute("aria-busy", String(Boolean(test?.running)));
+      view.remove.disabled = Boolean(test?.running);
+      view.feedback.hidden = !test;
+      view.progress.hidden = !test?.running;
+      view.elapsed.hidden = !test?.running;
+      view.message.textContent = test?.message || "";
+      view.feedback.dataset.state = test?.running ? "running" : test?.ok ? "success" : "error";
+      view.detail.textContent = test?.detail || "";
+      view.detail.hidden = !test?.detail;
+      if (test?.running) view.elapsed.textContent = `已等待 ${elapsedLabel(performance.now() - test.startedAt)}`;
+    }
+  }
+
+  async function testModel(model, isText) {
+    if (hasRunningTest()) return;
+    const vision = isText && Boolean(model.canVision);
+    const mode = vision ? "视觉识图" : isText ? "文字模型" : "生图模型";
+    const test = { running: true, startedAt: performance.now(), message: "正在准备测试…", detail: "" };
+    testStates.set(model.id, test);
+    updateTestViews();
+    revealTestFeedback(model.id);
+    stopTestClock();
+    testTimer = setInterval(() => {
+      if (dialogClosed) { stopTestClock(); return; }
+      const view = testViews.get(model.id);
+      if (view) view.elapsed.textContent = `已等待 ${elapsedLabel(performance.now() - test.startedAt)}`;
+    }, 1000);
+    try {
+      await saveProviderPayload();
+      test.message = `正在测试${mode}，等待接口返回…`;
+      updateTestViews();
+      const result = await api("POST", `/api/providers/${encodeURIComponent(prov.id)}/test`, {
+        model: model.id,
+        vision,
+      });
+      test.ok = Boolean(result.ok);
+      const latency = Number.isFinite(result.latencyMs) ? result.latencyMs : performance.now() - test.startedAt;
+      test.message = `${mode}测试${test.ok ? "成功" : "失败"} · 用时 ${elapsedLabel(latency)}`;
+      if (!test.ok) test.detail = result.error || "接口未返回具体失败原因";
+      else if (result.reply) test.detail = `模型回复：\n${typeof result.reply === "string" ? result.reply : JSON.stringify(result.reply, null, 2)}`;
+      else if (result.imagesCount !== undefined) test.detail = `接口返回 ${result.imagesCount} 张测试图片`;
+      else test.detail = "接口已正常响应";
+    } catch (error) {
+      test.ok = false;
+      test.message = `${mode}测试失败 · 用时 ${elapsedLabel(performance.now() - test.startedAt)}`;
+      test.detail = error.message || "请求失败，请重试";
+    } finally {
+      test.running = false;
+      stopTestClock();
+      updateTestViews();
+      revealTestFeedback(model.id);
+    }
+  }
 
   function addModelEntry(id, meta = {}) {
     const cleanId = String(id || "").trim();
@@ -792,6 +871,7 @@ function openProviderModal(existing, onSaved) {
 
   function renderModels() {
     clear(modelsWrap);
+    testViews.clear();
     const isText = purposeSel.value === "text";
     if (!(prov.models || []).length) {
       modelsWrap.appendChild(el("div", { class: "muted", style: { fontSize: "12px" } }, "尚未添加模型，可点击「🔍 拉取 /models」或手动输入模型 ID"));
@@ -813,28 +893,27 @@ function openProviderModal(existing, onSaved) {
           el("label", { class: "row", style: { fontSize: "11.5px" } }, editChk, "编辑")
         );
       }
-      controls.append(
-        el("button", {
-          type: "button",
-          class: "btn btn-sm",
-          onClick: async () => {
-            try {
-              await saveProviderPayload();
-              const t = await api("POST", `/api/providers/${encodeURIComponent(prov.id)}/test`, {
-                model: m.id,
-                vision: isText && Boolean(m.canVision),
-              });
-              toast(t.ok ? `${m.id} 连通正常（${t.latencyMs}ms）` : `测试失败：${t.error}`);
-            } catch (e) { toast(e.message); }
-          },
-        }, "测试"),
-        el("button", { type: "button", class: "btn btn-sm btn-danger", onClick: () => { prov.models.splice(idx, 1); renderModels(); renderFetched(); } }, "×")
+      const testButton = el("button", { type: "button", class: "btn btn-sm", onClick: () => testModel(m, isText) }, "测试");
+      const removeButton = el("button", { type: "button", class: "btn btn-sm btn-danger", onClick: () => { prov.models.splice(idx, 1); testStates.delete(m.id); renderModels(); renderFetched(); } }, "×");
+      controls.append(testButton, removeButton);
+      const progress = el("progress", { "aria-label": `${m.id} 测试中`, style: { width: "64px", height: "6px" } });
+      const message = el("span", { role: "status", "aria-live": "polite", "aria-atomic": "true" });
+      const elapsed = el("span", { class: "muted", "aria-live": "off" });
+      const detail = el("pre", { class: "provider-test-detail" });
+      const feedback = el("div", { class: "provider-test-feedback" },
+        el("div", { class: "row" }, progress, message, elapsed),
+        detail
       );
-      modelsWrap.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", background: "var(--paper)", padding: "6px 8px", borderRadius: "6px" } },
-        el("span", { class: "mono", style: { fontSize: "12px" } }, m.id),
-        controls
+      testViews.set(m.id, { button: testButton, remove: removeButton, progress, message, elapsed, detail, feedback });
+      modelsWrap.appendChild(el("div", { class: "col provider-model-entry", style: { gap: "6px", background: "var(--paper)", padding: "6px 8px", borderRadius: "6px", minWidth: 0 } },
+        el("div", { class: "row", style: { justifyContent: "space-between" } },
+          el("span", { class: "mono", style: { fontSize: "12px", overflowWrap: "anywhere" } }, m.id),
+          controls
+        ),
+        feedback
       ));
     });
+    updateTestViews();
   }
 
   let fetchQuery = "";
@@ -937,7 +1016,7 @@ function openProviderModal(existing, onSaved) {
     },
   }, "🔍 拉取 /models");
 
-  showModal(isNew ? "添加第三方接口" : "编辑接口", el("div", { class: "col" },
+  const dialog = showModal(isNew ? "添加第三方接口" : "编辑接口", el("div", { class: "col" },
     el("div", { class: "field" }, el("label", null, "接口名称"), nameIn),
     el("div", { class: "field" }, el("label", null, "用途"), purposeSel),
     el("div", { class: "field" }, el("label", null, "Base URL"), urlIn),
@@ -973,4 +1052,8 @@ function openProviderModal(existing, onSaved) {
       },
     }, "保存"),
   ]);
+  dialog.addEventListener("close", () => {
+    dialogClosed = true;
+    stopTestClock();
+  }, { once: true });
 }

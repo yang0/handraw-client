@@ -11,7 +11,6 @@ import { renderArticle } from "./views/article.js";
 import { renderCanvas } from "./views/canvas.js";
 import { renderAnnotate } from "./views/annotate.js";
 import { renderWorks } from "./views/works.js";
-import { renderCommunity } from "./views/community.js";
 import { renderSettings } from "./views/settings.js";
 
 const VIEWS = {
@@ -24,7 +23,6 @@ const VIEWS = {
   canvas: renderCanvas,
   annotate: renderAnnotate,
   works: renderWorks,
-  community: renderCommunity,
   settings: renderSettings,
 };
 
@@ -38,7 +36,6 @@ const CORE_NAV = [
   { id: "canvas", ico: "🧩", label: "画布", plugin: "canvas" },
   { id: "annotate", ico: "📌", label: "批注", plugin: "annotate" },
   { id: "works", ico: "🖼", label: "作品" },
-  { id: "community", ico: "🌐", label: "社区", plugin: "community" },
 ];
 
 let currentView = "home";
@@ -117,7 +114,7 @@ async function start() {
   }
 
   async function go(view, params = {}) {
-    currentView = view || "home";
+    currentView = view && view !== "community" ? view : "home";
     currentParams = params || {};
     if (location.hash !== "#" + currentView) {
       history.replaceState(null, "", "#" + currentView);

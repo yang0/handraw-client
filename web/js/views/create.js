@@ -49,6 +49,57 @@ export function buildGroupedModelSelect(modelsData = {}, currentRef = "") {
   return sel;
 }
 
+export function buildGroupedAIModelSelect(modelsData = {}, currentRef = "", capability = "text") {
+  const isVision = capability === "vision";
+  const sel = el("select", {
+    class: "select select-sm",
+    style: { maxWidth: "260px" },
+    "aria-label": isVision ? "视觉解析模型" : "文字模型",
+  });
+  const siteHint = modelsData.loggedIn ? "网站线上接口" : "网站线上接口（需先登录）";
+  const gSite = el("optgroup", { label: siteHint });
+  gSite.appendChild(el("option", { value: "site:auto" }, "网站线上接口 · 智能路由（默认）"));
+
+  const siteAI = Array.isArray(modelsData.siteAI) ? modelsData.siteAI : [];
+  const seenRefs = new Set(["site:auto"]);
+  for (const m of siteAI) {
+    const id = m?.id || m?.model || "";
+    if (!id) continue;
+    const cap = (m.capability || "text").toLowerCase();
+    if (isVision && cap === "text") continue;
+    if (!isVision && cap === "vision") continue;
+    const ref = "site:" + id;
+    if (seenRefs.has(ref)) continue;
+    seenRefs.add(ref);
+    const isRec = isVision ? m.isDefaultVision : m.isDefaultText;
+    const label = [m.label || m.name || id, isRec ? "推荐" : ""].filter(Boolean).join(" · ");
+    gSite.appendChild(el("option", { value: ref }, label));
+  }
+  sel.appendChild(gSite);
+
+  const textProvs = Array.isArray(modelsData.textProviders) ? modelsData.textProviders : [];
+  for (const p of textProvs) {
+    const models = p.models || [];
+    if (!models.length) continue;
+    const g = el("optgroup", { label: `自定义 · ${p.name}` });
+    for (const m of models) {
+      const ref = `${p.id}:${m.id}`;
+      const note = isVision && m.canVision ? " · 识图" : "";
+      g.appendChild(el("option", { value: ref }, `${m.label || m.name || m.id}${note}`));
+    }
+    sel.appendChild(g);
+  }
+
+  const fallbackRef = isVision ? modelsData.defaultVisionModel : modelsData.defaultTextModel;
+  const target = currentRef || fallbackRef || "site:auto";
+  if (target && Array.from(sel.options).some((o) => o.value === target)) {
+    sel.value = target;
+  } else {
+    sel.value = "site:auto";
+  }
+  return sel;
+}
+
 export async function renderCreate(root, ctx, params = {}) {
   const host = studioMount(root);
 
@@ -664,7 +715,7 @@ export async function renderCreate(root, ctx, params = {}) {
         themeInput.value = res.theme;
         state.promptCustomized = false;
         await refreshPromptAndQuote();
-        toast(res.source === "provider" ? "已通过文本模型扩写主题" : "已扩写画面结构描述");
+        toast(res.source === "provider" ? "已通过自定义文本模型扩写主题" : (res.source === "site" ? "已通过网站线上接口扩写主题" : "已扩写画面结构描述"));
       }
     } catch (e) { toast(e.message); } finally {
       expandBtn.disabled = false;

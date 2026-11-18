@@ -61,24 +61,6 @@ func (s *Server) RegisterBuiltins() {
 		InUse:    countKind("article"),
 	})
 	s.Plugins.Register(plugins.Manifest{
-		ID:       "community",
-		Name:     "社区与热帖",
-		Desc:     "浏览网站热门作品与论坛热帖，支持用同款配方",
-		API:      "^1",
-		Provides: []string{"community"},
-		Pages:    []string{"community"},
-		Settings: []plugins.Setting{
-			{
-				Key:         "refreshMinutes",
-				Title:       "自动刷新间隔（分钟）",
-				Description: "社区热门作品与热帖缓存有效期",
-				Type:        "enum",
-				Enum:        []string{"15", "30", "60", "manual"},
-				Default:     "30",
-			},
-		},
-	})
-	s.Plugins.Register(plugins.Manifest{
 		ID:       "annotate",
 		Name:     "批注改图",
 		Desc:     "在图片任意位置添加多条批注或框选区域批量修改",

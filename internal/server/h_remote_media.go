@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yang0/handraw-client/internal/appdir"
+	"github.com/yang0/handraw-client/internal/site"
 )
 
 const (
@@ -108,18 +111,18 @@ func (s *Server) fileRemote(w http.ResponseWriter, r *http.Request) {
 	key := hex.EncodeToString(sum[:])
 	cachePath := filepath.Join(appdir.Cache(), "remote-img", key[:2], key+".img")
 
-	if st, err := os.Stat(cachePath); err == nil && !st.IsDir() && time.Since(st.ModTime()) < remoteImgTTL {
-		if b, rErr := os.ReadFile(cachePath); rErr == nil && len(b) > 0 {
-			w.Header().Set("Content-Type", detectRemoteImageMIME(b))
-			w.Header().Set("Cache-Control", "private, max-age=86400")
-			w.Header().Set("X-Handraw-Cache", "hit")
-			_, _ = w.Write(b)
-			return
-		}
+	if st, err := os.Stat(cachePath); err == nil && time.Since(st.ModTime()) < remoteImgTTL && serveCachedRemoteImage(w, cachePath, "hit", "private, max-age=86400") {
+		return
 	}
 
-	data, ct, err := s.Site.Fetch(r.Context(), targetURL)
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	data, ct, err := s.Site.Fetch(ctx, targetURL)
 	if err != nil {
+		var upstream *site.APIError
+		if (!errors.As(err, &upstream) || upstream.Status >= 500) && serveCachedRemoteImage(w, cachePath, "stale", "private, max-age=60") {
+			return
+		}
 		http.Error(w, "拉取远端缩略图失败", http.StatusBadGateway)
 		return
 	}
@@ -147,6 +150,18 @@ func (s *Server) fileRemote(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	w.Header().Set("X-Handraw-Cache", "miss")
 	_, _ = w.Write(data)
+}
+
+func serveCachedRemoteImage(w http.ResponseWriter, path, status, cacheControl string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	w.Header().Set("Content-Type", detectRemoteImageMIME(data))
+	w.Header().Set("Cache-Control", cacheControl)
+	w.Header().Set("X-Handraw-Cache", status)
+	_, _ = w.Write(data)
+	return true
 }
 
 func detectRemoteImageMIME(b []byte) string {

@@ -12,12 +12,12 @@ import (
 	"github.com/yang0/handraw-client/internal/appdir"
 )
 
-// Provider is a user-configured image or text API. Its key lives in the keyring.
+// Provider is a user-configured image or text/vision API. Its key lives in the keyring.
 type Provider struct {
 	ID      string  `json:"id"`
 	Name    string  `json:"name"`
 	Kind    string  `json:"kind"`    // "openai" (OpenAI compatible)
-	Purpose string  `json:"purpose"` // "image" or "text"
+	Purpose string  `json:"purpose"` // "image" or "text" (text + vision)
 	BaseURL string  `json:"baseUrl"`
 	Models  []Model `json:"models"`
 	Enabled bool    `json:"enabled"`
@@ -31,24 +31,27 @@ type Model struct {
 	PriceCents  int      `json:"priceCents,omitempty"`
 	CanEdit     bool     `json:"canEdit"`
 	CanRefImage bool     `json:"canRefImage"`
+	CanVision   bool     `json:"canVision,omitempty"`
 }
 
 type Settings struct {
-	SiteBase          string          `json:"siteBase"`
-	WorksDir          string          `json:"worksDir"`
-	Theme             string          `json:"theme"` // light | dark | system
-	AutoSyncResources bool            `json:"autoSyncResources"`
-	AutoCheckUpdate   bool            `json:"autoCheckUpdate"`
-	CostLimitCents    int             `json:"costLimitCents"`
-	DefaultModel      string          `json:"defaultModel"` // "site:<id>" or "<providerId>:<modelId>"
-	QuickShotHotkey   string          `json:"quickShotHotkey"`
-	QuickShotEnabled  bool            `json:"quickShotEnabled"`
-	MinimizeToTray    bool            `json:"minimizeToTray"`
-	Providers         []Provider      `json:"providers"`
-	Plugins           map[string]bool `json:"plugins"`
-	PluginConfig      map[string]any  `json:"pluginConfig"`
-	LastRecipeID      string          `json:"lastRecipeId"`
-	Onboarded         bool            `json:"onboarded"`
+	SiteBase           string          `json:"siteBase"`
+	WorksDir           string          `json:"worksDir"`
+	Theme              string          `json:"theme"` // light | dark | system
+	AutoSyncResources  bool            `json:"autoSyncResources"`
+	AutoCheckUpdate    bool            `json:"autoCheckUpdate"`
+	CostLimitCents     int             `json:"costLimitCents"`
+	DefaultModel       string          `json:"defaultModel"`       // "site:<id>" or "<providerId>:<modelId>"
+	DefaultTextModel   string          `json:"defaultTextModel"`   // "", "site:auto", "site:<id>", or "<providerId>:<modelId>"
+	DefaultVisionModel string          `json:"defaultVisionModel"` // "", "site:auto", "site:<id>", or "<providerId>:<modelId>"
+	QuickShotHotkey    string          `json:"quickShotHotkey"`
+	QuickShotEnabled   bool            `json:"quickShotEnabled"`
+	MinimizeToTray     bool            `json:"minimizeToTray"`
+	Providers          []Provider      `json:"providers"`
+	Plugins            map[string]bool `json:"plugins"`
+	PluginConfig       map[string]any  `json:"pluginConfig"`
+	LastRecipeID       string          `json:"lastRecipeId"`
+	Onboarded          bool            `json:"onboarded"`
 }
 
 func Defaults() Settings {

@@ -41,16 +41,44 @@ func endpoint(p Provider, path string) string {
 }
 
 type ModelInfo struct {
-	ID      string `json:"id"`
-	OwnedBy string `json:"owned_by,omitempty"`
-	IsImage bool   `json:"isImage"`
+	ID       string `json:"id"`
+	OwnedBy  string `json:"owned_by,omitempty"`
+	IsImage  bool   `json:"isImage"`
+	IsVision bool   `json:"isVision"`
 }
 
 var imageHints = []string{"image", "dall-e", "dalle", "flux", "sd", "stable-diffusion", "seedream", "jimeng", "kolors", "imagen", "midjourney", "mj", "ideogram", "recraft", "qwen-image", "hunyuan-image", "cogview", "wanx", "gemini-2.5-flash-image", "nano-banana"}
 
-func looksImage(id string) bool {
+var visionHints = []string{
+	"gpt-4o", "gpt-4.1", "gpt-4.5", "gpt-4-turbo", "gpt-4-vision", "gpt-5",
+	"claude-3", "claude-4", "claude-sonnet-4", "claude-opus-4", "claude-haiku-4",
+	"gemini-1.5", "gemini-2", "gemini-2.5", "gemini-3", "gemini-pro-vision",
+	"qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qvq",
+	"glm-4v", "glm-4.1v", "glm-4.5v", "glm-4.6v",
+	"doubao-vision", "doubao-1.5-vision", "kimi-vl", "moonshot-v1-vision",
+	"step-1v", "step-1o", "internvl", "minicpm-v", "pixtral",
+	"llama-3.2-11b-vision", "llama-3.2-90b-vision", "llama-4",
+	"grok-2-vision", "grok-4", "vision", "-vl", "_vl", "multimodal",
+}
+
+// LooksImage reports whether a model ID looks like an image generation model.
+func LooksImage(id string) bool {
 	l := strings.ToLower(id)
 	for _, h := range imageHints {
+		if strings.Contains(l, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// LooksVision reports whether a non-image-generation model ID looks like a vision-capable model.
+func LooksVision(id string) bool {
+	if LooksImage(id) {
+		return false
+	}
+	l := strings.ToLower(id)
+	for _, h := range visionHints {
 		if strings.Contains(l, h) {
 			return true
 		}
@@ -90,7 +118,12 @@ func ListModels(ctx context.Context, p Provider) ([]ModelInfo, error) {
 	}
 	var models []ModelInfo
 	for _, m := range out.Data {
-		models = append(models, ModelInfo{ID: m.ID, OwnedBy: m.OwnedBy, IsImage: looksImage(m.ID)})
+		models = append(models, ModelInfo{
+			ID:       m.ID,
+			OwnedBy:  m.OwnedBy,
+			IsImage:  LooksImage(m.ID),
+			IsVision: LooksVision(m.ID),
+		})
 	}
 	sort.SliceStable(models, func(i, j int) bool {
 		if models[i].IsImage != models[j].IsImage {
@@ -336,7 +369,7 @@ func Chat(ctx context.Context, p Provider, model string, msgs []ChatMessage, jso
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if resp.StatusCode >= 400 {
 		// Some relays reject response_format; retry once without it.
-		if jsonMode && resp.StatusCode == 400 {
+		if jsonMode && (resp.StatusCode == 400 || resp.StatusCode == 422) {
 			return Chat(ctx, p, model, msgs, false)
 		}
 		return "", apiErr(resp.StatusCode, data)
@@ -344,14 +377,43 @@ func Chat(ctx context.Context, p Provider, model string, msgs []ChatMessage, jso
 	var out struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content any `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
 	}
-	if err := json.Unmarshal(data, &out); err != nil || len(out.Choices) == 0 {
+	if err := json.Unmarshal(data, &out); err != nil {
 		return "", errors.New("文字模型返回无法解析")
 	}
-	return out.Choices[0].Message.Content, nil
+	if len(out.Choices) == 0 {
+		if out.Error.Message != "" {
+			return "", fmt.Errorf("接口返回错误：%s", out.Error.Message)
+		}
+		return "", errors.New("文字模型返回无法解析")
+	}
+	return extractContentText(out.Choices[0].Message.Content), nil
+}
+
+func extractContentText(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return v
+	case []any:
+		var sb strings.Builder
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if txt, ok := m["text"].(string); ok {
+				sb.WriteString(txt)
+			}
+		}
+		return sb.String()
+	}
+	return ""
 }
 
 // SizeForRatio maps an aspect ratio to a common OpenAI image size.

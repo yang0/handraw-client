@@ -37,18 +37,20 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) (any, error
 
 func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
-		SiteBase          *string `json:"siteBase"`
-		WorksDir          *string `json:"worksDir"`
-		Theme             *string `json:"theme"`
-		AutoSyncResources *bool   `json:"autoSyncResources"`
-		AutoCheckUpdate   *bool   `json:"autoCheckUpdate"`
-		CostLimitCents    *int    `json:"costLimitCents"`
-		DefaultModel      *string `json:"defaultModel"`
-		QuickShotHotkey   *string `json:"quickShotHotkey"`
-		QuickShotEnabled  *bool   `json:"quickShotEnabled"`
-		MinimizeToTray    *bool   `json:"minimizeToTray"`
-		LastRecipeID      *string `json:"lastRecipeId"`
-		Onboarded         *bool   `json:"onboarded"`
+		SiteBase           *string `json:"siteBase"`
+		WorksDir           *string `json:"worksDir"`
+		Theme              *string `json:"theme"`
+		AutoSyncResources  *bool   `json:"autoSyncResources"`
+		AutoCheckUpdate    *bool   `json:"autoCheckUpdate"`
+		CostLimitCents     *int    `json:"costLimitCents"`
+		DefaultModel       *string `json:"defaultModel"`
+		DefaultTextModel   *string `json:"defaultTextModel"`
+		DefaultVisionModel *string `json:"defaultVisionModel"`
+		QuickShotHotkey    *string `json:"quickShotHotkey"`
+		QuickShotEnabled   *bool   `json:"quickShotEnabled"`
+		MinimizeToTray     *bool   `json:"minimizeToTray"`
+		LastRecipeID       *string `json:"lastRecipeId"`
+		Onboarded          *bool   `json:"onboarded"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -79,6 +81,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		}
 		if body.DefaultModel != nil {
 			st.DefaultModel = *body.DefaultModel
+		}
+		if body.DefaultTextModel != nil {
+			st.DefaultTextModel = strings.TrimSpace(*body.DefaultTextModel)
+		}
+		if body.DefaultVisionModel != nil {
+			st.DefaultVisionModel = strings.TrimSpace(*body.DefaultVisionModel)
 		}
 		if body.QuickShotHotkey != nil && *body.QuickShotHotkey != st.QuickShotHotkey {
 			st.QuickShotHotkey = *body.QuickShotHotkey
@@ -132,7 +140,7 @@ func (s *Server) providerPut(w http.ResponseWriter, r *http.Request) (any, error
 		body.Kind = "openai"
 	}
 	if body.Purpose == "" {
-		body.Purpose = "image"
+		body.Purpose = "text"
 	}
 	if body.Models == nil {
 		body.Models = []settings.Model{}
@@ -217,11 +225,12 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) (any, erro
 		return nil, notFound("找不到接口 " + id)
 	}
 	var body struct {
-		Model string `json:"model"`
+		Model  string `json:"model"`
+		Vision bool   `json:"vision"`
 	}
 	_ = decode(r, &body)
 	t0 := time.Now()
-	if body.Model == "" {
+	if body.Model == "" && !body.Vision {
 		models, err := providers.ListModels(r.Context(), p)
 		ms := time.Since(t0).Milliseconds()
 		if err != nil {
@@ -229,13 +238,42 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) (any, erro
 		}
 		return map[string]any{"ok": true, "latencyMs": ms, "modelsCount": len(models)}, nil
 	}
-	if p.Purpose == "text" {
-		reply, err := providers.Chat(r.Context(), p, body.Model, []providers.ChatMessage{{Role: "user", Content: "ping"}}, false)
+	if p.Purpose == "text" || p.Purpose == "vision" {
+		modelID := strings.TrimSpace(body.Model)
+		if modelID == "" && len(p.Models) > 0 {
+			modelID = p.Models[0].ID
+			if body.Vision {
+				for _, m := range p.Models {
+					if m.CanVision || providers.LooksVision(m.ID) {
+						modelID = m.ID
+						break
+					}
+				}
+			}
+		}
+		if modelID == "" {
+			return map[string]any{"ok": false, "latencyMs": 0, "error": "请先添加或选择要测试的模型"}, nil
+		}
+		var msgs []providers.ChatMessage
+		if body.Vision {
+			// Minimal 1x1 PNG for multimodal vision endpoint verification.
+			const tinyPNGDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+			msgs = []providers.ChatMessage{{
+				Role: "user",
+				Content: []any{
+					map[string]any{"type": "text", "text": "Reply OK"},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": tinyPNGDataURL}},
+				},
+			}}
+		} else {
+			msgs = []providers.ChatMessage{{Role: "user", Content: "ping"}}
+		}
+		reply, err := providers.Chat(r.Context(), p, modelID, msgs, false)
 		ms := time.Since(t0).Milliseconds()
 		if err != nil {
 			return map[string]any{"ok": false, "latencyMs": ms, "error": err.Error()}, nil
 		}
-		return map[string]any{"ok": true, "latencyMs": ms, "reply": reply}, nil
+		return map[string]any{"ok": true, "latencyMs": ms, "reply": reply, "model": modelID, "vision": body.Vision}, nil
 	}
 	imgs, err := providers.GenerateImage(r.Context(), p, providers.ImageRequest{
 		Model:  body.Model,

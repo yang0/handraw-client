@@ -29,7 +29,7 @@ func ClientName(version string) string {
 }
 
 // Scopes the client asks for. "studio" is the desktop scope (handraw-web W1).
-var Scopes = []string{"publish", "library", "studio"}
+var Scopes = []string{"publish", "library", "studio", "economy"}
 
 type Client struct {
 	HTTP    *http.Client
@@ -370,11 +370,15 @@ func (c *Client) BatchPlan(ctx context.Context, body map[string]any) (json.RawMe
 }
 
 // AnalyzeStyle (W8): reference images -> visual-language traits + nearest styles.
-func (c *Client) AnalyzeStyle(ctx context.Context, images []string, purpose string) (json.RawMessage, error) {
+func (c *Client) AnalyzeStyle(ctx context.Context, images []string, purpose string, model ...string) (json.RawMessage, error) {
 	var out json.RawMessage
 	c2 := *c
 	c2.HTTP = &http.Client{Timeout: 3 * time.Minute}
-	err := c2.Do(ctx, "POST", "/api/studio/analyze-style", map[string]any{"images": images, "purpose": purpose}, &out)
+	body := map[string]any{"images": images, "purpose": purpose}
+	if len(model) > 0 && strings.TrimSpace(model[0]) != "" {
+		body["model"] = strings.TrimSpace(model[0])
+	}
+	err := c2.Do(ctx, "POST", "/api/studio/analyze-style", body, &out)
 	return out, err
 }
 

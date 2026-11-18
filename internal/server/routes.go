@@ -86,7 +86,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/account/balance", s.h(s.balance))
 	m.HandleFunc("GET /api/site/collections", s.h(s.siteCollections))
 	m.HandleFunc("GET /api/site/history", s.h(s.siteHistory))
-	m.HandleFunc("GET /api/site/hot", s.h(s.siteHot))
+	m.HandleFunc("GET /api/site/discover", s.h(s.siteDiscover))
 	m.HandleFunc("POST /api/site/history/{id}/download", s.h(s.siteHistoryDownload))
 	m.HandleFunc("POST /api/open", s.h(s.open))
 
