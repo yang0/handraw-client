@@ -58,7 +58,9 @@ function drawCatalog(stage, { kind, title, allLabel, items, groupKey, groupLabel
       (!query || JSON.stringify(item).toLowerCase().includes(query))
     );
     if (!visible.length) {
-      grid.appendChild(el("div", { class: "card muted" }, query ? "没有找到匹配的资源" : (empty || "这个分类暂时没有资源")));
+      const emptyNode = typeof empty === "function" ? empty(selected) : empty;
+      grid.appendChild(query ? el("div", { class: "card muted" }, "没有找到匹配的资源")
+        : emptyNode instanceof Node ? emptyNode : el("div", { class: "card muted" }, emptyNode || "这个分类暂时没有资源"));
     } else {
       visible.forEach((item) => grid.appendChild(card(item)));
     }
@@ -68,6 +70,7 @@ function drawCatalog(stage, { kind, title, allLabel, items, groupKey, groupLabel
 
 export async function renderAtlas(root, ctx, params = {}) {
   if (params.tab) state.tab = params.tab;
+  if (state.tab === "mine") { state.tab = "styles"; state.group = MINE; }
   if (params.q !== undefined) state.q = params.q;
   clear(root);
 
@@ -78,7 +81,6 @@ export async function renderAtlas(root, ctx, params = {}) {
     ["colors", `主题色 (${summary.counts?.colors || 0})`],
     ["tones", `影调 (${summary.counts?.tones || 0})`],
     ["assets", "自建图库"],
-    ["mine", "我的资源"],
     ["compare", `对比台 (${state.compareIds.length}/4)`],
     ["find", "以图找风格"],
     ["dice", "画风骰子"],
@@ -122,7 +124,6 @@ export async function renderAtlas(root, ctx, params = {}) {
     else if (state.tab === "colors") await drawColors(stage, ctx);
     else if (state.tab === "tones") await drawTones(stage, ctx);
     else if (state.tab === "assets") await drawAssets(stage);
-    else if (state.tab === "mine") await drawMine(stage, ctx);
     else if (state.tab === "compare") await drawCompare(stage, ctx);
     else if (state.tab === "find") await drawFindByImage(stage, ctx);
     else if (state.tab === "dice") await drawDice(stage, ctx);
@@ -133,22 +134,31 @@ export async function renderAtlas(root, ctx, params = {}) {
 }
 
 async function drawStyles(stage, groups, ctx) {
-  const res = await api("GET", `/api/resources/styles?q=${encodeURIComponent(state.q)}&group=${encodeURIComponent(state.group)}`);
-  const items = res.items || [];
+  const mineOnly = state.group === MINE;
+  const [res, mineRes] = await Promise.all([
+    mineOnly ? Promise.resolve({ items: [] })
+      : api("GET", `/api/resources/styles?q=${encodeURIComponent(state.q)}&group=${encodeURIComponent(state.group)}`),
+    api("GET", "/api/mine/styles").catch(() => ({ items: [] })),
+  ]);
+  const query = state.q.trim().toLowerCase();
+  const mineAll = mineRes.items || [];
+  const mine = mineAll.filter((m) => !query || JSON.stringify(m).toLowerCase().includes(query));
+  const official = (res.items || []).filter((x) => x.source !== "mine");
+  // My styles lead "全部流派" and own the "我的画风" group.
+  const items = [...(state.group === "" || mineOnly ? mine.map((m) => ({ ...m, _mine: true })) : []), ...official];
 
+  const groupBtn = (key, label, count, extra = "") => el("button", {
+    type: "button",
+    class: "group-btn" + extra + (state.group === key ? " active" : ""),
+    "aria-pressed": String(state.group === key),
+    onClick: () => { state.group = key; drawStylesWrap(); },
+  }, el("span", null, label), el("span", { class: "muted" }, String(count)));
   const groupNav = el("div", { class: "atlas-groups" },
-    el("button", {
-      type: "button",
-      class: "group-btn" + (state.group === "" ? " active" : ""),
-      onClick: () => { state.group = ""; drawStylesWrap(); },
-    }, el("span", null, "全部流派"), el("span", { class: "muted" }, String(groups.reduce((total, g) => total + g.count, 0))))
+    groupBtn("", "全部流派", groups.filter((g) => g.code !== "MY").reduce((total, g) => total + g.count, 0) + mineAll.length),
+    groupBtn(MINE, "我的画风", mineAll.length, " group-mine")
   );
-  groups.forEach((g) => {
-    groupNav.appendChild(el("button", {
-      type: "button",
-      class: "group-btn" + (state.group === g.code ? " active" : ""),
-      onClick: () => { state.group = g.code; drawStylesWrap(); },
-    }, el("span", null, categoryName(g.zh || g.en)), el("span", { class: "muted" }, String(g.count))));
+  groups.filter((g) => g.code !== "MY").forEach((g) => {
+    groupNav.appendChild(groupBtn(g.code, categoryName(g.zh || g.en), g.count));
   });
 
   function drawStylesWrap() {
@@ -165,6 +175,10 @@ async function drawStyles(stage, groups, ctx) {
     const slice = items.slice(offset, offset + batchSize);
     offset += slice.length;
     slice.forEach((s) => {
+      if (s._mine) {
+        grid.appendChild(mineStyleCard(s, ctx, drawStylesWrap));
+        return;
+      }
       const inCmp = state.compareIds.includes(s.number);
       const card = el("div", { class: "style-card" },
         el("img", {
@@ -209,8 +223,19 @@ async function drawStyles(stage, groups, ctx) {
     io.observe(sentinel);
   }
 
+  const toolbar = mineToolbar([
+    el("button", { type: "button", class: "btn btn-primary btn-sm", onClick: () => openEditStyleDialog({}, () => { state.group = MINE; drawStylesWrap(); }) }, "+ 新建画风"),
+  ], drawStylesWrap, mineOnly ? "自建的画风只描述视觉语言；登录后会同步到你的网站账号，满意后可以发布到社区。" : "");
+  const emptyMine = el("div", { class: "card mine-empty" },
+    el("strong", null, "还没有自己的画风"),
+    el("span", { class: "muted" }, "上传 1–5 张参考图，自动提取纯视觉特征；或者在任意画风详情里「另存为我的画风」再微调。"),
+    el("div", { class: "row" },
+      el("button", { type: "button", class: "btn btn-primary btn-sm", onClick: () => openEditStyleDialog({}, drawStylesWrap) }, "从参考图建画风")
+    )
+  );
   const right = el("div", null,
-    items.length === 0 ? el("div", { class: "card muted" }, "没有找到匹配的画风") : grid,
+    toolbar,
+    items.length === 0 ? (mineOnly && !query ? emptyMine : el("div", { class: "card muted" }, "没有找到匹配的画风")) : grid,
     sentinel
   );
   stage.appendChild(el("div", { class: "atlas-wrap" }, groupNav, right));
@@ -256,7 +281,7 @@ async function openStyleDetail(id, ctx, onRefresh) {
       el("button", {
         type: "button",
         class: "btn",
-        onClick: () => { closeModal(); state.tab = "mine"; openEditStyleDialog({ name: (st.nameZh || st.generation_name) + " · 变体", traits: st.traits, traitsEn: st.traitsEn || st.traits }, onRefresh); },
+        onClick: () => { closeModal(); state.group = MINE; openEditStyleDialog({ name: (st.nameZh || st.generation_name) + " · 变体", traits: st.traits, traitsEn: st.traitsEn || st.traits }, onRefresh); },
       }, "另存为我的画风"),
       el("button", {
         type: "button",
@@ -270,11 +295,26 @@ async function openStyleDetail(id, ctx, onRefresh) {
 }
 
 async function drawLayouts(stage, ctx) {
-  const res = await api("GET", "/api/resources/layouts");
+  const reload = () => { clear(stage); drawLayouts(stage, ctx); };
+  const [res, mineRes] = await Promise.all([
+    api("GET", "/api/resources/layouts"),
+    api("GET", "/api/mine/layouts").catch(() => ({ items: [] })),
+  ]);
+  const mine = (mineRes.items || []).map((l) => ({ ...l, category: "mine", _mine: true }));
+  const items = [...mine, ...(res.items || []).filter((l) => l.source !== "mine")];
   drawCatalog(stage, {
-    kind: "layouts", title: "图型", allLabel: "全部图型", items: res.items || [],
-    groupKey: (l) => l.category, groupLabel: (l) => layoutNames[l.category] || l.category,
-    card: (l) => el("div", { class: "style-card" },
+    kind: "layouts", title: "图型", allLabel: "全部图型", items,
+    groups: [{ key: "mine", label: "我的图型" }],
+    groupKey: (l) => l.category, groupLabel: (l) => (l.category === "mine" ? "我的图型" : layoutNames[l.category] || l.category),
+    before: mineToolbar([
+      el("button", { type: "button", class: "btn btn-primary btn-sm", onClick: () => openEditLayoutDialog({}, () => { state.groups.layouts = "mine"; reload(); }) }, "+ 新建图型"),
+    ], reload, ""),
+    empty: (group) => group === "mine" ? el("div", { class: "card mine-empty" },
+      el("strong", null, "还没有自己的图型"),
+      el("span", { class: "muted" }, "描述区域划分、标题区、配图区和留白，就能在创作时像官方图型一样使用。"),
+      el("div", { class: "row" }, el("button", { type: "button", class: "btn btn-primary btn-sm", onClick: () => openEditLayoutDialog({}, reload) }, "新建图型"))
+    ) : "",
+    card: (l) => l._mine ? mineLayoutCard(l, ctx, reload) : el("div", { class: "style-card" },
       el("img", { class: "style-thumb", src: packImg(l.image), alt: l.name, loading: "lazy" }),
       el("div", { class: "style-body" },
         el("div", { class: "style-code" }, `${l.id} · ${l.category}`),
@@ -396,83 +436,84 @@ function openAssetDialog(onSaved) {
   ]);
 }
 
-async function drawMine(stage, ctx) {
-  const [stRes, layRes] = await Promise.all([
-    api("GET", "/api/mine/styles").catch(() => ({ items: [] })),
-    api("GET", "/api/mine/layouts").catch(() => ({ items: [] })),
-  ]);
-  const reload = () => { clear(stage); drawMine(stage, ctx); };
+const MINE = "__mine";
 
-  stage.appendChild(el("div", { class: "row", style: { marginBottom: "14px", justifyContent: "space-between" } },
-    el("div", { class: "row" },
-      el("button", { type: "button", class: "btn btn-primary btn-sm", onClick: () => openEditStyleDialog({}, reload) }, "+ 新建/从参考图建画风"),
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => openEditLayoutDialog({}, reload) }, "+ 新建图型")
+// Toolbar shown above the style/layout grid: create + sync with the website.
+function mineToolbar(actions, reload, hint) {
+  return el("div", { class: "mine-toolbar" },
+    el("div", { class: "row" }, ...actions,
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: async (e) => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          try {
+            const r = await api("POST", "/api/mine/sync", {});
+            toast(`已与网站同步：上传 ${r.pushed || 0}，拉取 ${r.pulled || 0}${(r.conflicts || []).length ? "（有冲突，请检查）" : ""}`);
+            reload();
+          } catch (err) { toast(err.message); btn.disabled = false; }
+        },
+      }, "☁ 与网站同步")
     ),
-    el("button", {
-      type: "button",
-      class: "btn btn-sm",
-      onClick: async () => {
-        try {
-          const r = await api("POST", "/api/mine/sync", {});
-          toast(`同步完成：上传 ${r.pushed || 0}，拉取 ${r.pulled || 0}${(r.conflicts || []).length ? "（存在冲突）" : ""}`);
-          reload();
-        } catch (e) { toast(e.message); }
-      },
-    }, "☁ 与网站同步")
-  ));
+    hint ? el("span", { class: "muted" }, hint) : null
+  );
+}
 
-  const styles = stRes.items || [];
-  const layouts = layRes.items || [];
-  if (styles.length === 0 && layouts.length === 0) {
-    stage.appendChild(el("div", { class: "card muted" }, "暂无自建画风或图型。创建后会同步到你的网站账号；满意后可以一键发布到社区，免费分享或设积分价格。"));
-    return;
-  }
-  const grid = masonry();
-  styles.forEach((s) => {
-    grid.appendChild(el("div", { class: "style-card" },
-      el("img", { class: "style-thumb", src: s.image ? localImg(s.image) : "/img/logo.svg", alt: s.generation_name }),
-      el("div", { class: "style-body" },
-        el("div", { class: "row", style: { justifyContent: "space-between" } },
-          el("span", { class: "style-code" }, s.number),
-          publishBadge(s)
-        ),
-        el("div", { class: "style-name" }, s.nameZh || s.generation_name),
-        el("div", { class: "style-traits" }, s.traits)
+async function deleteMine(kindPath, item, name, reload) {
+  const published = item.published && item.published.code;
+  const msg = published
+    ? `删除「${name}」？只会删除本机和你账号里的私有副本，已发布到社区的版本需要在网站上下架。`
+    : `删除「${name}」？删除后会同步删除你网站账号里的私有副本。`;
+  if (!window.confirm(msg)) return;
+  try {
+    await api("DELETE", `/api/mine/${kindPath}/${encodeURIComponent(item.docId)}`);
+    toast("已删除");
+    reload();
+  } catch (e) { toast(e.message); }
+}
+
+function mineStyleCard(s, ctx, reload) {
+  const name = s.nameZh || s.generation_name;
+  const edit = () => openEditStyleDialog(s, reload);
+  return el("div", { class: "style-card style-card-mine" },
+    el("img", { class: "style-thumb", src: s.image ? localImg(s.image) : "/img/logo.svg", alt: name, loading: "lazy", onClick: edit }),
+    el("div", { class: "style-body", onClick: edit },
+      el("div", { class: "row", style: { justifyContent: "space-between" } },
+        el("span", { class: "style-code" }, s.number),
+        el("span", { class: "row", style: { gap: "4px" } }, el("span", { class: "badge badge-accent" }, "我的"), publishBadge(s))
       ),
-      el("div", { class: "style-actions" },
-        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { style: s.number }) }, "创作"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => openEditStyleDialog(s, reload) }, "编辑"),
-        publishButton("styles", s, s.nameZh || s.generation_name, reload),
-        el("button", {
-          type: "button",
-          class: "btn btn-sm btn-danger",
-          onClick: async () => { await api("DELETE", `/api/mine/styles/${encodeURIComponent(s.docId)}`); toast("已删除"); reload(); },
-        }, "删除")
-      )
-    ));
-  });
-  layouts.forEach((l) => {
-    grid.appendChild(el("div", { class: "style-card" },
-      el("div", { class: "style-body" },
-        el("div", { class: "row", style: { justifyContent: "space-between" } },
-          el("span", { class: "style-code" }, l.id),
-          publishBadge(l)
-        ),
-        el("div", { class: "style-name" }, l.name),
-        el("div", { class: "style-traits" }, l.prompt_zh)
+      el("div", { class: "style-name" }, name),
+      el("div", { class: "style-traits" }, s.traits)
+    ),
+    el("div", { class: "style-actions" },
+      el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { style: s.number }) }, "用于创作"),
+      el("button", { type: "button", class: "btn btn-sm", onClick: edit }, "编辑"),
+      publishButton("styles", s, name, reload),
+      el("button", { type: "button", class: "btn btn-sm btn-ghost-danger", title: "删除", "aria-label": `删除${name}`, onClick: () => deleteMine("styles", s, name, reload) }, "删除")
+    )
+  );
+}
+
+function mineLayoutCard(l, ctx, reload) {
+  const edit = () => openEditLayoutDialog(l, reload);
+  return el("div", { class: "style-card style-card-mine" },
+    l.image ? el("img", { class: "style-thumb", src: localImg(l.image), alt: l.name, loading: "lazy", onClick: edit }) : null,
+    el("div", { class: "style-body", onClick: edit },
+      el("div", { class: "row", style: { justifyContent: "space-between" } },
+        el("span", { class: "style-code" }, l.id),
+        el("span", { class: "row", style: { gap: "4px" } }, el("span", { class: "badge badge-accent" }, "我的"), publishBadge(l))
       ),
-      el("div", { class: "style-actions" },
-        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { layout: l.id }) }, "创作"),
-        publishButton("layouts", l, l.name, reload),
-        el("button", {
-          type: "button",
-          class: "btn btn-sm btn-danger",
-          onClick: async () => { await api("DELETE", `/api/mine/layouts/${encodeURIComponent(l.docId)}`); toast("已删除"); reload(); },
-        }, "删除")
-      )
-    ));
-  });
-  stage.appendChild(grid);
+      el("div", { class: "style-name" }, l.name),
+      el("div", { class: "style-traits" }, l.prompt_zh)
+    ),
+    el("div", { class: "style-actions" },
+      el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { layout: l.id }) }, "用于创作"),
+      el("button", { type: "button", class: "btn btn-sm", onClick: edit }, "编辑"),
+      publishButton("layouts", l, l.name, reload),
+      el("button", { type: "button", class: "btn btn-sm btn-ghost-danger", title: "删除", "aria-label": `删除${l.name}`, onClick: () => deleteMine("layouts", l, l.name, reload) }, "删除")
+    )
+  );
 }
 
 function publishBadge(item) {
@@ -654,7 +695,7 @@ export function openEditStyleDialog(initial = {}, onSaved) {
     },
   }, "✨ 从参考图提取纯视觉特征");
 
-  showModal(initial.docId ? "编辑自定义画风" : "新建自定义画风", el("div", null,
+  showModal(initial.docId ? "编辑我的画风" : "新建我的画风", el("div", null,
     el("div", { class: "field" },
       el("label", null, "参考图（可选 1–5 张，用于提取视觉特征）"),
       fileIn,
@@ -683,7 +724,7 @@ export function openEditStyleDialog(initial = {}, onSaved) {
           if (res.violations?.length) {
             toast("已保存，建议后续移除特征中的主体词：" + res.violations.join("、"));
           } else {
-            toast("自定义画风已保存");
+            toast("画风已保存");
           }
           closeModal();
           if (onSaved) onSaved();
@@ -697,7 +738,7 @@ function openEditLayoutDialog(initial = {}, onSaved) {
   const nameIn = el("input", { class: "input", value: initial.name || "", placeholder: "图型名称，如：双栏要点对照卡" });
   const zhIn = el("textarea", { class: "textarea", placeholder: "描述区域划分、主标题区、配图区与留白约束" }, initial.prompt_zh || "");
   const enIn = el("textarea", { class: "textarea", placeholder: "English layout instructions..." }, initial.prompt_en || "");
-  showModal("新建自定义图型", el("div", null,
+  showModal(initial.docId ? "编辑我的图型" : "新建我的图型", el("div", null,
     el("div", { class: "field" }, el("label", null, "图型名称"), nameIn),
     el("div", { class: "field" }, el("label", null, "中文排版约束"), zhIn),
     el("div", { class: "field" }, el("label", null, "英文排版约束"), enIn)
@@ -707,9 +748,12 @@ function openEditLayoutDialog(initial = {}, onSaved) {
       class: "btn btn-primary",
       onClick: async () => {
         try {
-          await api("POST", "/api/mine/layouts", { name: nameIn.value, prompt_zh: zhIn.value, prompt_en: enIn.value });
+          await api("POST", "/api/mine/layouts", {
+            docId: initial.docId || "", id: initial.id || "", image: initial.image || "",
+            name: nameIn.value, prompt_zh: zhIn.value, prompt_en: enIn.value,
+          });
           closeModal();
-          toast("自定义图型已保存");
+          toast("图型已保存");
           onSaved();
         } catch (e) { toast(e.message); }
       },
@@ -810,7 +854,7 @@ async function drawFindByImage(stage, ctx) {
           el("button", {
             type: "button",
             class: "btn btn-sm btn-primary",
-            onClick: () => openEditStyleDialog({ traits: res.traitsZh, traitsEn: res.traitsEn, image: up.path }, () => { state.tab = "mine"; clear(stage); drawMine(stage, ctx); }),
+            onClick: () => openEditStyleDialog({ traits: res.traitsZh, traitsEn: res.traitsEn, image: up.path }, () => { state.tab = "styles"; state.group = MINE; ctx.go("atlas", { tab: "styles" }); }),
           }, "据此新建我的画风")
         )
       ));
