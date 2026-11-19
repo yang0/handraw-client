@@ -60,6 +60,9 @@ func (s *Server) mineList(w http.ResponseWriter, r *http.Request) (any, error) {
 				m["remoteId"] = d.RemoteID
 				m["remoteRev"] = d.RemoteRev
 				m["dirty"] = d.Dirty
+				if pub := s.publishedState(d.ID); pub != nil {
+					m["published"] = pub
+				}
 				if b, err := json.Marshal(m); err == nil {
 					items = append(items, b)
 				}

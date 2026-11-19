@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, localImg, money, packImg, showModal, toast } from "../api.js";
+import { api, clear, closeModal, copyText, el, localImg, money, openURL, packImg, showModal, toast, toWebp } from "../api.js";
 import { buildGroupedAIModelSelect } from "./create.js";
 import { masonry } from "../masonry.js";
 
@@ -418,13 +418,13 @@ async function drawMine(stage, ctx) {
           reload();
         } catch (e) { toast(e.message); }
       },
-    }, "☁ 立即与网站私有库同步")
+    }, "☁ 与网站同步")
   ));
 
   const styles = stRes.items || [];
   const layouts = layRes.items || [];
   if (styles.length === 0 && layouts.length === 0) {
-    stage.appendChild(el("div", { class: "card muted" }, "暂无自定义画风或图型。点击上方按钮创建，登录后将默认同步到你的网站私有库。"));
+    stage.appendChild(el("div", { class: "card muted" }, "暂无自建画风或图型。创建后会同步到你的网站账号；满意后可以一键发布到社区，免费分享或设积分价格。"));
     return;
   }
   const grid = masonry();
@@ -434,7 +434,7 @@ async function drawMine(stage, ctx) {
       el("div", { class: "style-body" },
         el("div", { class: "row", style: { justifyContent: "space-between" } },
           el("span", { class: "style-code" }, s.number),
-          el("span", { class: "badge" }, s.dirty ? "待同步" : (s.remoteId ? "已同步私有" : "仅本地"))
+          publishBadge(s)
         ),
         el("div", { class: "style-name" }, s.nameZh || s.generation_name),
         el("div", { class: "style-traits" }, s.traits)
@@ -442,6 +442,7 @@ async function drawMine(stage, ctx) {
       el("div", { class: "style-actions" },
         el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { style: s.number }) }, "创作"),
         el("button", { type: "button", class: "btn btn-sm", onClick: () => openEditStyleDialog(s, reload) }, "编辑"),
+        publishButton("styles", s, s.nameZh || s.generation_name, reload),
         el("button", {
           type: "button",
           class: "btn btn-sm btn-danger",
@@ -453,12 +454,16 @@ async function drawMine(stage, ctx) {
   layouts.forEach((l) => {
     grid.appendChild(el("div", { class: "style-card" },
       el("div", { class: "style-body" },
-        el("div", { class: "style-code" }, l.id),
+        el("div", { class: "row", style: { justifyContent: "space-between" } },
+          el("span", { class: "style-code" }, l.id),
+          publishBadge(l)
+        ),
         el("div", { class: "style-name" }, l.name),
         el("div", { class: "style-traits" }, l.prompt_zh)
       ),
       el("div", { class: "style-actions" },
         el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { layout: l.id }) }, "创作"),
+        publishButton("layouts", l, l.name, reload),
         el("button", {
           type: "button",
           class: "btn btn-sm btn-danger",
@@ -468,6 +473,126 @@ async function drawMine(stage, ctx) {
     ));
   });
   stage.appendChild(grid);
+}
+
+function publishBadge(item) {
+  const p = item.published;
+  if (p && p.status === "approved") return el("span", { class: "badge badge-ok" }, "已公开");
+  if (p && p.status === "pending") return el("span", { class: "badge badge-warn" }, "评审中");
+  if (p && p.status === "changes_requested") return el("span", { class: "badge badge-warn" }, "需修改");
+  return el("span", { class: "badge" }, item.dirty ? "待同步" : (item.remoteId ? "已同步" : "仅本地"));
+}
+
+function publishButton(kindPath, item, name, reload) {
+  const p = item.published;
+  if (p && p.code) {
+    return el("button", { type: "button", class: "btn btn-sm", onClick: async () => {
+      const { siteBase } = await api("GET", "/api/account").catch(() => ({}));
+      const url = (siteBase || "https://handraw-style.com").replace(/\/+$/, "") + (p.url || "");
+      toast(await copyText(url) ? "社区链接已复制" : url);
+    } }, "复制链接");
+  }
+  return el("button", { type: "button", class: "btn btn-sm", onClick: () => openPublishResourceDialog(kindPath, item, name, reload) }, "发布到社区");
+}
+
+// openPublishResourceDialog: pick a cover and examples from finished works,
+// choose free or a point price, publish (handraw-web docs/sharing-v2.md §2.1).
+async function openPublishResourceDialog(kindPath, item, name, reload) {
+  const label = kindPath === "styles" ? "画风" : "图型";
+  const code = item.number || item.id;
+  // Images made with this resource come first; any finished image can be used.
+  const res = await api("GET", "/api/works?limit=60").catch(() => ({ items: [] }));
+  const pool = [];
+  for (const r of res.items || []) {
+    const matches = Boolean(code) && JSON.stringify(r.recipe || {}).includes(code);
+    for (const im of r.images || []) {
+      if (im.status === "done" && im.path) pool.push({ path: im.path, thumb: im.thumb, matches });
+    }
+  }
+  pool.sort((a, b) => Number(b.matches) - Number(a.matches));
+  const chosen = [];
+  const grid = el("div", { class: "publish-pick" });
+  const counter = el("span", { class: "muted" }, "");
+  const refresh = () => {
+    grid.querySelectorAll(".pick").forEach((node) => {
+      const idx = chosen.indexOf(node.dataset.path);
+      node.classList.toggle("on", idx >= 0);
+      node.querySelector(".pick-n").textContent = idx === 0 ? "封面" : idx > 0 ? String(idx) : "";
+    });
+    counter.textContent = `已选 ${chosen.length} 张（第 1 张作封面，自动裁成正方形；至少 3 张，最多 10 张）`;
+  };
+  if (!pool.length) {
+    grid.appendChild(el("div", { class: "muted" }, `还没有可用的作品图。先用这个${label}生成 3 张以上不同主题的图，再回来发布。`));
+  }
+  pool.slice(0, 60).forEach((im) => {
+    const node = el("button", { type: "button", class: "pick", dataset: { path: im.path }, onClick: () => {
+      const idx = chosen.indexOf(im.path);
+      if (idx >= 0) chosen.splice(idx, 1);
+      else if (chosen.length < 10) chosen.push(im.path);
+      refresh();
+    } },
+      el("img", { src: localImg(im.thumb || im.path), alt: "", loading: "lazy" }),
+      el("span", { class: "pick-n" }),
+      im.matches ? el("span", { class: "pick-tag" }, `用了此${label}`) : null
+    );
+    grid.appendChild(node);
+  });
+  refresh();
+
+  const descIn = el("textarea", { class: "textarea", rows: 3, maxlength: 300, placeholder: `介绍这个${label}：适合什么主题、有什么特点（8–300 字）` });
+  const priceSel = el("select", { class: "input" },
+    el("option", { value: "0" }, "免费公开（定义可见，别人可加入并在本地使用）"),
+    ...[10, 30, 50, 100, 200, 500].map((v) => el("option", { value: String(v) }, `${v} 积分（定义保密，别人解锁后只能用网站模型生成）`))
+  );
+  const note = el("span", { class: "muted", style: { fontSize: "12px" } }, "免费资源立即上架；收费资源由社区评审团审核通过后开售。积分只用于站内解锁，不能提现。");
+  priceSel.addEventListener("change", () => {
+    note.textContent = priceSel.value === "0"
+      ? "免费资源立即上架；违规内容可被举报下架。"
+      : "收费资源由社区评审团审核通过后开售。别人解锁时你获得积分（只能用于站内解锁）。";
+  });
+  const body = el("div", { class: "col", style: { gap: "10px" } },
+    el("strong", null, `发布「${name}」到手绘风社区`),
+    el("span", { class: "muted" }, "发布后所有人都能在网站看到它的名称、封面和示例图。"),
+    counter, grid,
+    el("div", { class: "field" }, el("label", null, "简介"), descIn),
+    el("div", { class: "field" }, el("label", null, "价格"), priceSel),
+    note
+  );
+  const submit = el("button", { type: "button", class: "btn btn-primary", onClick: async () => {
+    if (chosen.length < 3) return toast("请至少选择 3 张图（含封面）");
+    if (descIn.value.trim().length < 8) return toast("简介至少 8 个字");
+    submit.disabled = true;
+    try {
+      submit.textContent = "正在压缩图片…";
+      const cover = await toWebp(localImg(chosen[0]), { maxEdge: 1024, square: true });
+      const images = [];
+      for (const p of chosen.slice(1)) {
+        const url = await toWebp(localImg(p));
+        if (url) images.push(url);
+      }
+      if (!cover || images.length < 2) throw new Error("当前系统无法压缩为 WebP，请更新系统 WebView 后重试");
+      submit.textContent = "正在发布…";
+      const r = await api("POST", `/api/mine/${kindPath}/${encodeURIComponent(item.docId)}/publish`, {
+        price: Number(priceSel.value), description: descIn.value.trim(), cover, images,
+      });
+      closeModal();
+      const pub = r.published || {};
+      const url = (r.siteBase || "").replace(/\/+$/, "") + (pub.url || "");
+      if (pub.status === "approved") {
+        toast("已公开到社区，链接已复制");
+        await copyText(url);
+        openURL(url);
+      } else {
+        toast("已提交社区评审，通过后自动开售");
+      }
+      reload();
+    } catch (e) {
+      toast(e.message);
+      submit.disabled = false;
+      submit.textContent = "确认发布";
+    }
+  } }, "确认发布");
+  showModal(`发布${label}`, body, [el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"), submit]);
 }
 
 export function openEditStyleDialog(initial = {}, onSaved) {

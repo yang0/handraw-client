@@ -106,6 +106,46 @@ export function remoteThumb(src, width = 480, siteBase = "") {
   return `/files/remote?url=${encodeURIComponent(full)}&w=${encodeURIComponent(width)}&t=${encodeURIComponent(getToken())}`;
 }
 
+// toWebp encodes an image as a WebP data URL for sharing (docs/sharing-v2.md:
+// long edge <= maxEdge, quality 0.85). square crops to the centre square.
+// Resolves "" when the WebView cannot encode WebP; the backend then falls back.
+export function toWebp(src, { maxEdge = 2048, quality = 0.85, square = false } = {}) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => {
+      let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
+      if (square) {
+        const side = Math.min(sw, sh);
+        sx = (sw - side) / 2; sy = (sh - side) / 2; sw = sh = side;
+      }
+      const scale = Math.min(1, maxEdge / Math.max(sw, sh));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(sw * scale));
+      canvas.height = Math.max(1, Math.round(sh * scale));
+      canvas.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      const url = canvas.toDataURL("image/webp", quality);
+      resolve(url.startsWith("data:image/webp") ? url : "");
+    };
+    img.onerror = () => resolve("");
+    img.src = src;
+  });
+}
+
+export async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = el("textarea", { style: { position: "fixed", opacity: "0" } }, text);
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  }
+}
+
 export function money(cents) {
   return "¥" + (Number(cents || 0) / 100).toFixed(2);
 }

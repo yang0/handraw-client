@@ -281,6 +281,9 @@ func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byt
 	body["requestId"] = spec.RequestID
 	body["clientRequestId"] = spec.RequestID
 	body["source"] = "client"
+	if settings.Get().KeepSiteGenerationsPrivate {
+		body["visibility"] = "private"
+	}
 	if spec.QuoteID != "" {
 		body["quoteId"] = spec.QuoteID
 		body["quoteIndex"] = spec.QuoteIndex

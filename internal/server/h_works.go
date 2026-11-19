@@ -130,9 +130,9 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 	}
 	if run.PublishedWorkID != "" {
 		return map[string]any{
-			"ok":     true,
-			"workId": run.PublishedWorkID,
-			"url":    run.PublishedURL,
+			"ok":      true,
+			"workId":  run.PublishedWorkID,
+			"url":     run.PublishedURL,
 			"deduped": true,
 		}, nil
 	}
@@ -140,8 +140,18 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 		Title    string   `json:"title"`
 		Notes    string   `json:"notes"`
 		ImageIDs []string `json:"imageIds"`
+		// WebP data URLs encoded by the UI (long edge <= 2048, q85), keyed by image id.
+		Encoded map[string]string `json:"encoded"`
 	}
 	_ = decode(r, &body)
+	body.Title = strings.TrimSpace(body.Title)
+	body.Notes = strings.TrimSpace(body.Notes)
+	if len([]rune(body.Title)) > 60 {
+		return nil, bad("作品标题最多 60 字")
+	}
+	if len([]rune(body.Notes)) > 2000 {
+		return nil, bad("创作说明最多 2000 字")
+	}
 
 	want := map[string]bool{}
 	for _, iid := range body.ImageIDs {
@@ -166,35 +176,37 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 
 	var imagesPayload []map[string]any
 	for _, im := range selected {
-		raw, err := os.ReadFile(im.Path)
+		dataURL, name, err := shareImage(im, body.Encoded[im.ID])
 		if err != nil {
-			return nil, fmt.Errorf("读取图片失败：%w", err)
+			return nil, err
 		}
+		raw, _ := base64.StdEncoding.DecodeString(dataURL[strings.Index(dataURL, ",")+1:])
 		sum := sha256.Sum256(raw)
-		mime := "image/png"
-		switch strings.ToLower(filepath.Ext(im.Path)) {
-		case ".jpg", ".jpeg":
-			mime = "image/jpeg"
-		case ".webp":
-			mime = "image/webp"
-		}
 		imagesPayload = append(imagesPayload, map[string]any{
-			"name":    filepath.Base(im.Path),
+			"name":    name,
 			"sha256":  hex.EncodeToString(sum[:]),
-			"dataUrl": "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw),
+			"dataUrl": dataURL,
 		})
 	}
 
 	extUUID := uuid.NewSHA1(uuid.NameSpaceURL, []byte("handraw-run:"+run.ID)).String()
-	origReq := buildPublishRequestText(run, body.Title, body.Notes)
+	title := []rune(firstStr(body.Title, run.Title))
+	if len(title) > 60 {
+		title = title[:60]
+	}
 	payload := map[string]any{
 		"externalRunId":   extUUID,
 		"requestId":       "skill-history-" + extUUID,
 		"originClient":    "skill",
 		"visibility":      "public",
 		"status":          "success",
-		"originalRequest": origReq,
+		"originalRequest": buildPublishRequestText(run, "", ""),
 		"images":          imagesPayload,
+		"title":           string(title),
+		"recipe":          s.publishRecipe(run),
+	}
+	if body.Notes != "" {
+		payload["notes"] = body.Notes
 	}
 	rawResp, err := s.Site.Send(r.Context(), "POST", "/api/v1/me/generations", payload)
 	if err != nil {
@@ -204,13 +216,17 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 		WorkID   string   `json:"workId"`
 		WorkIds  []string `json:"workIds"`
 		CoverURL string   `json:"coverUrl"`
+		URL      string   `json:"url"`
 	}
 	_ = json.Unmarshal(rawResp, &res)
 	wid := res.WorkID
 	if wid == "" && len(res.WorkIds) > 0 {
 		wid = res.WorkIds[0]
 	}
-	workURL := s.Site.Base() + "/t/work-" + wid
+	workURL := res.URL
+	if workURL == "" {
+		workURL = s.Site.Base() + "/t/work-" + wid
+	}
 	fields := map[string]any{"published_work_id": wid, "published_url": workURL}
 	if body.Title != "" {
 		fields["title"] = body.Title
@@ -219,6 +235,133 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 	_ = jobs.WriteRunJSON(s.DB, run.ID)
 	s.Emit("work_published", map[string]any{"runId": run.ID, "workId": wid, "url": workURL})
 	return map[string]any{"ok": true, "workId": wid, "url": workURL}, nil
+}
+
+// shareMaxEdge follows docs/sharing-v2.md (WebP, long edge <= 2048, q85).
+const shareMaxEdge = 2048
+
+// shareImage returns the data URL uploaded for one image. The UI encodes WebP
+// (Go has no WebP encoder); when that is missing or invalid, a WebP original
+// within the size limit is sent as is, otherwise the original is downscaled
+// and sent as JPEG, which the site also accepts.
+func shareImage(im store.Image, encoded string) (string, string, error) {
+	base := strings.TrimSuffix(filepath.Base(im.Path), filepath.Ext(im.Path))
+	const prefix = "data:image/webp;base64,"
+	fits := func(raw []byte) bool {
+		if len(raw) < 12 || string(raw[0:4]) != "RIFF" || string(raw[8:12]) != "WEBP" || len(raw) > 12<<20 {
+			return false
+		}
+		cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+		return err == nil && cfg.Width <= shareMaxEdge && cfg.Height <= shareMaxEdge
+	}
+	if strings.HasPrefix(encoded, prefix) {
+		if raw, err := base64.StdEncoding.DecodeString(encoded[len(prefix):]); err == nil && fits(raw) {
+			return encoded, base + ".webp", nil
+		}
+	}
+	raw, err := os.ReadFile(im.Path)
+	if err != nil {
+		return "", "", fmt.Errorf("读取图片失败：%w", err)
+	}
+	if fits(raw) {
+		return prefix + base64.StdEncoding.EncodeToString(raw), base + ".webp", nil
+	}
+	src, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return "", "", fmt.Errorf("无法解码图片 %s：%w", filepath.Base(im.Path), err)
+	}
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w > shareMaxEdge || h > shareMaxEdge {
+		if w >= h {
+			h, w = h*shareMaxEdge/w, shareMaxEdge
+		} else {
+			w, h = w*shareMaxEdge/h, shareMaxEdge
+		}
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, max(w, 1), max(h, 1)))
+	draw.Draw(dst, dst.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
+	draw.CatmullRom.Scale(dst, dst.Bounds(), src, b, draw.Over, nil)
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 88}); err != nil {
+		return "", "", err
+	}
+	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), base + ".jpg", nil
+}
+
+// publishRecipe is the structured recipe sent with a shared work. Official
+// codes are public; the user's own resources are referenced only by their
+// website id, so their definitions never leave the machine through this path.
+func (s *Server) publishRecipe(run store.Run) map[string]any {
+	var rec struct {
+		StyleIDs []string `json:"styleIds"`
+		Style    string   `json:"style"`
+		Style2   string   `json:"style2"`
+		LayoutID string   `json:"layoutId"`
+		Layout   string   `json:"layout"`
+		Ratio    string   `json:"ratio"`
+		Color    string   `json:"color"`
+		Tone     string   `json:"tone"`
+		Colors   []string `json:"colors"`
+		Tones    []string `json:"tones"`
+	}
+	_ = json.Unmarshal(run.Recipe, &rec)
+	out := map[string]any{}
+	var styles, personal []string
+	seen := map[string]bool{}
+	addPersonal := func(kind, id string) {
+		d, err := s.DB.GetDoc(kind, id)
+		if err == nil && d.RemoteID != "" && !seen["r:"+d.RemoteID] && len(personal) < 4 {
+			seen["r:"+d.RemoteID] = true
+			personal = append(personal, d.RemoteID)
+		}
+	}
+	for _, id := range append(rec.StyleIDs, rec.Style, rec.Style2) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		switch {
+		case strings.HasPrefix(id, "mine:"):
+			addPersonal("style", id)
+		case !strings.HasPrefix(id, "MY-") && len(styles) < 2:
+			styles = append(styles, id)
+		}
+	}
+	if len(styles) > 0 {
+		out["styles"] = styles
+	}
+	if lay := strings.TrimSpace(firstStr(rec.LayoutID, rec.Layout)); lay != "" {
+		switch {
+		case strings.HasPrefix(lay, "mine:"):
+			addPersonal("layout", lay)
+		case !strings.HasPrefix(lay, "MY-"):
+			out["layout"] = lay
+		}
+	}
+	if rec.Ratio != "" {
+		out["ratio"] = rec.Ratio
+	}
+	nonEmpty := func(vals []string) []string {
+		var outv []string
+		for _, v := range vals {
+			if v = strings.TrimSpace(v); v != "" {
+				outv = append(outv, v)
+			}
+		}
+		return outv
+	}
+	if c := nonEmpty(append(rec.Colors, rec.Color)); len(c) > 0 {
+		out["colors"] = c
+	}
+	if t := nonEmpty(append(rec.Tones, rec.Tone)); len(t) > 0 {
+		out["tones"] = t
+	}
+	if len(personal) > 0 {
+		out["personalResources"] = personal
+	}
+	return out
 }
 
 // buildPublishRequestText follows AGENTS.md sharing rules: keep original request,

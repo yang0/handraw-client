@@ -52,6 +52,9 @@ type Settings struct {
 	PluginConfig       map[string]any  `json:"pluginConfig"`
 	LastRecipeID       string          `json:"lastRecipeId"`
 	Onboarded          bool            `json:"onboarded"`
+	// KeepSiteGenerationsPrivate stops website-model images from being
+	// published to the community automatically (the website default is public).
+	KeepSiteGenerationsPrivate bool `json:"keepSiteGenerationsPrivate"`
 }
 
 func Defaults() Settings {

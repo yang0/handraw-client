@@ -348,6 +348,7 @@ export async function renderSettings(root, ctx, params = {}) {
   const trayChk = el("input", { id: "pref-tray", name: "minimizeToTray", type: "checkbox", checked: Boolean(settings.minimizeToTray) });
   const autoUpdChk = el("input", { id: "pref-auto-update", name: "autoCheckUpdate", type: "checkbox", checked: Boolean(settings.autoCheckUpdate) });
   const autoSyncChk = el("input", { id: "pref-auto-sync", name: "autoSyncResources", type: "checkbox", checked: Boolean(settings.autoSyncResources) });
+  const publicChk = el("input", { id: "pref-public-gen", name: "publicSiteGenerations", type: "checkbox", checked: !settings.keepSiteGenerationsPrivate });
   const prefStatus = el("span", { class: "muted", role: "status", "aria-live": "polite" });
 
   const prefForm = el("form", {
@@ -365,6 +366,7 @@ export async function renderSettings(root, ctx, params = {}) {
           minimizeToTray: trayChk.checked,
           autoCheckUpdate: autoUpdChk.checked,
           autoSyncResources: autoSyncChk.checked,
+          keepSiteGenerationsPrivate: !publicChk.checked,
         });
         prefStatus.textContent = "已保存";
         toast("偏好设置已保存");
@@ -411,7 +413,8 @@ export async function renderSettings(root, ctx, params = {}) {
       el("div", { class: "settings-checks" },
         el("label", { for: "pref-tray", class: "settings-check" }, trayChk, el("span", null, "关闭主窗口时最小化到系统托盘")),
         el("label", { for: "pref-auto-update", class: "settings-check" }, autoUpdChk, el("span", null, "自动检查软件更新")),
-        el("label", { for: "pref-auto-sync", class: "settings-check" }, autoSyncChk, el("span", null, "登录后自动同步自定义画风"))
+        el("label", { for: "pref-auto-sync", class: "settings-check" }, autoSyncChk, el("span", null, "登录后自动同步自定义画风")),
+        el("label", { for: "pref-public-gen", class: "settings-check" }, publicChk, el("span", null, "网站模型生成的图片自动公开到社区（用了自己参考图的除外）"))
       )
     ),
     el("div", { class: "row", style: { justifyContent: "space-between" } },

@@ -37,20 +37,21 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) (any, error
 
 func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
-		SiteBase           *string `json:"siteBase"`
-		WorksDir           *string `json:"worksDir"`
-		Theme              *string `json:"theme"`
-		AutoSyncResources  *bool   `json:"autoSyncResources"`
-		AutoCheckUpdate    *bool   `json:"autoCheckUpdate"`
-		CostLimitCents     *int    `json:"costLimitCents"`
-		DefaultModel       *string `json:"defaultModel"`
-		DefaultTextModel   *string `json:"defaultTextModel"`
-		DefaultVisionModel *string `json:"defaultVisionModel"`
-		QuickShotHotkey    *string `json:"quickShotHotkey"`
-		QuickShotEnabled   *bool   `json:"quickShotEnabled"`
-		MinimizeToTray     *bool   `json:"minimizeToTray"`
-		LastRecipeID       *string `json:"lastRecipeId"`
-		Onboarded          *bool   `json:"onboarded"`
+		SiteBase                   *string `json:"siteBase"`
+		WorksDir                   *string `json:"worksDir"`
+		Theme                      *string `json:"theme"`
+		AutoSyncResources          *bool   `json:"autoSyncResources"`
+		KeepSiteGenerationsPrivate *bool   `json:"keepSiteGenerationsPrivate"`
+		AutoCheckUpdate            *bool   `json:"autoCheckUpdate"`
+		CostLimitCents             *int    `json:"costLimitCents"`
+		DefaultModel               *string `json:"defaultModel"`
+		DefaultTextModel           *string `json:"defaultTextModel"`
+		DefaultVisionModel         *string `json:"defaultVisionModel"`
+		QuickShotHotkey            *string `json:"quickShotHotkey"`
+		QuickShotEnabled           *bool   `json:"quickShotEnabled"`
+		MinimizeToTray             *bool   `json:"minimizeToTray"`
+		LastRecipeID               *string `json:"lastRecipeId"`
+		Onboarded                  *bool   `json:"onboarded"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -72,6 +73,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		}
 		if body.AutoSyncResources != nil {
 			st.AutoSyncResources = *body.AutoSyncResources
+		}
+		if body.KeepSiteGenerationsPrivate != nil {
+			st.KeepSiteGenerationsPrivate = *body.KeepSiteGenerationsPrivate
 		}
 		if body.AutoCheckUpdate != nil {
 			st.AutoCheckUpdate = *body.AutoCheckUpdate
@@ -413,14 +417,18 @@ func (s *Server) pluginCall(w http.ResponseWriter, r *http.Request) (any, error)
 		if err := need("clipboard"); err != nil {
 			return nil, err
 		}
-		var a struct{ Text string `json:"text"` }
+		var a struct {
+			Text string `json:"text"`
+		}
 		_ = json.Unmarshal(body.Args, &a)
 		return okv, s.Host.CopyText(a.Text)
 	case "open.url":
 		if err := need("open:url"); err != nil {
 			return nil, err
 		}
-		var a struct{ URL string `json:"url"` }
+		var a struct {
+			URL string `json:"url"`
+		}
 		_ = json.Unmarshal(body.Args, &a)
 		if !strings.HasPrefix(a.URL, "https://") && !strings.HasPrefix(a.URL, "http://") {
 			return nil, bad("只允许打开 http/https 链接")

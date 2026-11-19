@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, localImg, onEvent, openURL, remoteThumb, showModal, toast } from "../api.js";
+import { api, clear, closeModal, copyText, el, localImg, onEvent, openURL, remoteThumb, showModal, toast, toWebp } from "../api.js";
 import { masonry } from "../masonry.js";
 
 const state = {
@@ -130,7 +130,7 @@ async function openRunDetail(runId, ctx, onChanged) {
   const versions = detail.versions || [];
 
   const titleIn = el("input", { class: "input", value: run.title || "" });
-  const notesIn = el("input", { class: "input", placeholder: "可选：发布到社区时的创作说明" });
+  const notesIn = el("textarea", { class: "input", rows: 2, maxlength: 2000, placeholder: "可选：创作说明、心得或配方要点（别人做同款时能看到）" });
   const body = el("div", { class: "col", style: { gap: "12px" } });
 
   // Versions strip if >1
@@ -205,37 +205,62 @@ async function openRunDetail(runId, ctx, onChanged) {
     ));
   }
 
-  // Publish preview panel
-  const pubBox = el("div", { class: "card col", style: { background: "var(--paper)" } });
+  // Publish panel
+  const pubBox = el("div", { class: "card col publish-box" });
+  const showPublished = (url) => {
+    clear(pubBox);
+    pubBox.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+      el("span", { class: "badge badge-ok" }, "已发布到手绘风社区"),
+      el("div", { class: "row" },
+        el("button", { type: "button", class: "btn btn-sm", onClick: async () => toast(await copyText(url) ? "链接已复制，可以发给朋友或贴到社媒" : "复制失败，请手动复制") }, "复制链接"),
+        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openURL(url) }, "↗ 在网站打开")
+      )
+    ));
+    pubBox.appendChild(el("span", { class: "muted mono", style: { wordBreak: "break-all", fontSize: "11.5px" } }, url));
+  };
   if (run.publishedWorkId) {
-    pubBox.appendChild(el("div", { class: "row", style: { justifyContent: "space-between" } },
-      el("span", { class: "badge badge-ok" }, "已发布到网站社区"),
-      el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openURL(run.publishedUrl) }, "↗ 在网站打开")
-    ));
+    showPublished(run.publishedUrl);
   } else {
-    pubBox.appendChild(el("strong", null, "☁ 发布到手绘风社区（本地生成默认不上传，确认后发布）"));
-    pubBox.appendChild(el("span", { class: "muted" }, "发布只携带勾选图片、公开主题与官方配方编号；自定义 MY-* 私密提示词不会外泄。"));
+    pubBox.appendChild(el("strong", null, "☁ 分享到手绘风社区"));
+    pubBox.appendChild(el("span", { class: "muted" }, "上传勾选的图片（WebP，长边 2048）、标题、说明和配方编号，别人可以一键做同款。自建画风只显示名称和网站链接，不会带上本机的定义。"));
     pubBox.appendChild(notesIn);
-    pubBox.appendChild(el("div", { class: "row" },
-      el("button", {
-        type: "button",
-        class: "btn btn-primary",
-        onClick: async () => {
-          if (!selectedIds.size) return toast("请至少勾选 1 张已完成的图片");
-          try {
-            const res = await api("POST", `/api/works/${encodeURIComponent(run.id)}/publish`, {
-              title: titleIn.value.trim(),
-              notes: notesIn.value.trim(),
-              imageIds: Array.from(selectedIds),
-            });
-            toast("已发布到社区");
-            closeModal();
-            onChanged?.();
-            if (res.url) openURL(res.url);
-          } catch (e) { toast(e.message); }
-        },
-      }, "确认发布所选图片")
-    ));
+    const pubBtn = el("button", {
+      type: "button",
+      class: "btn btn-primary",
+      onClick: async () => {
+        if (!selectedIds.size) return toast("请至少勾选 1 张已完成的图片");
+        pubBtn.disabled = true;
+        const label = pubBtn.textContent;
+        try {
+          const ids = Array.from(selectedIds);
+          const encoded = {};
+          let n = 0;
+          for (const id of ids) {
+            const im = run.images.find((x) => x.id === id);
+            pubBtn.textContent = `正在压缩 ${++n}/${ids.length}…`;
+            const url = im ? await toWebp(localImg(im.path)) : "";
+            if (url) encoded[id] = url;
+          }
+          pubBtn.textContent = "正在上传…";
+          const res = await api("POST", `/api/works/${encodeURIComponent(run.id)}/publish`, {
+            title: titleIn.value.trim(),
+            notes: notesIn.value.trim(),
+            imageIds: ids,
+            encoded,
+          });
+          toast("已发布到社区");
+          run.publishedWorkId = res.workId;
+          run.publishedUrl = res.url;
+          showPublished(res.url);
+          onChanged?.();
+        } catch (e) {
+          toast(e.message);
+          pubBtn.disabled = false;
+          pubBtn.textContent = label;
+        }
+      },
+    }, "发布所选图片");
+    pubBox.appendChild(el("div", { class: "row" }, pubBtn));
   }
   body.appendChild(pubBox);
 
