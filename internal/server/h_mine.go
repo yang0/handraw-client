@@ -534,7 +534,7 @@ func (s *Server) syncResourcesInternal(ctx context.Context) (map[string]any, err
 				continue
 			}
 			var zh, en, lic string
-			var examples []string
+			examples := []string{} // never null: the site rejects a null list
 			if kind == "style" {
 				var st resources.Style
 				_ = json.Unmarshal(d.Data, &st)

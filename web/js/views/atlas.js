@@ -582,9 +582,18 @@ async function openPublishResourceDialog(kindPath, item, name, reload) {
 
   const descIn = el("textarea", { class: "textarea", rows: 3, maxlength: 300, placeholder: `介绍这个${label}：适合什么主题、有什么特点（8–300 字）` });
   const priceSel = el("select", { class: "input" },
-    el("option", { value: "0" }, "免费公开（定义可见，别人可加入并在本地使用）"),
-    ...[10, 30, 50, 100, 200, 500].map((v) => el("option", { value: String(v) }, `${v} 积分（定义保密，别人解锁后只能用网站模型生成）`))
+    el("option", { value: "0" }, "免费公开（定义可见，别人可加入并在本地使用）")
   );
+  const priceHint = el("span", { class: "muted", style: { fontSize: "12px" } }, "正在读取你的等级…");
+  // Paid tiers depend on the creator level (handraw-web #376).
+  api("GET", "/api/account/level").then((lv) => {
+    const cap = lv && lv.available ? Number(lv.priceCap || 0) : 500;
+    const tiers = [10, 30, 50, 100, 200, 500].filter((v) => v <= cap);
+    tiers.forEach((v) => priceSel.appendChild(el("option", { value: String(v) }, `${v} 积分（定义保密，别人解锁后只能用网站模型生成）`)));
+    priceHint.textContent = !lv || !lv.available ? ""
+      : tiers.length ? `你现在是 Lv${lv.level}，收费定价最高 ${cap > 100000 ? 500 : cap} 积分。`
+      : `你现在是 Lv${lv.level}，达到 Lv3 后可以发布收费画风/图型；现在可以先免费发布积累经验。`;
+  }).catch(() => { priceHint.textContent = ""; });
   const note = el("span", { class: "muted", style: { fontSize: "12px" } }, "免费资源立即上架；收费资源由社区评审团审核通过后开售。积分只用于站内解锁，不能提现。");
   priceSel.addEventListener("change", () => {
     note.textContent = priceSel.value === "0"
@@ -596,7 +605,7 @@ async function openPublishResourceDialog(kindPath, item, name, reload) {
     el("span", { class: "muted" }, "发布后所有人都能在网站看到它的名称、封面和示例图。"),
     counter, grid,
     el("div", { class: "field" }, el("label", null, "简介"), descIn),
-    el("div", { class: "field" }, el("label", null, "价格"), priceSel),
+    el("div", { class: "field" }, el("label", null, "价格"), priceSel, priceHint),
     note
   );
   const submit = el("button", { type: "button", class: "btn btn-primary", onClick: async () => {
@@ -628,7 +637,8 @@ async function openPublishResourceDialog(kindPath, item, name, reload) {
       }
       reload();
     } catch (e) {
-      toast(e.message);
+      const byCode = { level_too_low: "你的等级还不能发布收费资源，请选择免费发布", price_above_level_cap: "这个价格超过了你当前等级的上限，请选低一档" };
+      toast(byCode[e.code] || e.message);
       submit.disabled = false;
       submit.textContent = "确认发布";
     }

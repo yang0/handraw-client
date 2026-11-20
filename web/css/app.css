@@ -1038,3 +1038,8 @@ dialog::backdrop {
   }
   .atlas-groups .group-mine { border-bottom: 1px solid var(--line); margin-bottom: 0; padding-bottom: 5px; }
 }
+
+.settings-level { display: flex; gap: 12px; align-items: center; margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.settings-level-seal { flex: 0 0 auto; width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: var(--accent); color: #fff; font-weight: 800; transform: rotate(-3deg); }
+.settings-level-bar { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.settings-level-bar span { display: block; height: 100%; background: var(--accent); border-radius: inherit; }

@@ -29,7 +29,9 @@ func ClientName(version string) string {
 }
 
 // Scopes the client asks for. "studio" is the desktop scope (handraw-web W1).
-var Scopes = []string{"publish", "library", "studio", "economy"}
+// Scopes requested at device login. /api/economy and /api/me/level are
+// readable by any device token, so no extra scope is needed for balances.
+var Scopes = []string{"publish", "library", "studio"}
 
 type Client struct {
 	HTTP    *http.Client
@@ -179,6 +181,16 @@ func firstNonEmpty(v ...string) string {
 }
 
 // Fetch downloads a site resource (an image URL or /generated path) with the token.
+// needsToken reports whether a site path is private media or an API call.
+func needsToken(p string) bool {
+	for _, prefix := range []string{"/images/", "/assets/", "/data/"} {
+		if strings.HasPrefix(p, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Client) Fetch(ctx context.Context, ref string) ([]byte, string, error) {
 	u := ref
 	if strings.HasPrefix(ref, "/") {
@@ -193,8 +205,9 @@ func (c *Client) Fetch(ctx context.Context, ref string) ([]byte, string, error) 
 		return nil, "", err
 	}
 	req.Header.Set("User-Agent", "handraw-client/"+c.Version)
-	// Only send the token to the site itself.
-	if bu, _ := url.Parse(c.base()); bu != nil && strings.EqualFold(pu.Host, bu.Host) {
+	// Only send the token to the site itself, and only where it is needed:
+	// public images must not depend on the token's scopes.
+	if bu, _ := url.Parse(c.base()); bu != nil && strings.EqualFold(pu.Host, bu.Host) && needsToken(pu.Path) {
 		if tok := c.token(); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 		}
@@ -232,7 +245,7 @@ func (c *Client) StartDevice(ctx context.Context) (DeviceStart, error) {
 	}, &out)
 	if err != nil {
 		var ae *APIError
-		// An older site doesn't know "studio" yet: fall back to the Skill scopes.
+		// A site that doesn't know "studio" yet: fall back to the Skill scopes.
 		if errors.As(err, &ae) && ae.Code == "invalid_scope" {
 			err = c.Public(ctx, "POST", "/api/auth/device", map[string]any{
 				"clientName": ClientName(c.Version),
@@ -292,6 +305,13 @@ func (c *Client) Me(ctx context.Context) (map[string]any, error) {
 func (c *Client) Economy(ctx context.Context) (json.RawMessage, error) {
 	var out json.RawMessage
 	err := c.Do(ctx, "GET", "/api/economy", nil, &out)
+	return out, err
+}
+
+// Level is the signed-in user's creator level (handraw-web #376/#377).
+func (c *Client) Level(ctx context.Context) (json.RawMessage, error) {
+	var out json.RawMessage
+	err := c.Do(ctx, "GET", "/api/me/level", nil, &out)
 	return out, err
 }
 

@@ -182,6 +182,29 @@ export async function renderSettings(root, ctx, params = {}) {
       accSection.appendChild(assetsGrid);
     }
 
+    // Creator level (handraw-web #376): loaded separately so an older site
+    // without levels never blocks the account panel.
+    const levelSlot = el("div", { class: "settings-level-slot" });
+    accSection.appendChild(levelSlot);
+    api("GET", "/api/account/level").then((lv) => {
+      if (!lv || !lv.available) return;
+      const pct = Math.round((lv.progress || 0) * 100);
+      levelSlot.appendChild(el("div", { class: "settings-level" },
+        el("span", { class: "settings-level-seal" }, `Lv${lv.level}`),
+        el("div", { class: "col", style: { gap: "4px", flex: "1", minWidth: 0 } },
+          el("div", { class: "row", style: { justifyContent: "space-between", gap: "8px" } },
+            el("strong", null, `${lv.name} · ${lv.xp} 经验`),
+            el("button", { type: "button", class: "btn btn-sm", onClick: () => openURL(`${siteBase}/?view=account&section=level`) }, "等级详情 ↗")
+          ),
+          el("div", { class: "settings-level-bar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(pct), "aria-label": "距离下一级的进度" },
+            el("span", { style: { width: `${pct}%` } })),
+          el("span", { class: "muted" }, lv.nextLevel
+            ? `再获得 ${lv.nextXp - lv.xp} 经验升到 Lv${lv.nextLevel} ${lv.nextName}` + (lv.priceCap > 100000 ? "" : lv.priceCap ? ` · 收费定价上限 ${lv.priceCap} 积分` : " · Lv3 起可发布收费画风")
+            : "已经是最高等级")
+        )
+      ));
+    }).catch(() => {});
+
     const syncHint = economySyncHint(eco);
     if (syncHint) {
       accSection.appendChild(el("div", { class: "economy-hint row", style: { justifyContent: "space-between" } },

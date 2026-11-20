@@ -85,6 +85,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/account/login", s.h(s.loginStatus))
 	m.HandleFunc("POST /api/account/logout", s.h(s.logout))
 	m.HandleFunc("GET /api/account/balance", s.h(s.balance))
+	m.HandleFunc("GET /api/account/level", s.h(s.accountLevel))
 	m.HandleFunc("GET /api/site/collections", s.h(s.siteCollections))
 	m.HandleFunc("GET /api/site/history", s.h(s.siteHistory))
 	m.HandleFunc("GET /api/site/discover", s.h(s.siteDiscover))
