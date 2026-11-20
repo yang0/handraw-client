@@ -1,0 +1,119 @@
+name: Release
+
+# Push a tag like v0.5.0 to build, sign and publish a release (#43).
+# Needs repository variable HANDRAW_RELEASE_PUBKEY and secret
+# HANDRAW_RELEASE_SIGNING_KEY (see docs/release.md). Without them the
+# workflow stops before publishing: an unsigned release could never update.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.5.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Signing material present
+        env:
+          PUB: ${{ vars.HANDRAW_RELEASE_PUBKEY }}
+          KEY: ${{ secrets.HANDRAW_RELEASE_SIGNING_KEY }}
+        run: |
+          [ -n "$PUB" ] || { echo "::error::repository variable HANDRAW_RELEASE_PUBKEY is not set"; exit 1; }
+          [ -n "$KEY" ] || { echo "::error::secret HANDRAW_RELEASE_SIGNING_KEY is not set"; exit 1; }
+
+  windows:
+    needs: preflight
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.TAG }}" }
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: Test
+        if: matrix.arch == 'amd64'
+        run: go test ./...
+      - name: Build
+        shell: pwsh
+        env:
+          GOOS: windows
+          GOARCH: ${{ matrix.arch }}
+          PUB: ${{ vars.HANDRAW_RELEASE_PUBKEY }}
+        run: |
+          $ver = "$env:TAG"
+          go build -trimpath -ldflags "-s -w -H windowsgui -X main.Version=$ver -X github.com/yang0/handraw-client/internal/updater.PublicKey=$env:PUB" -o "handraw-windows-${{ matrix.arch }}.exe" ./cmd/handraw
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: handraw-windows-${{ matrix.arch }}.exe
+
+  macos:
+    needs: preflight
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [arm64, amd64]
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.TAG }}" }
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: Build app bundle
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: ${{ matrix.arch == 'amd64' && '-arch x86_64' || '' }}
+          CGO_LDFLAGS: ${{ matrix.arch == 'amd64' && '-arch x86_64' || '' }}
+          PUB: ${{ vars.HANDRAW_RELEASE_PUBKEY }}
+        run: |
+          ver="${TAG#v}"
+          app="dist/手绘风.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          go build -trimpath -ldflags "-s -w -X main.Version=$TAG -X github.com/yang0/handraw-client/internal/updater.PublicKey=$PUB" -o "$app/Contents/MacOS/handraw" ./cmd/handraw
+          sed "s/__VERSION__/$ver/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          (cd dist && ditto -c -k --keepParent "手绘风.app" "../handraw-darwin-${{ matrix.arch }}.zip")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: handraw-darwin-${{ matrix.arch }}.zip
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.TAG }}" }
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - name: Checksums and signature
+        env:
+          HANDRAW_RELEASE_SIGNING_KEY: ${{ secrets.HANDRAW_RELEASE_SIGNING_KEY }}
+          PUB: ${{ vars.HANDRAW_RELEASE_PUBKEY }}
+        run: |
+          cd artifacts
+          sha256sum handraw-* | sort -k2 > SHA256SUMS
+          cd ..
+          go run -tags nogui ./tools/signsums sign "$TAG" artifacts/SHA256SUMS > artifacts/SHA256SUMS.sig
+          go run -tags nogui ./tools/signsums verify "$TAG" artifacts/SHA256SUMS artifacts/SHA256SUMS.sig "$PUB"
+          cat artifacts/SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "手绘风 $TAG" --notes-file <(git log -1 --format=%B "$TAG") --verify-tag
+          gh release upload "$TAG" artifacts/* --clobber
