@@ -230,7 +230,7 @@ export async function renderSettings(root, ctx, params = {}) {
     el("div", { class: "settings-section-head" },
       el("div", { class: "col", style: { gap: "2px" } },
         el("h2", { class: "settings-section-title" }, "2. 模型与接口配置"),
-        el("p", { class: "muted", style: { margin: 0 } }, "设置全局默认生图、文字与视觉模型，或接入 OpenAI 兼容第三方中转站")
+        el("p", { class: "muted", style: { margin: 0 } }, "生图模型与文字/视觉服务默认使用网站官方固定接口（平台自动调度），也可自由接入 OpenAI 兼容第三方中转站")
       ),
       el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openProviderModal(null, () => renderSettings(root, ctx, { preserveScroll: true })) }, "+ 添加第三方接口")
     )
@@ -267,15 +267,15 @@ export async function renderSettings(root, ctx, params = {}) {
     ),
     el("div", { class: "settings-row" },
       el("div", { class: "settings-row-meta" },
-        el("label", { for: "def-text-model", class: "settings-row-label" }, "全局默认文字模型"),
-        el("span", { class: "muted" }, "用于主题扩写、系列规划、文章配图与画布助手")
+        el("label", { for: "def-text-model", class: "settings-row-label" }, "全局文字服务接口"),
+        el("span", { class: "muted" }, "用于主题扩写、系列规划、文章配图与画布助手；网站官方自动调度，也可切到第三方 OpenAI 接口")
       ),
       defTextSel
     ),
     el("div", { class: "settings-row" },
       el("div", { class: "settings-row-meta" },
-        el("label", { for: "def-vision-model", class: "settings-row-label" }, "全局默认视觉解析模型"),
-        el("span", { class: "muted" }, "用于以图找风格与从参考图提取画风特征")
+        el("label", { for: "def-vision-model", class: "settings-row-label" }, "全局视觉服务接口"),
+        el("span", { class: "muted" }, "用于以图找风格与提取参考图画风特征；网站官方自动调度，也可切到第三方 OpenAI 视觉接口")
       ),
       defVisionSel
     )

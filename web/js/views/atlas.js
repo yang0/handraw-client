@@ -669,7 +669,7 @@ export function openEditStyleDialog(initial = {}, onSaved) {
 
   let selectedVisionRef = "";
   const visionWrap = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } },
-    el("span", { class: "muted", style: { fontSize: "12px" } }, "视觉模型：")
+    el("span", { class: "muted", style: { fontSize: "12px" } }, "视觉接口：")
   );
   api("GET", "/api/models").then((modRes) => {
     const sel = buildGroupedAIModelSelect(modRes, modRes.defaultVisionModel || "", "vision");
@@ -851,7 +851,7 @@ async function drawFindByImage(stage, ctx) {
       });
       clear(resultBox);
       const srcLabel = res.source === "site"
-        ? (res.model ? `网站线上接口 · ${res.model}` : "网站线上接口")
+        ? "网站官方视觉服务"
         : (res.model ? `第三方接口 · ${res.model}` : "第三方接口");
       resultBox.appendChild(el("div", { class: "card", style: { marginBottom: "12px" } },
         el("div", { class: "row", style: { justifyContent: "space-between", marginBottom: "4px" } },

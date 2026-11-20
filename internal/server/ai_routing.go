@@ -9,10 +9,9 @@ import (
 )
 
 type aiRoute struct {
-	Mode      string // "auto" | "site_explicit" | "provider"
-	SiteModel string
-	Provider  settings.Provider
-	Model     string
+	Mode     string // "auto" | "site" | "provider"
+	Provider settings.Provider
+	Model    string
 }
 
 func isTextOrVisionPurpose(purpose string) bool {
@@ -32,12 +31,15 @@ func resolveAIRoute(capability, overrideRef string) (aiRoute, error) {
 	if ref == "" || ref == "site:auto" {
 		return aiRoute{Mode: "auto"}, nil
 	}
+	// Official website text/vision always uses fixed capability endpoints without
+	// exposing or selecting internal site model names (#45). Legacy "site:<model>"
+	// values gracefully route to the fixed official site service.
 	if strings.HasPrefix(ref, "site:") {
-		modelID := strings.TrimSpace(strings.TrimPrefix(ref, "site:"))
-		if modelID == "" || modelID == "auto" {
+		sub := strings.TrimSpace(strings.TrimPrefix(ref, "site:"))
+		if sub == "" || sub == "auto" {
 			return aiRoute{Mode: "auto"}, nil
 		}
-		return aiRoute{Mode: "site_explicit", SiteModel: modelID}, nil
+		return aiRoute{Mode: "site"}, nil
 	}
 	pid, mid, ok := strings.Cut(ref, ":")
 	if !ok || strings.TrimSpace(pid) == "" {
@@ -87,26 +89,31 @@ func normalizeSiteAIModels(raw json.RawMessage) []map[string]any {
 	if json.Unmarshal(raw, &obj) != nil || len(obj.AIModels) == 0 {
 		return out
 	}
-	seen := map[string]bool{}
+	// Never expose raw internal website multimodal model names to client UI (#45).
+	// Collapse any server response into fixed abstract capability service entries.
+	var textItem, visionItem map[string]any
 	for _, it := range obj.AIModels {
-		id := strings.TrimSpace(planString(it, "id"))
-		if id == "" {
-			id = strings.TrimSpace(planString(it, "model"))
-		}
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		name := strings.TrimSpace(firstStr(planString(it, "name"), planString(it, "label"), id))
 		capStr := strings.ToLower(strings.TrimSpace(planString(it, "capability")))
 		if capStr != "text" && capStr != "vision" && capStr != "both" {
 			capStr = "text"
 		}
 		isDefText, _ := it["isDefaultText"].(bool)
 		isDefVision, _ := it["isDefaultVision"].(bool)
-		inPrice, _ := it["inputPriceMicrosPerM"].(float64)
-		outPrice, _ := it["outputPriceMicrosPerM"].(float64)
-		out = append(out, map[string]any{
+		if capStr == "text" || capStr == "both" {
+			if textItem == nil || isDefText {
+				textItem = it
+			}
+		}
+		if capStr == "vision" || capStr == "both" {
+			if visionItem == nil || isDefVision {
+				visionItem = it
+			}
+		}
+	}
+	makeEntry := func(id, name, capStr string, isDefText, isDefVision bool, src map[string]any) map[string]any {
+		inPrice, _ := src["inputPriceMicrosPerM"].(float64)
+		outPrice, _ := src["outputPriceMicrosPerM"].(float64)
+		return map[string]any{
 			"id":                    id,
 			"model":                 id,
 			"name":                  name,
@@ -116,7 +123,13 @@ func normalizeSiteAIModels(raw json.RawMessage) []map[string]any {
 			"isDefaultVision":       isDefVision,
 			"inputPriceMicrosPerM":  int64(inPrice),
 			"outputPriceMicrosPerM": int64(outPrice),
-		})
+		}
+	}
+	if textItem != nil {
+		out = append(out, makeEntry("text", "智能文字服务", "text", true, false, textItem))
+	}
+	if visionItem != nil {
+		out = append(out, makeEntry("vision", "智能视觉理解服务", "vision", false, true, visionItem))
 	}
 	return out
 }

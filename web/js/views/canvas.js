@@ -1481,7 +1481,7 @@ export async function renderCanvas(host, ctx, params = {}) {
     showModal("✨ 画布工作流助手", el("div", { class: "col" },
       promptIn,
       el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center" } },
-        el("span", { class: "muted", style: { fontSize: "12px" } }, "文本规划模型"),
+        el("span", { class: "muted", style: { fontSize: "12px" } }, "文字服务接口"),
         textSel
       )
     ), [

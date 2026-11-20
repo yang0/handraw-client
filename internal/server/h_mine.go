@@ -701,8 +701,8 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 	}
 	purpose := firstStr(body.Purpose, "find")
 
-	analyzeWithSite := func(siteModel string) (map[string]any, error) {
-		raw, err := s.Site.AnalyzeStyle(r.Context(), dataURLs, purpose, siteModel)
+	analyzeWithSite := func() (map[string]any, error) {
+		raw, err := s.Site.AnalyzeStyle(r.Context(), dataURLs, purpose)
 		if err != nil {
 			return nil, err
 		}
@@ -724,7 +724,6 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 		}
 		return map[string]any{
 			"source":     "site",
-			"model":      siteModel,
 			"name":       parsed.Name,
 			"traitsZh":   parsed.TraitsZh,
 			"traitsEn":   parsed.TraitsEn,
@@ -768,11 +767,11 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 	switch route.Mode {
 	case "provider":
 		return analyzeWithProvider(route.Provider, route.Model)
-	case "site_explicit":
+	case "site":
 		if !s.Site.LoggedIn() {
 			return nil, site.ErrNotLoggedIn
 		}
-		res, err := analyzeWithSite(route.SiteModel)
+		res, err := analyzeWithSite()
 		if err != nil {
 			return nil, analyzeSiteError(err)
 		}
@@ -780,7 +779,7 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 	default:
 		var siteErr error
 		if s.Site.LoggedIn() {
-			res, err := analyzeWithSite("")
+			res, err := analyzeWithSite()
 			if err == nil {
 				return res, nil
 			}

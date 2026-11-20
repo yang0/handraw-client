@@ -105,13 +105,10 @@ func (s *Server) expandTheme(w http.ResponseWriter, r *http.Request) (any, error
 		}
 		return strings.TrimSpace(reply), nil
 	}
-	expandWithSite := func(siteModel string) (string, error) {
+	expandWithSite := func() (string, error) {
 		req := map[string]any{"seed": body.Theme, "count": 1, "layoutMode": "fixed"}
 		if strings.TrimSpace(body.Style) != "" {
 			req["styleId"] = strings.TrimSpace(body.Style)
-		}
-		if siteModel != "" {
-			req["model"] = siteModel
 		}
 		raw, err := s.Site.BatchPlan(r.Context(), req)
 		if err != nil {
@@ -138,18 +135,18 @@ func (s *Server) expandTheme(w http.ResponseWriter, r *http.Request) (any, error
 			return nil, err
 		}
 		return map[string]any{"theme": txt, "source": "provider"}, nil
-	case "site_explicit":
+	case "site":
 		if !s.Site.LoggedIn() {
 			return nil, site.ErrNotLoggedIn
 		}
-		txt, err := expandWithSite(route.SiteModel)
+		txt, err := expandWithSite()
 		if err != nil {
 			return nil, err
 		}
 		return map[string]any{"theme": txt, "source": "site"}, nil
 	default:
 		if s.Site.LoggedIn() {
-			if txt, err := expandWithSite(""); err == nil {
+			if txt, err := expandWithSite(); err == nil {
 				return map[string]any{"theme": txt, "source": "site"}, nil
 			}
 		}
@@ -701,13 +698,10 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 			}
 		}
 	}
-	planWithSite := func(siteModel string) (map[string]any, error) {
+	planWithSite := func() (map[string]any, error) {
 		req := map[string]any{
 			"seed": body.Topic, "count": body.Count, "layoutMode": body.LayoutMode,
 			"fixedLayout": body.FixedLayout, "layoutRequirement": body.LayoutRequirement, "styleId": body.StyleID,
-		}
-		if siteModel != "" {
-			req["model"] = siteModel
 		}
 		raw, err := s.Site.BatchPlan(r.Context(), req)
 		if err != nil {
@@ -736,14 +730,14 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 	switch route.Mode {
 	case "provider":
 		return planWithProvider(route.Provider, route.Model)
-	case "site_explicit":
+	case "site":
 		if !s.Site.LoggedIn() {
 			return nil, site.ErrNotLoggedIn
 		}
-		return planWithSite(route.SiteModel)
+		return planWithSite()
 	default:
 		if s.Site.LoggedIn() {
-			if res, err := planWithSite(""); err == nil {
+			if res, err := planWithSite(); err == nil {
 				return res, nil
 			}
 		}
@@ -793,11 +787,8 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 	if err != nil {
 		return nil, err
 	}
-	planWithSite := func(siteModel string) (map[string]any, error) {
+	planWithSite := func() (map[string]any, error) {
 		request := articlePlanRequest(body.Title, body.Content, body.StyleID, body.CoverRatio, body.InlineRatio, includeCover)
-		if siteModel != "" {
-			request["model"] = siteModel
-		}
 		raw, err := s.Site.ArticlePlan(r.Context(), request)
 		if err != nil {
 			return nil, err
@@ -823,14 +814,14 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 	switch route.Mode {
 	case "provider":
 		return planWithProvider(route.Provider, route.Model)
-	case "site_explicit":
+	case "site":
 		if !s.Site.LoggedIn() {
 			return nil, site.ErrNotLoggedIn
 		}
-		return planWithSite(route.SiteModel)
+		return planWithSite()
 	default:
 		if s.Site.LoggedIn() {
-			if res, err := planWithSite(""); err == nil {
+			if res, err := planWithSite(); err == nil {
 				return res, nil
 			}
 		}
@@ -1032,11 +1023,8 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 	if err != nil {
 		return nil, err
 	}
-	buildWithSite := func(siteModel string) (map[string]any, error) {
+	buildWithSite := func() (map[string]any, error) {
 		req := map[string]any{"prompt": body.Prompt}
-		if siteModel != "" {
-			req["model"] = siteModel
-		}
 		raw, err := s.Site.CanvasAssistant(r.Context(), req)
 		if err != nil {
 			return nil, err
@@ -1059,14 +1047,14 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 	switch route.Mode {
 	case "provider":
 		return buildWithProvider(route.Provider, route.Model)
-	case "site_explicit":
+	case "site":
 		if !s.Site.LoggedIn() {
 			return nil, site.ErrNotLoggedIn
 		}
-		return buildWithSite(route.SiteModel)
+		return buildWithSite()
 	default:
 		if s.Site.LoggedIn() {
-			if res, err := buildWithSite(""); err == nil {
+			if res, err := buildWithSite(); err == nil {
 				return res, nil
 			}
 		}

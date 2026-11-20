@@ -158,7 +158,7 @@ func TestTextAndVisionModelsDiscoveryAndCustomRelayRouting(t *testing.T) {
 		t.Fatalf("vision test failed: %d %s", rrVisTest.Code, rrVisTest.Body.String())
 	}
 
-	// 2. Verify /api/models exposes siteAI alongside textProviders and defaults.
+	// 2. Verify /api/models exposes abstract siteAI service entries (never leaking raw site model IDs) alongside textProviders (#45).
 	rrMods := doReq(t, h, srv.Token, "GET", "/api/models", nil)
 	if rrMods.Code != 200 {
 		t.Fatalf("/api/models failed: %d %s", rrMods.Code, rrMods.Body.String())
@@ -171,19 +171,22 @@ func TestTextAndVisionModelsDiscoveryAndCustomRelayRouting(t *testing.T) {
 	if len(modsOut.SiteAI) != 2 || len(modsOut.TextProviders) != 1 {
 		t.Fatalf("unexpected /api/models output: siteAI=%d textProvs=%d body=%s", len(modsOut.SiteAI), len(modsOut.TextProviders), rrMods.Body.String())
 	}
+	if strings.Contains(rrMods.Body.String(), "deepseek-v3") || strings.Contains(rrMods.Body.String(), "gemini-2.5-flash") {
+		t.Fatalf("expected /api/models not to expose internal site multimodal model names: %s", rrMods.Body.String())
+	}
 
-	// 3. Default (site:auto) uses online site APIs directly when logged in.
+	// 3. Default (site:auto) and legacy site:<model> both call fixed online site endpoints without forwarding a site model name (#45).
 	rrExpandSite := doReq(t, h, srv.Token, "POST", "/api/prompt/expand", map[string]any{"theme": "咖啡屋", "style": "FA-001"})
-	if rrExpandSite.Code != 200 || !strings.Contains(rrExpandSite.Body.String(), `"source":"site"`) || lastSiteBatchSeed != "咖啡屋" {
-		t.Fatalf("expected online site expand, got %d %s (seed=%q)", rrExpandSite.Code, rrExpandSite.Body.String(), lastSiteBatchSeed)
+	if rrExpandSite.Code != 200 || !strings.Contains(rrExpandSite.Body.String(), `"source":"site"`) || lastSiteBatchSeed != "咖啡屋" || lastSiteBatchModel != "" {
+		t.Fatalf("expected online site expand without model override, got %d %s (seed=%q, model=%q)", rrExpandSite.Code, rrExpandSite.Body.String(), lastSiteBatchSeed, lastSiteBatchModel)
 	}
 	rrAnalyzeSite := doReq(t, h, srv.Token, "POST", "/api/mine/analyze", map[string]any{
 		"images":   []string{"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="},
 		"purpose":  "find",
 		"modelRef": "site:gemini-2.5-flash",
 	})
-	if rrAnalyzeSite.Code != 200 || !strings.Contains(rrAnalyzeSite.Body.String(), `"source":"site"`) || lastSiteAnalyzeModel != "gemini-2.5-flash" {
-		t.Fatalf("expected explicit online site analyze with model=gemini-2.5-flash, got %d %s (model=%q)", rrAnalyzeSite.Code, rrAnalyzeSite.Body.String(), lastSiteAnalyzeModel)
+	if rrAnalyzeSite.Code != 200 || !strings.Contains(rrAnalyzeSite.Body.String(), `"source":"site"`) || lastSiteAnalyzeModel != "" || strings.Contains(rrAnalyzeSite.Body.String(), "gemini-2.5-flash") {
+		t.Fatalf("expected fixed online site analyze without model override/leak, got %d %s (model=%q)", rrAnalyzeSite.Code, rrAnalyzeSite.Body.String(), lastSiteAnalyzeModel)
 	}
 
 	// 4. Configure settings to use custom relay models directly (even while logged into website!).
