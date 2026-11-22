@@ -83,6 +83,7 @@ jobs:
           app="dist/手绘风.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           go build -trimpath -ldflags "-s -w -X main.Version=$TAG -X github.com/yang0/handraw-client/internal/updater.PublicKey=$PUB" -o "$app/Contents/MacOS/handraw" ./cmd/handraw
+          cp packaging/macos/handraw.icns "$app/Contents/Resources/handraw.icns"
           sed "s/__VERSION__/$ver/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
           (cd dist && ditto -c -k --keepParent "手绘风.app" "../handraw-darwin-${{ matrix.arch }}.zip")
       - uses: actions/upload-artifact@v4

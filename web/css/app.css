@@ -1,20 +1,21 @@
 :root {
   color-scheme: light dark;
-  --paper: light-dark(#F7F3EC, #161412);
-  --surface: light-dark(#FDFBF7, #1F1C19);
-  --surface-2: light-dark(#EFE9DD, #292521);
-  --ink: light-dark(#1E1C1A, #F2EDE4);
-  --ink-muted: light-dark(#6C655D, #A59D92);
-  --line: light-dark(rgba(30, 28, 26, 0.11), rgba(242, 237, 228, 0.12));
-  --accent: #C84B31;
-  --accent-hover: #B13C24;
-  --accent-soft: light-dark(rgba(200, 75, 49, 0.11), rgba(200, 75, 49, 0.22));
-  --ok: #2D7A4D;
-  --warn: #B76E1E;
+  --paper: light-dark(#F6F3EC, #161412);
+  --surface: light-dark(#FFFDF9, #1F1C19);
+  --surface-2: light-dark(#EFEAE0, #292521);
+  --ink: light-dark(#1E1B18, #F2EDE4);
+  --ink-muted: light-dark(#766D62, #A59D92);
+  --line: light-dark(rgba(30, 27, 24, 0.11), rgba(242, 237, 228, 0.12));
+  --accent: light-dark(#B74227, #D45538);
+  --accent-hover: light-dark(#99331B, #E06346);
+  --accent-soft: light-dark(rgba(183, 66, 39, 0.11), rgba(212, 85, 56, 0.22));
+  --ok: #286E49;
+  --warn: #9A6412;
   --err: #B8332A;
-  --shadow: light-dark(0 6px 24px rgba(30, 28, 26, 0.08), 0 8px 28px rgba(0, 0, 0, 0.45));
+  --shadow: light-dark(0 6px 24px rgba(34, 27, 20, 0.08), 0 8px 28px rgba(0, 0, 0, 0.45));
   --radius: 12px;
   --font-sans: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", Georgia, serif;
   --font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
 }
 
@@ -78,12 +79,13 @@ html, body {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-weight: 700;
-  font-size: 15px;
-  letter-spacing: 0.02em;
+  font-family: var(--font-serif);
+  font-weight: 800;
+  font-size: 16px;
+  letter-spacing: 0.03em;
 }
-.brand-logo { width: 24px; height: 24px; }
-.brand-logo-sm { width: 18px; height: 18px; }
+.brand-logo { width: 26px; height: 26px; display: block; flex-shrink: 0; }
+.brand-logo-sm { width: 20px; height: 20px; display: block; flex-shrink: 0; }
 
 .cmd-trigger {
   display: flex;

@@ -196,7 +196,7 @@ func Run(version string, srv *server.Server, addr string, showMain bool, deepLin
 		MinWidth:         900,
 		MinHeight:        600,
 		Hidden:           true,
-		BackgroundColour: application.NewRGBA(247, 243, 236, 255),
+		BackgroundColour: application.NewRGBA(246, 243, 236, 255),
 	})
 
 	h.main.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {

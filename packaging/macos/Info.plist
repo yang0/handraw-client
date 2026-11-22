@@ -6,6 +6,7 @@
   <key>CFBundleDisplayName</key><string>手绘风</string>
   <key>CFBundleIdentifier</key><string>com.handraw-style.client</string>
   <key>CFBundleExecutable</key><string>handraw</string>
+  <key>CFBundleIconFile</key><string>handraw.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>__VERSION__</string>
   <key>CFBundleVersion</key><string>__VERSION__</string>
