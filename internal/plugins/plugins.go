@@ -394,6 +394,7 @@ type Community struct {
 	Enabled     bool           `json:"enabled"`
 	Dir         string         `json:"-"`
 	Source      string         `json:"source"`
+	Install     *InstallMeta   `json:"install,omitempty"`
 	Error       string         `json:"error,omitempty"`
 }
 
@@ -535,6 +536,7 @@ func (r *Runtime) ListCommunity(enabled map[string]bool) []Community {
 		c.Enabled = err == nil && enabled["community:"+c.ID]
 		src, _ := os.ReadFile(filepath.Join(dir, ".source"))
 		c.Source = string(src)
+		c.Install = ReadInstallMeta(dir)
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -545,7 +547,15 @@ func (r *Runtime) Community(id string) (Community, error) {
 	if !idRe.MatchString(id) {
 		return Community{}, errors.New("插件 id 无效")
 	}
-	return ReadCommunity(filepath.Join(r.Dir, id))
+	slot := filepath.Join(r.Dir, id)
+	c, err := ReadCommunity(slot)
+	if err != nil {
+		return c, err
+	}
+	src, _ := os.ReadFile(filepath.Join(slot, ".source"))
+	c.Source = string(src)
+	c.Install = ReadInstallMeta(slot)
+	return c, nil
 }
 
 var ghRe = regexp.MustCompile(`^(?:https://github\.com/)?([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$`)

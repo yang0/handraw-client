@@ -308,6 +308,9 @@ func (s *Server) pluginList(w http.ResponseWriter, r *http.Request) (any, error)
 		"community":        s.Plugins.ListCommunity(s.enabledPlugins()),
 		"knownPermissions": plugins.KnownPermissions,
 	}
+	if snap, ok := s.cachedPluginUpdateSnapshot(30 * time.Minute); ok {
+		out["updates"] = snap
+	}
 	if s.DSH != nil {
 		out["dshStatus"] = s.DSH.Status()
 	}
@@ -393,6 +396,7 @@ func (s *Server) pluginInstall(w http.ResponseWriter, r *http.Request) (any, err
 	if err != nil {
 		return nil, bad(err.Error())
 	}
+	s.invalidatePluginUpdateCache()
 	return map[string]any{"plugin": c}, nil
 }
 
@@ -401,6 +405,7 @@ func (s *Server) pluginRemove(w http.ResponseWriter, r *http.Request) (any, erro
 	if err := s.Plugins.Remove(id); err != nil {
 		return nil, bad(err.Error())
 	}
+	s.invalidatePluginUpdateCache()
 	if s.Galleries != nil {
 		s.Galleries.UnregisterByOwner(id)
 	}

@@ -390,8 +390,13 @@ func (r *Runtime) InstallLocal(localPath string) (Community, error) {
 		return c, err
 	}
 	src := "link:" + abs
-	_ = os.WriteFile(filepath.Join(slot, ".source"), []byte(src), 0o644)
+	meta := InstallMeta{
+		Type:   "local",
+		Source: src,
+	}
+	_ = WriteInstallMeta(slot, meta)
 	c.Source = src
+	c.Install = &meta
 	c.Dir = abs
 	return c, nil
 }

@@ -145,9 +145,10 @@ async function start() {
   async function refreshNav() {
     const plugRes = await api("GET", "/api/plugins").catch(() => ({ builtin: [], community: [] }));
     const enabledBuiltins = new Set((plugRes.builtin || []).filter((b) => b.enabled).map((b) => b.id));
+    const pluginUpdateCount = Number(plugRes.updates?.outdatedCount || 0);
     clear(navList);
 
-    const addBtn = (id, ico, label) => {
+    const addBtn = (id, ico, label, dotCount = 0) => {
       const isImg = typeof ico === "string" && (ico.startsWith("/") || ico.startsWith("http") || ico.startsWith("data:"));
       const icoNode = isImg
         ? el("span", { class: "nav-ico" }, el("img", { src: ico, alt: "", class: "nav-ico-img" }))
@@ -156,18 +157,19 @@ async function start() {
         type: "button",
         class: "nav-item" + (currentView === id ? " active" : ""),
         dataset: { view: id },
-        title: label,
+        title: dotCount > 0 ? `${label}（${dotCount} 个插件可更新）` : label,
         onClick: () => go(id),
       },
         icoNode,
-        el("span", { class: "nav-label" }, label)
+        el("span", { class: "nav-label" }, label),
+        dotCount > 0 ? el("span", { class: "nav-update-dot", "aria-label": `${dotCount} 个插件可更新` }) : null
       );
       navList.appendChild(btn);
     };
 
     for (const item of CORE_NAV) {
       if (item.plugin && !enabledBuiltins.has(item.plugin)) continue;
-      addBtn(item.id, item.ico, item.label);
+      addBtn(item.id, item.ico, item.label, item.id === "plugins" ? pluginUpdateCount : 0);
     }
 
     for (const c of plugRes.community || []) {

@@ -1581,8 +1581,435 @@ dialog::backdrop {
   .login-step.is-done .login-step-dot,
   .login-live-dot,
   .login-spinner,
-  .login-success-banner {
+  .login-success-banner,
+  .pm-card,
+  .pm-sk,
+  .pm-spin {
     animation: none !important;
     transition: none !important;
   }
 }
+
+/* ================= PLUGIN MARKET CARDS & UPDATES (.pm-*) (#68) ================= */
+.nav-item {
+  position: relative;
+}
+.nav-update-dot {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--surface);
+  pointer-events: none;
+}
+.sidebar.expanded .nav-update-dot {
+  position: static;
+  margin-left: auto;
+  box-shadow: none;
+}
+
+.pm-tab-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  margin-left: 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.pm-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.pm-search-input {
+  width: 210px;
+  max-width: 100%;
+  height: 30px;
+  font-size: 12.5px;
+}
+.pm-toggle-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--ink-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pm-toggle-inline input {
+  accent-color: var(--accent);
+}
+
+/* Responsive multi-column card grid (Magpie-inspired) */
+.pm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(276px, 1fr));
+  gap: 12px;
+}
+.pm-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 13px 14px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+.pm-card:hover {
+  border-color: color-mix(in srgb, var(--ink) 22%, var(--line));
+  box-shadow: 0 4px 14px rgba(28, 25, 23, 0.06);
+  transform: translateY(-1px);
+}
+.pm-card:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.pm-card-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.pm-logo {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.pm-logo.big {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+}
+.pm-logo-img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  display: block;
+}
+.pm-logo.big .pm-logo-img {
+  width: 30px;
+  height: 30px;
+}
+.pm-card-who {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pm-card-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.pm-card-name strong {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pm-card-by {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--ink-muted);
+}
+.pm-verified-tag {
+  color: var(--ok);
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.pm-author-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pm-card-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+  min-height: 3em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.pm-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 2px;
+  min-height: 20px;
+}
+.pm-ver {
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+.pm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 19px;
+  padding: 0 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--paper);
+  color: var(--ink-muted);
+}
+.pm-chip.soft {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.pm-chip.up {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.pm-chip.warn {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+}
+.pm-chip.warn .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--warn, #b45309);
+}
+
+/* Quiet Magpie-style pill button on cards & update rows */
+.pm-act {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 27px;
+  min-width: 58px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  background: var(--paper);
+  color: var(--ink);
+  transition: background 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+}
+.pm-act.get {
+  background: transparent;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 20%, transparent);
+}
+.pm-act.get:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: none;
+}
+.pm-act.pm-up {
+  background: color-mix(in srgb, var(--ok) 11%, transparent);
+  color: var(--ok);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.pm-act.pm-up:hover:not(:disabled) {
+  background: var(--ok);
+  color: #fff;
+  box-shadow: none;
+}
+.pm-act.done {
+  background: transparent;
+  color: var(--ok);
+  padding: 0 9px;
+  min-width: 0;
+}
+.pm-act.done:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+.pm-act.busy {
+  background: var(--paper);
+  color: var(--ink-muted);
+  cursor: default;
+}
+.pm-act:disabled:not(.busy) {
+  opacity: 0.55;
+  cursor: default;
+}
+.pm-spin {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.6px solid currentColor;
+  border-right-color: transparent;
+  display: inline-block;
+  flex-shrink: 0;
+  animation: loginSpin 0.7s linear infinite;
+}
+
+/* Shimmer skeleton cards while market loads */
+.pm-card.is-skeleton {
+  pointer-events: none;
+  cursor: default;
+}
+.pm-sk {
+  border-radius: 6px;
+  background: linear-gradient(100deg, var(--paper) 30%, var(--surface-2) 50%, var(--paper) 70%);
+  background-size: 250% 100%;
+  animation: pmSheen 1.6s ease-in-out infinite;
+}
+.pm-sk-ico { width: 38px; height: 38px; border-radius: 10px; flex: none; }
+.pm-sk-title { width: 58%; height: 12px; }
+.pm-sk-sub { width: 38%; height: 9px; margin-top: 4px; }
+.pm-sk-btn { width: 54px; height: 26px; border-radius: 999px; flex: none; }
+.pm-sk-line { width: 100%; height: 10px; }
+.pm-sk-line.short { width: 70%; }
+.pm-sk-chip { width: 48px; height: 16px; }
+.pm-sk-chip.short { width: 34px; }
+@keyframes pmSheen {
+  from { background-position: 100% 0; }
+  to { background-position: 0 0; }
+}
+
+/* Plugin Detail Modal facts & version history */
+.pm-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 1px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+.pm-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 11px;
+  background: var(--paper);
+  min-width: 0;
+}
+.pm-fact-k {
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+.pm-fact-v {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.pm-ver-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--paper);
+}
+.pm-ver-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 11px;
+  font-size: 12.5px;
+}
+.pm-ver-row + .pm-ver-row {
+  border-top: 1px solid var(--line);
+}
+
+/* Installed Tab: Magpie-style Updates Banner, List & Footer */
+.pm-updates-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 11px;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  font-size: 13px;
+}
+.pm-updates-banner .pm-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+.pm-updates-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  font-weight: 500;
+}
+.pm-installed-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.pm-inst-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 14px;
+}
+.pm-inst-row + .pm-inst-row {
+  border-top: 1px solid var(--line);
+}
+.pm-inst-row.is-off .pm-logo,
+.pm-inst-row.is-off strong {
+  opacity: 0.6;
+}
+.pm-installed-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 4px;
+}
+.pm-check-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+

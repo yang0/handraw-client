@@ -24,17 +24,21 @@ type marketViewPlugin struct {
 	Icon             string                 `json:"icon,omitempty"`
 	Author           string                 `json:"author,omitempty"`
 	Homepage         string                 `json:"homepage,omitempty"`
+	RepositoryURL    string                 `json:"repositoryUrl,omitempty"`
 	Categories       []string               `json:"categories"`
 	Labels           []string               `json:"labels"`
 	Featured         float64                `json:"featured"`
 	LatestVersion    string                 `json:"latestVersion"`
+	LatestCommit     string                 `json:"latestCommit,omitempty"`
 	InstallType      string                 `json:"installType"` // git | npm
 	PublishTimestamp int64                  `json:"publishTimestamp"`
 	Installed        bool                   `json:"installed"`
 	InstalledID      string                 `json:"installedId,omitempty"`
 	InstalledVersion string                 `json:"installedVersion,omitempty"`
+	InstalledCommit  string                 `json:"installedCommit,omitempty"`
 	Enabled          bool                   `json:"enabled"`
 	UpdateAvailable  bool                   `json:"updateAvailable"`
+	UpdateReason     string                 `json:"updateReason,omitempty"`
 	Versions         []plugins.MarketVersion `json:"versions"`
 }
 
@@ -137,6 +141,15 @@ func (s *Server) pluginMarketList(w http.ResponseWriter, r *http.Request) (any, 
 			if lbls == nil {
 				lbls = []string{}
 			}
+			repoURL := ""
+			if p.Repository != nil {
+				repoURL = strings.TrimSpace(p.Repository.URL)
+			}
+			instCommit := ""
+			if hasInst && inst.Install != nil {
+				instCommit = inst.Install.Commit
+			}
+			updateAvail, updateReason := marketPluginHasUpdate(hasInst, inst, latest)
 			items = append(items, marketViewPlugin{
 				SourceID:         src.ID,
 				SourceName:       src.Name,
@@ -147,17 +160,21 @@ func (s *Server) pluginMarketList(w http.ResponseWriter, r *http.Request) (any, 
 				Icon:             p.Icon,
 				Author:           p.Author,
 				Homepage:         p.Homepage,
+				RepositoryURL:    repoURL,
 				Categories:       cats,
 				Labels:           lbls,
 				Featured:         p.Metadata.SortKeys["featured"],
 				LatestVersion:    latest.Version,
+				LatestCommit:     plugins.ShortCommit(latest.Source.Commit),
 				InstallType:      latest.Source.Type,
 				PublishTimestamp: latest.PublishTimestamp,
 				Installed:        hasInst,
 				InstalledID:      inst.ID,
 				InstalledVersion: inst.Version,
+				InstalledCommit:  plugins.ShortCommit(instCommit),
 				Enabled:          hasInst && inst.Enabled,
-				UpdateAvailable:  hasInst && inst.Version != "" && latest.Version != "" && inst.Version != latest.Version,
+				UpdateAvailable:  updateAvail,
+				UpdateReason:     updateReason,
 				Versions:         p.Versions,
 			})
 		}
@@ -318,11 +335,47 @@ func (s *Server) pluginMarketInstall(w http.ResponseWriter, r *http.Request) (an
 			return nil, notFound("未找到版本 " + body.Version)
 		}
 	}
+	// Check if upgrading an existing plugin so we safely stop DSH sidecar on Windows
+	// and preserve enabled state & upgrade audit metadata.
+	var prevInst *plugins.Community
+	for _, existing := range s.Plugins.ListCommunity(s.enabledPlugins()) {
+		if matchMarketName(existing, targetPlugin.Name) {
+			cp := existing
+			prevInst = &cp
+			break
+		}
+	}
+	wasEnabled := prevInst != nil && prevInst.Enabled
+	if prevInst != nil {
+		if prevInst.Kind == "dsh" && prevInst.Enabled && s.DSH != nil {
+			s.DSH.Stop()
+		}
+		if s.Galleries != nil {
+			s.Galleries.UnregisterByOwner(prevInst.ID)
+		}
+	}
+
 	c, err := s.Plugins.InstallFromMarketVersion(r.Context(), targetPlugin.Name, chosen, targetSrc.URL)
 	if err != nil {
+		if wasEnabled && s.DSH != nil {
+			_ = s.SyncDSH(r.Context())
+		}
 		return nil, bad(err.Error())
 	}
-	if body.Enable && !(c.Kind == "dsh" && c.DSH != nil && c.DSH.Compat == "unsupported") {
+	if c.Install != nil {
+		meta := *c.Install
+		meta.MarketSource = targetSrc.ID
+		if prevInst != nil {
+			meta.UpdatedAt = time.Now().UnixMilli()
+			meta.UpdatedFrom = firstStr(prevInst.Version, plugins.ShortCommit(installCommitOf(*prevInst)))
+			meta.UpdatedTo = firstStr(c.Version, chosen.Version, plugins.ShortCommit(meta.Commit))
+		}
+		_ = s.Plugins.SaveInstallMeta(c.ID, meta)
+		c.Install = &meta
+	}
+	s.invalidatePluginUpdateCache()
+	shouldEnable := body.Enable || wasEnabled
+	if shouldEnable && !(c.Kind == "dsh" && c.DSH != nil && c.DSH.Compat == "unsupported") {
 		_, _ = settings.Update(func(st *settings.Settings) error {
 			if st.Plugins == nil {
 				st.Plugins = map[string]bool{}

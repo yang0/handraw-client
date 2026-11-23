@@ -159,14 +159,35 @@ func (r *Runtime) InstallFromMarketVersion(ctx context.Context, pkgName string, 
 	if marketURL != "" {
 		sourceTag += " (" + marketURL + ")"
 	}
+	var c Community
+	var err error
 	switch ver.Source.Type {
 	case "git":
-		return r.InstallGit(ctx, ver.Source.URL, ver.Source.Commit, ver.Source.Directory, sourceTag)
+		c, err = r.InstallGit(ctx, ver.Source.URL, ver.Source.Commit, ver.Source.Directory, sourceTag)
 	case "npm":
-		return r.InstallNPM(ctx, pkgName, ver.Version, ver.Source.Registry, sourceTag)
+		c, err = r.InstallNPM(ctx, pkgName, ver.Version, ver.Source.Registry, sourceTag)
 	default:
 		return Community{}, fmt.Errorf("不支持的市场安装源类型：%q", ver.Source.Type)
 	}
+	if err != nil {
+		return c, err
+	}
+	meta := InstallMeta{
+		Type:      "market",
+		Source:    sourceTag,
+		MarketURL: marketURL,
+		Package:   pkgName,
+		Registry:  ver.Source.Registry,
+		RepoURL:   ver.Source.URL,
+		Subdir:    cleanRelSubdir(ver.Source.Directory),
+		Commit:    strings.TrimSpace(ver.Source.Commit),
+	}
+	if c.Install != nil && c.Install.Commit != "" && meta.Commit == "" {
+		meta.Commit = c.Install.Commit
+	}
+	_ = r.SaveInstallMeta(c.ID, meta)
+	c.Install = &meta
+	return c, nil
 }
 
 // InstallNPM fetches a package from npm (with npmmirror fallback) and unpacks
@@ -179,7 +200,19 @@ func (r *Runtime) InstallNPM(ctx context.Context, pkgName, version, registry, so
 	if err != nil {
 		return Community{}, err
 	}
-	return r.InstallTarGzURL(ctx, tarballURL, "", sourceTag)
+	c, err := r.InstallTarGzURL(ctx, tarballURL, "", sourceTag)
+	if err != nil {
+		return c, err
+	}
+	meta := InstallMeta{
+		Type:     "npm",
+		Source:   sourceTag,
+		Package:  pkgName,
+		Registry: strings.TrimSpace(registry),
+	}
+	_ = r.SaveInstallMeta(c.ID, meta)
+	c.Install = &meta
+	return c, nil
 }
 
 // InstallGit installs a plugin from any Git repository URL (with optional commit
@@ -194,10 +227,22 @@ func (r *Runtime) InstallGit(ctx context.Context, repoURL, commit, subdir, sourc
 	// Direct archive URLs (e.g. test mocks or direct .zip / .tgz links).
 	lower := strings.ToLower(repoURL)
 	if strings.HasSuffix(lower, ".zip") {
-		return r.InstallZipURL(ctx, repoURL, cleanSub, sourceTag)
+		c, err := r.InstallZipURL(ctx, repoURL, cleanSub, sourceTag)
+		if err == nil {
+			meta := InstallMeta{Type: "url", Source: sourceTag, RepoURL: repoURL, Subdir: cleanSub, Commit: commit}
+			_ = r.SaveInstallMeta(c.ID, meta)
+			c.Install = &meta
+		}
+		return c, err
 	}
 	if strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz") {
-		return r.InstallTarGzURL(ctx, repoURL, cleanSub, sourceTag)
+		c, err := r.InstallTarGzURL(ctx, repoURL, cleanSub, sourceTag)
+		if err == nil {
+			meta := InstallMeta{Type: "url", Source: sourceTag, RepoURL: repoURL, Subdir: cleanSub, Commit: commit}
+			_ = r.SaveInstallMeta(c.ID, meta)
+			c.Install = &meta
+		}
+		return c, err
 	}
 
 	// Strategy 1: Native Git shallow clone / sparse-checkout (works on GitHub, Gitee, GitLab, any repo size).
@@ -217,7 +262,19 @@ func (r *Runtime) InstallGit(ctx context.Context, repoURL, commit, subdir, sourc
 			ref = "HEAD"
 		}
 		tarURL := fmt.Sprintf("https://codeload.github.com/%s/%s/tar.gz/%s", m[1], m[2], url.PathEscape(ref))
-		return r.InstallTarGzURL(ctx, tarURL, cleanSub, sourceTag)
+		c, err := r.InstallTarGzURL(ctx, tarURL, cleanSub, sourceTag)
+		if err == nil {
+			resolvedCommit := commit
+			if resolvedCommit == "" || strings.EqualFold(resolvedCommit, "HEAD") {
+				if sha, hErr := ResolveGitHeadCommit(ctx, repoURL); hErr == nil {
+					resolvedCommit = sha
+				}
+			}
+			meta := InstallMeta{Type: "git", Source: sourceTag, RepoURL: repoURL, Subdir: cleanSub, Commit: resolvedCommit}
+			_ = r.SaveInstallMeta(c.ID, meta)
+			c.Install = &meta
+		}
+		return c, err
 	}
 
 	return Community{}, fmt.Errorf("未检测到本机 git，且暂无法直接归档下载该仓库：%s", repoURL)
@@ -281,10 +338,21 @@ func (r *Runtime) installViaGitCLI(ctx context.Context, gitBin, repoURL, commit,
 		return Community{}, err
 	}
 
+	// Record exact checked-out commit SHA before deleting .git metadata.
+	resolvedCommit := commit
+	revCmd := exec.CommandContext(gitCtx, gitBin, "rev-parse", "HEAD")
+	revCmd.Dir = tmp
+	hideWindow(revCmd)
+	if revOut, revErr := revCmd.Output(); revErr == nil {
+		if sha := strings.TrimSpace(string(revOut)); len(sha) >= 7 {
+			resolvedCommit = sha
+		}
+	}
+
 	// Prepare final clean unpacked directory without .git metadata.
-	srcDir := tmp
+	var c Community
 	if cleanSub != "" {
-		srcDir = filepath.Join(tmp, filepath.FromSlash(cleanSub))
+		srcDir := filepath.Join(tmp, filepath.FromSlash(cleanSub))
 		if st, err := os.Stat(srcDir); err != nil || !st.IsDir() {
 			return Community{}, fmt.Errorf("仓库中找不到插件子目录 %s", cleanSub)
 		}
@@ -298,11 +366,27 @@ func (r *Runtime) installViaGitCLI(ctx context.Context, gitBin, repoURL, commit,
 			return Community{}, err
 		}
 		defer os.RemoveAll(cleanTmp)
-		return r.commitUnpackedDir(cleanTmp, sourceTag)
+		c, err = r.commitUnpackedDir(cleanTmp, sourceTag)
+		if err != nil {
+			return c, err
+		}
+	} else {
+		_ = os.RemoveAll(filepath.Join(tmp, ".git"))
+		c, err = r.commitUnpackedDir(tmp, sourceTag)
+		if err != nil {
+			return c, err
+		}
 	}
-
-	_ = os.RemoveAll(filepath.Join(tmp, ".git"))
-	return r.commitUnpackedDir(tmp, sourceTag)
+	meta := InstallMeta{
+		Type:    "git",
+		Source:  sourceTag,
+		RepoURL: repoURL,
+		Subdir:  cleanSub,
+		Commit:  resolvedCommit,
+	}
+	_ = r.SaveInstallMeta(c.ID, meta)
+	c.Install = &meta
+	return c, nil
 }
 
 func resolveNPMTarballURL(ctx context.Context, pkgName, version, registry string) (string, error) {
