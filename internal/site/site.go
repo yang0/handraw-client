@@ -414,8 +414,53 @@ func (c *Client) AnalyzeStyle(ctx context.Context, images []string, purpose stri
 func (c *Client) CanvasAssistant(ctx context.Context, body map[string]any) (json.RawMessage, error) {
 	var out json.RawMessage
 	c2 := *c
-	c2.HTTP = &http.Client{Timeout: 3 * time.Minute}
+	c2.HTTP = &http.Client{Timeout: 3 * time.Minute, Transport: c.HTTP.Transport}
 	err := c2.Do(ctx, "POST", "/api/studio/canvas-assistant", body, &out)
+	return out, err
+}
+
+// ---------- unified model-agnostic text/vision AI gateway ----------
+
+type AIChatToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type AIChatRequest struct {
+	Capability   string `json:"capability,omitempty"` // "text" | "vision" | "auto"
+	System       string `json:"system,omitempty"`
+	Messages     any    `json:"messages"`
+	Tools        any    `json:"tools,omitempty"`
+	ToolChoice   any    `json:"toolChoice,omitempty"`
+	JSONMode     bool   `json:"jsonMode,omitempty"`
+	Temperature  *float64 `json:"temperature,omitempty"`
+	MaxTokens    int    `json:"maxTokens,omitempty"`
+	FeatureScope string `json:"featureScope,omitempty"`
+}
+
+type AIChatResult struct {
+	OK           bool             `json:"ok"`
+	Capability   string           `json:"capability"`
+	Service      string           `json:"service"`
+	Content      string           `json:"content"`
+	Text         string           `json:"text"`
+	ToolCalls    []AIChatToolCall `json:"toolCalls"`
+	FinishReason string           `json:"finishReason"`
+	Usage        map[string]any   `json:"usage,omitempty"`
+	Billing      map[string]any   `json:"billing,omitempty"`
+}
+
+// AIChat invokes the website's unified text/vision AI gateway (/api/ai/chat).
+// The client never specifies or receives internal upstream model names.
+func (c *Client) AIChat(ctx context.Context, req AIChatRequest) (AIChatResult, error) {
+	var out AIChatResult
+	c2 := *c
+	c2.HTTP = &http.Client{Timeout: 3 * time.Minute, Transport: c.HTTP.Transport}
+	err := c2.Do(ctx, "POST", "/api/ai/chat", req, &out)
 	return out, err
 }
 

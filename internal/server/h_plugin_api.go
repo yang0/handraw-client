@@ -11,6 +11,7 @@ import (
 	"github.com/yang0/handraw-client/internal/galleries"
 	"github.com/yang0/handraw-client/internal/providers"
 	"github.com/yang0/handraw-client/internal/settings"
+	"github.com/yang0/handraw-client/internal/site"
 )
 
 // hostModelsSummary returns a sanitized, secret-free model catalog for plugins
@@ -87,12 +88,43 @@ func (s *Server) executeHostChat(ctx context.Context, req hostChatRequest) (map[
 		}, nil
 	}
 
+	callSite := func() (map[string]any, error) {
+		res, err := s.Site.AIChat(ctx, site.AIChatRequest{
+			Capability:   capStr,
+			Messages:     msgs,
+			JSONMode:     req.JSONMode,
+			FeatureScope: "plugin_chat",
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]any{
+			"text":       res.Content,
+			"content":    res.Content,
+			"source":     "site",
+			"service":    res.Service,
+			"capability": res.Capability,
+		}
+		if res.Usage != nil {
+			out["usage"] = res.Usage
+		}
+		return out, nil
+	}
+
 	switch route.Mode {
 	case "provider":
 		return callProvider(route.Provider, route.Model)
+	case "site":
+		if !s.Site.LoggedIn() {
+			return nil, site.ErrNotLoggedIn
+		}
+		return callSite()
 	default:
-		// Prefer user's configured text/vision OpenAI-compatible provider for general
-		// chat completions (official website text/vision endpoints are task-specific).
+		if s.Site.LoggedIn() {
+			if res, err := callSite(); err == nil {
+				return res, nil
+			}
+		}
 		if tp, model, ok := findTextProviderFor(capStr); ok {
 			return callProvider(tp, model)
 		}
@@ -101,7 +133,7 @@ func (s *Server) executeHostChat(ctx context.Context, req hostChatRequest) (map[
 				return callProvider(tp, model)
 			}
 		}
-		return nil, bad("尚未配置可用的文字/视觉模型接口，请在「设置 → 模型与接口」中添加自定义文字模型")
+		return nil, bad("请先登录手绘风账号使用官方智能文字/视觉服务，或在「设置 → 第三方接口」中添加自定义接口")
 	}
 }
 

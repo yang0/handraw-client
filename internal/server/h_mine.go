@@ -704,6 +704,44 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 	analyzeWithSite := func() (map[string]any, error) {
 		raw, err := s.Site.AnalyzeStyle(r.Context(), dataURLs, purpose)
 		if err != nil {
+			var ae *site.APIError
+			if errors.As(err, &ae) && (ae.Status == 404 || ae.Status == 403) {
+				// Use the unified website vision AI gateway (/api/ai/chat) without model names.
+				parts := []any{map[string]any{
+					"type": "text",
+					"text": "请仅提取以下参考图的纯粹视觉艺术语言（媒介、线条、材质、色彩倾向、光影质感、空间构图机制）。严禁描述任何具体人物、性别、发型、服饰、动物、道具、建筑或场景故事。返回严格 JSON: {\"name\":\"\",\"traitsZh\":\"\",\"traitsEn\":\"\"}",
+				}}
+				for _, du := range dataURLs {
+					parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": du}})
+				}
+				aiRes, aiErr := s.Site.AIChat(r.Context(), site.AIChatRequest{
+					Capability:   "vision",
+					Messages:     []providers.ChatMessage{{Role: "user", Content: parts}},
+					JSONMode:     true,
+					FeatureScope: "vision_extract",
+				})
+				if aiErr != nil {
+					return nil, aiErr
+				}
+				var out struct {
+					Name     string `json:"name"`
+					TraitsZh string `json:"traitsZh"`
+					TraitsEn string `json:"traitsEn"`
+				}
+				if json.Unmarshal([]byte(extractJSON(aiRes.Content)), &out) != nil || (out.TraitsZh == "" && out.TraitsEn == "") {
+					return nil, bad("视觉理解服务返回格式无法解析，请重试")
+				}
+				matched := p.SearchStyles(out.TraitsZh+" "+out.TraitsEn, 5)
+				return map[string]any{
+					"source":     "site",
+					"service":    aiRes.Service,
+					"name":       out.Name,
+					"traitsZh":   out.TraitsZh,
+					"traitsEn":   out.TraitsEn,
+					"matches":    matched,
+					"violations": prompt.CheckTraitViolations(out.TraitsZh + " " + out.TraitsEn),
+				}, nil
+			}
 			return nil, err
 		}
 		var parsed struct {

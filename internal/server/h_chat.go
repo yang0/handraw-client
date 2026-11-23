@@ -11,6 +11,7 @@ import (
 
 	"github.com/yang0/handraw-client/internal/providers"
 	"github.com/yang0/handraw-client/internal/settings"
+	"github.com/yang0/handraw-client/internal/site"
 	"github.com/yang0/handraw-client/internal/skills"
 )
 
@@ -124,12 +125,20 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 
 	var tp settings.Provider
 	var textModel string
+	useSiteAI := false
 	hasTextProvider := false
 	switch route.Mode {
 	case "provider":
 		tp, textModel, hasTextProvider = route.Provider, route.Model, true
+	case "site":
+		if !s.Site.LoggedIn() {
+			return nil, site.ErrNotLoggedIn
+		}
+		useSiteAI = true
 	default:
-		if p, m, ok := findTextProviderFor("text"); ok {
+		if s.Site.LoggedIn() {
+			useSiteAI = true
+		} else if p, m, ok := findTextProviderFor("text"); ok {
 			tp, textModel, hasTextProvider = p, m, true
 		}
 	}
@@ -144,9 +153,14 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 		resp:          resp,
 	}
 
-	if hasTextProvider {
-		resp.Source = "provider"
-		resp.TextModel = tp.ID + ":" + textModel
+	if useSiteAI || hasTextProvider {
+		if useSiteAI {
+			resp.Source = "site"
+			resp.TextModel = "site:text"
+		} else {
+			resp.Source = "provider"
+			resp.TextModel = tp.ID + ":" + textModel
+		}
 		sysPrompt := buildChatSystemPrompt(activeSkills, invokedSkillID, imageModelRef, defaultRatio, len(req.Refs))
 		msgs := make([]providers.ChatMessage, 0, len(req.Messages)+2)
 		msgs = append(msgs, providers.ChatMessage{Role: "system", Content: sysPrompt})
@@ -170,9 +184,33 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 
 		tools := chatAgentToolDefs()
 		for step := 0; step < 6; step++ {
-			turnRes, err := providers.ChatWithTools(r.Context(), tp, textModel, msgs, tools)
-			if err != nil {
-				return nil, err
+			var turnRes providers.ChatTurnResult
+			var turnErr error
+			if useSiteAI {
+				siteRes, err := s.Site.AIChat(r.Context(), site.AIChatRequest{
+					Capability:   "text",
+					Messages:     msgs,
+					Tools:        tools,
+					ToolChoice:   "auto",
+					FeatureScope: "client_chat",
+				})
+				turnErr = err
+				if err == nil {
+					turnRes.Content = siteRes.Content
+					for _, tc := range siteRes.ToolCalls {
+						var ptc providers.ToolCall
+						ptc.ID = tc.ID
+						ptc.Type = tc.Type
+						ptc.Function.Name = tc.Function.Name
+						ptc.Function.Arguments = tc.Function.Arguments
+						turnRes.ToolCalls = append(turnRes.ToolCalls, ptc)
+					}
+				}
+			} else {
+				turnRes, turnErr = providers.ChatWithTools(r.Context(), tp, textModel, msgs, tools)
+			}
+			if turnErr != nil {
+				return nil, turnErr
 			}
 			if len(turnRes.ToolCalls) == 0 {
 				resp.Reply = strings.TrimSpace(turnRes.Content)
@@ -273,7 +311,7 @@ func resolveActiveSkills(all []skills.Skill, explicitIDs []string, userText stri
 	if invokedID != "" {
 		add(invokedID)
 	}
-	if len(explicitIDs) > 0 {
+	if explicitIDs != nil {
 		for _, id := range explicitIDs {
 			add(id)
 		}

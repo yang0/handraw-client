@@ -7,6 +7,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -1065,6 +1066,25 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 		req := map[string]any{"prompt": body.Prompt}
 		raw, err := s.Site.CanvasAssistant(r.Context(), req)
 		if err != nil {
+			var ae *site.APIError
+			if errors.As(err, &ae) && (ae.Status == 404 || ae.Status == 403) {
+				ask := fmt.Sprintf("根据用户需求「%s」生成节点画布工作流 JSON：{\"nodes\":[{\"id\":\"n1\",\"type\":\"themes|recipe|styles|generate|export\",\"x\":80,\"y\":120,\"data\":{\"label\":\"\",\"items\":[]}}],\"edges\":[{\"id\":\"e1\",\"from\":\"n1\",\"to\":\"n2\"}]}", body.Prompt)
+				aiRes, aiErr := s.Site.AIChat(r.Context(), site.AIChatRequest{
+					Capability:   "text",
+					Messages:     []providers.ChatMessage{{Role: "user", Content: ask}},
+					JSONMode:     true,
+					FeatureScope: "canvas_assistant",
+				})
+				if aiErr != nil {
+					return nil, aiErr
+				}
+				var g map[string]any
+				if json.Unmarshal([]byte(extractJSON(aiRes.Content)), &g) != nil {
+					return nil, bad("官方文字服务返回的画布 JSON 无法解析")
+				}
+				g["source"] = "site"
+				return g, nil
+			}
 			return nil, err
 		}
 		return map[string]any{"raw": raw, "source": "site"}, nil

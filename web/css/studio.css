@@ -318,7 +318,37 @@
 }
 .studio-duo-row .field { margin: 0; }
 
-/* Resource Picker Modal Gallery */
+/* Resource Picker Modal Gallery (fixed-height shell, zero jitter, instant cached paint #59) */
+dialog.modal-picker {
+  width: min(920px, 94vw);
+  max-width: min(920px, 94vw);
+  height: min(84vh, 740px);
+  max-height: 90vh;
+}
+dialog.modal-picker .modal-inner {
+  height: 100%;
+  max-height: 100%;
+}
+dialog.modal-picker .modal-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.studio-picker-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+.studio-picker-dialog-body > .studio-cat-tabs,
+.studio-picker-dialog-body > search,
+.studio-picker-dialog-body > p {
+  flex: 0 0 auto;
+}
 .studio-cat-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -326,11 +356,18 @@
 }
 .studio-resource-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(144px, 1fr));
+  grid-auto-rows: max-content;
+  align-content: start;
+  align-items: start;
   gap: 10px;
-  max-height: 52vh;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  padding: 2px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 2px 4px 10px 2px;
+  contain: layout style;
 }
 .studio-resource-option {
   display: flex;
@@ -344,15 +381,42 @@
   color: var(--ink);
   cursor: pointer;
   min-width: 0;
+  contain: layout style paint;
   transition: border-color 0.14s ease;
 }
 .studio-resource-option:hover { border-color: var(--accent); }
-.studio-resource-option img {
+.studio-resource-thumb-wrap {
+  position: relative;
   width: 100%;
   aspect-ratio: 4 / 3;
-  object-fit: cover;
   border-radius: 5px;
   background: var(--surface-2);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+.studio-resource-option img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  opacity: 0;
+  transition: opacity 0.12s ease-out;
+}
+.studio-resource-option img.is-loaded { opacity: 1; }
+.studio-resource-option img.is-instant { opacity: 1; transition: none; }
+.studio-resource-option img.is-error { display: none; }
+.studio-resource-thumb-wrap.is-error::after {
+  content: attr(data-fallback);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink-muted);
+}
+.studio-resource-sentinel {
+  grid-column: 1 / -1;
+  height: 1px;
+  pointer-events: none;
 }
 .studio-resource-option-empty {
   width: 100%;

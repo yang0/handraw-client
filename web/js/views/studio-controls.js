@@ -154,6 +154,35 @@ function resourceCategory(item) {
   return CATEGORY_LABELS[raw] || raw;
 }
 
+const _warmedStudioThumbs = new Set();
+
+export function warmResourceThumbs(items, limit = 24) {
+  if (!Array.isArray(items) || !items.length || typeof Image === "undefined") return;
+  const urls = [];
+  for (let i = 0; i < items.length && urls.length < limit; i++) {
+    const raw = items[i]?.image;
+    if (!raw) continue;
+    const url = packImg(raw);
+    if (!url || _warmedStudioThumbs.has(url)) continue;
+    _warmedStudioThumbs.add(url);
+    urls.push(url);
+  }
+  if (!urls.length) return;
+  const run = () => {
+    urls.forEach((url) => {
+      const img = new Image();
+      img.decoding = "async";
+      try { img.fetchPriority = "low"; } catch {}
+      img.src = url;
+    });
+  };
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(run, { timeout: 1200 });
+  } else {
+    setTimeout(run, 120);
+  }
+}
+
 export function openResourceDialog(title, items, selected, onSelect, { empty = "不指定" } = {}) {
   const search = el("input", { class: "input", type: "search", placeholder: "搜索编号、名称或关键词…", autofocus: true });
   const catBar = el("div", { class: "studio-cat-tabs", role: "group", "aria-label": `${title}分类` });
@@ -162,13 +191,26 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
 
   let activeCat = "";
   const catCounts = new Map();
-  items.forEach((item) => {
+  const searchIndex = items.map((item) => {
     const c = resourceCategory(item);
     if (c) catCounts.set(c, (catCounts.get(c) || 0) + 1);
+    return `${resourceId(item)} ${resourceName(item)} ${item.traits || ""} ${item.prompt_zh || ""} ${c}`.toLowerCase();
   });
 
   let closeCurrent = closeModal;
-  const choose = (id) => { onSelect(id); closeCurrent(); };
+  let batchObserver = null;
+  let searchTimer = null;
+  const cleanupGrid = () => {
+    if (batchObserver) {
+      batchObserver.disconnect();
+      batchObserver = null;
+    }
+  };
+  const choose = (id) => {
+    cleanupGrid();
+    onSelect(id);
+    closeCurrent();
+  };
 
   const renderCats = () => {
     clear(catBar);
@@ -185,35 +227,118 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
     });
   };
 
+  const buildOptionCard = (item, idx) => {
+    const id = resourceId(item);
+    let mediaNode;
+    if (item.image) {
+      const wrap = el("div", { class: "studio-resource-thumb-wrap", dataset: { fallback: id || "+" } });
+      const img = el("img", {
+        src: packImg(item.image),
+        alt: "",
+        decoding: "async",
+        loading: idx < 18 ? "eager" : "lazy",
+        ...(idx < 10 ? { fetchpriority: "high" } : {}),
+      });
+      img.addEventListener("load", () => {
+        img.classList.remove("is-error");
+        img.classList.add("is-loaded");
+        wrap.classList.remove("is-error");
+      });
+      img.addEventListener("error", () => {
+        img.classList.remove("is-loaded", "is-instant");
+        img.classList.add("is-error");
+        wrap.classList.add("is-error");
+      });
+      if (img.complete && img.naturalWidth > 0) {
+        img.classList.add("is-loaded", "is-instant");
+      }
+      wrap.appendChild(img);
+      mediaNode = wrap;
+    } else {
+      mediaNode = el("div", { class: "studio-resource-option-empty" }, id || "+");
+    }
+    return el("button", {
+      type: "button",
+      class: "studio-resource-option",
+      "aria-pressed": String(id === selected),
+      onClick: () => choose(id),
+    },
+    mediaNode,
+    el("small", { class: "mono" }, id),
+    el("strong", null, resourceName(item)));
+  };
+
   const renderGrid = () => {
+    cleanupGrid();
     clear(grid);
+    grid.scrollTop = 0;
     const q = search.value.trim().toLowerCase();
-    const visible = items.filter((x) => {
-      if (activeCat && resourceCategory(x) !== activeCat) return false;
-      if (!q) return true;
-      return `${resourceId(x)} ${resourceName(x)} ${x.traits || ""} ${x.prompt_zh || ""} ${resourceCategory(x)}`.toLowerCase().includes(q);
-    });
+    const visible = [];
+    for (let i = 0; i < items.length; i++) {
+      const x = items[i];
+      if (activeCat && resourceCategory(x) !== activeCat) continue;
+      if (q && !searchIndex[i].includes(q)) continue;
+      visible.push(x);
+    }
     count.textContent = `共 ${visible.length} 项`;
     if (!visible.length) {
       grid.appendChild(el("p", { class: "muted", style: { gridColumn: "1 / -1", textAlign: "center", padding: "24px 0" } }, "没有匹配的条目"));
       return;
     }
-    visible.forEach((item) => {
-      const id = resourceId(item);
-      grid.appendChild(el("button", {
-        type: "button",
-        class: "studio-resource-option",
-        "aria-pressed": String(id === selected),
-        onClick: () => choose(id),
-      },
-      item.image ? el("img", { src: packImg(item.image), alt: "", loading: "lazy" }) : el("div", { class: "studio-resource-option-empty" }, id || "+"),
-      el("small", { class: "mono" }, id),
-      el("strong", null, resourceName(item))));
-    });
+
+    const INITIAL_BATCH = 36;
+    const NEXT_BATCH = 40;
+    let cursor = 0;
+    let sentinel = null;
+
+    const appendBatch = (size) => {
+      if (cursor >= visible.length) {
+        cleanupGrid();
+        sentinel?.remove();
+        sentinel = null;
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      const end = Math.min(visible.length, cursor + size);
+      for (let i = cursor; i < end; i++) {
+        frag.appendChild(buildOptionCard(visible[i], i));
+      }
+      cursor = end;
+      if (sentinel && sentinel.parentNode === grid) {
+        grid.insertBefore(frag, sentinel);
+      } else {
+        grid.appendChild(frag);
+      }
+      if (cursor >= visible.length) {
+        cleanupGrid();
+        sentinel?.remove();
+        sentinel = null;
+      }
+    };
+
+    appendBatch(INITIAL_BATCH);
+
+    if (cursor < visible.length) {
+      sentinel = el("div", { class: "studio-resource-sentinel", "aria-hidden": "true" });
+      grid.appendChild(sentinel);
+      if (typeof IntersectionObserver !== "undefined") {
+        batchObserver = new IntersectionObserver((entries) => {
+          if (entries.some((en) => en.isIntersecting)) {
+            appendBatch(NEXT_BATCH);
+          }
+        }, { root: grid, rootMargin: "480px 0px" });
+        batchObserver.observe(sentinel);
+      } else {
+        appendBatch(visible.length - cursor);
+      }
+    }
   };
 
-  search.addEventListener("input", renderGrid);
-  const body = el("div", { class: "col", style: { gap: "10px" } },
+  search.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(renderGrid, 60);
+  });
+  const body = el("div", { class: "studio-picker-dialog-body" },
     el("search", null, field("筛选", search)),
     catBar,
     count,
@@ -226,9 +351,10 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
 
   // If #app-dialog is already open (e.g. inside slot prompt or settings dialog),
   // stack a dedicated native top-layer <dialog> instead of overwriting it.
+  let activeDialog = null;
   if (document.getElementById("app-dialog")?.open) {
     const titleId = `nested-dlg-title-${++fieldSequence}`;
-    const nested = el("dialog", { class: "modal", closedby: "any", "aria-labelledby": titleId },
+    const nested = el("dialog", { class: "modal modal-picker", closedby: "any", "aria-labelledby": titleId },
       el("div", { class: "modal-inner" },
         el("div", { class: "modal-head" },
           el("h2", { id: titleId, class: "modal-title" }, `选择${title}`),
@@ -241,15 +367,22 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
       )
     );
     closeCurrent = () => { if (nested.open) nested.close(""); };
-    nested.addEventListener("close", () => nested.remove());
+    nested.addEventListener("close", () => { cleanupGrid(); clearTimeout(searchTimer); nested.remove(); });
     document.body.appendChild(nested);
     nested.showModal();
+    activeDialog = nested;
   } else {
-    showModal(`选择${title}`, body, footer);
+    activeDialog = showModal(`选择${title}`, body, footer);
+    activeDialog?.classList.add("modal-picker");
+    activeDialog?.addEventListener("close", () => {
+      cleanupGrid();
+      clearTimeout(searchTimer);
+      activeDialog.classList.remove("modal-picker");
+    }, { once: true });
   }
   renderCats();
   renderGrid();
-  search.focus();
+  requestAnimationFrame(() => search.focus({ preventScroll: true }));
 }
 
 export function resourcePicker(label, items, value, onChange, empty = "不指定", { allowClear = true } = {}) {
@@ -354,6 +487,8 @@ export function recipeControls(state, catalog, onChange = () => {}, { article = 
   const secondary = resourcePicker("场景画风", catalog.styles || [], state.style2, (v) => { state.style2 = v; change(); }, "选择场景画风", { allowClear: true });
   const layoutPicker = resourcePicker("图型", catalog.layouts || [], state.layout, (v) => { state.layout = v; syncSpecialLayoutFields(); change(); }, "自由构图", { allowClear: true });
   const color = resourcePicker("主题色", catalog.colors || [], state.color, (v) => { state.color = v; change(); }, "随画风", { allowClear: true });
+  warmResourceThumbs(catalog.styles || [], 24);
+  warmResourceThumbs(catalog.layouts || [], 24);
 
   const pickersRow = el("div", { class: "make-image-pickers-row" },
     primary, secondary, layout ? layoutPicker : null, color
