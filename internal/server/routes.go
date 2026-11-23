@@ -49,6 +49,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /files/remote", s.fileRemote)
 	m.HandleFunc("GET /files/plugin/{id}/", s.filePlugin)
 	m.HandleFunc("GET /files/dsh-client/{id}", s.dshClientFile)
+	m.HandleFunc("GET /files/market-icon", s.marketIcon)
 
 	// my styles / layouts / recipes
 	m.HandleFunc("GET /api/mine/{kind}", s.h(s.mineList))
@@ -115,6 +116,10 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/plugins", s.h(s.pluginList))
 	m.HandleFunc("GET /api/plugins/dsh/discover", s.h(s.pluginDSHDiscover))
 	m.HandleFunc("GET /api/plugins/dsh/status", s.h(s.pluginDSHStatus))
+	m.HandleFunc("GET /api/plugins/market", s.h(s.pluginMarketList))
+	m.HandleFunc("POST /api/plugins/market/sources", s.h(s.pluginMarketAddSource))
+	m.HandleFunc("DELETE /api/plugins/market/sources/{id}", s.h(s.pluginMarketRemoveSource))
+	m.HandleFunc("POST /api/plugins/market/install", s.h(s.pluginMarketInstall))
 	m.HandleFunc("PATCH /api/plugins/{id}", s.h(s.pluginPatch))
 	m.HandleFunc("POST /api/plugins/install", s.h(s.pluginInstall))
 	m.HandleFunc("DELETE /api/plugins/{id}", s.h(s.pluginRemove))

@@ -34,24 +34,47 @@ type Model struct {
 	CanVision   bool     `json:"canVision,omitempty"`
 }
 
+// PluginMarketSource is one subscribed DSH Format 1 plugin market index.json URL.
+type PluginMarketSource struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Official bool   `json:"official,omitempty"`
+	Enabled  bool   `json:"enabled"`
+}
+
+// DefaultPluginMarkets returns the built-in official plugin market sources.
+func DefaultPluginMarkets() []PluginMarketSource {
+	return []PluginMarketSource{
+		{
+			ID:       "handraw-official",
+			Name:     "手绘风官方插件市场",
+			URL:      "https://raw.githubusercontent.com/yang0/handraw-plugins/main/index.json",
+			Official: true,
+			Enabled:  true,
+		},
+	}
+}
+
 type Settings struct {
-	SiteBase           string          `json:"siteBase"`
-	WorksDir           string          `json:"worksDir"`
-	Theme              string          `json:"theme"` // light | dark | system
-	AutoSyncResources  bool            `json:"autoSyncResources"`
-	AutoCheckUpdate    bool            `json:"autoCheckUpdate"`
-	CostLimitCents     int             `json:"costLimitCents"`
-	DefaultModel       string          `json:"defaultModel"`       // "site:<id>" or "<providerId>:<modelId>"
-	DefaultTextModel   string          `json:"defaultTextModel"`   // "", "site:auto", "site:<id>", or "<providerId>:<modelId>"
-	DefaultVisionModel string          `json:"defaultVisionModel"` // "", "site:auto", "site:<id>", or "<providerId>:<modelId>"
-	QuickShotHotkey    string          `json:"quickShotHotkey"`
-	QuickShotEnabled   bool            `json:"quickShotEnabled"`
-	MinimizeToTray     bool            `json:"minimizeToTray"`
-	Providers          []Provider      `json:"providers"`
-	Plugins            map[string]bool `json:"plugins"`
-	PluginConfig       map[string]any  `json:"pluginConfig"`
-	LastRecipeID       string          `json:"lastRecipeId"`
-	Onboarded          bool            `json:"onboarded"`
+	SiteBase           string               `json:"siteBase"`
+	WorksDir           string               `json:"worksDir"`
+	Theme              string               `json:"theme"` // light | dark | system
+	AutoSyncResources  bool                 `json:"autoSyncResources"`
+	AutoCheckUpdate    bool                 `json:"autoCheckUpdate"`
+	CostLimitCents     int                  `json:"costLimitCents"`
+	DefaultModel       string               `json:"defaultModel"`       // "site:<id>" or "<providerId>:<modelId>"
+	DefaultTextModel   string               `json:"defaultTextModel"`   // "", "site:auto", "site:<id>", or "<providerId>:<modelId>"
+	DefaultVisionModel string               `json:"defaultVisionModel"` // "", "site:auto", "site:<id>", or "<providerId>:<modelId>"
+	QuickShotHotkey    string               `json:"quickShotHotkey"`
+	QuickShotEnabled   bool                 `json:"quickShotEnabled"`
+	MinimizeToTray     bool                 `json:"minimizeToTray"`
+	Providers          []Provider           `json:"providers"`
+	Plugins            map[string]bool      `json:"plugins"`
+	PluginConfig       map[string]any       `json:"pluginConfig"`
+	PluginMarkets      []PluginMarketSource `json:"pluginMarkets,omitempty"`
+	LastRecipeID       string               `json:"lastRecipeId"`
+	Onboarded          bool                 `json:"onboarded"`
 	// KeepSiteGenerationsPrivate stops website-model images from being
 	// published to the community automatically (the website default is public).
 	KeepSiteGenerationsPrivate bool `json:"keepSiteGenerationsPrivate"`
@@ -70,6 +93,7 @@ func Defaults() Settings {
 		MinimizeToTray:    true,
 		Plugins:           map[string]bool{},
 		PluginConfig:      map[string]any{},
+		PluginMarkets:     DefaultPluginMarkets(),
 	}
 }
 
@@ -121,6 +145,9 @@ func clone(s Settings) Settings {
 	if out.PluginConfig == nil {
 		out.PluginConfig = map[string]any{}
 	}
+	if len(out.PluginMarkets) == 0 {
+		out.PluginMarkets = DefaultPluginMarkets()
+	}
 	return out
 }
 
@@ -140,6 +167,9 @@ func load() Settings {
 	}
 	if s.WorksDir == "" {
 		s.WorksDir = appdir.DefaultWorks()
+	}
+	if len(s.PluginMarkets) == 0 {
+		s.PluginMarkets = DefaultPluginMarkets()
 	}
 	return s
 }

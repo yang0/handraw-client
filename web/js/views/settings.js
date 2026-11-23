@@ -532,6 +532,205 @@ export async function renderSettings(root, ctx, params = {}) {
 
   const dshStatus = plugRes.dshStatus || {};
   const dshRuntimeMap = new Map((dshStatus.plugins || []).map((p) => [p.id, p]));
+
+  // Official & subscribed DSH Format 1 plugin market browser (default source: yang0/handraw-plugins).
+  const marketWrap = el("div", { class: "col", style: { gap: "8px", marginTop: "6px", paddingTop: "10px", borderTop: "1px solid var(--line)" } });
+  const marketSourcesRow = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } });
+  const marketFilterRow = el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } });
+  const marketGrid = el("div", { class: "col", style: { gap: "8px" } });
+  let marketCategory = "";
+  let marketQuery = "";
+  let marketData = null;
+
+  const paintMarket = () => {
+    clear(marketSourcesRow);
+    clear(marketFilterRow);
+    clear(marketGrid);
+    if (!marketData) {
+      marketGrid.appendChild(el("span", { class: "muted" }, "正在加载插件市场…"));
+      return;
+    }
+    const sources = marketData.sources || [];
+    sources.forEach((src) => {
+      marketSourcesRow.appendChild(el("span", { class: "badge" + (src.official ? " badge-accent" : ""), title: src.url },
+        src.name || src.id,
+        !src.official ? el("button", {
+          type: "button",
+          style: { border: 0, background: "transparent", cursor: "pointer", marginLeft: "4px", padding: "0 2px", color: "inherit" },
+          title: "移除市场源",
+          onClick: async () => {
+            try {
+              await api("DELETE", `/api/plugins/market/sources/${encodeURIComponent(src.id)}`);
+              toast("已移除市场源");
+              loadMarket(true);
+            } catch (e) { toast(e.message); }
+          },
+        }, "×") : null
+      ));
+    });
+
+    (marketData.errors || []).forEach((er) => {
+      marketGrid.appendChild(el("div", { class: "settings-subcard", style: { borderColor: "var(--accent)", padding: "8px 10px" } },
+        el("span", { class: "muted" }, `市场源「${er.name || er.sourceId}」拉取失败：${er.error}`)
+      ));
+    });
+
+    const cats = marketData.categories || {};
+    const catBar = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } });
+    const addCat = (key, label) => {
+      catBar.appendChild(el("button", {
+        type: "button",
+        class: "btn btn-sm" + (marketCategory === key ? " btn-primary" : ""),
+        onClick: () => { marketCategory = key; paintMarket(); },
+      }, label));
+    };
+    addCat("", `全部 (${(marketData.plugins || []).length})`);
+    Object.entries(cats).forEach(([k, label]) => addCat(k, label || k));
+
+    const searchBox = el("input", {
+      class: "input",
+      type: "search",
+      value: marketQuery,
+      placeholder: "搜索市场插件…",
+      style: { width: "180px" },
+    });
+    searchBox.addEventListener("input", () => { marketQuery = searchBox.value; paintMarket(); });
+    marketFilterRow.appendChild(catBar);
+    marketFilterRow.appendChild(searchBox);
+
+    const q = marketQuery.trim().toLowerCase();
+    const labelsMap = marketData.labels || {};
+    const list = (marketData.plugins || []).filter((p) => {
+      if (marketCategory && !(p.categories || []).includes(marketCategory)) return false;
+      if (!q) return true;
+      return `${p.name} ${p.title} ${p.description} ${p.author}`.toLowerCase().includes(q);
+    });
+    if (!list.length) {
+      marketGrid.appendChild(el("span", { class: "muted" }, "当前筛选下暂无插件。"));
+      return;
+    }
+
+    list.forEach((p) => {
+      const iconUrl = p.icon
+        ? (p.icon.startsWith("data:") ? p.icon : `/files/market-icon?url=${encodeURIComponent(p.icon)}&t=${encodeURIComponent(ctx.token || "")}`)
+        : "";
+      const iconNode = iconUrl
+        ? el("img", {
+          src: iconUrl,
+          alt: "",
+          style: { width: "36px", height: "36px", borderRadius: "8px", objectFit: "contain", flex: "none", background: "var(--paper)", border: "1px solid var(--line)" },
+          onError: (ev) => { ev.currentTarget.style.display = "none"; },
+        })
+        : el("span", { style: { width: "36px", height: "36px", borderRadius: "8px", display: "grid", placeItems: "center", background: "var(--paper)", border: "1px solid var(--line)", flex: "none" } }, "🧩");
+
+      const badges = [el("span", { class: "badge" }, `v${p.latestVersion}`)];
+      if (p.installType) badges.push(el("span", { class: "badge" }, p.installType));
+      (p.labels || []).forEach((lk) => {
+        const cls = lk === "official" ? "badge badge-accent" : (lk === "handraw-verified" ? "badge badge-ok" : "badge");
+        badges.push(el("span", { class: cls }, labelsMap[lk] || lk));
+      });
+
+      const actionBtn = el("button", {
+        type: "button",
+        class: "btn btn-sm" + (!p.installed || p.updateAvailable ? " btn-primary" : ""),
+        disabled: p.installed && !p.updateAvailable,
+        onClick: async () => {
+          actionBtn.disabled = true;
+          const prevText = actionBtn.textContent;
+          actionBtn.textContent = "安装中…";
+          try {
+            await api("POST", "/api/plugins/market/install", {
+              sourceId: p.sourceId,
+              name: p.name,
+              version: p.latestVersion,
+              enable: true,
+            });
+            ctx.refreshNav?.();
+            toast(`已安装并启用「${p.title}」`);
+            renderSettings(root, ctx, { preserveScroll: true });
+          } catch (e) {
+            actionBtn.disabled = false;
+            actionBtn.textContent = prevText;
+            toast(e.message);
+          }
+        },
+      }, p.updateAvailable ? `更新到 v${p.latestVersion}` : (p.installed ? "已安装" : "安装并启用"));
+
+      marketGrid.appendChild(el("div", { class: "settings-subcard row", style: { justifyContent: "space-between", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+        el("div", { class: "row", style: { gap: "10px", flex: "1", minWidth: "220px", alignItems: "flex-start" } },
+          iconNode,
+          el("div", { class: "col", style: { gap: "4px", minWidth: 0 } },
+            el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } },
+              el("strong", null, p.title || p.name),
+              ...badges
+            ),
+            el("span", { class: "muted" }, p.description || p.name),
+            p.author ? el("span", { class: "muted", style: { fontSize: "11px" } }, `作者：${p.author} · ${p.name}`) : null
+          )
+        ),
+        el("div", { class: "row", style: { gap: "6px" } },
+          p.installed && p.enabled && p.installedId
+            ? el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go(`dsh:${p.installedId}`) }, "打开")
+            : null,
+          actionBtn
+        )
+      ));
+    });
+  };
+
+  const loadMarket = async (refresh = false) => {
+    marketData = null;
+    paintMarket();
+    try {
+      marketData = await api("GET", `/api/plugins/market${refresh ? "?refresh=1" : ""}`);
+      if (marketWrap.isConnected) paintMarket();
+    } catch (e) {
+      marketData = { sources: [], categories: {}, labels: {}, plugins: [], errors: [{ sourceId: "market", name: "插件市场", error: e.message }] };
+      if (marketWrap.isConnected) paintMarket();
+    }
+  };
+
+  const openAddMarketDialog = () => {
+    const urlIn = el("input", { class: "input", placeholder: "https://.../index.json（DSH Format 1 标准）", style: { width: "100%" } });
+    const nameIn = el("input", { class: "input", placeholder: "显示名称（可留空，自动读取索引标题）", style: { width: "100%" } });
+    const body = el("div", { class: "col", style: { gap: "8px" } },
+      el("span", { class: "muted" }, "输入任意兼容 DeepSeek Harness Format 1 的插件市场 index.json 网址："),
+      urlIn,
+      nameIn
+    );
+    showModal("添加插件市场源", body, [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: async () => {
+          if (!urlIn.value.trim()) return toast("请填写市场源 URL");
+          try {
+            await api("POST", "/api/plugins/market/sources", { url: urlIn.value.trim(), name: nameIn.value.trim() });
+            closeModal();
+            toast("已添加插件市场源");
+            loadMarket(true);
+          } catch (e) { toast(e.message); }
+        },
+      }, "添加"),
+    ]);
+  };
+
+  marketWrap.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+    el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+      el("span", { class: "settings-subhead" }, "官方插件市场"),
+      marketSourcesRow
+    ),
+    el("div", { class: "row", style: { gap: "6px" } },
+      el("button", { type: "button", class: "btn btn-sm", onClick: openAddMarketDialog }, "+ 添加市场源"),
+      el("button", { type: "button", class: "btn btn-sm", onClick: () => loadMarket(true) }, "刷新市场")
+    )
+  ));
+  marketWrap.appendChild(marketFilterRow);
+  marketWrap.appendChild(marketGrid);
+  plugSection.appendChild(marketWrap);
+  loadMarket(false);
+
   const srcIn = el("input", {
     id: "plugin-install-src",
     class: "input",
