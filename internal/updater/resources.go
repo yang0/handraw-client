@@ -99,9 +99,13 @@ func (u *Updater) PlanResources(ctx context.Context, dir string) (*Plan, error) 
 				p.Removed = append(p.Removed, f.Path)
 			}
 		}
+		newVer := ""
+		if len(p.Changed) > 0 || len(p.Removed) > 0 {
+			newVer = remote.Version
+		}
 		u.set(func(s *Status) {
 			s.ResourceLocal = local.Version
-			s.ResourceNew = remote.Version
+			s.ResourceNew = newVer
 			s.ResourceFiles = len(p.Changed)
 			s.ResourceBytes = p.Bytes
 		})
@@ -174,7 +178,7 @@ func (u *Updater) ApplyResources(ctx context.Context, dir string, p *Plan, progr
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), p.raw, 0o644); err != nil {
 		return err
 	}
-	u.set(func(s *Status) { s.ResourceLocal = p.Version; s.ResourceFiles = 0; s.ResourceBytes = 0 })
+	u.set(func(s *Status) { s.ResourceLocal = p.Version; s.ResourceNew = ""; s.ResourceFiles = 0; s.ResourceBytes = 0 })
 	return nil
 }
 

@@ -71,6 +71,8 @@ async function start() {
     refreshNav,
     refreshTopbar,
   };
+  let updatingNow = false;
+  let latestUpdateStatus = {};
 
   async function refreshNav() {
     const plugRes = await api("GET", "/api/plugins").catch(() => ({ builtin: [], community: [] }));
@@ -218,10 +220,12 @@ async function start() {
       qCnt.textContent = String(cnt);
       qBtn.classList.toggle("hidden", cnt <= 0);
     }
+    latestUpdateStatus = upd || {};
     if (updBtn) {
       const hasUpd = Boolean(upd.available || upd.ready || upd.resourceNew);
       updBtn.classList.toggle("hidden", !hasUpd);
-      updBtn.textContent = upd.ready ? "⬆ 重启更新" : (upd.available ? `⬆ 新版 ${upd.latest}` : "⬆ 资源可更新");
+      updBtn.textContent = "更新";
+      updBtn.disabled = updatingNow;
     }
   }
 
@@ -310,9 +314,65 @@ async function start() {
     });
   }
 
+  async function runImmediateUpdate() {
+    if (updatingNow) return;
+    const updBtn = document.getElementById("btn-update");
+    updatingNow = true;
+    if (updBtn) updBtn.disabled = true;
+    const finish = () => {
+      updatingNow = false;
+      if (updBtn) updBtn.disabled = false;
+    };
+    try {
+      const st = await api("GET", "/api/update").catch(() => latestUpdateStatus || {});
+      if (st.resourceNew) {
+        toast("正在更新资源包…");
+        const r = await api("POST", "/api/update/resources");
+        if (r?.updated) {
+          toast("资源包已更新");
+        }
+      }
+      const afterRes = await api("GET", "/api/update").catch(() => st);
+      if (afterRes.ready) {
+        toast("正在应用更新并重启…");
+        await api("POST", "/api/update/apply");
+        return;
+      }
+      if (afterRes.available) {
+        toast("正在下载更新…");
+        if (!afterRes.downloading) {
+          await api("POST", "/api/update/download");
+        }
+        const deadline = Date.now() + 10 * 60 * 1000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 800));
+          const cur = await api("GET", "/api/update").catch(() => null);
+          if (!cur) continue;
+          if (cur.ready) {
+            toast("正在应用更新并重启…");
+            await api("POST", "/api/update/apply");
+            return;
+          }
+          if (!cur.downloading && cur.error) {
+            throw new Error(cur.error);
+          }
+          if (!cur.downloading && !cur.available) {
+            break;
+          }
+        }
+      }
+      await refreshTopbar();
+      finish();
+    } catch (e) {
+      toast(e?.message || "更新失败");
+      finish();
+      await refreshTopbar();
+    }
+  }
+
   settingsNavBtn?.addEventListener("click", () => go("settings"));
   document.getElementById("btn-account")?.addEventListener("click", () => go("settings", { anchor: "settings-account" }));
-  document.getElementById("btn-update")?.addEventListener("click", () => go("settings", { anchor: "settings-updates" }));
+  document.getElementById("btn-update")?.addEventListener("click", () => runImmediateUpdate());
   document.getElementById("btn-queue")?.addEventListener("click", async () => {
     const running = await api("GET", "/api/works?limit=12").catch(() => ({ items: [] }));
     const body = el("div", { class: "col" });
