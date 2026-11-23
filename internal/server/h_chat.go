@@ -264,15 +264,27 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 				Content:   turnRes.Content,
 				ToolCalls: turnRes.ToolCalls,
 			})
+			allGenOK := len(turnRes.ToolCalls) > 0
 			for _, tc := range turnRes.ToolCalls {
 				toolOut, trace := execCtx.runTool(r.Context(), tc.Function.Name, tc.Function.Arguments)
 				resp.ToolCalls = append(resp.ToolCalls, trace)
+				if tc.Function.Name != "generate_images" || !trace.OK {
+					allGenOK = false
+				}
 				msgs = append(msgs, providers.ChatMessage{
 					Role:       "tool",
 					ToolCallID: tc.ID,
 					Name:       tc.Function.Name,
 					Content:    toolOut,
 				})
+			}
+			// Fast-finish after successful generate_images tool call(s) to avoid
+			// a redundant 2nd text LLM round-trip and extra AI billing (#64).
+			if allGenOK && (len(resp.Runs) > 0 || resp.PendingConfirm != nil) {
+				p, _ := s.pack()
+				resp.Reply = buildChatGenerateSummary(p, turnRes.Content, execCtx.lastGenTitle, execCtx.lastGenItems, imageModelRef, resp.PendingConfirm)
+				s.refreshChatRuns(resp)
+				return resp, nil
 			}
 		}
 		if resp.Reply == "" {
@@ -311,6 +323,105 @@ func (s *Server) refreshChatRuns(resp *chatTurnResponse) {
 			}
 		}
 	}
+}
+
+func buildChatGenerateSummary(p *resources.Pack, modelContent, title string, items []map[string]any, modelRef string, pendingConfirm map[string]any) string {
+	if pendingConfirm != nil {
+		return "本次生图预计费用超过了你设置的确认阈值，请点击下方「确认继续生成」。"
+	}
+	if txt := strings.TrimSpace(modelContent); txt != "" {
+		return txt
+	}
+	if len(items) == 0 {
+		return "已提交生图任务，图像完成后会在下方实时显影。"
+	}
+	styleLabel := func(id string) string {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return "-"
+		}
+		if p != nil {
+			if st, ok := p.Style(id); ok {
+				if nm := firstStr(st.NameZh, st.GenerationName); nm != "" {
+					return id + " " + nm
+				}
+			}
+		}
+		return id
+	}
+	layoutLabel := func(id string) string {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return ""
+		}
+		if p != nil {
+			if l, ok := p.Layout(id); ok && strings.TrimSpace(l.Name) != "" {
+				return id + " " + strings.TrimSpace(l.Name)
+			}
+		}
+		return id
+	}
+	colorLabel := func(id string) string {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return ""
+		}
+		if p != nil {
+			for _, c := range p.Colors {
+				if strings.EqualFold(c.ID, id) && strings.TrimSpace(c.NameZh) != "" {
+					return c.ID + " " + strings.TrimSpace(c.NameZh)
+				}
+			}
+		}
+		return id
+	}
+
+	var sb strings.Builder
+	title = strings.TrimSpace(title)
+	if len(items) == 1 {
+		it := items[0]
+		sb.WriteString("生图任务已提交，图像正在下方实时绘制并自动显影。\n\n")
+		sb.WriteString("**本次方案**\n")
+		sb.WriteString("- **画风**：" + styleLabel(fmt.Sprint(it["style"])) + "\n")
+		if lay := layoutLabel(fmt.Sprint(it["layout"])); lay != "" {
+			sb.WriteString("- **图型**：" + lay + "\n")
+		}
+		if col := colorLabel(fmt.Sprint(it["color"])); col != "" {
+			sb.WriteString("- **主题色**：" + col + "\n")
+		}
+		if ratio := strings.TrimSpace(fmt.Sprint(it["ratio"])); ratio != "" {
+			sb.WriteString("- **比例**：" + ratio + "\n")
+		}
+		if copyTxt := strings.TrimSpace(fmt.Sprint(it["text"])); copyTxt != "" {
+			cleanCopy := strings.ReplaceAll(copyTxt, "\n", " / ")
+			sb.WriteString("- **文案**：" + cleanCopy + "\n")
+		}
+		return strings.TrimSpace(sb.String())
+	}
+
+	if title != "" {
+		sb.WriteString(fmt.Sprintf("已提交 **%d 张**「%s」生图任务，图像正在下方实时绘制并自动显影。\n\n", len(items), title))
+	} else {
+		sb.WriteString(fmt.Sprintf("已提交 **%d 张**生图任务，图像正在下方实时绘制并自动显影。\n\n", len(items)))
+	}
+	for i, it := range items {
+		var meta []string
+		meta = append(meta, styleLabel(fmt.Sprint(it["style"])))
+		if lay := layoutLabel(fmt.Sprint(it["layout"])); lay != "" {
+			meta = append(meta, lay)
+		}
+		if col := colorLabel(fmt.Sprint(it["color"])); col != "" {
+			meta = append(meta, col)
+		}
+		line := fmt.Sprintf("%d. **%s**", i+1, strings.Join(meta, " · "))
+		if copyTxt := strings.TrimSpace(fmt.Sprint(it["text"])); copyTxt != "" {
+			line += " — 文案：「" + strings.ReplaceAll(copyTxt, "\n", " / ") + "」"
+		} else if th := firstNRunes(fmt.Sprint(it["theme"]), 36); th != "" {
+			line += " — " + th
+		}
+		sb.WriteString(line + "\n")
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 func resolveActiveSkills(all []skills.Skill, explicitIDs []string, userText string) ([]skills.Skill, string, string) {
@@ -631,6 +742,8 @@ type chatExecContext struct {
 	refs          []string
 	confirmed     bool
 	resp          *chatTurnResponse
+	lastGenTitle  string
+	lastGenItems  []map[string]any
 }
 
 func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (string, chatToolTrace) {
@@ -841,6 +954,8 @@ func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (st
 		if runObj, ok := m["run"]; ok && runObj != nil {
 			c.resp.Runs = append(c.resp.Runs, runObj)
 		}
+		c.lastGenTitle = fmt.Sprint(payload["title"])
+		c.lastGenItems = append(c.lastGenItems, genItems...)
 		return okOut(fmt.Sprintf("已提交 %d 张生图任务（模型 %s）", len(genItems), firstStr(c.imageModelRef, "默认")), map[string]any{
 			"ok":    true,
 			"count": len(genItems),

@@ -273,6 +273,59 @@ func pickSize(listed, ratio, def string) string {
 	return def
 }
 
+func strFromMap(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	if s, ok := m[key].(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if t := strings.TrimSpace(v); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// requoteSiteItem fetches a fresh single-item quote from the website for a
+// retried or quote-expired site generation (#64).
+func (m *Manager) requoteSiteItem(ctx context.Context, im store.Image, spec *Spec, body map[string]any) error {
+	rawModel := firstNonEmptyStr(strFromMap(body, "model"), strings.TrimPrefix(spec.ModelRef, "site:"))
+	qItem := map[string]any{
+		"model":      rawModel,
+		"resolution": firstNonEmptyStr(spec.Resolution, strFromMap(body, "resolution"), "1k"),
+		"quality":    firstNonEmptyStr(spec.Quality, strFromMap(body, "quality"), "standard"),
+		"ratio":      firstNonEmptyStr(spec.Ratio, strFromMap(body, "ratio"), "3:4"),
+		"count":      1,
+	}
+	if sid := strFromMap(body, "specId"); sid != "" {
+		qItem["specId"] = sid
+	}
+	rawQ, err := m.Site.Quote(ctx, []map[string]any{qItem})
+	if err != nil {
+		return fmt.Errorf("重试获取报价失败：%w", err)
+	}
+	var q struct {
+		QuoteID string `json:"quoteId"`
+	}
+	if err := json.Unmarshal(rawQ, &q); err != nil || strings.TrimSpace(q.QuoteID) == "" {
+		return errors.New("重试获取报价失败：网站未返回有效 quoteId")
+	}
+	spec.QuoteID = strings.TrimSpace(q.QuoteID)
+	spec.QuoteIndex = 0
+	body["quoteId"] = spec.QuoteID
+	body["quoteIndex"] = 0
+	if meta, err := json.Marshal(spec); err == nil {
+		_ = m.DB.UpdateImage(im.ID, map[string]any{"meta": json.RawMessage(meta)})
+	}
+	return nil
+}
+
 func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byte, int, error) {
 	body := map[string]any{}
 	for k, v := range spec.SiteBody {
@@ -284,6 +337,7 @@ func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byt
 	if settings.Get().KeepSiteGenerationsPrivate {
 		body["visibility"] = "private"
 	}
+	requoted := false
 	if spec.QuoteID != "" {
 		body["quoteId"] = spec.QuoteID
 		body["quoteIndex"] = spec.QuoteIndex
@@ -304,7 +358,21 @@ func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byt
 		}
 	}
 	if res.Status == "" {
+		if spec.QuoteID == "" {
+			if qErr := m.requoteSiteItem(ctx, im, &spec, body); qErr != nil {
+				return nil, 0, qErr
+			}
+			requoted = true
+		}
 		res, err = m.Site.Generate(ctx, body)
+		if err != nil && !requoted {
+			var ae *site.APIError
+			if errors.As(err, &ae) && (ae.Code == "quote_expired" || ae.Code == "quote_required") {
+				if qErr := m.requoteSiteItem(ctx, im, &spec, body); qErr == nil {
+					res, err = m.Site.Generate(ctx, body)
+				}
+			}
+		}
 		if err != nil {
 			return nil, 0, err
 		}
@@ -477,7 +545,8 @@ func (m *Manager) Retry(imageID string) error {
 	var spec Spec
 	_ = json.Unmarshal(im.Meta, &spec)
 	spec.RequestID = NewID("req")
-	spec.QuoteID = "" // quotes expire; the site re-prices
+	spec.QuoteID = "" // quotes expire; runSite fetches a fresh quote automatically (#64)
+	spec.QuoteIndex = 0
 	meta, _ := json.Marshal(spec)
 	if err := m.DB.UpdateImage(imageID, map[string]any{"status": "queued", "error": "", "remote_task_id": "", "meta": json.RawMessage(meta)}); err != nil {
 		return err

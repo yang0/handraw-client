@@ -580,10 +580,21 @@ export async function renderChat(root, ctx, params = {}) {
             el("button", {
               type: "button",
               class: "btn btn-sm btn-primary",
-              onClick: async () => {
-                await api("POST", `/api/images/${encodeURIComponent(im.id)}/retry`).catch((e) => toast(e.message));
-                im.status = "queued";
-                renderMessages(false);
+              onClick: async (e) => {
+                const btn = e.currentTarget;
+                btn.disabled = true;
+                btn.textContent = "提交中…";
+                try {
+                  await api("POST", `/api/images/${encodeURIComponent(im.id)}/retry`);
+                  im.status = "queued";
+                  im.error = "";
+                  renderMessages(false);
+                  if (run?.id) syncRun(run.id);
+                } catch (err) {
+                  btn.disabled = false;
+                  btn.textContent = "重试";
+                  toast(err?.message || "重试失败");
+                }
               },
             }, "重试")
           ));
@@ -602,6 +613,9 @@ export async function renderChat(root, ctx, params = {}) {
 
   function renderMessages(scrollToBottom = true) {
     const sess = activeSession();
+    const prevScrollTop = messagesBox.scrollTop;
+    const mainScroller = page.closest(".main");
+    const prevMainScrollTop = mainScroller ? mainScroller.scrollTop : 0;
     clear(messagesBox);
 
     if (!sess.data.messages.length && !isSending) {
@@ -718,6 +732,9 @@ export async function renderChat(root, ctx, params = {}) {
 
     if (scrollToBottom) {
       messagesBox.scrollTop = messagesBox.scrollHeight;
+    } else {
+      messagesBox.scrollTop = prevScrollTop;
+      if (mainScroller) mainScroller.scrollTop = prevMainScrollTop;
     }
   }
 
