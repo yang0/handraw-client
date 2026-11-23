@@ -12,6 +12,7 @@ import (
 func (s *Server) skillsManager() *skills.Manager {
 	if s.Skills == nil {
 		s.Skills = skills.New(appdir.Skills())
+		_ = s.Skills.EnsureBuiltin()
 	}
 	return s.Skills
 }
@@ -124,4 +125,40 @@ func (s *Server) skillRemove(w http.ResponseWriter, r *http.Request) (any, error
 	}
 	s.Emit("skills", map[string]any{"updated": true, "removed": id})
 	return okv, nil
+}
+
+func (s *Server) skillCheckUpdates(w http.ResponseWriter, r *http.Request) (any, error) {
+	mgr := s.skillsManager()
+	results := mgr.CheckAllUpdates(r.Context())
+	if results == nil {
+		results = []skills.UpdateCheckResult{}
+	}
+	s.Emit("skills", map[string]any{"checked": true})
+	return map[string]any{"items": results}, nil
+}
+
+func (s *Server) skillUpdate(w http.ResponseWriter, r *http.Request) (any, error) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		id = skills.BuiltinHandrawSkillID
+	}
+	mgr := s.skillsManager()
+	prev, _ := mgr.Get(id)
+	sk, changed, err := mgr.Update(r.Context(), id)
+	if err != nil {
+		return nil, bad(err.Error())
+	}
+	s.Emit("skills", map[string]any{
+		"updated": true,
+		"changed": changed,
+		"id":      sk.ID,
+		"version": sk.Version,
+	})
+	return map[string]any{
+		"ok":              true,
+		"updated":         changed,
+		"skill":           sk,
+		"previousVersion": prev.Version,
+		"version":         sk.Version,
+	}, nil
 }

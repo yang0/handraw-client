@@ -60,9 +60,11 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/mine/analyze", s.h(s.mineAnalyze))
 	m.HandleFunc("POST /api/mine/upload", s.h(s.uploadImage))
 
-	// chat + skills (#58)
+	// chat + skills (#58, #60)
 	m.HandleFunc("GET /api/skills", s.h(s.skillList))
 	m.HandleFunc("POST /api/skills/install", s.h(s.skillInstall))
+	m.HandleFunc("POST /api/skills/check-updates", s.h(s.skillCheckUpdates))
+	m.HandleFunc("POST /api/skills/{id}/update", s.h(s.skillUpdate))
 	m.HandleFunc("PATCH /api/skills/{id}", s.h(s.skillPatch))
 	m.HandleFunc("DELETE /api/skills/{id}", s.h(s.skillRemove))
 	m.HandleFunc("POST /api/chat/turn", s.h(s.chatTurn))

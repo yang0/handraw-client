@@ -57,6 +57,7 @@ var chatToolLabels = map[string]string{
 	"generate_images":       "提交生图任务",
 	"list_skills":           "查看已安装 Skill",
 	"install_skill":         "安装 Skill",
+	"update_skill":          "更新 Skill",
 	"remove_skill":          "卸载 Skill",
 	"list_plugins":          "查看已安装插件",
 	"search_market_plugins": "搜索插件市场",
@@ -350,8 +351,12 @@ func buildChatSystemPrompt(activeSkills []skills.Skill, invokedID, imageModelRef
 		for _, sk := range activeSkills {
 			body := strings.TrimSpace(sk.Body)
 			runes := []rune(body)
-			if len(runes) > 2600 {
-				body = string(runes[:2600]) + "\n...(已截断)"
+			limit := 2600
+			if sk.Builtin || sk.ID == skills.BuiltinHandrawSkillID {
+				limit = 6000
+			}
+			if len(runes) > limit {
+				body = string(runes[:limit]) + "\n...(已截断)"
 			}
 			sb.WriteString(fmt.Sprintf("\n### Skill: %s (id: %s)\n", sk.Name, sk.ID))
 			if sk.Description != "" {
@@ -436,6 +441,19 @@ func chatAgentToolDefs() []providers.ToolDef {
 						"name":        map[string]any{"type": "string", "description": "直接创建时的 Skill 名称"},
 						"description": map[string]any{"type": "string", "description": "直接创建时的简短说明"},
 						"content":     map[string]any{"type": "string", "description": "直接创建时的 SKILL.md Markdown 指令正文"},
+					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: providers.ToolFunctionDef{
+				Name:        "update_skill",
+				Description: "免重启在线动态更新内置官方手绘 Skill（默认 id 为 handraw-skill）或其他支持远端同步的 Skill。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id": map[string]any{"type": "string", "description": "要更新的 Skill ID，留空则默认更新内置官方手绘skill (handraw-skill)"},
 					},
 				},
 			},
@@ -695,14 +713,46 @@ func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (st
 		brief := make([]map[string]any, 0, len(items))
 		for _, sk := range items {
 			brief = append(brief, map[string]any{
-				"id":          sk.ID,
-				"name":        sk.Name,
-				"description": sk.Description,
-				"enabled":     sk.Enabled,
-				"source":      sk.Source,
+				"id":              sk.ID,
+				"name":            sk.Name,
+				"description":     sk.Description,
+				"enabled":         sk.Enabled,
+				"builtin":         sk.Builtin,
+				"version":         sk.Version,
+				"latestVersion":   sk.LatestVersion,
+				"updateAvailable": sk.UpdateAvailable,
+				"updatable":       sk.Updatable,
+				"source":          sk.Source,
 			})
 		}
 		return okOut(fmt.Sprintf("共 %d 个已安装 Skill", len(brief)), map[string]any{"ok": true, "items": brief})
+
+	case "update_skill":
+		var args struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal([]byte(rawArgs), &args)
+		id := strings.TrimSpace(args.ID)
+		if id == "" {
+			id = skills.BuiltinHandrawSkillID
+		}
+		sk, changed, err := c.srv.skillsManager().Update(ctx, id)
+		if err != nil {
+			return fail(err.Error())
+		}
+		c.resp.SkillsChanged = true
+		c.srv.Emit("skills", map[string]any{"updated": true, "changed": changed, "id": sk.ID, "version": sk.Version})
+		msg := fmt.Sprintf("Skill「%s」已是最新版本 %s", sk.Name, sk.Version)
+		if changed {
+			msg = fmt.Sprintf("已热更新 Skill「%s」至 %s（免重启生效）", sk.Name, sk.Version)
+		}
+		return okOut(msg, map[string]any{
+			"ok":      true,
+			"updated": changed,
+			"id":      sk.ID,
+			"name":    sk.Name,
+			"version": sk.Version,
+		})
 
 	case "install_skill":
 		var args struct {
@@ -844,6 +894,28 @@ func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (st
 }
 
 func (s *Server) handleChatSlashCommand(ctx context.Context, text string, resp *chatTurnResponse) (bool, error) {
+	if text == "/update-skill" || strings.HasPrefix(text, "/update-skill ") {
+		id := strings.TrimSpace(strings.TrimPrefix(text, "/update-skill"))
+		if id == "" {
+			id = skills.BuiltinHandrawSkillID
+		}
+		sk, changed, err := s.skillsManager().Update(ctx, id)
+		if err != nil {
+			return true, bad(err.Error())
+		}
+		resp.SkillsChanged = true
+		s.Emit("skills", map[string]any{"updated": true, "changed": changed, "id": sk.ID, "version": sk.Version})
+		summary := fmt.Sprintf("Skill「%s」已是最新（%s）", sk.Name, sk.Version)
+		if changed {
+			summary = fmt.Sprintf("已在线热更新 Skill「%s」至 %s", sk.Name, sk.Version)
+		}
+		resp.ToolCalls = append(resp.ToolCalls, chatToolTrace{
+			Name: "update_skill", Label: chatToolLabels["update_skill"],
+			Summary: summary, OK: true,
+		})
+		resp.Reply = summary + "，无需重启即可直接生效。"
+		return true, nil
+	}
 	if strings.HasPrefix(text, "/install-skill ") {
 		src := strings.TrimSpace(strings.TrimPrefix(text, "/install-skill "))
 		sk, err := s.skillsManager().InstallFromSource(ctx, src)
@@ -883,11 +955,24 @@ func (s *Server) handleChatSlashCommand(ctx context.Context, text string, resp *
 var (
 	reDrawIntent    = regexp.MustCompile(`(?i)(画一|画\s*\d+|画[两二三四五六七八九十]|帮我画|给我画|生图|生成.{0,8}(图|画|海报|插画|手账|封面)|来[一两二三四五六七八九十\d]+[张幅页]|九宫格|四格|海报|插画|手账|draw|generate\s+image)`)
 	reInstallSkill  = regexp.MustCompile(`(?i)(安装|添加|导入).{0,6}(skill|技能)`)
+	reUpdateSkill   = regexp.MustCompile(`(?i)(更新|升级|同步).{0,6}(手绘\s*)?(skill|技能)`)
 	reInstallPlugin = regexp.MustCompile(`(?i)(安装|搜索|查看|逛).{0,6}(插件|plugin)`)
 	reURLOrPath     = regexp.MustCompile(`(https?://\S+|[A-Za-z]:\\[^\s"'<>]+|/[^\s"'<>]+\.(?:md|zip))`)
 )
 
 func (s *Server) handleChatWithoutTextProvider(ctx context.Context, text string, execCtx *chatExecContext) (*chatTurnResponse, error) {
+	// 0. Skill update intent (e.g. "更新手绘skill")
+	if reUpdateSkill.MatchString(text) {
+		b, _ := json.Marshal(map[string]any{"id": skills.BuiltinHandrawSkillID})
+		_, trace := execCtx.runTool(ctx, "update_skill", string(b))
+		execCtx.resp.ToolCalls = append(execCtx.resp.ToolCalls, trace)
+		if trace.OK {
+			execCtx.resp.Reply = trace.Summary + "。"
+		} else {
+			execCtx.resp.Reply = "更新手绘 Skill 失败：" + trace.Summary
+		}
+		return execCtx.resp, nil
+	}
 	// 1. Skill installation intent with path/URL
 	if reInstallSkill.MatchString(text) {
 		if m := reURLOrPath.FindString(text); m != "" {

@@ -168,7 +168,7 @@ export async function renderChat(root, ctx, params = {}) {
     persisted: false,
     data: {
       messages: [],
-      skillIds: [],
+      skillIds: skillsList.filter((sk) => sk.builtin && sk.enabled !== false).map((sk) => sk.id),
       textModelRef: modRes.defaultTextModel || "site:auto",
       imageModelRef: modRes.defaultModel || "site:seedream-4.5",
       ratio: "3:4",
@@ -327,6 +327,7 @@ export async function renderChat(root, ctx, params = {}) {
         title: `/${sk.id}`,
         desc: `${sk.name}${sk.description ? " · " + sk.description : ""}`,
       })),
+      { cmd: "/update-skill", title: "/update-skill", desc: "免重启在线热更新内置官方手绘skill" },
       { cmd: "/install-skill ", title: "/install-skill <路径或链接>", desc: "直接从本地目录/文件或 GitHub 链接安装 Skill" },
       { cmd: "/install-plugin ", title: "/install-plugin <插件名或链接>", desc: "直接从市场或地址安装并启用插件" },
     ].filter((c) => !q || c.title.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q));
@@ -690,6 +691,11 @@ export async function renderChat(root, ctx, params = {}) {
         if (msg.usedSkills?.length) {
           footItems.push(el("span", null, `Skills: ${msg.usedSkills.map((s) => s.name).join("、")}`));
         }
+        if (msg.usage?.cache_read_tokens > 0) {
+          footItems.push(el("span", { class: "badge badge-ok", title: "已命中中转站 Prompt Cache，显著节约输入 token 费用" }, `⚡ 缓存命中 ${msg.usage.cache_read_tokens} tok`));
+        } else if (msg.usage?.total_tokens > 0) {
+          footItems.push(el("span", { class: "mono" }, `${msg.usage.total_tokens} tok`));
+        }
         if (footItems.length) {
           bubble.appendChild(el("div", { class: "chat-msg-foot" }, ...footItems));
         }
@@ -729,6 +735,24 @@ export async function renderChat(root, ctx, params = {}) {
     const r = await api("GET", "/api/skills").catch(() => ({ items: [] }));
     skillsList = Array.isArray(r.items) ? r.items : [];
     renderSelectedSkills();
+  }
+
+  function setSkillInlineBtn(btn, state, label, pct = 0, titleText = "") {
+    if (!btn) return;
+    btn.classList.add("btn-update-inline");
+    btn.dataset.state = state;
+    btn.style.setProperty("--upd-pct", `${Math.max(0, Math.min(100, Number(pct || 0)))}%`);
+    btn.disabled = state === "busy";
+    btn.setAttribute("aria-busy", String(state === "busy"));
+    if (titleText) btn.title = titleText;
+    clear(btn);
+    if (state === "busy") {
+      btn.append(el("span", { class: "upd-spinner", "aria-hidden": "true" }), el("span", null, label));
+    } else if (state === "done") {
+      btn.append(el("span", { class: "upd-check", "aria-hidden": "true" }, "✓"), el("span", null, label));
+    } else {
+      btn.append(el("span", null, label));
+    }
   }
 
   async function openSkillPickerModal() {
@@ -777,9 +801,14 @@ export async function renderChat(root, ctx, params = {}) {
 
       filtered.forEach((sk) => {
         const isSel = selectedSet.has(sk.id);
-        const card = el("button", {
+        const verBadge = sk.version ? el("span", { class: "badge mono" }, `v${sk.version}`) : null;
+        const newBadge = sk.updateAvailable && sk.latestVersion
+          ? el("span", { class: "badge badge-ok" }, `可升 v${sk.latestVersion}`)
+          : null;
+
+        const mainBtn = el("button", {
           type: "button",
-          class: "chat-skill-picker-item" + (isSel ? " is-selected" : ""),
+          class: "chat-skill-picker-main",
           "aria-pressed": String(isSel),
           onClick: () => {
             const cur = Array.isArray(sess.data.skillIds) ? [...sess.data.skillIds] : [];
@@ -795,16 +824,78 @@ export async function renderChat(root, ctx, params = {}) {
         },
           el("div", { class: "chat-skill-picker-head" },
             el("strong", { class: "chat-skill-picker-name" }, sk.name),
-            el("div", { class: "row", style: { gap: "6px" } },
+            el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+              sk.builtin ? el("span", { class: "badge badge-accent" }, "内置官方") : null,
+              verBadge,
+              newBadge,
               el("span", { class: "badge mono" }, `/${sk.id}`),
               isSel ? el("span", { class: "badge badge-accent" }, "已选") : null
             )
           ),
           el("p", { class: "chat-skill-picker-desc" }, sk.description || "暂无介绍")
         );
+
+        let foot = null;
+        if (sk.updatable) {
+          const updBtn = el("button", {
+            type: "button",
+            class: "btn btn-sm btn-update-inline",
+            "data-skill-update": sk.id,
+            onClick: async (e) => {
+              e.stopPropagation();
+              setSkillInlineBtn(updBtn, "busy", "在线更新中…", 35);
+              try {
+                const r = await api("POST", `/api/skills/${encodeURIComponent(sk.id)}/update`);
+                const ver = r?.version ? ` v${r.version}` : "";
+                setSkillInlineBtn(updBtn, "done", r?.updated ? `已更新${ver}` : `已是最新${ver}`, 100);
+                await reloadSkills();
+                setTimeout(() => {
+                  if (listWrap.isConnected) renderList();
+                }, 1200);
+              } catch (err) {
+                setSkillInlineBtn(updBtn, "error", "更新失败，重试", 0, err?.message || "更新失败");
+              }
+            },
+          }, sk.updateAvailable && sk.latestVersion ? `更新至 v${sk.latestVersion}` : "在线更新");
+
+          foot = el("div", { class: "chat-skill-picker-foot" },
+            el("span", { class: "chat-skill-picker-foot-meta" },
+              sk.updateAvailable && sk.latestVersion
+                ? `发现新版本 v${sk.latestVersion}，支持免重启热更新`
+                : (sk.builtin ? "内置官方手绘 Skill · 支持免重启在线动态更新" : "远端 Skill · 支持在线同步更新")
+            ),
+            updBtn
+          );
+        }
+
+        const card = el("div", {
+          class: "chat-skill-picker-item" + (isSel ? " is-selected" : ""),
+          "data-skill-id": sk.id,
+        }, mainBtn, foot);
         listWrap.appendChild(card);
       });
     };
+
+    const checkAllBtn = el("button", {
+      type: "button",
+      class: "btn btn-update-inline",
+      onClick: async () => {
+        setSkillInlineBtn(checkAllBtn, "busy", "检查更新中…", 30);
+        try {
+          const r = await api("POST", "/api/skills/check-updates");
+          const items = Array.isArray(r?.items) ? r.items : [];
+          const cnt = items.filter((it) => it.updateAvailable).length;
+          await reloadSkills();
+          if (listWrap.isConnected) renderList();
+          setSkillInlineBtn(checkAllBtn, "done", cnt > 0 ? `发现 ${cnt} 项更新` : "全部已是最新", 100);
+          setTimeout(() => {
+            if (checkAllBtn.isConnected) setSkillInlineBtn(checkAllBtn, "idle", "检查 Skill 更新", 0);
+          }, 1800);
+        } catch (err) {
+          setSkillInlineBtn(checkAllBtn, "error", "检查失败，重试", 0, err?.message || "检查失败");
+        }
+      },
+    }, "检查 Skill 更新");
 
     searchIn.addEventListener("input", renderList);
     renderList();
@@ -825,6 +916,7 @@ export async function renderChat(root, ctx, params = {}) {
           inputEl.focus();
         },
       }, "＋ 用指令安装新 Skill"),
+      checkAllBtn,
       el("button", { type: "button", class: "btn btn-primary", onClick: closeModal }, "关闭"),
     ]);
     searchIn.focus();
@@ -839,6 +931,7 @@ export async function renderChat(root, ctx, params = {}) {
     const activeIds = [...(sess.data.skillIds || [])];
     try {
       const res = await api("POST", "/api/chat/turn", {
+        sessionId: sess.id,
         messages: apiMessages,
         textModelRef: textModelSel.value,
         imageModelRef: imageModelSel.value,
@@ -857,6 +950,7 @@ export async function renderChat(root, ctx, params = {}) {
         usedSkills: res.usedSkills || [],
         toolCalls: res.toolCalls || [],
         runs: res.runs || [],
+        usage: res.usage || null,
         pendingConfirm: res.pendingConfirm || null,
         ts: Date.now(),
       });

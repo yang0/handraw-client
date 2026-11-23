@@ -46,12 +46,13 @@ export async function renderSettings(root, ctx, params = {}) {
     activeSettingsTab = requestedTab;
   }
 
-  const [accRes, balRes, settRes, updRes, loginRes] = await Promise.all([
+  const [accRes, balRes, settRes, updRes, loginRes, skillsRes] = await Promise.all([
     api("GET", "/api/account").catch(() => ({ loggedIn: false })),
     api("GET", "/api/account/balance").catch((e) => ({ loggedIn: false, error: e?.message || "" })),
     api("GET", "/api/settings").catch(() => ({ settings: {}, providers: [] })),
     api("GET", "/api/update").catch(() => ({})),
     api("GET", "/api/account/login").catch(() => null),
+    api("GET", "/api/skills").catch(() => ({ items: [] })),
   ]);
   if (!root.isConnected || root._settingsRenderSeq !== seq) return;
 
@@ -749,10 +750,12 @@ export async function renderSettings(root, ctx, params = {}) {
     prefForm
   );
 
-  // 4. Version & Incremental Resource Updates
-  const hasAnyUpdate = Boolean(updRes.available || updRes.ready || updRes.resourceNew);
+  // 4. Version, Built-in Handraw Skill & Incremental Resource Updates
+  const builtinSkill = (Array.isArray(skillsRes?.items) ? skillsRes.items : []).find((sk) => sk.builtin || sk.id === "handraw-skill") || null;
+  const hasAnyUpdate = Boolean(updRes.available || updRes.ready || updRes.resourceNew || builtinSkill?.updateAvailable);
   let dlPollTimer = null;
   let updatingResourcesInline = false;
+  let updatingSkillInline = false;
 
   function setInlineActionBtn(btn, state, label, pct = 0, titleText = "") {
     if (!btn) return;
@@ -780,8 +783,12 @@ export async function renderSettings(root, ctx, params = {}) {
       try {
         const r = await api("POST", "/api/update/check");
         const st = r?.status || {};
-        if (st.available || st.ready || st.resourceNew) {
-          setInlineActionBtn(checkUpdBtn, "done", st.available ? `发现新版 ${st.latest || ""}`.trim() : "发现资源更新", 100);
+        const skUpd = Boolean(r?.skill?.updateAvailable);
+        if (st.available || st.ready || st.resourceNew || skUpd) {
+          const msg = st.available
+            ? `发现新版 ${st.latest || ""}`.trim()
+            : (skUpd ? "发现手绘 Skill 更新" : "发现资源更新");
+          setInlineActionBtn(checkUpdBtn, "done", msg, 100);
           setTimeout(() => {
             if (root.isConnected && root._settingsRenderSeq === seq) {
               renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
@@ -891,6 +898,31 @@ export async function renderSettings(root, ctx, params = {}) {
     },
   }, "增量更新资源包");
 
+  const skillUpdBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm btn-update-inline",
+    id: "btn-update-handraw-skill",
+    onClick: async () => {
+      if (updatingSkillInline) return;
+      updatingSkillInline = true;
+      setInlineActionBtn(skillUpdBtn, "busy", "更新手绘 Skill…", 35);
+      try {
+        const r = await api("POST", "/api/skills/handraw-skill/update");
+        updatingSkillInline = false;
+        const ver = r?.version ? ` v${r.version}` : "";
+        setInlineActionBtn(skillUpdBtn, "done", r?.updated ? `已热更新${ver}` : `已是最新${ver}`, 100);
+        setTimeout(() => {
+          if (root.isConnected && root._settingsRenderSeq === seq) {
+            renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
+          }
+        }, 1400);
+      } catch (e) {
+        updatingSkillInline = false;
+        setInlineActionBtn(skillUpdBtn, "error", "Skill 更新失败，重试", 0, e?.message || "手绘 Skill 更新失败");
+      }
+    },
+  }, builtinSkill?.updateAvailable && builtinSkill?.latestVersion ? `更新手绘 Skill (v${builtinSkill.latestVersion})` : "更新手绘 Skill");
+
   const updSection = el("section", {
     id: "settings-updates",
     class: "card settings-section",
@@ -901,7 +933,7 @@ export async function renderSettings(root, ctx, params = {}) {
     el("div", { class: "settings-section-head" },
       el("div", { class: "col", style: { gap: "2px" } },
         el("h2", { class: "settings-section-title" }, "客户端版本与资源包更新"),
-        el("p", { class: "muted", style: { margin: 0 } }, "检查客户端新版发布与画风/图型静态资源包增量热更新")
+        el("p", { class: "muted", style: { margin: 0 } }, "检查客户端新版发布、内置手绘 Skill 在线热更新与画风/图型资源包增量同步")
       ),
       hasAnyUpdate ? el("span", { class: "badge badge-accent" }, "发现可更新内容") : el("span", { class: "badge" }, `v${updRes.current || "?"}`)
     ),
@@ -917,13 +949,20 @@ export async function renderSettings(root, ctx, params = {}) {
       el("div", { class: "economy-stat" },
         el("span", { class: "muted" }, "本地资源包"),
         el("strong", { class: "mono" }, `${updRes.resourceLocal || "?"}${updRes.resourceNew ? " → " + updRes.resourceNew : ""}`)
+      ),
+      el("div", { class: "economy-stat" },
+        el("span", { class: "muted" }, "内置手绘 Skill"),
+        el("strong", { class: "mono" }, builtinSkill
+          ? `v${builtinSkill.version || "?"}${builtinSkill.updateAvailable && builtinSkill.latestVersion ? " → v" + builtinSkill.latestVersion : ""}`
+          : "未加载")
       )
     ),
     el("div", { class: "row" },
       checkUpdBtn,
       dlUpdBtn,
       applyUpdBtn,
-      resUpdBtn
+      resUpdBtn,
+      skillUpdBtn
     )
   );
 

@@ -105,6 +105,7 @@ func New(version string) *Server {
 		Host:      nopHost{},
 		Log:       slog.Default(),
 	}
+	_ = s.Skills.EnsureBuiltin()
 	s.Galleries.OnChange = func() {
 		s.Emit("galleries", map[string]any{"updated": true})
 	}
@@ -161,6 +162,33 @@ func (s *Server) Listen(ctx context.Context, port int) (string, error) {
 	go func() { _ = srv.Serve(ln) }()
 	if s.DSH != nil && s.Plugins != nil {
 		go func() { _ = s.SyncDSH(ctx) }()
+	}
+	// Background non-blocking check for built-in Handraw Skill updates.
+	if s.Skills != nil {
+		go func() {
+			t := time.NewTimer(4 * time.Second)
+			defer t.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			st := settings.Get()
+			if !st.AutoCheckUpdate && !st.AutoSyncResources {
+				return
+			}
+			cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+			defer cancel()
+			if st.AutoSyncResources {
+				if sk, changed, err := s.Skills.Update(cctx, skills.BuiltinHandrawSkillID); err == nil && changed {
+					s.Emit("skills", map[string]any{"updated": true, "changed": true, "id": sk.ID, "version": sk.Version})
+				}
+				return
+			}
+			if res, err := s.Skills.CheckUpdate(cctx, skills.BuiltinHandrawSkillID); err == nil && res.UpdateAvailable {
+				s.Emit("skills", map[string]any{"checked": true, "id": res.ID, "latestVersion": res.LatestVersion})
+			}
+		}()
 	}
 	return s.addr, nil
 }

@@ -80,3 +80,97 @@ func TestSkillManagerInstallToggleAndRemove(t *testing.T) {
 		t.Fatalf("expected 3 skills after remove, got %d", len(list2))
 	}
 }
+
+func TestBuiltinHandrawSkillAndDynamicUpdate(t *testing.T) {
+	mgr := New(t.TempDir())
+	if err := mgr.EnsureBuiltin(); err != nil {
+		t.Fatalf("EnsureBuiltin failed: %v", err)
+	}
+
+	sk, err := mgr.Get(BuiltinHandrawSkillID)
+	if err != nil {
+		t.Fatalf("Get builtin skill failed: %v", err)
+	}
+	if !sk.Builtin || !sk.Enabled || !sk.Updatable {
+		t.Fatalf("unexpected builtin flags: %+v", sk)
+	}
+	if sk.Name != "手绘skill" {
+		t.Fatalf("expected display_name 手绘skill, got %q", sk.Name)
+	}
+	if sk.Version == "" || !strings.Contains(sk.Body, "Hand-drawn Style Prompter") {
+		t.Fatalf("unexpected bundled content/version: ver=%q len=%d", sk.Version, len(sk.Body))
+	}
+
+	// Custom skill installed later must still sort after built-in skill.
+	if _, err := mgr.InstallInline("custom-a", "自定义测试", "desc", "# custom", "inline"); err != nil {
+		t.Fatalf("InstallInline failed: %v", err)
+	}
+	list, err := mgr.List()
+	if err != nil || len(list) != 2 || list[0].ID != BuiltinHandrawSkillID {
+		t.Fatalf("expected builtin skill first in list, got %+v err=%v", list, err)
+	}
+
+	// SetEnabled must preserve Builtin and Version metadata.
+	disabled, err := mgr.SetEnabled(BuiltinHandrawSkillID, false)
+	if err != nil || disabled.Enabled || !disabled.Builtin || disabled.Version != sk.Version {
+		t.Fatalf("SetEnabled lost metadata: %+v err=%v", disabled, err)
+	}
+	if _, err := mgr.SetEnabled(BuiltinHandrawSkillID, true); err != nil {
+		t.Fatalf("SetEnabled(true) failed: %v", err)
+	}
+
+	// Delete protection for built-in skill.
+	if err := mgr.Remove(BuiltinHandrawSkillID); err == nil {
+		t.Fatalf("expected Remove(builtin) to fail")
+	}
+
+	// Mock remote mirrors (mirror 1 returns 500 to verify fallback to mirror 2).
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/fail/version.json", "/fail/SKILL.md":
+			http.Error(w, "upstream down", http.StatusInternalServerError)
+		case "/ok/version.json":
+			_, _ = w.Write([]byte(`{"version":"2.1.0"}`))
+		case "/ok/SKILL.md":
+			_, _ = w.Write([]byte("---\nname: handraw-skill\ndisplay_name: 手绘skill\ndescription: 新版手绘技能说明\nversion: 2.1.0\n---\n\n# Hand-drawn Style Prompter v2.1.0\n\n动态热更新内容生效。"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	origMirrors := BuiltinHandrawMirrors
+	BuiltinHandrawMirrors = []struct {
+		SkillURL   string
+		VersionURL string
+	}{
+		{SkillURL: ts.URL + "/fail/SKILL.md", VersionURL: ts.URL + "/fail/version.json"},
+		{SkillURL: ts.URL + "/ok/SKILL.md", VersionURL: ts.URL + "/ok/version.json"},
+	}
+	defer func() { BuiltinHandrawMirrors = origMirrors }()
+
+	chk, err := mgr.CheckUpdate(context.Background(), BuiltinHandrawSkillID)
+	if err != nil {
+		t.Fatalf("CheckUpdate failed: %v", err)
+	}
+	if !chk.UpdateAvailable || chk.LatestVersion != "2.1.0" {
+		t.Fatalf("expected UpdateAvailable=true latest=2.1.0, got %+v", chk)
+	}
+
+	updated, changed, err := mgr.Update(context.Background(), BuiltinHandrawSkillID)
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if !changed || updated.Version != "2.1.0" || updated.UpdateAvailable {
+		t.Fatalf("unexpected updated skill: changed=%v sk=%+v", changed, updated)
+	}
+	if !strings.Contains(updated.Body, "动态热更新内容生效") {
+		t.Fatalf("expected hot-updated body, got %q", updated.Body)
+	}
+
+	// Second update against same remote should report changed=false.
+	_, changed2, err := mgr.Update(context.Background(), BuiltinHandrawSkillID)
+	if err != nil || changed2 {
+		t.Fatalf("expected idempotent second update, changed=%v err=%v", changed2, err)
+	}
+}

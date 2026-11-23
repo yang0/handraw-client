@@ -17,6 +17,7 @@ import (
 	"github.com/yang0/handraw-client/internal/resources"
 	"github.com/yang0/handraw-client/internal/secrets"
 	"github.com/yang0/handraw-client/internal/settings"
+	"github.com/yang0/handraw-client/internal/skills"
 )
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -597,10 +598,19 @@ func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) (any, error
 	if plan, pErr := s.Updater.PlanResources(r.Context(), s.PackDir); pErr == nil && plan != nil {
 		st = s.Updater.Status()
 	}
-	if err != nil && st.ResourceNew == "" {
-		return map[string]any{"status": st, "error": err.Error()}, nil
+	var skillRes *skills.UpdateCheckResult
+	if res, sErr := s.skillsManager().CheckUpdate(r.Context(), skills.BuiltinHandrawSkillID); sErr == nil {
+		skillRes = &res
+		s.Emit("skills", map[string]any{"checked": true, "id": res.ID, "latestVersion": res.LatestVersion})
 	}
-	return map[string]any{"status": st}, nil
+	out := map[string]any{"status": st}
+	if skillRes != nil {
+		out["skill"] = skillRes
+	}
+	if err != nil && st.ResourceNew == "" {
+		out["error"] = err.Error()
+	}
+	return out, nil
 }
 
 func (s *Server) updateDownload(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -631,17 +641,33 @@ func (s *Server) updateResources(w http.ResponseWriter, r *http.Request) (any, e
 	if err != nil {
 		return nil, err
 	}
-	if len(plan.Changed) == 0 && len(plan.Removed) == 0 {
-		return map[string]any{"updated": false, "status": s.Updater.Status()}, nil
+	resChanged := 0
+	if len(plan.Changed) > 0 || len(plan.Removed) > 0 {
+		if err := s.Updater.ApplyResources(r.Context(), s.PackDir, plan, func(done, total int) {
+			s.Emit("resource_update", map[string]any{"done": done, "total": total})
+		}); err != nil {
+			return nil, err
+		}
+		resChanged = len(plan.Changed)
+		if p, err := resources.Load(s.PackDir); err == nil {
+			resources.SetCurrent(p)
+			s.Emit("pack", map[string]any{"version": p.Version, "styles": len(p.Styles)})
+		}
 	}
-	if err := s.Updater.ApplyResources(r.Context(), s.PackDir, plan, func(done, total int) {
-		s.Emit("resource_update", map[string]any{"done": done, "total": total})
-	}); err != nil {
-		return nil, err
+	skillUpdated := false
+	skillVersion := ""
+	if sk, changed, sErr := s.skillsManager().Update(r.Context(), skills.BuiltinHandrawSkillID); sErr == nil {
+		skillUpdated = changed
+		skillVersion = sk.Version
+		if changed {
+			s.Emit("skills", map[string]any{"updated": true, "changed": true, "id": sk.ID, "version": sk.Version})
+		}
 	}
-	if p, err := resources.Load(s.PackDir); err == nil {
-		resources.SetCurrent(p)
-		s.Emit("pack", map[string]any{"version": p.Version, "styles": len(p.Styles)})
-	}
-	return map[string]any{"updated": true, "changed": len(plan.Changed), "status": s.Updater.Status()}, nil
+	return map[string]any{
+		"updated":      resChanged > 0 || skillUpdated,
+		"changed":      resChanged,
+		"skillUpdated": skillUpdated,
+		"skillVersion": skillVersion,
+		"status":       s.Updater.Status(),
+	}, nil
 }

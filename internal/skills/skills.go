@@ -29,22 +29,36 @@ const (
 )
 
 type Skill struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Content     string `json:"content"`
-	Body        string `json:"body"`
-	Enabled     bool   `json:"enabled"`
-	Source      string `json:"source"`
-	Dir         string `json:"dir"`
-	InstalledAt int64  `json:"installedAt"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	Content         string `json:"content"`
+	Body            string `json:"body"`
+	Enabled         bool   `json:"enabled"`
+	Builtin         bool   `json:"builtin"`
+	Version         string `json:"version"`
+	LatestVersion   string `json:"latestVersion,omitempty"`
+	UpdateAvailable bool   `json:"updateAvailable"`
+	Updatable       bool   `json:"updatable"`
+	Source          string `json:"source"`
+	Dir             string `json:"dir"`
+	InstalledAt     int64  `json:"installedAt"`
+	UpdatedAt       int64  `json:"updatedAt,omitempty"`
+	ContentSHA      string `json:"contentSha,omitempty"`
 }
 
 type metaFile struct {
-	ID          string `json:"id"`
-	Enabled     bool   `json:"enabled"`
-	Source      string `json:"source"`
-	InstalledAt int64  `json:"installedAt"`
+	ID              string `json:"id"`
+	Enabled         bool   `json:"enabled"`
+	Builtin         bool   `json:"builtin,omitempty"`
+	Version         string `json:"version,omitempty"`
+	LatestVersion   string `json:"latestVersion,omitempty"`
+	UpdateAvailable bool   `json:"updateAvailable,omitempty"`
+	Source          string `json:"source"`
+	InstalledAt     int64  `json:"installedAt"`
+	UpdatedAt       int64  `json:"updatedAt,omitempty"`
+	ContentSHA      string `json:"contentSha,omitempty"`
+	Customized      bool   `json:"customized,omitempty"`
 }
 
 type Manager struct {
@@ -82,6 +96,9 @@ func (m *Manager) List() ([]Skill, error) {
 		out = append(out, sk)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].Builtin != out[j].Builtin {
+			return out[i].Builtin
+		}
 		if out[i].InstalledAt != out[j].InstalledAt {
 			return out[i].InstalledAt > out[j].InstalledAt
 		}
@@ -111,17 +128,19 @@ func (m *Manager) SetEnabled(id string, enabled bool) (Skill, error) {
 	if err != nil {
 		return Skill{}, err
 	}
-	meta := metaFile{
-		ID:          id,
-		Enabled:     enabled,
-		Source:      sk.Source,
-		InstalledAt: sk.InstalledAt,
+	dir := filepath.Join(m.dir, id)
+	meta := readMetaLocked(dir, id)
+	meta.Enabled = enabled
+	if meta.Source == "" {
+		meta.Source = sk.Source
 	}
-	if err := writeMeta(filepath.Join(m.dir, id), meta); err != nil {
+	if meta.InstalledAt == 0 {
+		meta.InstalledAt = sk.InstalledAt
+	}
+	if err := writeMeta(dir, meta); err != nil {
 		return Skill{}, err
 	}
-	sk.Enabled = enabled
-	return sk, nil
+	return m.readLocked(id)
 }
 
 func (m *Manager) UpdateContent(id, content string) (Skill, error) {
@@ -135,13 +154,20 @@ func (m *Manager) UpdateContent(id, content string) (Skill, error) {
 	if err != nil {
 		return Skill{}, err
 	}
-	content = strings.TrimSpace(content)
+	content = strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
 	if content == "" {
 		return Skill{}, errors.New("SKILL.md 内容不能为空")
 	}
-	if err := os.WriteFile(filepath.Join(m.dir, id, "SKILL.md"), []byte(content+"\n"), 0o644); err != nil {
+	dir := filepath.Join(m.dir, id)
+	normalized := content + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(normalized), 0o644); err != nil {
 		return Skill{}, err
 	}
+	meta := readMetaLocked(dir, id)
+	meta.Customized = true
+	meta.ContentSHA = sha256Hex([]byte(normalized))
+	meta.UpdatedAt = time.Now().UnixMilli()
+	_ = writeMeta(dir, meta)
 	return m.readLocked(sk.ID)
 }
 
@@ -151,6 +177,12 @@ func (m *Manager) Remove(id string) error {
 	id = SanitizeID(id)
 	if id == "" {
 		return errors.New("Skill ID 无效")
+	}
+	if id == BuiltinHandrawSkillID {
+		return errors.New("内置官方手绘 Skill 不可删除，如需停用请将其关闭或取消勾选")
+	}
+	if sk, err := m.readLocked(id); err == nil && sk.Builtin {
+		return errors.New("内置官方手绘 Skill 不可删除，如需停用请将其关闭或取消勾选")
 	}
 	target := filepath.Join(m.dir, id)
 	rel, err := filepath.Rel(m.dir, target)
@@ -174,7 +206,7 @@ func (m *Manager) InstallInline(id, name, description, content, source string) (
 	if content == "" {
 		return Skill{}, errors.New("Skill 指令内容不能为空")
 	}
-	pName, pDesc, pBody := ParseFrontmatter(content)
+	pName, pDesc, pBody, pVer := ParseFrontmatterFull(content)
 	if name == "" {
 		name = pName
 	}
@@ -212,14 +244,19 @@ func (m *Manager) InstallInline(id, name, description, content, source string) (
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return Skill{}, err
 	}
-	if err := os.WriteFile(filepath.Join(dest, "SKILL.md"), []byte(strings.TrimSpace(content)+"\n"), 0o644); err != nil {
+	normalized := strings.TrimSpace(content) + "\n"
+	if err := os.WriteFile(filepath.Join(dest, "SKILL.md"), []byte(normalized), 0o644); err != nil {
 		return Skill{}, err
 	}
+	now := time.Now().UnixMilli()
 	meta := metaFile{
 		ID:          id,
 		Enabled:     true,
+		Version:     pVer,
 		Source:      source,
-		InstalledAt: time.Now().UnixMilli(),
+		InstalledAt: now,
+		UpdatedAt:   now,
+		ContentSHA:  sha256Hex([]byte(normalized)),
 	}
 	if err := writeMeta(dest, meta); err != nil {
 		return Skill{}, err
@@ -555,7 +592,7 @@ func (m *Manager) readLocked(id string) (Skill, error) {
 		return Skill{}, err
 	}
 	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	name, desc, body := ParseFrontmatter(content)
+	name, desc, body, fmVer := ParseFrontmatterFull(content)
 	if name == "" {
 		name = id
 	}
@@ -568,17 +605,29 @@ func (m *Manager) readLocked(id string) (Skill, error) {
 			meta.InstalledAt = st.ModTime().UnixMilli()
 		}
 	}
-	return Skill{
-		ID:          id,
-		Name:        name,
-		Description: desc,
-		Content:     content,
-		Body:        body,
-		Enabled:     meta.Enabled,
-		Source:      meta.Source,
-		Dir:         dir,
-		InstalledAt: meta.InstalledAt,
-	}, nil
+	sha := meta.ContentSHA
+	if sha == "" {
+		sha = sha256Hex([]byte(strings.TrimSpace(content) + "\n"))
+	}
+	sk := Skill{
+		ID:              id,
+		Name:            name,
+		Description:     desc,
+		Content:         content,
+		Body:            body,
+		Enabled:         meta.Enabled,
+		Builtin:         meta.Builtin || id == BuiltinHandrawSkillID,
+		Version:         firstNonEmpty(meta.Version, fmVer),
+		LatestVersion:   meta.LatestVersion,
+		UpdateAvailable: meta.UpdateAvailable,
+		Source:          meta.Source,
+		Dir:             dir,
+		InstalledAt:     meta.InstalledAt,
+		UpdatedAt:       meta.UpdatedAt,
+		ContentSHA:      sha,
+	}
+	sk.Updatable = isRemoteUpdatable(sk)
+	return sk, nil
 }
 
 func findSkillMD(dir string) string {
@@ -601,8 +650,16 @@ func writeMeta(dir string, meta metaFile) error {
 
 // ParseFrontmatter extracts name, description, and body from a SKILL.md file.
 func ParseFrontmatter(raw string) (name, desc, body string) {
+	name, desc, body, _ = ParseFrontmatterFull(raw)
+	return name, desc, body
+}
+
+// ParseFrontmatterFull extracts display name (preferring display_name over name),
+// description, body, and version from a SKILL.md file.
+func ParseFrontmatterFull(raw string) (name, desc, body, version string) {
 	s := strings.TrimSpace(strings.ReplaceAll(raw, "\r\n", "\n"))
 	body = s
+	var displayName string
 	if strings.HasPrefix(s, "---\n") {
 		rest := s[4:]
 		if idx := strings.Index(rest, "\n---"); idx >= 0 {
@@ -623,11 +680,18 @@ func ParseFrontmatter(raw string) (name, desc, body string) {
 				switch k {
 				case "name":
 					name = v
+				case "display_name":
+					displayName = v
 				case "description":
 					desc = v
+				case "version":
+					version = v
 				}
 			}
 		}
+	}
+	if displayName != "" {
+		name = displayName
 	}
 	if name == "" {
 		for _, ln := range strings.Split(body, "\n") {
@@ -653,7 +717,7 @@ func ParseFrontmatter(raw string) (name, desc, body string) {
 			break
 		}
 	}
-	return name, desc, body
+	return name, desc, body, version
 }
 
 var reInvalidID = regexp.MustCompile(`[^\p{L}\p{N}_-]+`)
