@@ -1260,3 +1260,216 @@ dialog::backdrop {
 .settings-level-seal { flex: 0 0 auto; width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: var(--accent); color: #fff; font-weight: 800; transform: rotate(-3deg); }
 .settings-level-bar { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
 .settings-level-bar span { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
+
+/* Device Login Process Card & Motion */
+@keyframes loginShimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(260%); }
+}
+@keyframes loginPulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 42%, transparent); }
+  70% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--accent) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent); }
+}
+@keyframes loginSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes loginPopIn {
+  0% { opacity: 0; transform: scale(0.86); }
+  100% { opacity: 1; transform: scale(1); }
+}
+@keyframes settingsFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.settings-account-enter {
+  animation: settingsFadeIn 0.24s ease-out;
+}
+.login-flow-card {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  background: var(--paper);
+}
+.login-flow-card.is-entering {
+  animation: settingsFadeIn 0.2s ease-out;
+}
+.login-flow-card[data-stage="syncing"],
+.login-flow-card[data-stage="ok"] {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
+}
+.login-flow-card[data-stage="error"] {
+  border-color: color-mix(in srgb, var(--err) 45%, var(--line));
+}
+.login-progress-track {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.login-progress-bar {
+  height: 100%;
+  width: 38%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: loginShimmer 1.5s ease-in-out infinite;
+}
+.login-flow-card[data-stage="checking"] .login-progress-bar {
+  animation-duration: 0.9s;
+}
+.login-flow-card[data-stage="syncing"] .login-progress-bar,
+.login-flow-card[data-stage="ok"] .login-progress-bar {
+  width: 100%;
+  animation: none;
+  background: var(--ok);
+  transition: width 0.25s ease, background-color 0.25s ease;
+}
+.login-flow-card[data-stage="error"] .login-progress-bar {
+  width: 100%;
+  animation: none;
+  background: var(--err);
+}
+.login-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding-top: 2px;
+}
+.login-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+  min-width: 0;
+}
+.login-step-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+.login-step.is-active {
+  color: var(--ink);
+  font-weight: 600;
+}
+.login-step.is-active .login-step-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  animation: loginPulse 1.8s ease-out infinite;
+}
+.login-step.is-done {
+  color: var(--ink);
+}
+.login-step.is-done .login-step-dot {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: #fff;
+  animation: loginPopIn 0.22s ease-out;
+}
+.login-code-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.login-code-value {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  line-height: 1.2;
+}
+.login-live-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--ink);
+}
+.login-live-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  animation: loginPulse 1.6s ease-out infinite;
+}
+.login-flow-card[data-stage="syncing"] .login-live-dot,
+.login-flow-card[data-stage="ok"] .login-live-dot {
+  background: var(--ok);
+}
+.login-flow-card[data-stage="error"] .login-live-dot {
+  background: var(--err);
+  animation: none;
+}
+.login-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  display: inline-block;
+  flex-shrink: 0;
+  animation: loginSpin 0.7s linear infinite;
+}
+.login-success-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ok) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--ok) 30%, var(--line));
+  animation: loginPopIn 0.22s ease-out;
+}
+.login-success-check {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--ok);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 800;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+@media (max-width: 680px) {
+  .login-steps { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-account-enter,
+  .login-flow-card,
+  .login-progress-bar,
+  .login-step.is-active .login-step-dot,
+  .login-step.is-done .login-step-dot,
+  .login-live-dot,
+  .login-spinner,
+  .login-success-banner {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, money, onEvent, openURL, setColorScheme, showModal, toast } from "../api.js";
+import { api, clear, closeModal, copyText, el, money, onEvent, openURL, setColorScheme, showModal, toast } from "../api.js";
 import { economySyncHint, formatQuotaSummary, parseEconomy } from "../economy.js";
 
 const VALID_SETTINGS_TABS = new Set([
@@ -46,11 +46,12 @@ export async function renderSettings(root, ctx, params = {}) {
     activeSettingsTab = requestedTab;
   }
 
-  const [accRes, balRes, settRes, updRes] = await Promise.all([
+  const [accRes, balRes, settRes, updRes, loginRes] = await Promise.all([
     api("GET", "/api/account").catch(() => ({ loggedIn: false })),
     api("GET", "/api/account/balance").catch((e) => ({ loggedIn: false, error: e?.message || "" })),
     api("GET", "/api/settings").catch(() => ({ settings: {}, providers: [] })),
     api("GET", "/api/update").catch(() => ({})),
+    api("GET", "/api/account/login").catch(() => null),
   ]);
   if (!root.isConnected || root._settingsRenderSeq !== seq) return;
 
@@ -62,6 +63,10 @@ export async function renderSettings(root, ctx, params = {}) {
   const siteBase = (accRes.siteBase || settings.siteBase || "https://handraw-style.com").replace(/\/+$/, "");
   const eco = parseEconomy(accRes.loggedIn ? { ...balRes, loggedIn: true } : { loggedIn: false });
   let loginPollTimer = null;
+  let loginTickTimer = null;
+  let currentLoginState = null;
+  let completingLogin = false;
+  let lastFocusCheckAt = 0;
 
   root.appendChild(el("div", { class: "page-head" },
     el("div", { class: "col", style: { gap: "2px" } },
@@ -71,38 +76,298 @@ export async function renderSettings(root, ctx, params = {}) {
     el("span", { class: "muted mono" }, `数据目录：${settRes.dataDir || ""}`)
   ));
 
-  function startDeviceLogin(loginStatusArea) {
-    return async () => {
-      try {
-        const st = await api("POST", "/api/account/login");
-        clear(loginStatusArea);
-        loginStatusArea.classList.remove("hidden");
-        loginStatusArea.appendChild(el("div", { class: "card col", style: { background: "var(--paper)", gap: "6px" } },
-          el("div", null, "浏览器授权页已打开，请在网页中确认核对码："),
-          el("div", { class: "mono", style: { fontSize: "22px", fontWeight: 700, letterSpacing: "0.08em", color: "var(--accent)" } }, st.userCode || ""),
-          st.verificationUrl ? el("div", { class: "row" },
-            el("button", { type: "button", class: "btn btn-sm", onClick: () => openURL(st.verificationUrl) }, "重新打开授权网页")
-          ) : null
-        ));
-        clearInterval(loginPollTimer);
+  const loginStatusArea = el("div", { class: "col hidden" });
+  const loginTriggerButtons = [];
+
+  function setLoginTriggersBusy(busy, label = "登录手绘风账号") {
+    for (const btn of loginTriggerButtons) {
+      btn.disabled = busy;
+      clear(btn);
+      if (busy) {
+        btn.append(el("span", { class: "login-spinner", "aria-hidden": "true" }), el("span", null, label));
+      } else {
+        btn.textContent = btn.dataset.defaultLabel || "登录手绘风账号";
+      }
+    }
+  }
+
+  function formatMMSS(sec) {
+    const s = Math.max(0, Math.ceil(sec));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+  }
+
+  function stopLoginTimers() {
+    clearInterval(loginPollTimer);
+    clearInterval(loginTickTimer);
+    loginPollTimer = null;
+    loginTickTimer = null;
+  }
+
+  function finishLoginTransition(userObj) {
+    if (completingLogin) return;
+    completingLogin = true;
+    stopLoginTimers();
+    renderLoginFlow({
+      ...(currentLoginState || {}),
+      status: "ok",
+      active: false,
+      checking: false,
+      loggedIn: true,
+      user: userObj || currentLoginState?.user || null,
+    });
+    const minVisualDelay = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? 80 : 420;
+    Promise.all([
+      ctx.refreshTopbar?.(true)?.catch?.(() => {}) || Promise.resolve(),
+      new Promise((resolve) => setTimeout(resolve, minVisualDelay)),
+    ]).then(() => {
+      if (!root.isConnected || root._settingsRenderSeq !== seq) return;
+      renderSettings(root, ctx, { tab: "settings-account", justLoggedIn: true });
+      toast("登录成功");
+    });
+  }
+
+  function triggerImmediateLoginCheck(manual = false) {
+    if (!currentLoginState?.active || currentLoginState.status !== "pending") return;
+    const now = Date.now();
+    if (!manual && now - lastFocusCheckAt < 900) return;
+    lastFocusCheckAt = now;
+    api("GET", "/api/account/login?check=1").then((st) => {
+      if (!root.isConnected || root._settingsRenderSeq !== seq || !st) return;
+      applyLoginState(st);
+      if (manual && st.status === "pending") {
+        const nextMs = st.nextCheckAt ? Date.parse(st.nextCheckAt) - Date.now() : 0;
+        if (st.checking) {
+          toast("正在向官网核对授权状态…");
+        } else if (nextMs > 1200) {
+          toast(`将在 ${Math.ceil(nextMs / 1000)} 秒后自动核对授权`);
+        }
+      }
+    }).catch(() => {});
+  }
+
+  let loginFlowRefs = null;
+
+  function updateLoginCountdowns() {
+    if (!loginFlowRefs || !currentLoginState) return;
+    const st = currentLoginState;
+    if (st.status !== "pending") return;
+    if (st.expiresAt) {
+      const remSec = Math.max(0, (Date.parse(st.expiresAt) - Date.now()) / 1000);
+      loginFlowRefs.expiryEl.textContent = remSec > 0 ? `有效 ${formatMMSS(remSec)}` : "即将过期";
+    } else {
+      loginFlowRefs.expiryEl.textContent = "";
+    }
+    if (st.checking) {
+      loginFlowRefs.liveText.textContent = "正在向官网核对授权状态…";
+    } else if (st.nextCheckAt) {
+      const nextSec = Math.max(0, Math.ceil((Date.parse(st.nextCheckAt) - Date.now()) / 1000));
+      loginFlowRefs.liveText.textContent = nextSec > 0
+        ? `已在浏览器打开授权页，点击「批准授权」后将自动登录（${nextSec} 秒后自动检测）`
+        : "正在等待官网返回授权结果…";
+    } else {
+      loginFlowRefs.liveText.textContent = "已在浏览器打开授权页，点击「批准授权」后将自动登录…";
+    }
+  }
+
+  function buildStepNode(num, label, state) {
+    const cls = "login-step" + (state === "done" ? " is-done" : state === "active" ? " is-active" : "");
+    return el("div", { class: cls },
+      el("span", { class: "login-step-dot", "aria-hidden": "true" }, state === "done" ? "✓" : String(num)),
+      el("span", null, label)
+    );
+  }
+
+  function renderLoginFlow(st) {
+    currentLoginState = st;
+    if (!st || st.status === "idle") {
+      clear(loginStatusArea);
+      loginStatusArea.classList.add("hidden");
+      loginFlowRefs = null;
+      setLoginTriggersBusy(false);
+      return;
+    }
+
+    const wasHidden = loginStatusArea.classList.contains("hidden");
+    loginStatusArea.classList.remove("hidden");
+    const visualStage = st.status === "pending" && st.checking ? "checking" : st.status;
+    const isSyncOrOk = st.status === "syncing" || st.status === "ok";
+    const isStarting = st.status === "starting";
+    const isError = st.status === "error";
+
+    setLoginTriggersBusy(isStarting || st.status === "pending" || isSyncOrOk, isStarting ? "正在申请授权码…" : isSyncOrOk ? "正在同步账号…" : "等待网页授权中…");
+
+    const step1 = isStarting ? "active" : "done";
+    const step2 = isStarting ? "upcoming" : isSyncOrOk ? "done" : isError ? "upcoming" : "active";
+    const step3 = isSyncOrOk ? "active" : "upcoming";
+
+    clear(loginStatusArea);
+    const card = el("div", {
+      class: "login-flow-card" + (wasHidden ? " is-entering" : ""),
+      dataset: { stage: visualStage },
+      role: "status",
+      "aria-live": "polite",
+    },
+      el("div", { class: "login-progress-track", "aria-hidden": "true" }, el("div", { class: "login-progress-bar" })),
+      el("div", { class: "login-steps" },
+        buildStepNode(1, "打开网页授权", step1),
+        buildStepNode(2, "等待网页确认", step2),
+        buildStepNode(3, "同步账号资产", step3)
+      )
+    );
+
+    if (isStarting) {
+      card.appendChild(el("div", { class: "login-live-row" },
+        el("span", { class: "login-spinner", style: { color: "var(--accent)" }, "aria-hidden": "true" }),
+        el("span", null, "正在向手绘风官网申请设备授权码，随后将自动打开浏览器…")
+      ));
+      loginFlowRefs = null;
+    } else if (isSyncOrOk) {
+      const who = st.user?.displayName || st.user?.username || "";
+      card.appendChild(el("div", { class: "login-success-banner" },
+        el("span", { class: "login-success-check", "aria-hidden": "true" }, "✓"),
+        el("div", { class: "col", style: { gap: "2px" } },
+          el("strong", null, who ? `授权已通过，欢迎回来 ${who}！` : "授权已通过！"),
+          el("span", { class: "muted" }, "正在同步账号余额、积分与免费生图额度…")
+        ),
+        el("span", { class: "login-spinner", style: { marginLeft: "auto", color: "var(--ok)" }, "aria-hidden": "true" })
+      ));
+      loginFlowRefs = null;
+    } else if (isError) {
+      card.appendChild(el("div", { class: "login-live-row" },
+        el("span", { class: "login-live-dot", "aria-hidden": "true" }),
+        el("span", null, st.error || "授权未完成，请重新发起登录")
+      ));
+      card.appendChild(el("div", { class: "row" },
+        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: startDeviceLogin() }, "重新发起登录"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => renderLoginFlow({ status: "idle" }),
+        }, "收起")
+      ));
+      loginFlowRefs = null;
+    } else {
+      const expiryEl = el("span", { class: "muted mono", style: { fontSize: "12px" } }, "");
+      const liveText = el("span", null, "");
+      const indicator = st.checking
+        ? el("span", { class: "login-spinner", style: { color: "var(--accent)" }, "aria-hidden": "true" })
+        : el("span", { class: "login-live-dot", "aria-hidden": "true" });
+
+      card.appendChild(el("div", { class: "login-code-strip" },
+        el("div", { class: "col", style: { gap: "2px" } },
+          el("span", { class: "muted", style: { fontSize: "12px" } }, "请在浏览器授权页核对此设备码并点击确认"),
+          el("div", { class: "login-code-value mono" }, st.userCode || "----")
+        ),
+        el("div", { class: "row", style: { gap: "8px" } },
+          expiryEl,
+          st.userCode ? el("button", {
+            type: "button",
+            class: "btn btn-sm",
+            onClick: async () => {
+              const ok = await copyText(st.userCode);
+              toast(ok ? "已复制核对码" : "复制失败");
+            },
+          }, "复制核对码") : null
+        )
+      ));
+
+      card.appendChild(el("div", { class: "login-live-row" }, indicator, liveText));
+
+      const checkNowBtn = el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        disabled: Boolean(st.checking),
+        onClick: () => triggerImmediateLoginCheck(true),
+      }, st.checking ? "正在检测…" : "我已授权，立即检测");
+
+      card.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+        el("div", { class: "row" },
+          checkNowBtn,
+          st.verificationUrl ? el("button", { type: "button", class: "btn btn-sm", onClick: () => openURL(st.verificationUrl) }, "重新打开授权页 ↗") : null
+        ),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: async () => {
+            stopLoginTimers();
+            await api("POST", "/api/account/login/cancel").catch(() => {});
+            renderLoginFlow({ status: "idle" });
+            toast("已取消登录");
+          },
+        }, "取消登录")
+      ));
+
+      loginFlowRefs = { expiryEl, liveText };
+      updateLoginCountdowns();
+    }
+
+    loginStatusArea.appendChild(card);
+  }
+
+  function applyLoginState(st) {
+    if (!st) return;
+    if (st.status === "ok") {
+      finishLoginTransition(st.user);
+      return;
+    }
+    if (st.status === "syncing") {
+      stopLoginTimers();
+      renderLoginFlow(st);
+      // Fallback poll in case SSE missed the final "ok" transition.
+      loginPollTimer = setInterval(async () => {
+        if (!root.isConnected || completingLogin) { clearInterval(loginPollTimer); return; }
+        const p = await api("GET", "/api/account/login").catch(() => null);
+        if (p?.status === "ok" || (p?.loggedIn && p?.status !== "syncing")) {
+          finishLoginTransition(p.user);
+        }
+      }, 600);
+      return;
+    }
+    if (st.status === "error") {
+      stopLoginTimers();
+      renderLoginFlow(st);
+      if (st.error) toast(st.error);
+      return;
+    }
+    if (st.status === "idle") {
+      stopLoginTimers();
+      renderLoginFlow(st);
+      return;
+    }
+    if (st.status === "pending" || st.active) {
+      renderLoginFlow(st);
+      if (!loginTickTimer) {
+        loginTickTimer = setInterval(updateLoginCountdowns, 500);
+      }
+      if (!loginPollTimer) {
+        // Lightweight fallback sync; primary updates arrive instantaneously via SSE.
         loginPollTimer = setInterval(async () => {
-          if (!root.isConnected) {
-            clearInterval(loginPollTimer);
+          if (!root.isConnected || completingLogin) {
+            stopLoginTimers();
             return;
           }
           const poll = await api("GET", "/api/account/login").catch(() => null);
-          if (poll?.loggedIn || poll?.status === "ok") {
-            clearInterval(loginPollTimer);
-            await ctx.refreshTopbar?.(true);
-            renderSettings(root, ctx, { tab: "settings-account" });
-            toast("登录成功");
-          } else if (poll?.status === "error") {
-            clearInterval(loginPollTimer);
-            toast(poll.error || "登录失败");
+          if (poll && (poll.status !== currentLoginState?.status || poll.checking !== currentLoginState?.checking || poll.pollCount !== currentLoginState?.pollCount)) {
+            applyLoginState(poll);
           }
-        }, 2000);
+        }, 2500);
+      }
+    }
+  }
+
+  function startDeviceLogin() {
+    return async () => {
+      completingLogin = false;
+      stopLoginTimers();
+      renderLoginFlow({ status: "starting", active: true });
+      try {
+        const st = await api("POST", "/api/account/login");
+        applyLoginState(st);
       } catch (e) {
-        toast(e.message);
+        renderLoginFlow({ status: "error", active: false, error: e.message || "发起登录失败，请检查网络连接" });
+        toast(e.message || "发起登录失败");
       }
     };
   }
@@ -110,7 +375,7 @@ export async function renderSettings(root, ctx, params = {}) {
   // 1. Account & Assets
   const accSection = el("section", {
     id: "settings-account",
-    class: "card settings-section",
+    class: "card settings-section" + (params?.justLoggedIn ? " settings-account-enter" : ""),
     role: "tabpanel",
     "aria-labelledby": "tab-settings-account",
     tabindex: "0",
@@ -131,7 +396,6 @@ export async function renderSettings(root, ctx, params = {}) {
     accSection.appendChild(el("div", { class: "badge badge-accent" }, `检测到本机 Skill 已配置账号（${accRes.skillUsername || "已登录"}）；客户端使用独立加密令牌存储，互不覆盖`));
   }
 
-  const loginStatusArea = el("div", { class: "col hidden" });
   if (accRes.loggedIn) {
     const displayName = accRes.user?.displayName || accRes.user?.username || accRes.user?.name || "手绘风用户";
     const username = accRes.user?.username || "";
@@ -223,22 +487,39 @@ export async function renderSettings(root, ctx, params = {}) {
 
     const syncHint = economySyncHint(eco);
     if (syncHint) {
-      accSection.appendChild(el("div", { class: "economy-hint row", style: { justifyContent: "space-between" } },
-        el("span", null, syncHint),
-        eco.scopeDenied ? el("button", {
+      let reauthBtn = null;
+      if (eco.scopeDenied) {
+        reauthBtn = el("button", {
           type: "button",
           class: "btn btn-sm",
-          onClick: startDeviceLogin(loginStatusArea),
-        }, "重新授权登录") : null
+          dataset: { defaultLabel: "重新授权登录" },
+          onClick: startDeviceLogin(),
+        }, "重新授权登录");
+        loginTriggerButtons.push(reauthBtn);
+      }
+      accSection.appendChild(el("div", { class: "economy-hint row", style: { justifyContent: "space-between" } },
+        el("span", null, syncHint),
+        reauthBtn
       ));
     }
     accSection.appendChild(loginStatusArea);
   } else {
+    const loginBtn = el("button", {
+      type: "button",
+      class: "btn btn-primary",
+      dataset: { defaultLabel: "登录手绘风账号" },
+      onClick: startDeviceLogin(),
+    }, "登录手绘风账号");
+    loginTriggerButtons.push(loginBtn);
     accSection.appendChild(el("div", { class: "settings-account-bar" },
       el("span", { class: "muted" }, accRes.error || "登录后可同步可用余额、社区积分与免费额度，并支持发布作品与收藏同步"),
-      el("button", { type: "button", class: "btn btn-primary", onClick: startDeviceLogin(loginStatusArea) }, "登录手绘风账号")
+      loginBtn
     ));
     accSection.appendChild(loginStatusArea);
+  }
+
+  if (loginRes && (loginRes.active || loginRes.status === "pending" || loginRes.status === "syncing")) {
+    applyLoginState(loginRes);
   }
 
   // 2. Third-Party Providers Only (no official interface selectors here)
@@ -613,8 +894,17 @@ export async function renderSettings(root, ctx, params = {}) {
     });
   }
 
+  const onReturnFocus = () => {
+    if (document.visibilityState === "hidden") return;
+    triggerImmediateLoginCheck(false);
+  };
+  window.addEventListener("focus", onReturnFocus);
+  document.addEventListener("visibilitychange", onReturnFocus);
+
   const cleanup = () => {
-    clearInterval(loginPollTimer);
+    stopLoginTimers();
+    window.removeEventListener("focus", onReturnFocus);
+    document.removeEventListener("visibilitychange", onReturnFocus);
     unsub();
   };
   const unsub = onEvent((msg) => {
@@ -624,8 +914,15 @@ export async function renderSettings(root, ctx, params = {}) {
     }
     if (msg.type === "resource_update") {
       resProg.textContent = `资源包增量下载进度：${msg.data?.done || 0} / ${msg.data?.total || 0}`;
-    } else if ((msg.type === "account" && msg.data?.loggedIn) || msg.type === "balance") {
-      clearInterval(loginPollTimer);
+    } else if (msg.type === "account") {
+      const data = msg.data || {};
+      if (data.status === "pending" || data.status === "syncing" || data.status === "ok" || data.status === "error" || data.status === "idle") {
+        applyLoginState(data);
+      } else if (data.loggedIn) {
+        finishLoginTransition(data.user);
+      }
+    } else if (msg.type === "balance") {
+      if (completingLogin || currentLoginState?.active) return;
       ctx.refreshTopbar?.(true);
       renderSettings(root, ctx, { preserveScroll: true });
     }

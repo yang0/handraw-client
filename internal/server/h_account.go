@@ -19,16 +19,70 @@ import (
 	"github.com/yang0/handraw-client/internal/store"
 )
 
+// pollJitterBuffer pads RFC 8628 device polling intervals slightly so network
+// RTT jitter never causes two consecutive polls to arrive faster than the
+// server's interval and trigger cascading slow_down penalties.
+var pollJitterBuffer = 450 * time.Millisecond
+
 type loginState struct {
-	mu         sync.Mutex
-	active     bool
-	deviceCode string
-	userCode   string
-	verifyURL  string
-	status     string // idle | pending | ok | error
-	errMsg     string
-	expiresAt  time.Time
-	cancel     context.CancelFunc
+	mu          sync.Mutex
+	active      bool
+	checking    bool
+	deviceCode  string
+	userCode    string
+	verifyURL   string
+	status      string // idle | pending | syncing | ok | error
+	errMsg      string
+	intervalSec int
+	pollCount   int
+	lastPollAt  time.Time
+	nextCheckAt time.Time
+	expiresAt   time.Time
+	user        *site.User
+	cancel      context.CancelFunc
+	nudge       chan struct{}
+}
+
+func (s *Server) loginSnapshotLocked() map[string]any {
+	snap := map[string]any{
+		"active":          s.login.active,
+		"checking":        s.login.checking,
+		"status":          s.login.status,
+		"userCode":        s.login.userCode,
+		"verificationUrl": s.login.verifyURL,
+		"error":           s.login.errMsg,
+		"loggedIn":        s.Site.LoggedIn() || s.login.status == "syncing" || s.login.status == "ok",
+		"intervalSec":     s.login.intervalSec,
+		"pollCount":       s.login.pollCount,
+	}
+	if !s.login.expiresAt.IsZero() {
+		snap["expiresAt"] = s.login.expiresAt.UTC().Format(time.RFC3339Nano)
+		rem := int(time.Until(s.login.expiresAt).Seconds())
+		if rem < 0 {
+			rem = 0
+		}
+		snap["expiresIn"] = rem
+	}
+	if !s.login.nextCheckAt.IsZero() && s.login.active {
+		snap["nextCheckAt"] = s.login.nextCheckAt.UTC().Format(time.RFC3339Nano)
+	}
+	if s.login.user != nil {
+		snap["user"] = s.login.user
+	}
+	return snap
+}
+
+func (s *Server) nudgeLoginPoll() {
+	s.login.mu.Lock()
+	ch := s.login.nudge
+	active := s.login.active
+	s.login.mu.Unlock()
+	if active && ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (s *Server) account(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -89,97 +143,246 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) (any, error)
 	if ds.ExpiresIn <= 0 {
 		ds.ExpiresIn = 300
 	}
+	firstDelay := time.Duration(ds.Interval) * time.Second
+	if firstDelay > 2*time.Second {
+		// First poll has no previous last_polled_at on the server, so checking
+		// promptly catches quick browser approvals without triggering slow_down.
+		firstDelay = 2 * time.Second
+	}
+	nudge := make(chan struct{}, 1)
+
 	s.login.mu.Lock()
 	if s.login.cancel != nil {
 		s.login.cancel()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(ds.ExpiresIn)*time.Second)
 	s.login.active = true
+	s.login.checking = false
 	s.login.deviceCode = ds.DeviceCode
 	s.login.userCode = ds.UserCode
 	s.login.verifyURL = ds.VerificationURL
 	s.login.status = "pending"
 	s.login.errMsg = ""
+	s.login.intervalSec = ds.Interval
+	s.login.pollCount = 0
+	s.login.lastPollAt = time.Time{}
+	s.login.nextCheckAt = time.Now().Add(firstDelay)
 	s.login.expiresAt = time.Now().Add(time.Duration(ds.ExpiresIn) * time.Second)
+	s.login.user = nil
 	s.login.cancel = cancel
+	s.login.nudge = nudge
+	snap := s.loginSnapshotLocked()
 	s.login.mu.Unlock()
 
 	if ds.VerificationURL != "" {
 		_ = s.Host.OpenURL(ds.VerificationURL)
 	}
-	go s.pollLogin(ctx, ds.DeviceCode, ds.Interval)
-	return map[string]any{
-		"status":          "pending",
-		"userCode":        ds.UserCode,
-		"verificationUrl": ds.VerificationURL,
-		"expiresIn":       ds.ExpiresIn,
-	}, nil
+	s.Emit("account", snap)
+	go s.pollLogin(ctx, ds.DeviceCode, firstDelay, nudge)
+	return snap, nil
 }
 
-func (s *Server) pollLogin(ctx context.Context, deviceCode string, interval int) {
-	t := time.NewTicker(time.Duration(interval) * time.Second)
-	defer t.Stop()
+func (s *Server) pollLogin(ctx context.Context, deviceCode string, firstDelay time.Duration, nudge <-chan struct{}) {
+	timer := time.NewTimer(firstDelay)
+	defer timer.Stop()
+
+	resetTimer := func(d time.Duration) {
+		if d < 0 {
+			d = 0
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(d)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			var snap map[string]any
 			s.login.mu.Lock()
 			if s.login.deviceCode == deviceCode && s.login.status == "pending" {
 				s.login.active = false
+				s.login.checking = false
 				s.login.status = "error"
-				s.login.errMsg = "登录授权已超时，请重试"
+				s.login.errMsg = "登录授权已超时，请重新发起登录"
+				s.login.nextCheckAt = time.Time{}
+				snap = s.loginSnapshotLocked()
 			}
 			s.login.mu.Unlock()
-			s.Emit("account", map[string]any{"status": "error"})
+			if snap != nil {
+				s.Emit("account", snap)
+			}
 			return
-		case <-t.C:
-			done, _ := s.tryExchangeDevice(ctx, deviceCode)
-			if done {
+		case <-nudge:
+			// Honour the server's minimum polling interval even on manual/focus
+			// nudges so we never provoke a slow_down backoff penalty.
+			s.login.mu.Lock()
+			if !s.login.active || s.login.deviceCode != deviceCode {
+				s.login.mu.Unlock()
 				return
 			}
+			minWait := time.Duration(s.login.intervalSec)*time.Second + pollJitterBuffer
+			var wait time.Duration
+			if !s.login.lastPollAt.IsZero() {
+				elapsed := time.Since(s.login.lastPollAt)
+				if elapsed < minWait {
+					wait = minWait - elapsed
+				}
+			}
+			if wait > 0 {
+				s.login.nextCheckAt = time.Now().Add(wait)
+				snap := s.loginSnapshotLocked()
+				s.login.mu.Unlock()
+				s.Emit("account", snap)
+				resetTimer(wait)
+				continue
+			}
+			s.login.mu.Unlock()
+		case <-timer.C:
 		}
+
+		done, nextWait := s.tryExchangeDevice(ctx, deviceCode)
+		if done {
+			return
+		}
+		resetTimer(nextWait)
 	}
 }
 
-func (s *Server) tryExchangeDevice(ctx context.Context, deviceCode string) (bool, error) {
+func (s *Server) tryExchangeDevice(ctx context.Context, deviceCode string) (bool, time.Duration) {
+	s.login.mu.Lock()
+	if !s.login.active || s.login.deviceCode != deviceCode {
+		s.login.mu.Unlock()
+		return true, 0
+	}
+	if s.login.checking {
+		wait := time.Duration(s.login.intervalSec)*time.Second + pollJitterBuffer
+		s.login.mu.Unlock()
+		return false, wait
+	}
+	s.login.checking = true
+	s.login.nextCheckAt = time.Time{}
+	checkingSnap := s.loginSnapshotLocked()
+	s.login.mu.Unlock()
+
+	s.Emit("account", checkingSnap)
+
 	res, code, err := s.Site.PollDevice(ctx, deviceCode)
+	now := time.Now()
+
 	if err != nil {
+		// If the poll was canceled locally (user clicked cancel or restarted),
+		// don't overwrite the newer state with context.Canceled.
+		if ctx.Err() != nil {
+			s.login.mu.Lock()
+			if s.login.deviceCode == deviceCode {
+				s.login.checking = false
+			}
+			s.login.mu.Unlock()
+			return true, 0
+		}
+		var errSnap map[string]any
 		s.login.mu.Lock()
 		if s.login.deviceCode == deviceCode {
 			s.login.active = false
+			s.login.checking = false
 			s.login.status = "error"
 			s.login.errMsg = err.Error()
+			s.login.nextCheckAt = time.Time{}
+			errSnap = s.loginSnapshotLocked()
 		}
 		s.login.mu.Unlock()
-		s.Emit("account", map[string]any{"status": "error", "error": err.Error()})
-		return true, err
+		if errSnap != nil {
+			s.Emit("account", errSnap)
+		}
+		return true, 0
 	}
+
 	if res == nil {
-		_ = code
-		return false, nil
-	}
-	if err := secrets.Set(secrets.SiteToken, res.Token); err != nil {
+		var pendingSnap map[string]any
+		var nextWait time.Duration
 		s.login.mu.Lock()
-		s.login.active = false
-		s.login.status = "error"
-		s.login.errMsg = "保存令牌到系统凭据库失败：" + err.Error()
+		if s.login.deviceCode == deviceCode && s.login.active {
+			s.login.checking = false
+			s.login.pollCount++
+			s.login.lastPollAt = now
+			if code == "slow_down" {
+				// RFC 8628: back off by +5s when server signals slow_down.
+				s.login.intervalSec += 5
+			}
+			nextWait = time.Duration(s.login.intervalSec)*time.Second + pollJitterBuffer
+			s.login.nextCheckAt = now.Add(nextWait)
+			pendingSnap = s.loginSnapshotLocked()
+		}
 		s.login.mu.Unlock()
-		return true, err
+		if pendingSnap != nil {
+			s.Emit("account", pendingSnap)
+		}
+		return false, nextWait
+	}
+
+	// Authorization succeeded! Emit immediate "syncing" stage and focus the app
+	// window before writing credentials and refreshing account assets.
+	var syncingSnap map[string]any
+	userCopy := res.User
+	s.login.mu.Lock()
+	if s.login.deviceCode == deviceCode {
+		s.login.checking = false
+		s.login.status = "syncing"
+		s.login.user = &userCopy
+		s.login.nextCheckAt = time.Time{}
+		syncingSnap = s.loginSnapshotLocked()
+	}
+	s.login.mu.Unlock()
+	if syncingSnap != nil {
+		s.Emit("account", syncingSnap)
+	}
+	s.Host.ShowMain()
+
+	if err := secrets.Set(secrets.SiteToken, res.Token); err != nil {
+		var errSnap map[string]any
+		s.login.mu.Lock()
+		if s.login.deviceCode == deviceCode {
+			s.login.active = false
+			s.login.checking = false
+			s.login.status = "error"
+			s.login.errMsg = "保存令牌到系统凭据库失败：" + err.Error()
+			errSnap = s.loginSnapshotLocked()
+		}
+		s.login.mu.Unlock()
+		if errSnap != nil {
+			s.Emit("account", errSnap)
+		}
+		return true, 0
 	}
 	_ = s.DB.SetKV("account_user", res.User)
+
+	var okSnap map[string]any
 	s.login.mu.Lock()
-	if s.login.cancel != nil {
-		s.login.cancel()
+	if s.login.deviceCode == deviceCode {
+		if s.login.cancel != nil {
+			s.login.cancel()
+		}
+		s.login.active = false
+		s.login.checking = false
+		s.login.status = "ok"
+		s.login.errMsg = ""
+		s.login.nextCheckAt = time.Time{}
+		s.login.user = &userCopy
+		okSnap = s.loginSnapshotLocked()
 	}
-	s.login.active = false
-	s.login.status = "ok"
-	s.login.errMsg = ""
 	s.login.mu.Unlock()
-	s.Emit("account", map[string]any{"loggedIn": true, "user": res.User})
-	s.Emit("balance", nil)
+	if okSnap != nil {
+		s.Emit("account", okSnap)
+	}
 	go func() {
 		_, _ = s.syncResourcesInternal(context.Background())
 	}()
-	return true, nil
+	return true, 0
 }
 
 // HandleDeepLink handles handraw:// URL callbacks from the browser.
@@ -190,30 +393,39 @@ func (s *Server) HandleDeepLink(rawURL string) {
 	}
 	s.Host.ShowMain()
 	if u.Host == "auth" || strings.HasPrefix(u.Path, "/auth") {
-		s.login.mu.Lock()
-		dc := s.login.deviceCode
-		s.login.mu.Unlock()
-		if dc != "" {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				defer cancel()
-				_, _ = s.tryExchangeDevice(ctx, dc)
-			}()
-		}
+		s.nudgeLoginPoll()
 	}
 }
 
 func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) (any, error) {
+	if r.URL.Query().Get("check") == "1" {
+		s.nudgeLoginPoll()
+	}
 	s.login.mu.Lock()
-	defer s.login.mu.Unlock()
-	return map[string]any{
-		"active":          s.login.active,
-		"status":          s.login.status,
-		"userCode":        s.login.userCode,
-		"verificationUrl": s.login.verifyURL,
-		"error":           s.login.errMsg,
-		"loggedIn":        s.Site.LoggedIn(),
-	}, nil
+	snap := s.loginSnapshotLocked()
+	s.login.mu.Unlock()
+	return snap, nil
+}
+
+func (s *Server) loginCancel(w http.ResponseWriter, r *http.Request) (any, error) {
+	s.login.mu.Lock()
+	if s.login.cancel != nil {
+		s.login.cancel()
+	}
+	s.login.active = false
+	s.login.checking = false
+	s.login.deviceCode = ""
+	s.login.userCode = ""
+	s.login.verifyURL = ""
+	s.login.status = "idle"
+	s.login.errMsg = ""
+	s.login.nextCheckAt = time.Time{}
+	s.login.expiresAt = time.Time{}
+	s.login.user = nil
+	snap := s.loginSnapshotLocked()
+	s.login.mu.Unlock()
+	s.Emit("account", snap)
+	return snap, nil
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -222,7 +434,15 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) (any, error) {
 		s.login.cancel()
 	}
 	s.login.active = false
+	s.login.checking = false
+	s.login.deviceCode = ""
+	s.login.userCode = ""
+	s.login.verifyURL = ""
 	s.login.status = "idle"
+	s.login.errMsg = ""
+	s.login.nextCheckAt = time.Time{}
+	s.login.expiresAt = time.Time{}
+	s.login.user = nil
 	s.login.mu.Unlock()
 
 	if s.Site.LoggedIn() {
