@@ -7,6 +7,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -110,5 +114,62 @@ func TestInstallZipSubdirAndNPMTarGz(t *testing.T) {
 	}
 	if c2.ID != "dsh-npm-demo" || c2.Version != "2.1.0" || c2.Kind != "dsh" {
 		t.Fatalf("unexpected npm plugin: %+v", c2)
+	}
+
+	// 3. Streaming tar.gz with GitHub-style wrapper + monorepo subdir.
+	ghTar := tgzOf(t, map[string]string{
+		"handraw-style-abc123/README.md":                           "root",
+		"handraw-style-abc123/plugins/dsh-sub/package.json":        pkgJSON,
+		"handraw-style-abc123/plugins/dsh-sub/host.js":             "export function apply(){}",
+		"handraw-style-abc123/plugins/dsh-sub/client.js":           "window.__ModuleLoader__.load({id:'z',factory:()=>({})})",
+	})
+	c3, err := r.InstallTarGzStream(bytes.NewReader(ghTar), "plugins/dsh-sub", "git-tar")
+	if err != nil {
+		t.Fatalf("InstallTarGzStream(subdir) failed: %v", err)
+	}
+	if c3.ID != "dsh-plugin-sub" || c3.Kind != "dsh" {
+		t.Fatalf("unexpected tar.gz subdir plugin: %+v", c3)
+	}
+}
+
+func TestInstallGitShallowAndSparseSubdir(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	run := func(args ...string) string {
+		cmd := exec.Command(gitBin, args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("init", "-b", "main")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "Test")
+
+	_ = os.WriteFile(filepath.Join(repo, "BIG_UNRELATED.txt"), []byte("unrelated root file"), 0o644)
+	sub := filepath.Join(repo, "plugins", "demo-git")
+	_ = os.MkdirAll(sub, 0o755)
+	_ = os.WriteFile(filepath.Join(sub, "package.json"), []byte(`{"name":"dsh-git-sparse","version":"0.3.0","exports":{".":"./host.js","./client":"./client.js"},"dsh":{"client":{"platform":"web"}}}`), 0o644)
+	_ = os.WriteFile(filepath.Join(sub, "host.js"), []byte(`export function apply(){}`), 0o644)
+	_ = os.WriteFile(filepath.Join(sub, "client.js"), []byte(`window.__ModuleLoader__.load({id:'g',factory:()=>({})})`), 0o644)
+	run("add", ".")
+	run("commit", "-m", "init")
+	sha := run("rev-parse", "HEAD")
+
+	r := NewRuntime(t.TempDir())
+	c, err := r.InstallGit(context.Background(), repo, sha, "plugins/demo-git", "market:dsh-git-sparse@0.3.0")
+	if err != nil {
+		t.Fatalf("InstallGit sparse failed: %v", err)
+	}
+	if c.ID != "dsh-git-sparse" || c.Version != "0.3.0" || c.Kind != "dsh" {
+		t.Fatalf("unexpected git plugin: %+v", c)
+	}
+	if _, err := os.Stat(filepath.Join(c.Dir, "BIG_UNRELATED.txt")); err == nil {
+		t.Fatal("sparse subdir install leaked unrelated root file")
 	}
 }

@@ -18,14 +18,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 )
 
 const APIVersion = "1.0"
@@ -552,9 +550,9 @@ func (r *Runtime) Community(id string) (Community, error) {
 
 var ghRe = regexp.MustCompile(`^(?:https://github\.com/)?([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$`)
 
-// Install downloads a GitHub repository (default branch zip), a zip URL,
-// or links a local plugin directory (including DSH plugins) after validation.
-// It returns the plugin, not yet enabled.
+// Install installs a plugin from a local directory (or link:), npm:<pkg>[@ver],
+// a Git repository (GitHub owner/repo, https://...git, Gitee/GitLab), or a
+// direct .tar.gz / .tgz / .zip URL. It returns the plugin, not yet enabled.
 func (r *Runtime) Install(ctx context.Context, source string) (Community, error) {
 	source = strings.TrimSpace(source)
 	if strings.HasPrefix(source, "link:") {
@@ -564,30 +562,35 @@ func (r *Runtime) Install(ctx context.Context, source string) (Community, error)
 	if st, err := os.Stat(trimmedPath); err == nil && st.IsDir() {
 		return r.InstallLocal(trimmedPath)
 	}
-	url := source
+	if strings.HasPrefix(source, "npm:") {
+		spec := strings.TrimSpace(strings.TrimPrefix(source, "npm:"))
+		pkgName, ver := spec, "latest"
+		if i := strings.LastIndexByte(spec, '@'); i > 0 {
+			pkgName, ver = spec[:i], spec[i+1:]
+		}
+		if pkgName == "" {
+			return Community{}, errors.New("请填写有效的 npm 包名（例如 npm:dsh-media-desk）")
+		}
+		return r.InstallNPM(ctx, pkgName, ver, "", source)
+	}
 	if m := ghRe.FindStringSubmatch(source); m != nil {
-		url = fmt.Sprintf("https://codeload.github.com/%s/%s/zip/HEAD", m[1], m[2])
-	} else if !strings.HasPrefix(source, "https://") {
-		return Community{}, errors.New("请填写本地插件目录路径、GitHub 仓库（owner/repo）或 https 开头的 zip 地址")
+		repoURL := fmt.Sprintf("https://github.com/%s/%s.git", m[1], m[2])
+		return r.InstallGit(ctx, repoURL, "HEAD", "", source)
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return Community{}, err
+	if !strings.HasPrefix(source, "https://") {
+		return Community{}, errors.New("请填写本地目录、Git 仓库（owner/repo 或 https://...git）、npm:<包名>，或 .tar.gz / .zip 链接")
 	}
-	c := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := c.Do(req)
-	if err != nil {
-		return Community{}, fmt.Errorf("下载插件失败：%w", err)
+	lower := strings.ToLower(source)
+	switch {
+	case strings.HasSuffix(lower, ".tgz"), strings.HasSuffix(lower, ".tar.gz"):
+		return r.InstallTarGzURL(ctx, source, "", source)
+	case strings.HasSuffix(lower, ".zip"):
+		return r.InstallZipURL(ctx, source, "", source)
+	case strings.HasSuffix(lower, ".git"), strings.Contains(lower, "github.com/"), strings.Contains(lower, "gitee.com/"), strings.Contains(lower, "gitlab.com/"):
+		return r.InstallGit(ctx, source, "HEAD", "", source)
+	default:
+		return r.InstallZipURL(ctx, source, "", source)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return Community{}, fmt.Errorf("下载插件失败：%d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
-	if err != nil {
-		return Community{}, err
-	}
-	return r.InstallZip(data, source)
 }
 
 // InstallZip validates and unpacks a plugin archive.

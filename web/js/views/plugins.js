@@ -272,7 +272,7 @@ function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap
     autocorrect: "off",
     autocapitalize: "none",
     spellcheck: "false",
-    placeholder: "输入本地插件目录（支持 DSH 插件）、GitHub 仓库或 ZIP 地址…",
+    placeholder: "输入本地目录、Git 仓库（GitHub/Gitee）、npm:包名 或 .tar.gz / .zip 地址…",
   });
 
   const discoverBox = el("div", { class: "col", style: { gap: "6px", display: "none" } });

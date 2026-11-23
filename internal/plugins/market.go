@@ -13,12 +13,17 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 )
+
+// Max unpacked size per plugin (2 GiB) so asset-heavy galleries (poses, outfits, styles) install cleanly.
+const maxPluginUnpackedBytes int64 = 2 << 30
+const maxPluginSingleFileBytes int64 = 256 << 20
 
 // MarketLocalizedText maps BCP-47 language codes ("zh", "en", ...) to strings.
 type MarketLocalizedText map[string]string
@@ -147,8 +152,8 @@ func FetchMarketIndex(ctx context.Context, indexURL string) (MarketIndex, error)
 var ghGitRe = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$`)
 
 // InstallFromMarketVersion downloads and installs a plugin version from a DSH
-// Format 1 market entry (supporting both "git" and "npm" sources without needing
-// local git or npm CLIs).
+// Format 1 market entry (supporting Git shallow/sparse clone, streaming tar.gz,
+// disk-backed zip, and npm .tgz without forcing zip-only installs).
 func (r *Runtime) InstallFromMarketVersion(ctx context.Context, pkgName string, ver MarketVersion, marketURL string) (Community, error) {
 	sourceTag := fmt.Sprintf("market:%s@%s", pkgName, ver.Version)
 	if marketURL != "" {
@@ -156,45 +161,148 @@ func (r *Runtime) InstallFromMarketVersion(ctx context.Context, pkgName string, 
 	}
 	switch ver.Source.Type {
 	case "git":
-		zipURL, err := gitArchiveZipURL(ver.Source.URL, ver.Source.Commit)
-		if err != nil {
-			return Community{}, err
-		}
-		data, err := downloadBytes(ctx, zipURL, 80<<20)
-		if err != nil {
-			return Community{}, fmt.Errorf("下载插件压缩包失败：%w", err)
-		}
-		return r.InstallZipSubdir(data, ver.Source.Directory, sourceTag)
+		return r.InstallGit(ctx, ver.Source.URL, ver.Source.Commit, ver.Source.Directory, sourceTag)
 	case "npm":
-		tarballURL, err := resolveNPMTarballURL(ctx, pkgName, ver.Version, ver.Source.Registry)
-		if err != nil {
-			return Community{}, err
-		}
-		data, err := downloadBytes(ctx, tarballURL, 80<<20)
-		if err != nil {
-			return Community{}, fmt.Errorf("下载 npm 插件包失败：%w", err)
-		}
-		return r.InstallTarGz(data, sourceTag)
+		return r.InstallNPM(ctx, pkgName, ver.Version, ver.Source.Registry, sourceTag)
 	default:
 		return Community{}, fmt.Errorf("不支持的市场安装源类型：%q", ver.Source.Type)
 	}
 }
 
-func gitArchiveZipURL(repoURL, commit string) (string, error) {
+// InstallNPM fetches a package from npm (with npmmirror fallback) and unpacks
+// its .tgz tarball directly in streaming Go (no local npm CLI required).
+func (r *Runtime) InstallNPM(ctx context.Context, pkgName, version, registry, sourceTag string) (Community, error) {
+	if strings.TrimSpace(version) == "" {
+		version = "latest"
+	}
+	tarballURL, err := resolveNPMTarballURL(ctx, pkgName, version, registry)
+	if err != nil {
+		return Community{}, err
+	}
+	return r.InstallTarGzURL(ctx, tarballURL, "", sourceTag)
+}
+
+// InstallGit installs a plugin from any Git repository URL (with optional commit
+// and monorepo subdirectory). When local `git` is installed, it uses shallow
+// fetch + sparse-checkout (only fetching the target subdir for huge monorepos!).
+// Otherwise it falls back to streaming GitHub tar.gz (constant RAM, no zip size cap).
+func (r *Runtime) InstallGit(ctx context.Context, repoURL, commit, subdir, sourceTag string) (Community, error) {
 	repoURL = strings.TrimSpace(repoURL)
 	commit = strings.TrimSpace(commit)
-	if commit == "" {
-		commit = "HEAD"
+	cleanSub := cleanRelSubdir(subdir)
+
+	// Direct archive URLs (e.g. test mocks or direct .zip / .tgz links).
+	lower := strings.ToLower(repoURL)
+	if strings.HasSuffix(lower, ".zip") {
+		return r.InstallZipURL(ctx, repoURL, cleanSub, sourceTag)
 	}
+	if strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz") {
+		return r.InstallTarGzURL(ctx, repoURL, cleanSub, sourceTag)
+	}
+
+	// Strategy 1: Native Git shallow clone / sparse-checkout (works on GitHub, Gitee, GitLab, any repo size).
+	if gitBin, err := exec.LookPath("git"); err == nil && gitBin != "" {
+		if c, gitErr := r.installViaGitCLI(ctx, gitBin, repoURL, commit, cleanSub, sourceTag); gitErr == nil {
+			return c, nil
+		} else if !ghGitRe.MatchString(repoURL) {
+			return Community{}, fmt.Errorf("Git 拉取插件失败：%w", gitErr)
+		}
+		// If git CLI failed on a GitHub URL (e.g. proxy mismatch), fall through to HTTPS streaming tar.gz.
+	}
+
+	// Strategy 2: Streaming GitHub tar.gz (zero git CLI required, constant RAM, no 80 MB truncation).
 	if m := ghGitRe.FindStringSubmatch(repoURL); m != nil {
-		return fmt.Sprintf("https://codeload.github.com/%s/%s/zip/%s", m[1], m[2], url.PathEscape(commit)), nil
+		ref := commit
+		if ref == "" {
+			ref = "HEAD"
+		}
+		tarURL := fmt.Sprintf("https://codeload.github.com/%s/%s/tar.gz/%s", m[1], m[2], url.PathEscape(ref))
+		return r.InstallTarGzURL(ctx, tarURL, cleanSub, sourceTag)
 	}
-	if strings.HasPrefix(repoURL, "http://127.0.0.1") || strings.HasPrefix(repoURL, "http://localhost") {
-		if strings.HasSuffix(repoURL, ".zip") {
-			return repoURL, nil
+
+	return Community{}, fmt.Errorf("未检测到本机 git，且暂无法直接归档下载该仓库：%s", repoURL)
+}
+
+func (r *Runtime) installViaGitCLI(ctx context.Context, gitBin, repoURL, commit, cleanSub, sourceTag string) (Community, error) {
+	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+		return Community{}, err
+	}
+	tmp, err := os.MkdirTemp(r.Dir, ".git-install-")
+	if err != nil {
+		return Community{}, err
+	}
+	defer os.RemoveAll(tmp)
+
+	gitCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	runGit := func(args ...string) error {
+		cmd := exec.CommandContext(gitCtx, gitBin, args...)
+		cmd.Dir = tmp
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		hideWindow(cmd)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			msg := strings.TrimSpace(string(out))
+			if len(msg) > 260 {
+				msg = msg[len(msg)-260:]
+			}
+			return fmt.Errorf("%s: %w (%s)", strings.Join(args, " "), err, msg)
+		}
+		return nil
+	}
+
+	if err := runGit("init", "-q"); err != nil {
+		return Community{}, err
+	}
+	if err := runGit("remote", "add", "origin", repoURL); err != nil {
+		return Community{}, err
+	}
+	targetRef := commit
+	if targetRef == "" {
+		targetRef = "HEAD"
+	}
+
+	if cleanSub != "" {
+		// Monorepo sparse-checkout: fetch only the plugin subdirectory blobs!
+		_ = runGit("sparse-checkout", "init", "--cone")
+		_ = runGit("sparse-checkout", "set", cleanSub)
+		if err := runGit("fetch", "--depth", "1", "--filter=blob:none", "origin", targetRef); err != nil {
+			if err2 := runGit("fetch", "--depth", "1", "origin", targetRef); err2 != nil {
+				return Community{}, err2
+			}
+		}
+	} else {
+		if err := runGit("fetch", "--depth", "1", "origin", targetRef); err != nil {
+			return Community{}, err
 		}
 	}
-	return "", fmt.Errorf("暂仅支持 GitHub 仓库的免 Git 安装：%s", repoURL)
+	if err := runGit("checkout", "--force", "-q", "FETCH_HEAD"); err != nil {
+		return Community{}, err
+	}
+
+	// Prepare final clean unpacked directory without .git metadata.
+	srcDir := tmp
+	if cleanSub != "" {
+		srcDir = filepath.Join(tmp, filepath.FromSlash(cleanSub))
+		if st, err := os.Stat(srcDir); err != nil || !st.IsDir() {
+			return Community{}, fmt.Errorf("仓库中找不到插件子目录 %s", cleanSub)
+		}
+		cleanTmp, err := os.MkdirTemp(r.Dir, ".install-")
+		if err != nil {
+			return Community{}, err
+		}
+		// Move the extracted subdirectory out so tmp (.git) gets deleted cleanly.
+		_ = os.RemoveAll(cleanTmp)
+		if err := os.Rename(srcDir, cleanTmp); err != nil {
+			return Community{}, err
+		}
+		defer os.RemoveAll(cleanTmp)
+		return r.commitUnpackedDir(cleanTmp, sourceTag)
+	}
+
+	_ = os.RemoveAll(filepath.Join(tmp, ".git"))
+	return r.commitUnpackedDir(tmp, sourceTag)
 }
 
 func resolveNPMTarballURL(ctx context.Context, pkgName, version, registry string) (string, error) {
@@ -252,13 +360,79 @@ func downloadBytes(ctx context.Context, rawURL string, limit int64) ([]byte, err
 	return io.ReadAll(io.LimitReader(resp.Body, limit))
 }
 
-// InstallZipSubdir unpacks a plugin zip archive, optionally extracting only a
-// clean relative subdirectory (e.g., "plugins/dsh-handraw-style" inside a monorepo).
+// InstallZipURL downloads a zip archive to a temporary file on disk (no RAM cap
+// truncation) and unpacks it safely.
+func (r *Runtime) InstallZipURL(ctx context.Context, rawURL, subdir, source string) (Community, error) {
+	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+		return Community{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+	if err != nil {
+		return Community{}, err
+	}
+	req.Header.Set("User-Agent", "handraw-client")
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return Community{}, fmt.Errorf("下载插件压缩包失败：%w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return Community{}, fmt.Errorf("下载插件压缩包失败：HTTP %d", resp.StatusCode)
+	}
+	tmpFile, err := os.CreateTemp(r.Dir, ".download-*.zip")
+	if err != nil {
+		return Community{}, err
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	n, err := io.Copy(tmpFile, io.LimitReader(resp.Body, maxPluginUnpackedBytes+1))
+	_ = tmpFile.Close()
+	if err != nil {
+		return Community{}, fmt.Errorf("保存插件压缩包失败：%w", err)
+	}
+	if n > maxPluginUnpackedBytes {
+		return Community{}, errors.New("插件压缩包超过 2 GB 限制")
+	}
+	zr, err := zip.OpenReader(tmpPath)
+	if err != nil {
+		return Community{}, errors.New("下载的文件不是有效的 zip（可能网络中断或源地址返回了错误页）")
+	}
+	defer zr.Close()
+	return r.unpackZipFiles(zr.File, subdir, source)
+}
+
+// InstallTarGzURL streams a .tar.gz / .tgz directly from HTTP into r.Dir with
+// constant memory usage (supports both npm tarballs and GitHub codeload tar.gz).
+func (r *Runtime) InstallTarGzURL(ctx context.Context, rawURL, subdir, source string) (Community, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+	if err != nil {
+		return Community{}, err
+	}
+	req.Header.Set("User-Agent", "handraw-client")
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return Community{}, fmt.Errorf("下载插件包失败：%w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return Community{}, fmt.Errorf("下载插件包失败：HTTP %d", resp.StatusCode)
+	}
+	return r.InstallTarGzStream(resp.Body, subdir, source)
+}
+
+// InstallZipSubdir unpacks a plugin zip byte slice, optionally extracting only
+// a clean relative subdirectory.
 func (r *Runtime) InstallZipSubdir(data []byte, subdir, source string) (Community, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return Community{}, errors.New("插件包不是有效的 zip")
 	}
+	return r.unpackZipFiles(zr.File, subdir, source)
+}
+
+func (r *Runtime) unpackZipFiles(files []*zip.File, subdir, source string) (Community, error) {
 	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
 		return Community{}, err
 	}
@@ -268,14 +442,14 @@ func (r *Runtime) InstallZipSubdir(data []byte, subdir, source string) (Communit
 	}
 	defer os.RemoveAll(tmp)
 
-	prefix := detectZipSingleTopPrefix(zr.File)
-	cleanSub := strings.Trim(path.Clean("/"+strings.ReplaceAll(strings.TrimSpace(subdir), "\\", "/")), "/")
+	prefix := detectZipSingleTopPrefix(files)
+	cleanSub := cleanRelSubdir(subdir)
 	if cleanSub != "" {
 		prefix += cleanSub + "/"
 	}
 
 	var total int64
-	for _, f := range zr.File {
+	for _, f := range files {
 		if !strings.HasPrefix(f.Name, prefix) {
 			continue
 		}
@@ -287,8 +461,8 @@ func (r *Runtime) InstallZipSubdir(data []byte, subdir, source string) (Communit
 			continue
 		}
 		total += int64(f.UncompressedSize64)
-		if total > 150<<20 {
-			return Community{}, errors.New("插件包过大")
+		if total > maxPluginUnpackedBytes {
+			return Community{}, errors.New("插件包解压体积超过 2 GB 上限")
 		}
 		dst := filepath.Join(tmp, filepath.FromSlash(name))
 		if f.FileInfo().IsDir() {
@@ -300,13 +474,16 @@ func (r *Runtime) InstallZipSubdir(data []byte, subdir, source string) (Communit
 		if err != nil {
 			return Community{}, err
 		}
-		b, err := io.ReadAll(io.LimitReader(rc, 60<<20))
-		rc.Close()
+		outF, err := os.Create(dst)
 		if err != nil {
+			rc.Close()
 			return Community{}, err
 		}
-		if err := os.WriteFile(dst, b, 0o644); err != nil {
-			return Community{}, err
+		_, cpErr := io.Copy(outF, io.LimitReader(rc, maxPluginSingleFileBytes))
+		_ = outF.Close()
+		rc.Close()
+		if cpErr != nil {
+			return Community{}, cpErr
 		}
 	}
 	return r.commitUnpackedDir(tmp, source)
@@ -330,11 +507,30 @@ func detectZipSingleTopPrefix(files []*zip.File) string {
 	return prefix
 }
 
-// InstallTarGz unpacks an npm-style .tgz tarball into r.Dir safely.
+func cleanRelSubdir(subdir string) string {
+	s := strings.TrimSpace(subdir)
+	if s == "" {
+		return ""
+	}
+	cleaned := strings.Trim(path.Clean("/"+strings.ReplaceAll(s, "\\", "/")), "/")
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
+}
+
+// InstallTarGz unpacks a .tgz / .tar.gz byte slice safely into r.Dir.
 func (r *Runtime) InstallTarGz(data []byte, source string) (Community, error) {
-	gr, err := gzip.NewReader(bytes.NewReader(data))
+	return r.InstallTarGzStream(bytes.NewReader(data), "", source)
+}
+
+// InstallTarGzStream streams a .tgz / .tar.gz reader safely into r.Dir,
+// stripping the single top-level wrapper folder (such as npm's "package/" or
+// GitHub's "<repo>-<commit>/") and optional monorepo subdir.
+func (r *Runtime) InstallTarGzStream(rd io.Reader, subdir, source string) (Community, error) {
+	gr, err := gzip.NewReader(rd)
 	if err != nil {
-		return Community{}, errors.New("插件包不是有效的 .tgz (gzip)")
+		return Community{}, errors.New("插件包不是有效的 .tar.gz / .tgz 格式")
 	}
 	defer gr.Close()
 	tr := tar.NewReader(gr)
@@ -347,6 +543,10 @@ func (r *Runtime) InstallTarGz(data []byte, source string) (Community, error) {
 	}
 	defer os.RemoveAll(tmp)
 
+	cleanSub := cleanRelSubdir(subdir)
+	topPrefix := ""
+	topPrefixSet := false
+
 	var total int64
 	for {
 		hdr, err := tr.Next()
@@ -354,15 +554,34 @@ func (r *Runtime) InstallTarGz(data []byte, source string) (Community, error) {
 			break
 		}
 		if err != nil {
-			return Community{}, fmt.Errorf("解压插件 tar 失败：%w", err)
+			return Community{}, fmt.Errorf("解压插件 tar.gz 失败：%w", err)
+		}
+		if hdr.Typeflag == tar.TypeXGlobalHeader || hdr.Typeflag == tar.TypeXHeader {
+			continue
 		}
 		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
 			continue
 		}
-		name := strings.TrimPrefix(strings.ReplaceAll(hdr.Name, "\\", "/"), "./")
-		// npm tarballs wrap contents under "package/".
-		if strings.HasPrefix(name, "package/") {
-			name = strings.TrimPrefix(name, "package/")
+		rawName := strings.TrimPrefix(strings.ReplaceAll(hdr.Name, "\\", "/"), "./")
+		if rawName == "" || rawName == "." {
+			continue
+		}
+		if !topPrefixSet {
+			if idx := strings.IndexByte(rawName, '/'); idx > 0 {
+				topPrefix = rawName[:idx+1]
+			}
+			topPrefixSet = true
+		}
+		name := rawName
+		if topPrefix != "" && strings.HasPrefix(name, topPrefix) {
+			name = strings.TrimPrefix(name, topPrefix)
+		}
+		if cleanSub != "" {
+			subPfx := cleanSub + "/"
+			if !strings.HasPrefix(name, subPfx) {
+				continue
+			}
+			name = strings.TrimPrefix(name, subPfx)
 		}
 		if name == "" || strings.Contains(name, "..") || strings.HasPrefix(name, "/") {
 			continue
@@ -376,16 +595,18 @@ func (r *Runtime) InstallTarGz(data []byte, source string) (Community, error) {
 			continue
 		}
 		total += hdr.Size
-		if total > 150<<20 {
-			return Community{}, errors.New("插件包过大")
+		if total > maxPluginUnpackedBytes {
+			return Community{}, errors.New("插件包解压体积超过 2 GB 上限")
 		}
 		_ = os.MkdirAll(filepath.Dir(dst), 0o755)
-		b, err := io.ReadAll(io.LimitReader(tr, 60<<20))
+		outF, err := os.Create(dst)
 		if err != nil {
 			return Community{}, err
 		}
-		if err := os.WriteFile(dst, b, 0o644); err != nil {
-			return Community{}, err
+		_, cpErr := io.Copy(outF, io.LimitReader(tr, maxPluginSingleFileBytes))
+		_ = outF.Close()
+		if cpErr != nil {
+			return Community{}, cpErr
 		}
 	}
 	return r.commitUnpackedDir(tmp, source)
