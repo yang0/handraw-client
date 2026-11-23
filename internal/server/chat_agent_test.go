@@ -132,6 +132,23 @@ func TestChatAgentSkillsDrawAndPlugins(t *testing.T) {
 		t.Fatalf("expected pure chat + skill injection, got res=%+v sawSkill=%v", chatRes, sawSkillInSystem.Load())
 	}
 
+	// 2b. Explicit empty skillIds: [] disables auto-injection (e.g. after user removes skill chips).
+	sawSkillInSystem.Store(false)
+	rrNoSkill := doReq(t, h, srv.Token, "POST", "/api/chat/turn", map[string]any{
+		"messages":      []map[string]string{{"role": "user", "content": "随便聊聊"}},
+		"textModelRef":  "txt1:gpt-4o",
+		"imageModelRef": "img1:mock-img",
+		"skillIds":      []string{},
+	})
+	if rrNoSkill.Code != 200 {
+		t.Fatalf("chat with empty skillIds failed: %d %s", rrNoSkill.Code, rrNoSkill.Body.String())
+	}
+	var noSkillRes chatTurnResponse
+	_ = json.Unmarshal(rrNoSkill.Body.Bytes(), &noSkillRes)
+	if len(noSkillRes.UsedSkills) != 0 || sawSkillInSystem.Load() {
+		t.Fatalf("expected 0 used skills when skillIds:[], got %+v saw=%v", noSkillRes.UsedSkills, sawSkillInSystem.Load())
+	}
+
 	// 3. Chat-driven multi-image generation via tool calling.
 	rrDraw := doReq(t, h, srv.Token, "POST", "/api/chat/turn", map[string]any{
 		"messages":      []map[string]string{{"role": "user", "content": "帮我画两张咖啡插画"}},

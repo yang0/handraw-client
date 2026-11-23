@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/yang0/handraw-client/internal/providers"
+	"github.com/yang0/handraw-client/internal/resources"
 	"github.com/yang0/handraw-client/internal/settings"
 	"github.com/yang0/handraw-client/internal/site"
 	"github.com/yang0/handraw-client/internal/skills"
@@ -21,6 +23,7 @@ type chatHistoryMessage struct {
 }
 
 type chatTurnRequest struct {
+	SessionID     string               `json:"sessionId"`
 	Messages      []chatHistoryMessage `json:"messages"`
 	TextModelRef  string               `json:"textModelRef"`
 	ImageModelRef string               `json:"imageModelRef"`
@@ -39,17 +42,18 @@ type chatToolTrace struct {
 }
 
 type chatTurnResponse struct {
-	OK             bool                `json:"ok"`
-	Reply          string              `json:"reply"`
-	Source         string              `json:"source"`
-	TextModel      string              `json:"textModel"`
-	ImageModel     string              `json:"imageModel"`
-	UsedSkills     []map[string]string `json:"usedSkills"`
-	ToolCalls      []chatToolTrace     `json:"toolCalls"`
-	Runs           []any               `json:"runs"`
-	PendingConfirm map[string]any      `json:"pendingConfirm,omitempty"`
-	SkillsChanged  bool                `json:"skillsChanged"`
-	PluginsChanged bool                `json:"pluginsChanged"`
+	OK             bool                  `json:"ok"`
+	Reply          string                `json:"reply"`
+	Source         string                `json:"source"`
+	TextModel      string                `json:"textModel"`
+	ImageModel     string                `json:"imageModel"`
+	UsedSkills     []map[string]string   `json:"usedSkills"`
+	ToolCalls      []chatToolTrace       `json:"toolCalls"`
+	Runs           []any                 `json:"runs"`
+	Usage          *providers.TokenUsage `json:"usage,omitempty"`
+	PendingConfirm map[string]any        `json:"pendingConfirm,omitempty"`
+	SkillsChanged  bool                  `json:"skillsChanged"`
+	PluginsChanged bool                  `json:"pluginsChanged"`
 }
 
 var chatToolLabels = map[string]string{
@@ -78,7 +82,9 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 	if imageModelRef == "" {
 		imageModelRef = strings.TrimSpace(st.DefaultModel)
 	}
-	resolution := firstStr(strings.TrimSpace(req.Resolution), "2k")
+	// Keep empty when caller doesn't force a resolution so site models automatically
+	// resolve to their first verified specification (e.g. 1k for gpt-image-2.5) (#61).
+	resolution := strings.TrimSpace(req.Resolution)
 	defaultRatio := firstStr(strings.TrimSpace(req.Ratio), "3:4")
 
 	// Locate last user message & detect explicit /skill-id invocation.
@@ -162,7 +168,8 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 			resp.Source = "provider"
 			resp.TextModel = tp.ID + ":" + textModel
 		}
-		sysPrompt := buildChatSystemPrompt(activeSkills, invokedSkillID, imageModelRef, defaultRatio, len(req.Refs))
+		p, _ := s.pack()
+		sysPrompt := buildChatSystemPrompt(p, activeSkills, invokedSkillID)
 		msgs := make([]providers.ChatMessage, 0, len(req.Messages)+2)
 		msgs = append(msgs, providers.ChatMessage{Role: "system", Content: sysPrompt})
 
@@ -177,13 +184,42 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 			if content == "" || (role != "user" && role != "assistant") {
 				continue
 			}
-			if i == lastUserIdx && cleanedUserText != "" {
-				content = cleanedUserText
+			if i == lastUserIdx {
+				if cleanedUserText != "" {
+					content = cleanedUserText
+				}
+				// Append volatile per-turn hints only to the latest user message so the
+				// static system prefix and prior history remain byte-identical for prompt caching (#61).
+				var hints []string
+				if defaultRatio != "" && defaultRatio != "3:4" {
+					hints = append(hints, "默认比例 "+defaultRatio)
+				}
+				if len(req.Refs) > 0 {
+					hints = append(hints, fmt.Sprintf("附带参考图 %d 张", len(req.Refs)))
+				}
+				if len(hints) > 0 {
+					content += "\n\n[" + strings.Join(hints, "，") + "]"
+				}
 			}
 			msgs = append(msgs, providers.ChatMessage{Role: role, Content: content})
 		}
 
 		tools := chatAgentToolDefs()
+		cacheKey := "handraw-chat:" + firstStr(strings.TrimSpace(req.SessionID), "default")
+		addUsage := func(u *providers.TokenUsage) {
+			if u == nil {
+				return
+			}
+			if resp.Usage == nil {
+				resp.Usage = &providers.TokenUsage{}
+			}
+			resp.Usage.InputTokens += u.InputTokens
+			resp.Usage.OutputTokens += u.OutputTokens
+			resp.Usage.CacheReadTokens += u.CacheReadTokens
+			resp.Usage.CacheWriteTokens += u.CacheWriteTokens
+			resp.Usage.TotalTokens += u.TotalTokens
+		}
+
 		for step := 0; step < 6; step++ {
 			var turnRes providers.ChatTurnResult
 			var turnErr error
@@ -198,6 +234,7 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 				turnErr = err
 				if err == nil {
 					turnRes.Content = siteRes.Content
+					turnRes.Usage = providers.ExtractTokenUsage(siteRes.Usage)
 					for _, tc := range siteRes.ToolCalls {
 						var ptc providers.ToolCall
 						ptc.ID = tc.ID
@@ -208,11 +245,12 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 					}
 				}
 			} else {
-				turnRes, turnErr = providers.ChatWithTools(r.Context(), tp, textModel, msgs, tools)
+				turnRes, turnErr = providers.ChatWithToolsCached(r.Context(), tp, textModel, msgs, tools, cacheKey)
 			}
 			if turnErr != nil {
 				return nil, turnErr
 			}
+			addUsage(turnRes.Usage)
 			if len(turnRes.ToolCalls) == 0 {
 				resp.Reply = strings.TrimSpace(turnRes.Content)
 				if resp.Reply == "" && len(resp.Runs) > 0 {
@@ -329,26 +367,98 @@ func resolveActiveSkills(all []skills.Skill, explicitIDs []string, userText stri
 	return active, invokedID, cleaned
 }
 
-func buildChatSystemPrompt(activeSkills []skills.Skill, invokedID, imageModelRef, defaultRatio string, refCount int) string {
+func buildCompactCatalogBlock(p *resources.Pack) string {
+	if p == nil {
+		return ""
+	}
+	var sections []string
+	if len(p.Styles) > 0 {
+		items := append([]resources.Style(nil), p.Styles...)
+		sort.Slice(items, func(i, j int) bool { return items[i].Number < items[j].Number })
+		parts := make([]string, 0, len(items))
+		for _, st := range items {
+			nm := firstStr(st.NameZh, st.GenerationName)
+			nm = strings.ReplaceAll(strings.TrimSpace(nm), "|", " ")
+			if len([]rune(nm)) > 24 {
+				nm = string([]rune(nm)[:24])
+			}
+			parts = append(parts, st.Number+":"+nm)
+		}
+		sections = append(sections, "可选画风编号（generate_images 的 style 必须从此目录挑选）：\n"+strings.Join(parts, "|"))
+	}
+	if len(p.Layouts) > 0 {
+		items := append([]resources.Layout(nil), p.Layouts...)
+		sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+		parts := make([]string, 0, len(items))
+		for _, l := range items {
+			nm := strings.ReplaceAll(strings.TrimSpace(l.Name), "|", " ")
+			if len([]rune(nm)) > 18 {
+				nm = string([]rune(nm)[:18])
+			}
+			parts = append(parts, l.ID+":"+nm)
+		}
+		sections = append(sections, "可选图型编号（layout，纯意境自由构图或纯图模式可留空）：\n"+strings.Join(parts, "|"))
+	}
+	if len(p.Colors) > 0 {
+		items := append([]resources.Color(nil), p.Colors...)
+		sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+		parts := make([]string, 0, len(items))
+		for _, c := range items {
+			nm := strings.ReplaceAll(strings.TrimSpace(c.NameZh), "|", " ")
+			if len([]rune(nm)) > 12 {
+				nm = string([]rune(nm)[:12])
+			}
+			parts = append(parts, c.ID+":"+nm)
+		}
+		sections = append(sections, "可选主题色编号（color，可选）：\n"+strings.Join(parts, "|"))
+	}
+	if len(p.Tones) > 0 {
+		items := append([]resources.Tone(nil), p.Tones...)
+		sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+		parts := make([]string, 0, len(items))
+		for _, t := range items {
+			nm := strings.ReplaceAll(strings.TrimSpace(t.NameZh), "|", " ")
+			if len([]rune(nm)) > 12 {
+				nm = string([]rune(nm)[:12])
+			}
+			parts = append(parts, t.ID+":"+nm)
+		}
+		sections = append(sections, "可选影调编号：\n"+strings.Join(parts, "|"))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+// buildChatSystemPrompt keeps the static rules and sorted Handraw resource catalog
+// byte-identical at the start of the system message to maximize upstream relay
+// Prompt Cache hit rates across turns and tool-call steps (#61).
+func buildChatSystemPrompt(p *resources.Pack, activeSkills []skills.Skill, invokedID string) string {
 	var sb strings.Builder
 	sb.WriteString(`你是「手绘风」桌面工作台的 AI 会话助手，类似 Codex / DSH 的对话式智能工作台。
 你可以：
 1. 与用户自然聊天、讨论选题、润色文案、编写提示词或回答问题。
-2. 当用户明确想画图、生图、出系列图/海报/配图时，主动调用 search_resources（可选，查画风/图型编号）与 generate_images 工具直接提交生图任务（支持单图和最多 12 张多图），无需让用户手动切换页面。
+2. 当用户明确想画图、生图、出系列图/海报/配图时，直接从下方内置的手绘风目录挑选合适编号，一步调用 generate_images 提交生图任务（支持单图和最多 12 张多图），无需让用户手动切换页面。
 3. 当用户想安装、创建、查看或卸载 Skill 时，主动调用 list_skills / install_skill / remove_skill 工具完成。
 4. 当用户想查找或安装插件时，主动调用 list_plugins / search_market_plugins / install_plugin 工具完成。
 
 重要约定：
 - 如果用户只是普通聊天、问问题或探讨方案，直接文字回复，不要误调用生图工具。
-- 生图默认比例为 ` + defaultRatio + `；当前用户选定的生图模型为 ` + firstStr(imageModelRef, "默认模型") + fmt.Sprintf("；本次附带参考图 %d 张。", refCount) + `
+- 生图时请优先直接从下方目录选定 style / layout / color 编号并立即调用 generate_images；不要反复调用 search_resources（仅在确需查某画风特征细节时最多调用 1-2 次）。
+- 默认比例为 3:4（除非用户在消息中另有要求或指明海报 9:16 / 横版等）。
 - 回复简洁清晰，使用中文 Markdown 排版。`)
 
+	if catalog := buildCompactCatalogBlock(p); catalog != "" {
+		sb.WriteString("\n\n## Handraw 本地视觉资源目录（直接选编号即可）\n\n")
+		sb.WriteString(catalog)
+	}
+
 	if len(activeSkills) > 0 {
-		sb.WriteString("\n\n## 当前会话已启用的用户 Skills\n")
+		sorted := append([]skills.Skill(nil), activeSkills...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+		sb.WriteString("\n\n## 当前会话已启用的 Skills\n")
 		if invokedID != "" {
 			sb.WriteString(fmt.Sprintf("注意：用户本次消息通过 `/%s` 显式调用了该 Skill，请优先严格遵循其指令。\n", invokedID))
 		}
-		for _, sk := range activeSkills {
+		for _, sk := range sorted {
 			body := strings.TrimSpace(sk.Body)
 			runes := []rune(body)
 			limit := 2600
@@ -551,55 +661,86 @@ func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (st
 		if err != nil {
 			return fail(err.Error())
 		}
-		q := strings.ToLower(strings.TrimSpace(args.Query))
-		var hits []map[string]string
+		tokens := tokenizeSearchQuery(args.Query)
+		type scoredHit struct {
+			score int
+			item  map[string]string
+		}
+		var scored []scoredHit
+		var fallback []map[string]string
+		scoreText := func(hay string) int {
+			if len(tokens) == 0 {
+				return 1
+			}
+			low := strings.ToLower(hay)
+			sc := 0
+			for _, tok := range tokens {
+				if strings.Contains(low, tok) {
+					sc++
+				}
+			}
+			return sc
+		}
 		switch strings.ToLower(args.Kind) {
 		case "layouts":
 			for _, l := range p.Layouts {
-				if q != "" && !strings.Contains(strings.ToLower(l.ID+" "+l.Name+" "+l.Category+" "+strings.Join(l.Keywords, " ")), q) {
-					continue
+				m := map[string]string{"id": l.ID, "name": l.Name, "category": l.Category}
+				if len(fallback) < args.Limit {
+					fallback = append(fallback, m)
 				}
-				hits = append(hits, map[string]string{"id": l.ID, "name": l.Name, "category": l.Category})
-				if len(hits) >= args.Limit {
-					break
+				if sc := scoreText(l.ID + " " + l.Name + " " + l.Category + " " + strings.Join(l.Keywords, " ")); sc > 0 {
+					scored = append(scored, scoredHit{score: sc, item: m})
 				}
 			}
 		case "colors":
 			for _, col := range p.Colors {
-				if q != "" && !strings.Contains(strings.ToLower(col.ID+" "+col.NameZh+" "+col.CategoryZh), q) {
-					continue
+				m := map[string]string{"id": col.ID, "name": col.NameZh, "category": col.CategoryZh}
+				if len(fallback) < args.Limit {
+					fallback = append(fallback, m)
 				}
-				hits = append(hits, map[string]string{"id": col.ID, "name": col.NameZh, "category": col.CategoryZh})
-				if len(hits) >= args.Limit {
-					break
+				if sc := scoreText(col.ID + " " + col.NameZh + " " + col.CategoryZh + " " + col.QuoteZh); sc > 0 {
+					scored = append(scored, scoredHit{score: sc, item: m})
 				}
 			}
 		case "tones":
 			for _, tn := range p.Tones {
-				if q != "" && !strings.Contains(strings.ToLower(tn.ID+" "+tn.NameZh+" "+tn.DescZh), q) {
-					continue
+				m := map[string]string{"id": tn.ID, "name": tn.NameZh}
+				if len(fallback) < args.Limit {
+					fallback = append(fallback, m)
 				}
-				hits = append(hits, map[string]string{"id": tn.ID, "name": tn.NameZh})
-				if len(hits) >= args.Limit {
-					break
+				if sc := scoreText(tn.ID + " " + tn.NameZh + " " + tn.DescZh); sc > 0 {
+					scored = append(scored, scoredHit{score: sc, item: m})
 				}
 			}
 		default:
 			for _, st := range p.Styles {
-				if q != "" && !strings.Contains(strings.ToLower(st.Number+" "+st.NameZh+" "+st.GenerationName+" "+st.Traits+" "+st.GroupZh), q) {
-					continue
-				}
-				hits = append(hits, map[string]string{
+				m := map[string]string{
 					"id":     st.Number,
 					"name":   firstStr(st.NameZh, st.GenerationName),
 					"traits": firstNRunes(st.Traits, 50),
-				})
-				if len(hits) >= args.Limit {
-					break
+				}
+				if len(fallback) < args.Limit {
+					fallback = append(fallback, m)
+				}
+				if sc := scoreText(st.Number + " " + st.NameZh + " " + st.GenerationName + " " + st.Traits + " " + st.GroupZh); sc > 0 {
+					scored = append(scored, scoredHit{score: sc, item: m})
 				}
 			}
 		}
-		return okOut(fmt.Sprintf("找到 %d 条 %s 资源", len(hits), firstStr(args.Kind, "styles")), map[string]any{"ok": true, "items": hits})
+		sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
+		hits := make([]map[string]string, 0, args.Limit)
+		for _, sh := range scored {
+			hits = append(hits, sh.item)
+			if len(hits) >= args.Limit {
+				break
+			}
+		}
+		note := ""
+		if len(hits) == 0 && len(fallback) > 0 {
+			hits = fallback
+			note = "未精确命中关键词，已返回常用候选，可直接选用编号并调用 generate_images"
+		}
+		return okOut(fmt.Sprintf("找到 %d 条 %s 资源", len(hits), firstStr(args.Kind, "styles")), map[string]any{"ok": true, "items": hits, "note": note})
 
 	case "generate_images":
 		var args struct {
@@ -1088,10 +1229,34 @@ func (s *Server) handleChatWithoutTextProvider(ctx context.Context, text string,
 	execCtx.resp.Reply = strings.TrimSpace(`当前尚未配置可用于自由对话的第三方 OpenAI 兼容文本模型。
 
 你可以：
-1. 点击右上角「去配置模型」或在 **设置 → 模型与接口** 添加一个文本模型（支持 DeepSeek、OpenAI、中转站等），并在底部 **文本模型** 下拉框选中它，即可像 Codex / DSH 一样自由对话并自动调用 Skill、生图和插件工具。
+1. 在 **设置 → 模型与接口** 添加一个文本模型（支持 DeepSeek、OpenAI、中转站等），并在底部 **文本** 下拉框选中它，或登录手绘风账号使用网站官方智能文字服务。
 2. 即使暂未配置文本模型，你也可以直接在这里：
    - **对话生图**：例如发送「画 4 张周末咖啡店治愈手账」或「画一张雨夜书店插画」
-   - **安装 Skill**：发送 ` + "`/install-skill <本地路径或链接>`" + ` 或点击左侧「+ 安装」
+   - **安装 Skill**：发送 ` + "`/install-skill <本地路径或链接>`" + `
    - **安装插件**：发送「搜索插件」或 ` + "`/install-plugin <插件名或链接>`")
 	return execCtx.resp, nil
+}
+
+func tokenizeSearchQuery(q string) []string {
+	q = strings.ToLower(strings.TrimSpace(q))
+	if q == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(q, func(r rune) bool {
+		switch r {
+		case ' ', '\t', '\n', ',', '，', '、', '/', '+', '|', ';', '；':
+			return true
+		}
+		return false
+	})
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }
