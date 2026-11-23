@@ -139,6 +139,14 @@ export async function renderCreate(root, ctx, params = {}) {
   });
   root = session.root;
   const state = session.state;
+  const shared = params.sharedRecipe || null;
+  if (shared) {
+    for (const key of ["style", "style2", "layout", "color", "tone", "mood", "mode", "ratio", "resolution", "modelRef"]) {
+      if (shared[key] !== undefined) state[key] = shared[key];
+    }
+    state.fusion = Boolean(state.style2);
+    state.promptCustomized = false;
+  }
   if (Object.keys(params).length) {
     Object.assign(state, { theme: params.theme ?? state.theme, text: params.text ?? state.text });
     for (const key of ["style", "style2", "layout", "color", "tone", "mood", "mode", "ratio", "resolution", "modelRef", "parentId", "groupId"]) {
@@ -163,10 +171,23 @@ export async function renderCreate(root, ctx, params = {}) {
     if (!params.promptText) state.promptCustomized = false;
     state.fusion = Boolean(state.style2);
   }
+  params.registerSharedGetter?.(() => ({
+    style: state.style,
+    style2: state.fusion ? state.style2 : "",
+    layout: state.layout,
+    color: state.color,
+    tone: state.tone,
+    mood: state.mood,
+    mode: state.mode,
+    ratio: state.ratio,
+    resolution: state.resolution,
+    modelRef: state.modelRef,
+  }));
 
   root.appendChild(el("div", { class: "page-head" },
-    el("div", { class: "row" },
-      el("h1", { class: "page-title" }, "单图创作"),
+    el("div", { class: "row", style: { gap: "12px", flexWrap: "wrap" } },
+      el("h1", { class: "page-title" }, "生图"),
+      params.modeSwitcher || null,
       el("span", { class: "muted" }, "调配画风、图型与主题色，在右侧直接输入画面描述出图")
     ),
     el("div", { class: "row" },

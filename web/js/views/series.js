@@ -23,6 +23,24 @@ export async function renderSeries(host, ctx, params = {}) {
     cards: [], selected: 0, composerMode: "series", activeRun: null,
   });
   const { root, state } = session;
+  if (params.sharedRecipe) {
+    for (const key of ["style", "style2", "layout", "color", "tone", "mood", "mode", "ratio", "resolution", "modelRef"]) {
+      if (params.sharedRecipe[key] !== undefined) state[key] = params.sharedRecipe[key];
+    }
+    state.fusion = Boolean(state.style2);
+  }
+  params.registerSharedGetter?.(() => ({
+    style: state.style,
+    style2: state.fusion ? state.style2 : "",
+    layout: state.layout,
+    color: state.color,
+    tone: state.tone,
+    mood: state.mood,
+    mode: state.mode,
+    ratio: state.ratio,
+    resolution: state.resolution,
+    modelRef: state.modelRef,
+  }));
   let planning = false, submitting = false, quoteRevision = 0;
 
   // Header
@@ -36,8 +54,9 @@ export async function renderSeries(host, ctx, params = {}) {
   draftSel.addEventListener("change", () => loadDraft(draftSel.value));
 
   root.appendChild(el("div", { class: "page-head" },
-    el("div", { class: "row" },
-      el("h1", { class: "page-title" }, "系列图创作"),
+    el("div", { class: "row", style: { gap: "12px", flexWrap: "wrap" } },
+      el("h1", { class: "page-title" }, "生图"),
+      params.modeSwitcher || null,
       el("span", { class: "muted" }, "统一画风与色板，先规划分张画面再按张预览或整套出图")
     ),
     el("div", { class: "row" },

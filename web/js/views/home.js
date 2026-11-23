@@ -125,7 +125,7 @@ export async function renderHome(container, ctx) {
     ),
     el("div", { class: "row" },
       el("div", { style: { flex: "1", minWidth: "240px" } }, themeInput),
-      el("button", { type: "button", class: "btn btn-primary", onClick: submitQuick }, "带入单图创作"),
+      el("button", { type: "button", class: "btn btn-primary", onClick: submitQuick }, "带入生图工作台"),
       el("button", { type: "button", class: "btn", onClick: () => ctx.go("atlas") }, "先翻风格画册")
     ),
     recipeStrip

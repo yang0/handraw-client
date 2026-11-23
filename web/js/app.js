@@ -5,24 +5,24 @@ import { mountPluginFrame } from "./plugins-host.js";
 import { renderHome } from "./views/home.js";
 import { renderAtlas } from "./views/atlas.js";
 import { renderRecipes } from "./views/recipes.js";
-import { renderCreate } from "./views/create.js";
-import { renderSeries } from "./views/series.js";
+import { renderStudio } from "./views/studio.js";
 import { renderArticle } from "./views/article.js";
 import { renderCanvas } from "./views/canvas.js";
 import { renderAnnotate } from "./views/annotate.js";
 import { renderWorks } from "./views/works.js";
+import { renderPlugins } from "./views/plugins.js";
 import { renderSettings } from "./views/settings.js";
 
 const VIEWS = {
   home: renderHome,
   atlas: renderAtlas,
   recipes: renderRecipes,
-  create: renderCreate,
-  series: renderSeries,
+  create: renderStudio,
   article: renderArticle,
   canvas: renderCanvas,
   annotate: renderAnnotate,
   works: renderWorks,
+  plugins: renderPlugins,
   settings: renderSettings,
 };
 
@@ -30,12 +30,12 @@ const CORE_NAV = [
   { id: "home", ico: "🏠", label: "首页" },
   { id: "atlas", ico: "🎨", label: "画册" },
   { id: "recipes", ico: "⚗", label: "配方" },
-  { id: "create", ico: "✨", label: "单图" },
-  { id: "series", ico: "🗂", label: "系列" },
+  { id: "create", ico: "✨", label: "生图" },
   { id: "article", ico: "📰", label: "文章", plugin: "article" },
   { id: "canvas", ico: "🧩", label: "画布", plugin: "canvas" },
   { id: "annotate", ico: "📌", label: "批注", plugin: "annotate" },
   { id: "works", ico: "🖼", label: "作品" },
+  { id: "plugins", ico: "🔌", label: "插件" },
 ];
 
 let currentView = "home";
@@ -123,6 +123,14 @@ async function start() {
   }
 
   async function go(view, params = {}) {
+    if (view === "series") {
+      view = "create";
+      params = { ...(params || {}), studioMode: "series" };
+    }
+    if (view === "settings" && params?.anchor === "settings-plugins") {
+      view = "plugins";
+      params = {};
+    }
     currentView = view && view !== "community" ? view : "home";
     currentParams = params || {};
     if (location.hash !== "#" + currentView) {
@@ -136,7 +144,7 @@ async function start() {
       const plugRes = await api("GET", "/api/plugins").catch(() => ({ community: [] }));
       const comm = (plugRes.community || []).find((x) => x.id === pid && x.enabled && x.kind === "dsh");
       if (!comm) {
-        main.appendChild(el("div", { class: "card muted" }, "该 DSH 插件未启用或不存在。请先在「设置 → 模块管理与社区插件」中启用。"));
+        main.appendChild(el("div", { class: "card muted" }, "该 DSH 插件未启用或不存在。请先在侧栏「插件」中启用。"));
         return;
       }
       const titleEl = el("h1", { class: "page-title" }, comm.name || comm.id);
@@ -465,7 +473,9 @@ async function start() {
 
   const qView = new URLSearchParams(location.search).get("view");
   const rawInitial = (location.hash && location.hash.slice(1)) || qView || "home";
-  if (rawInitial.startsWith("settings-")) {
+  if (rawInitial === "settings-plugins") {
+    await go("plugins");
+  } else if (rawInitial.startsWith("settings-")) {
     await go("settings", { anchor: rawInitial });
   } else {
     await go(rawInitial);

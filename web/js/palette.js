@@ -41,13 +41,14 @@ export function initPalette(ctx) {
 
   const baseActions = () => [
     { label: "去首页", hint: "视图", run: () => ctx.go("home") },
-    { label: "新建单图", hint: "创作", run: () => ctx.go("create") },
-    { label: "新建系列图", hint: "创作", run: () => ctx.go("series") },
+    { label: "生图 · 单图", hint: "生图", run: () => ctx.go("create", { studioMode: "single" }) },
+    { label: "生图 · 系列图", hint: "生图", run: () => ctx.go("create", { studioMode: "series" }) },
     { label: "打开文章到图文", hint: "创作", run: () => ctx.go("article") },
     { label: "打开自由画布", hint: "创作", run: () => ctx.go("canvas") },
     { label: "浏览风格画册", hint: "画册", run: () => ctx.go("atlas") },
     { label: "画风骰子", hint: "灵感", run: () => ctx.go("atlas", { tab: "dice" }) },
     { label: "本地作品库", hint: "作品", run: () => ctx.go("works") },
+    { label: "插件与官方市场", hint: "插件", run: () => ctx.go("plugins") },
     { label: "检查版本更新", hint: "操作", run: () => api("POST", "/api/update/check").then(() => toast("已检查更新")) },
     {
       label: "复制最后一张图",

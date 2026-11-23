@@ -299,7 +299,7 @@ async function openStyleDetail(id, ctx, onRefresh) {
         type: "button",
         class: "btn btn-primary",
         onClick: () => { closeModal(); ctx.go("create", { style: st.number }); },
-      }, "去创作单图"),
+      }, "去生图"),
     ]);
   } catch (err) {
     toast(err.message);
@@ -955,7 +955,7 @@ async function drawDice(stage, ctx) {
         layout: d.layout?.id || "",
         color: d.color?.id || "",
       }),
-    }, "带入单图工作区 →")
+    }, "带入生图工作台 →")
   ));
 
   stage.appendChild(masonry({},
@@ -1088,6 +1088,6 @@ function openExtensionItemDetail(meta, item, ctx) {
           },
         });
       },
-    }, "去创作单图"),
+    }, "去生图"),
   ]);
 }
