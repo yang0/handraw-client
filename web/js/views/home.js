@@ -154,7 +154,7 @@ export async function renderHome(container, ctx) {
     el("div", { class: "page-head" },
       el("h2", { style: { margin: 0, fontSize: "16px" } }, "最近创作"),
       el("div", { class: "row" },
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("series") }, "系列图"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("create") }, "生图工作台"),
         el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("article") }, "文章到图文"),
         el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("canvas") }, "自由画布"),
         el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("works") }, "全部作品 →")

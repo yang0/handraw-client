@@ -384,8 +384,16 @@ func (c *Client) ArticlePlan(ctx context.Context, body map[string]any) (json.Raw
 func (c *Client) BatchPlan(ctx context.Context, body map[string]any) (json.RawMessage, error) {
 	var out json.RawMessage
 	c2 := *c
-	c2.HTTP = &http.Client{Timeout: 4 * time.Minute}
+	c2.HTTP = &http.Client{Timeout: 4 * time.Minute, Transport: c.HTTP.Transport}
 	err := c2.Do(ctx, "POST", "/api/studio/batch-plan", body, &out)
+	return out, err
+}
+
+func (c *Client) ChatPlan(ctx context.Context, body map[string]any) (json.RawMessage, error) {
+	var out json.RawMessage
+	c2 := *c
+	c2.HTTP = &http.Client{Timeout: 4 * time.Minute, Transport: c.HTTP.Transport}
+	err := c2.Do(ctx, "POST", "/api/studio/chat-plan", body, &out)
 	return out, err
 }
 

@@ -66,6 +66,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/models", s.h(s.models))
 	m.HandleFunc("POST /api/quote", s.h(s.quote))
 	m.HandleFunc("POST /api/generate", s.h(s.generate))
+	m.HandleFunc("POST /api/studio/chat-plan", s.h(s.studioChatPlan))
 	m.HandleFunc("POST /api/series/plan", s.h(s.seriesPlan))
 	m.HandleFunc("POST /api/article/plan", s.h(s.articlePlan))
 	m.HandleFunc("POST /api/article/import", s.h(s.articleImport))

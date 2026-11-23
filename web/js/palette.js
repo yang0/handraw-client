@@ -41,8 +41,7 @@ export function initPalette(ctx) {
 
   const baseActions = () => [
     { label: "去首页", hint: "视图", run: () => ctx.go("home") },
-    { label: "生图 · 单图", hint: "生图", run: () => ctx.go("create", { studioMode: "single" }) },
-    { label: "生图 · 系列图", hint: "生图", run: () => ctx.go("create", { studioMode: "series" }) },
+    { label: "打开生图工作台", hint: "生图", run: () => ctx.go("create") },
     { label: "打开文章到图文", hint: "创作", run: () => ctx.go("article") },
     { label: "打开自由画布", hint: "创作", run: () => ctx.go("canvas") },
     { label: "浏览风格画册", hint: "画册", run: () => ctx.go("atlas") },

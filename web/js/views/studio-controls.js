@@ -350,7 +350,7 @@ export function recipeControls(state, catalog, onChange = () => {}, { article = 
 
   const topRow = el("div", { class: "make-image-top-row" }, modes, fusion);
 
-  const primary = resourcePicker("画风", catalog.styles || [], state.style, (v) => { state.style = v; change(); }, "选择画风", { allowClear: !hasDefaultStyle });
+  const primary = resourcePicker("画风", catalog.styles || [], state.style, (v) => { state.style = v; change(); }, hasDefaultStyle ? "选择画风" : "AI 推荐", { allowClear: !hasDefaultStyle });
   const secondary = resourcePicker("场景画风", catalog.styles || [], state.style2, (v) => { state.style2 = v; change(); }, "选择场景画风", { allowClear: true });
   const layoutPicker = resourcePicker("图型", catalog.layouts || [], state.layout, (v) => { state.layout = v; syncSpecialLayoutFields(); change(); }, "自由构图", { allowClear: true });
   const color = resourcePicker("主题色", catalog.colors || [], state.color, (v) => { state.color = v; change(); }, "随画风", { allowClear: true });
