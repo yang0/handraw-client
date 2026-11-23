@@ -80,6 +80,11 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/article/plan", s.h(s.articlePlan))
 	m.HandleFunc("POST /api/article/import", s.h(s.articleImport))
 	m.HandleFunc("POST /api/article/export", s.h(s.articleExport))
+	m.HandleFunc("GET /api/article/vault/tree", s.h(s.articleVaultTree))
+	m.HandleFunc("POST /api/article/vault/root", s.h(s.articleVaultSetRoot))
+	m.HandleFunc("GET /api/article/vault/file", s.h(s.articleVaultReadFile))
+	m.HandleFunc("PUT /api/article/vault/file", s.h(s.articleVaultWriteFile))
+	m.HandleFunc("DELETE /api/article/vault/file", s.h(s.articleVaultDeleteFile))
 	m.HandleFunc("POST /api/canvas/assistant", s.h(s.canvasAssistant))
 	m.HandleFunc("POST /api/images/import", s.h(s.uploadImage))
 

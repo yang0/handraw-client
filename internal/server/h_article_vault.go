@@ -1,0 +1,439 @@
+package server
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/yang0/handraw-client/internal/settings"
+	"github.com/yang0/handraw-client/internal/store"
+)
+
+const (
+	vaultMaxDepth = 8
+	vaultMaxFiles = 2000
+	vaultMaxBytes = 8 << 20 // 8 MiB per markdown file
+)
+
+type vaultNode struct {
+	Name     string      `json:"name"`
+	Path     string      `json:"path"` // vault-relative forward-slash path
+	Kind     string      `json:"kind"` // "dir" | "file"
+	ModTime  int64       `json:"modTime,omitempty"`
+	Size     int64       `json:"size,omitempty"`
+	Children []vaultNode `json:"children,omitempty"`
+}
+
+func (s *Server) activeArticleVaultDir() (string, error) {
+	st := settings.Get()
+	dir := strings.TrimSpace(st.ArticleVaultDir)
+	if dir == "" {
+		dir = filepath.Join(st.WorksDir, "articles")
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+func isMarkdownExt(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return ext == ".md" || ext == ".markdown"
+}
+
+func resolveVaultMarkdownPath(rootDir, relPath string, allowCreate bool) (absPath string, normRel string, err error) {
+	raw := strings.TrimSpace(strings.ReplaceAll(relPath, "\\", "/"))
+	raw = strings.TrimLeft(raw, "/")
+	if raw == "" || raw == "." {
+		return "", "", bad("请指定 Markdown 文件路径")
+	}
+	if strings.Contains(raw, ":") {
+		return "", "", bad("文件路径只能是文章库内的相对路径")
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(raw))
+	if cleaned == "." || cleaned == ".." || filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+		return "", "", bad("不允许访问文章库目录之外的路径")
+	}
+	if allowCreate && !isMarkdownExt(cleaned) {
+		cleaned += ".md"
+	}
+	if !isMarkdownExt(cleaned) {
+		return "", "", bad("仅支持 .md 或 .markdown 文件")
+	}
+	rootAbs, err := filepath.Abs(rootDir)
+	if err != nil {
+		return "", "", err
+	}
+	target := filepath.Join(rootAbs, cleaned)
+	relCheck, err := filepath.Rel(rootAbs, target)
+	if err != nil || relCheck == "." || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(os.PathSeparator)) {
+		return "", "", bad("不允许访问文章库目录之外的路径")
+	}
+	// Resolve symlinks on existing paths to prevent symlink escape.
+	if realRoot, rErr := filepath.EvalSymlinks(rootAbs); rErr == nil {
+		checkPath := target
+		if _, stErr := os.Stat(checkPath); stErr != nil {
+			checkPath = filepath.Dir(target)
+		}
+		if realCheck, cErr := filepath.EvalSymlinks(checkPath); cErr == nil {
+			if relReal, err := filepath.Rel(realRoot, realCheck); err != nil || strings.HasPrefix(relReal, "..") {
+				return "", "", bad("不允许访问文章库目录之外的符号链接")
+			}
+		}
+	}
+	return target, filepath.ToSlash(relCheck), nil
+}
+
+func vaultMetaKey(absPath string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(absPath))))
+	return "vm_" + hex.EncodeToString(sum[:12])
+}
+
+func extractMarkdownTitle(content, fileName string) string {
+	for _, ln := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "# ") {
+			h := strings.TrimSpace(strings.TrimPrefix(t, "# "))
+			if h != "" {
+				return h
+			}
+		}
+	}
+	ext := filepath.Ext(fileName)
+	return strings.TrimSuffix(filepath.Base(fileName), ext)
+}
+
+func scanVaultTree(rootAbs string) ([]vaultNode, int) {
+	fileCount := 0
+	var walk func(dir, relPrefix string, depth int) []vaultNode
+	walk = func(dir, relPrefix string, depth int) []vaultNode {
+		if depth > vaultMaxDepth || fileCount >= vaultMaxFiles {
+			return nil
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil
+		}
+		var dirs []vaultNode
+		var files []vaultNode
+		for _, e := range entries {
+			name := e.Name()
+			if name == "" || strings.HasPrefix(name, ".") {
+				continue
+			}
+			low := strings.ToLower(name)
+			if e.IsDir() {
+				if low == "node_modules" || low == "__pycache__" || low == "vendor" {
+					continue
+				}
+				subRel := name
+				if relPrefix != "" {
+					subRel = relPrefix + "/" + name
+				}
+				children := walk(filepath.Join(dir, name), subRel, depth+1)
+				if len(children) == 0 {
+					continue
+				}
+				dirs = append(dirs, vaultNode{
+					Name:     name,
+					Path:     subRel,
+					Kind:     "dir",
+					Children: children,
+				})
+				continue
+			}
+			if !isMarkdownExt(name) {
+				continue
+			}
+			if fileCount >= vaultMaxFiles {
+				break
+			}
+			subRel := name
+			if relPrefix != "" {
+				subRel = relPrefix + "/" + name
+			}
+			var modMs, sz int64
+			if info, err := e.Info(); err == nil {
+				modMs = info.ModTime().UnixMilli()
+				sz = info.Size()
+			}
+			fileCount++
+			files = append(files, vaultNode{
+				Name:    name,
+				Path:    subRel,
+				Kind:    "file",
+				ModTime: modMs,
+				Size:    sz,
+			})
+		}
+		sort.Slice(dirs, func(i, j int) bool { return strings.ToLower(dirs[i].Name) < strings.ToLower(dirs[j].Name) })
+		sort.Slice(files, func(i, j int) bool { return strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name) })
+		out := make([]vaultNode, 0, len(dirs)+len(files))
+		out = append(out, dirs...)
+		out = append(out, files...)
+		return out
+	}
+	nodes := walk(rootAbs, "", 0)
+	if nodes == nil {
+		nodes = []vaultNode{}
+	}
+	return nodes, fileCount
+}
+
+func (s *Server) articleVaultTree(w http.ResponseWriter, r *http.Request) (any, error) {
+	dir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	st, statErr := os.Stat(dir)
+	exists := statErr == nil && st.IsDir()
+	if !exists {
+		return map[string]any{
+			"dir":       dir,
+			"name":      filepath.Base(dir),
+			"exists":    false,
+			"tree":      []vaultNode{},
+			"fileCount": 0,
+		}, nil
+	}
+	tree, count := scanVaultTree(dir)
+	return map[string]any{
+		"dir":       dir,
+		"name":      filepath.Base(dir),
+		"exists":    true,
+		"tree":      tree,
+		"fileCount": count,
+	}, nil
+}
+
+func (s *Server) articleVaultSetRoot(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		Dir string `json:"dir"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	dir := strings.TrimSpace(body.Dir)
+	if dir == "" {
+		return nil, bad("请选择或输入本地文章目录路径")
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, bad("目录路径无效：" + err.Error())
+	}
+	st, err := os.Stat(abs)
+	if err != nil || !st.IsDir() {
+		return nil, bad("找不到该本地目录：" + abs)
+	}
+	if _, err := settings.Update(func(s *settings.Settings) error {
+		s.ArticleVaultDir = abs
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	tree, count := scanVaultTree(abs)
+	return map[string]any{
+		"dir":       abs,
+		"name":      filepath.Base(abs),
+		"exists":    true,
+		"tree":      tree,
+		"fileCount": count,
+	}, nil
+}
+
+func (s *Server) articleVaultReadFile(w http.ResponseWriter, r *http.Request) (any, error) {
+	dir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	absPath, normRel, err := resolveVaultMarkdownPath(dir, r.URL.Query().Get("path"), false)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(absPath)
+	if err != nil || info.IsDir() {
+		return nil, notFound("找不到 Markdown 文件：" + normRel)
+	}
+	if info.Size() > vaultMaxBytes {
+		return nil, bad("Markdown 文件过大（超过 8MB 限制）")
+	}
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, err
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	var meta json.RawMessage
+	if s.DB != nil {
+		if doc, err := s.DB.GetDoc("article_meta", vaultMetaKey(absPath)); err == nil && len(doc.Data) > 0 {
+			meta = doc.Data
+		}
+	}
+	return map[string]any{
+		"path":    normRel,
+		"name":    filepath.Base(absPath),
+		"title":   extractMarkdownTitle(content, absPath),
+		"content": content,
+		"modTime": info.ModTime().UnixMilli(),
+		"meta":    meta,
+	}, nil
+}
+
+func (s *Server) articleVaultWriteFile(w http.ResponseWriter, r *http.Request) (any, error) {
+	dir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	var body struct {
+		Path        string          `json:"path"`
+		Content     string          `json:"content"`
+		Title       string          `json:"title"`
+		Meta        json.RawMessage `json:"meta"`
+		EmbedImages bool            `json:"embedImages"`
+		Slots       []struct {
+			Role      string `json:"role"`
+			Anchor    string `json:"anchor"`
+			Title     string `json:"title"`
+			ImagePath string `json:"imagePath"`
+		} `json:"slots"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	absPath, normRel, err := resolveVaultMarkdownPath(dir, body.Path, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		return nil, err
+	}
+
+	content := strings.ReplaceAll(body.Content, "\r\n", "\n")
+	writtenImages := 0
+
+	// Optionally copy generated illustrations to relative ./assets/<slug>/ and embed
+	// standard Markdown image links so Obsidian renders them natively (#65).
+	if body.EmbedImages && len(body.Slots) > 0 {
+		baseSlug := sanitizeName(strings.TrimSuffix(filepath.Base(absPath), filepath.Ext(absPath)))
+		if baseSlug == "" {
+			baseSlug = "article"
+		}
+		assetRelDir := "assets/" + baseSlug
+		assetAbsDir := filepath.Join(filepath.Dir(absPath), filepath.FromSlash(assetRelDir))
+		copySlotImage := func(srcPath string, idx int) string {
+			if strings.TrimSpace(srcPath) == "" {
+				return ""
+			}
+			b, rErr := os.ReadFile(srcPath)
+			if rErr != nil {
+				return ""
+			}
+			_ = os.MkdirAll(assetAbsDir, 0o755)
+			fname := fmt.Sprintf("%02d%s", idx, sniffImageExt(b))
+			if wErr := os.WriteFile(filepath.Join(assetAbsDir, fname), b, 0o644); wErr != nil {
+				return ""
+			}
+			writtenImages++
+			return assetRelDir + "/" + fname
+		}
+
+		var lines []string
+		rawLines := strings.Split(content, "\n")
+		imgIdx := 0
+
+		// Embed cover right after H1 (or at top if no H1) if not already embedded.
+		var coverLine string
+		for _, sl := range body.Slots {
+			if sl.Role == "cover" && sl.ImagePath != "" {
+				imgIdx++
+				if relImg := copySlotImage(sl.ImagePath, imgIdx); relImg != "" {
+					alt := firstStr(sl.Title, body.Title, "封面")
+					mdLink := fmt.Sprintf("![%s](%s)", alt, relImg)
+					if !strings.Contains(content, relImg) {
+						coverLine = mdLink
+					}
+				}
+				break
+			}
+		}
+
+		coverInserted := coverLine == ""
+		usedSlot := map[int]bool{}
+		for _, ln := range rawLines {
+			lines = append(lines, ln)
+			trimmed := strings.TrimSpace(ln)
+			if !coverInserted && strings.HasPrefix(trimmed, "# ") {
+				lines = append(lines, "", coverLine, "")
+				coverInserted = true
+			}
+			for sIdx, sl := range body.Slots {
+				if usedSlot[sIdx] || sl.Role == "cover" || sl.ImagePath == "" || strings.TrimSpace(sl.Anchor) == "" {
+					continue
+				}
+				if strings.Contains(ln, sl.Anchor) {
+					usedSlot[sIdx] = true
+					imgIdx++
+					if relImg := copySlotImage(sl.ImagePath, imgIdx); relImg != "" && !strings.Contains(content, relImg) {
+						alt := firstStr(sl.Title, fmt.Sprintf("配图 %d", imgIdx))
+						lines = append(lines, "", fmt.Sprintf("![%s](%s)", alt, relImg), "")
+					}
+				}
+			}
+		}
+		if !coverInserted {
+			lines = append([]string{coverLine, ""}, lines...)
+		}
+		content = strings.Join(lines, "\n")
+	}
+
+	if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
+		return nil, err
+	}
+	if s.DB != nil && len(body.Meta) > 0 {
+		doc := store.Doc{
+			Kind: "article_meta",
+			ID:   vaultMetaKey(absPath),
+			Name: normRel,
+			Data: body.Meta,
+		}
+		_ = s.DB.PutDoc(&doc)
+	}
+	var modMs int64
+	if info, err := os.Stat(absPath); err == nil {
+		modMs = info.ModTime().UnixMilli()
+	}
+	return map[string]any{
+		"ok":            true,
+		"path":          normRel,
+		"name":          filepath.Base(absPath),
+		"title":         extractMarkdownTitle(content, absPath),
+		"content":       content,
+		"modTime":       modMs,
+		"writtenImages": writtenImages,
+	}, nil
+}
+
+func (s *Server) articleVaultDeleteFile(w http.ResponseWriter, r *http.Request) (any, error) {
+	dir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	absPath, normRel, err := resolveVaultMarkdownPath(dir, r.URL.Query().Get("path"), false)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Remove(absPath); err != nil {
+		return nil, bad("删除文件失败：" + err.Error())
+	}
+	if s.DB != nil {
+		_ = s.DB.DeleteDocHard("article_meta", vaultMetaKey(absPath))
+	}
+	return map[string]any{"ok": true, "deleted": normRel}, nil
+}

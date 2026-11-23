@@ -19,13 +19,14 @@ import {
 export async function renderArticle(root, ctx, params = {}) {
   const host = studioMount(root);
 
-  const [stylesRes, colorsRes, tonesRes, modRes, draftsRes, layoutsRes] = await Promise.all([
+  const [stylesRes, colorsRes, tonesRes, modRes, draftsRes, layoutsRes, vaultRes] = await Promise.all([
     api("GET", "/api/resources/styles").catch(() => ({ items: [] })),
     api("GET", "/api/resources/colors").catch(() => ({ items: [] })),
     api("GET", "/api/resources/tones").catch(() => ({ items: [] })),
     api("GET", "/api/models").catch(() => ({ site: [], providers: [] })),
     api("GET", "/api/docs/article").catch(() => ({ items: [] })),
     api("GET", "/api/resources/layouts").catch(() => ({ items: [] })),
+    api("GET", "/api/article/vault/tree").catch(() => ({ dir: "", name: "articles", exists: false, tree: [], fileCount: 0 })),
   ]);
   if (!host.isConnected) return;
 
@@ -34,9 +35,13 @@ export async function renderArticle(root, ctx, params = {}) {
   const tones = tonesRes.items || [];
   const layouts = layoutsRes.items || [];
   let drafts = draftsRes.items || [];
+  let vault = vaultRes || { dir: "", name: "articles", exists: false, tree: [], fileCount: 0 };
 
   const session = studioSession(host, "article", {
     docId: params.docId || "",
+    activeFile: "",
+    editorActive: Boolean(params.docId),
+    dirty: false,
     title: "",
     content: "",
     style: styles[0]?.number || "FA-013",
@@ -63,6 +68,19 @@ export async function renderArticle(root, ctx, params = {}) {
   let submitting = false;
   let planning = false;
   let activeSegTextarea = null;
+  let treeQuery = "";
+  const expandedDirs = new Set();
+  try {
+    const savedExp = JSON.parse(sessionStorage.getItem("article-vault-expanded") || "[]");
+    if (Array.isArray(savedExp)) savedExp.forEach((p) => expandedDirs.add(p));
+  } catch {}
+  const persistExpanded = () => {
+    try { sessionStorage.setItem("article-vault-expanded", JSON.stringify(Array.from(expandedDirs))); } catch {}
+  };
+  // Default-expand top-level folders on first visit so files are immediately visible.
+  if (expandedDirs.size === 0 && Array.isArray(vault.tree)) {
+    vault.tree.forEach((n) => { if (n.kind === "dir") expandedDirs.add(n.path); });
+  }
 
   const slotSignature = (sl) =>
     JSON.stringify([
@@ -89,11 +107,17 @@ export async function renderArticle(root, ctx, params = {}) {
     fd.append("file", f);
     try {
       const res = await api("POST", "/api/article/import", fd);
+      state.activeFile = "";
+      state.docId = "";
+      state.editorActive = true;
+      state.dirty = true;
+      state.viewMode = "editor";
       if (res.title) state.title = res.title;
       state.content = res.content || "";
+      state.slots = [];
       renderAll();
       session.persist();
-      toast("已导入文稿");
+      toast("已导入文稿，可点击保存写入本地 Markdown");
     } catch (e) {
       toast(e.message);
     }
@@ -163,12 +187,15 @@ export async function renderArticle(root, ctx, params = {}) {
     onClick: () => { state.viewMode = "preview"; renderStageMode(); },
   }, "预览");
 
+  const activeBreadcrumb = el("span", { class: "ic-vault-breadcrumb mono" }, "");
+  const saveBtn = el("button", { type: "button", class: "btn btn-sm", onClick: saveDraft }, "💾 保存");
+
   const topbar = el("header", { class: "ic-wechat-topbar" },
-    el("div", { class: "row" },
+    el("div", { class: "row", style: { minWidth: "0", gap: "8px" } },
       fileIn,
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => fileIn.click() }, "📄 导入文档"),
-      el("button", { type: "button", class: "btn btn-sm", onClick: openURLImportDialog }, "🔗 抓取链接"),
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("works") }, "作品库")
+      activeBreadcrumb,
+      el("button", { type: "button", class: "btn btn-sm", onClick: () => fileIn.click() }, "📄 导入"),
+      el("button", { type: "button", class: "btn btn-sm", onClick: openURLImportDialog }, "🔗 抓取链接")
     ),
     toolsGroup,
     el("div", { class: "row" },
@@ -176,23 +203,47 @@ export async function renderArticle(root, ctx, params = {}) {
         editSwitchBtn,
         previewSwitchBtn
       ),
-      el("button", { type: "button", class: "btn btn-sm", onClick: saveDraft }, "💾 保存文章")
+      saveBtn
     )
   );
 
-  // 2. Left Sidebar: History Articles
-  const histListBox = el("div", { class: "ic-hist-art-list" });
+  // 2. Left Sidebar: Obsidian-style Local Markdown Vault File Tree (#65)
+  const vaultTitleEl = el("strong", { class: "ic-vault-name", title: vault.dir || "" }, vault.name || "本地文章库");
+  const vaultFilterIn = el("input", {
+    type: "search",
+    class: "input ic-vault-search",
+    placeholder: "筛选本地 .md 文件…",
+    "aria-label": "筛选本地 Markdown 文件",
+  });
+  vaultFilterIn.addEventListener("input", () => {
+    treeQuery = vaultFilterIn.value.trim().toLowerCase();
+    renderSidebar();
+  });
+
+  const treeBox = el("div", { class: "ic-vault-tree", role: "tree", "aria-label": "本地 Markdown 文件树" });
+  const legacyDraftsWrap = el("details", { class: "ic-vault-legacy hidden" });
   const sidebarCountBadge = el("span", { class: "muted", style: { fontSize: "11px" } });
-  const sidebar = el("aside", { class: "ic-pv-outline", "aria-label": "历史文章列表" },
-    el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center" } },
-      el("strong", { style: { fontSize: "13px" } }, "📚 历史文章"),
-      el("button", { type: "button", class: "btn btn-sm", onClick: createNewArticle }, "＋ 新建")
+
+  const sidebar = el("aside", { class: "ic-pv-outline ic-vault-sidebar", "aria-label": "本地 Markdown 文件树" },
+    el("div", { class: "ic-vault-head" },
+      el("div", { class: "ic-vault-head-title" },
+        el("span", { "aria-hidden": "true" }, "📂"),
+        vaultTitleEl
+      ),
+      el("div", { class: "ic-vault-actions" },
+        el("button", { type: "button", class: "ic-vault-ico-btn", title: "切换本地文章目录", "aria-label": "切换本地目录", onClick: openChangeVaultDir }, "📁"),
+        el("button", { type: "button", class: "ic-vault-ico-btn", title: "新建 Markdown 文件", "aria-label": "新建 Markdown 文件", onClick: openNewMarkdownModal }, "＋"),
+        el("button", { type: "button", class: "ic-vault-ico-btn", title: "刷新目录树", "aria-label": "刷新目录树", onClick: refreshVaultTree }, "↻")
+      )
     ),
-    histListBox,
+    vaultFilterIn,
+    treeBox,
+    legacyDraftsWrap,
     sidebarCountBadge
   );
 
-  // 3. Center Scroll Area (Paper Editor / Preview Sheet)
+  // 3. Center Scroll Area (Vault Empty Welcome / Paper Editor / Preview Sheet)
+  const welcomeBox = el("div", { class: "ic-vault-welcome" });
   const titleInput = el("input", {
     type: "text",
     class: "ic-wechat-title-input",
@@ -203,7 +254,9 @@ export async function renderArticle(root, ctx, params = {}) {
   const titleCount = el("span", { class: "ic-wechat-title-count" }, `${(state.title || "").length}/64`);
   titleInput.addEventListener("input", () => {
     state.title = titleInput.value;
+    state.dirty = true;
     titleCount.textContent = `${state.title.length}/64`;
+    syncTopbarBreadcrumb();
     session.persist();
   });
 
@@ -222,7 +275,7 @@ export async function renderArticle(root, ctx, params = {}) {
   );
 
   const previewStageBox = el("div", { class: "col hidden", style: { gap: "12px" } });
-  const scrollArea = el("div", { class: "ic-wechat-scroll-area" }, paperSheet, previewStageBox);
+  const scrollArea = el("div", { class: "ic-wechat-scroll-area" }, welcomeBox, paperSheet, previewStageBox);
 
   // 4. Fixed Bottom Bar
   const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
@@ -300,20 +353,163 @@ export async function renderArticle(root, ctx, params = {}) {
     return (state.content || "").split(/\r?\n/).map((line, lineIdx) => ({ lineIdx, text: line, trimmed: line.trim() })).filter((b) => b.trimmed);
   }
 
-  function createNewArticle() {
-    Object.assign(state, {
-      docId: "",
-      title: "",
-      content: "",
-      recommendedStyles: [],
-      slots: [],
-      activeRun: null,
-      slotMap: [],
-      viewMode: "editor",
-    });
+  function syncTopbarBreadcrumb() {
+    if (state.activeFile) {
+      activeBreadcrumb.textContent = state.activeFile + (state.dirty ? " ●" : "");
+      activeBreadcrumb.title = `${vault.dir}/${state.activeFile}`;
+      saveBtn.textContent = state.dirty ? "💾 保存 MD ●" : "💾 保存 MD";
+    } else if (state.docId) {
+      activeBreadcrumb.textContent = (state.title || "本地草稿") + (state.dirty ? " ●" : "");
+      activeBreadcrumb.title = "本地草稿";
+      saveBtn.textContent = "💾 保存草稿";
+    } else {
+      activeBreadcrumb.textContent = state.dirty ? "未保存文稿 ●" : "";
+      activeBreadcrumb.title = "";
+      saveBtn.textContent = "💾 存为 MD";
+    }
+  }
+
+  async function refreshVaultTree() {
+    try {
+      const res = await api("GET", "/api/article/vault/tree");
+      vault = res || vault;
+      if (expandedDirs.size === 0 && Array.isArray(vault.tree)) {
+        vault.tree.forEach((n) => { if (n.kind === "dir") expandedDirs.add(n.path); });
+      }
+      renderSidebar();
+      if (!state.editorActive) renderWelcome();
+    } catch (e) {
+      toast(e.message || "刷新目录失败");
+    }
+  }
+
+  async function setVaultRootDir(dir) {
+    const res = await api("POST", "/api/article/vault/root", { dir });
+    vault = res;
+    expandedDirs.clear();
+    (vault.tree || []).forEach((n) => { if (n.kind === "dir") expandedDirs.add(n.path); });
+    persistExpanded();
+    state.activeFile = "";
+    state.docId = "";
+    state.editorActive = false;
+    state.dirty = false;
     renderAll();
     session.persist();
-    toast("已新建空白文章");
+    toast(`已切换本地文章目录：${vault.name || vault.dir}`);
+  }
+
+  async function openChangeVaultDir() {
+    try {
+      const picked = await api("POST", "/api/host/pick-directory", {});
+      if (picked?.path) {
+        await setVaultRootDir(picked.path);
+        return;
+      }
+    } catch {
+      // Fall back to manual directory input modal (e.g. web mode).
+    }
+    const dirIn = el("input", {
+      class: "input mono",
+      value: vault.dir || "",
+      placeholder: "例如：D:\\ObsidianVault\\文章 或 /Users/me/Notes",
+    });
+    showModal("选择本地 Markdown 文章目录", el("div", { class: "col", style: { gap: "8px" } },
+      el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, "指向你的 Obsidian 仓库或任意存放 .md 文章的本地文件夹，左侧将以树形结构实时浏览："),
+      dirIn
+    ), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: async () => {
+          if (!dirIn.value.trim()) return toast("请输入目录路径");
+          try {
+            await setVaultRootDir(dirIn.value.trim());
+            closeModal();
+          } catch (e) { toast(e.message); }
+        },
+      }, "确定切换"),
+    ]);
+    dirIn.focus();
+  }
+
+  function openNewMarkdownModal() {
+    const pathIn = el("input", {
+      class: "input",
+      placeholder: "例如：春日手账.md 或 2026/咖啡笔记.md",
+    });
+    showModal("新建本地 Markdown 文章", el("div", { class: "col", style: { gap: "8px" } },
+      el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, `将在当前目录（${vault.name || vault.dir}）下创建 .md 文件，支持用 / 创建子文件夹：`),
+      pathIn
+    ), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: async () => {
+          const raw = pathIn.value.trim();
+          if (!raw) return toast("请输入文件名");
+          const baseName = raw.split(/[\\/]/).pop().replace(/\.(md|markdown)$/i, "") || "未命名文章";
+          try {
+            const created = await api("PUT", "/api/article/vault/file", {
+              path: raw,
+              title: baseName,
+              content: `# ${baseName}\n\n`,
+            });
+            closeModal();
+            const parts = String(created.path || "").split("/");
+            for (let i = 1; i < parts.length; i++) {
+              expandedDirs.add(parts.slice(0, i).join("/"));
+            }
+            persistExpanded();
+            await refreshVaultTree();
+            await openVaultFile(created.path);
+            toast(`已创建 ${created.path}`);
+          } catch (e) { toast(e.message); }
+        },
+      }, "创建并编辑"),
+    ]);
+    pathIn.focus();
+  }
+
+  async function openVaultFile(relPath) {
+    if (!relPath) return;
+    try {
+      const res = await api("GET", `/api/article/vault/file?path=${encodeURIComponent(relPath)}`);
+      let meta = {};
+      try {
+        meta = typeof res.meta === "string" ? JSON.parse(res.meta) : (res.meta || {});
+      } catch {}
+      Object.assign(state, {
+        docId: "",
+        activeFile: res.path,
+        editorActive: true,
+        dirty: false,
+        title: meta.title || res.title || "",
+        content: res.content || "",
+        style: meta.style || state.style || styles[0]?.number || "FA-013",
+        style2: meta.style2 || "",
+        fusion: meta.fusion ?? Boolean(meta.style2),
+        layout: meta.layout || "",
+        color: meta.color || "",
+        tone: meta.tone || "",
+        mood: meta.mood || "",
+        mode: meta.mode || state.mode || "graphic-text",
+        coverRatio: meta.coverRatio || state.coverRatio || "2.35:1",
+        inlineRatio: meta.inlineRatio || state.inlineRatio || "4:3",
+        includeCover: meta.includeCover !== false,
+        recommendedStyles: Array.isArray(meta.recommendedStyles) ? meta.recommendedStyles : [],
+        slots: Array.isArray(meta.slots) ? meta.slots : [],
+        viewMode: "editor",
+        activeRun: null,
+        slotMap: [],
+      });
+      planNotice.textContent = "";
+      renderAll();
+      session.persist();
+    } catch (e) {
+      toast(e.message || "打开 Markdown 文件失败");
+    }
   }
 
   async function loadDraft(id) {
@@ -321,7 +517,15 @@ export async function renderArticle(root, ctx, params = {}) {
     try {
       const r = await api("GET", `/api/docs/article/${encodeURIComponent(id)}`);
       const data = typeof r.doc?.data === "string" ? JSON.parse(r.doc.data) : (r.doc?.data || {});
-      Object.assign(state, data, { docId: r.doc.id, activeRun: null, slotMap: [] });
+      Object.assign(state, data, {
+        docId: r.doc.id,
+        activeFile: "",
+        editorActive: true,
+        dirty: false,
+        viewMode: "editor",
+        activeRun: null,
+        slotMap: [],
+      });
       state.fusion = data.fusion ?? Boolean(data.style2);
       state.title = data.title || r.doc.name || "";
       state.slots = Array.isArray(data.slots) ? data.slots : [];
@@ -333,49 +537,162 @@ export async function renderArticle(root, ctx, params = {}) {
     }
   }
 
-  function renderSidebar() {
-    clear(histListBox);
-    sidebarCountBadge.textContent = `共 ${drafts.length} 篇本地文章`;
-    if (!drafts.length) {
-      histListBox.appendChild(el("p", { class: "muted", style: { textAlign: "center", padding: "18px 6px" } }, "暂无已保存文章"));
-      return;
+  function filterTreeNodes(nodes, q) {
+    if (!q) return nodes || [];
+    const out = [];
+    for (const n of (nodes || [])) {
+      if (n.kind === "dir") {
+        const sub = filterTreeNodes(n.children || [], q);
+        if (sub.length > 0 || n.name.toLowerCase().includes(q)) {
+          out.push({ ...n, children: sub.length > 0 ? sub : (n.children || []) });
+        }
+      } else if (`${n.name} ${n.path}`.toLowerCase().includes(q)) {
+        out.push(n);
+      }
     }
-    drafts.forEach((d) => {
-      const active = state.docId && state.docId === d.id;
-      const dateStr = d.updatedAt ? String(d.updatedAt).slice(0, 10) : "本地草稿";
-      const item = el("div", { class: "ic-hist-art-item" + (active ? " is-active" : "") },
+    return out;
+  }
+
+  function renderTreeBranch(nodes, depth) {
+    const frag = document.createDocumentFragment();
+    (nodes || []).forEach((node) => {
+      if (node.kind === "dir") {
+        const isOpen = Boolean(treeQuery) || expandedDirs.has(node.path);
+        const dirBtn = el("button", {
+          type: "button",
+          class: "ic-vault-row ic-vault-dir",
+          role: "treeitem",
+          "aria-expanded": String(isOpen),
+          style: { paddingLeft: `${8 + depth * 14}px` },
+          onClick: () => {
+            if (expandedDirs.has(node.path)) expandedDirs.delete(node.path);
+            else expandedDirs.add(node.path);
+            persistExpanded();
+            renderSidebar();
+          },
+        },
+          el("span", { class: "ic-vault-chevron", "aria-hidden": "true" }, isOpen ? "▾" : "▸"),
+          el("span", { class: "ic-vault-node-name", title: node.path }, node.name)
+        );
+        frag.appendChild(dirBtn);
+        if (isOpen && node.children?.length) {
+          frag.appendChild(renderTreeBranch(node.children, depth + 1));
+        }
+        return;
+      }
+
+      const isActive = Boolean(state.activeFile && state.activeFile === node.path);
+      const displayName = node.name.replace(/\.(md|markdown)$/i, "");
+      const row = el("div", {
+        class: "ic-vault-file-wrap" + (isActive ? " is-active" : ""),
+      },
         el("button", {
           type: "button",
-          class: "ic-hist-art-select",
-          title: d.name || d.id,
-          onClick: () => loadDraft(d.id),
+          class: "ic-vault-row ic-vault-file",
+          role: "treeitem",
+          "aria-selected": String(isActive),
+          title: node.path,
+          style: { paddingLeft: `${20 + depth * 14}px` },
+          onClick: () => openVaultFile(node.path),
         },
-          el("div", { class: "ic-hist-art-placeholder" }, "📄"),
-          el("div", { style: { minWidth: "0", flex: "1" } },
-            el("div", { style: { fontSize: "12px", fontWeight: "700", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, d.name || "未命名文章"),
-            el("div", { class: "muted", style: { fontSize: "10.5px" } }, dateStr)
-          )
+          el("span", { class: "ic-vault-file-ico", "aria-hidden": "true" }, "📄"),
+          el("span", { class: "ic-vault-node-name" }, displayName)
         ),
         el("button", {
           type: "button",
-          class: "ic-hist-art-delete",
-          title: "删除草稿",
-          "aria-label": `删除文章：${d.name || d.id}`,
-          onClick: async () => {
-            try {
-              await api("DELETE", `/api/docs/article/${encodeURIComponent(d.id)}`);
-              if (state.docId === d.id) state.docId = "";
-              drafts = (await api("GET", "/api/docs/article").catch(() => ({ items: [] }))).items || [];
-              renderSidebar();
-              toast("已删除文章");
-            } catch (e) {
-              toast(e.message);
-            }
+          class: "ic-vault-file-del",
+          title: `删除 ${node.name}`,
+          "aria-label": `删除文件 ${node.name}`,
+          onClick: (e) => {
+            e.stopPropagation();
+            showModal("删除本地 Markdown 文件", el("p", null, `确定删除「${node.path}」吗？该操作会直接从本地目录移除文件。`), [
+              el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+              el("button", {
+                type: "button",
+                class: "btn btn-danger",
+                onClick: async () => {
+                  try {
+                    await api("DELETE", `/api/article/vault/file?path=${encodeURIComponent(node.path)}`);
+                    closeModal();
+                    if (state.activeFile === node.path) {
+                      state.activeFile = "";
+                      state.editorActive = false;
+                      state.dirty = false;
+                    }
+                    await refreshVaultTree();
+                    renderStageMode();
+                    toast(`已删除 ${node.name}`);
+                  } catch (err) { toast(err.message); }
+                },
+              }, "确认删除"),
+            ]);
           },
-        }, "🗑")
+        }, "×")
       );
-      histListBox.appendChild(item);
+      frag.appendChild(row);
     });
+    return frag;
+  }
+
+  function renderSidebar() {
+    vaultTitleEl.textContent = vault.name || "本地文章库";
+    vaultTitleEl.title = vault.dir || "";
+    clear(treeBox);
+
+    const visible = filterTreeNodes(vault.tree || [], treeQuery);
+    sidebarCountBadge.textContent = `${vault.fileCount || 0} 篇本地 Markdown`;
+    sidebarCountBadge.title = vault.dir || "";
+
+    if (!visible.length) {
+      treeBox.appendChild(el("div", { class: "ic-vault-tree-empty" },
+        el("p", { class: "muted", style: { margin: 0, fontSize: "12px", lineHeight: "1.55" } },
+          treeQuery ? "没有匹配的 .md 文件" : "当前目录下还没有 .md 文件，可点击右上角 📁 切换本地目录，或点击 ＋ 新建。"
+        )
+      ));
+    } else {
+      treeBox.appendChild(renderTreeBranch(visible, 0));
+    }
+
+    // Preserve access to any legacy SQLite drafts in a compact collapsible footer
+    clear(legacyDraftsWrap);
+    if (drafts.length > 0) {
+      legacyDraftsWrap.classList.remove("hidden");
+      const listEl = el("div", { class: "ic-vault-legacy-list" });
+      drafts.forEach((d) => {
+        const active = !state.activeFile && state.docId === d.id;
+        listEl.appendChild(el("button", {
+          type: "button",
+          class: "ic-vault-row ic-vault-file" + (active ? " is-active" : ""),
+          onClick: () => loadDraft(d.id),
+        },
+          el("span", { class: "ic-vault-file-ico" }, "📝"),
+          el("span", { class: "ic-vault-node-name" }, d.name || "未命名草稿")
+        ));
+      });
+      legacyDraftsWrap.append(
+        el("summary", { class: "ic-vault-legacy-sum" }, `历史草稿箱 (${drafts.length})`),
+        listEl
+      );
+    } else {
+      legacyDraftsWrap.classList.add("hidden");
+    }
+  }
+
+  function renderWelcome() {
+    clear(welcomeBox);
+    welcomeBox.appendChild(el("div", { class: "ic-vault-welcome-card" },
+      el("div", { class: "ic-vault-welcome-ico", "aria-hidden": "true" }, "📚"),
+      el("h2", { style: { margin: 0, fontSize: "18px" } }, "本地 Markdown 文章库"),
+      el("p", { class: "muted", style: { margin: 0, maxWidth: "460px", lineHeight: "1.6", fontSize: "13px" } },
+        "点击左侧目录树中的任意 .md 文件即可进入编辑与配图模式，支持 AI 自动规划配图、并发生成封面与正文插图，并将配图直接写回本地 Markdown 文件。"
+      ),
+      el("div", { class: "ic-vault-path-pill mono", title: vault.dir || "" }, vault.dir || "未选择目录"),
+      el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", justifyContent: "center" } },
+        el("button", { type: "button", class: "btn btn-primary", onClick: openChangeVaultDir }, "📁 打开本地目录（如 Obsidian 库）"),
+        el("button", { type: "button", class: "btn", onClick: openNewMarkdownModal }, "＋ 新建 Markdown"),
+        el("button", { type: "button", class: "btn", onClick: () => fileIn.click() }, "📄 导入文档")
+      )
+    ));
   }
 
   function syncBottomBar() {
@@ -711,7 +1028,9 @@ export async function renderArticle(root, ctx, params = {}) {
     const segTextareas = [];
     const syncContentFromSegments = () => {
       state.content = segTextareas.map((ta) => ta.value).join("\n");
+      state.dirty = true;
       charCounter.textContent = `正文字数 ${state.content.length}`;
+      syncTopbarBreadcrumb();
       session.persist();
     };
 
@@ -843,6 +1162,17 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function renderStageMode() {
+    const active = Boolean(state.editorActive);
+    topbar.classList.toggle("hidden", !active);
+    bottombar.classList.toggle("hidden", !active);
+    welcomeBox.classList.toggle("hidden", active);
+    if (!active) {
+      paperSheet.classList.add("hidden");
+      previewStageBox.classList.add("hidden");
+      renderWelcome();
+      return;
+    }
+    syncTopbarBreadcrumb();
     const isEditor = state.viewMode !== "preview";
     editSwitchBtn.classList.toggle("is-active", isEditor);
     previewSwitchBtn.classList.toggle("is-active", !isEditor);
@@ -895,10 +1225,22 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function openExportModal() {
-    showModal("导出与复制",
+    const hasDoneImgs = state.slots.some((sl) => Boolean(sl.imagePath));
+    showModal("导出与写回 Markdown",
       el("div", { class: "col", style: { gap: "10px" } },
-        el("p", { class: "muted", style: { margin: "0" } }, "选择将文章与已生成的本地配图导出为对应格式："),
-        el("button", { type: "button", class: "btn btn-primary", onClick: async () => { await doExport("wechat_html", true); closeModal(); } }, "📋 复制公众号 HTML（含图链接）"),
+        el("p", { class: "muted", style: { margin: "0" } }, "选择将文章与已生成的本地配图写回本地 Markdown 或导出为其他格式："),
+        state.activeFile
+          ? el("button", {
+              type: "button",
+              class: "btn btn-primary",
+              disabled: !hasDoneImgs,
+              onClick: async () => {
+                await saveVaultFile(true);
+                closeModal();
+              },
+            }, hasDoneImgs ? "📝 将已生成配图写入当前 MD（适配 Obsidian）" : "📝 写入当前 MD（尚无已生成配图）")
+          : null,
+        el("button", { type: "button", class: "btn" + (!state.activeFile ? " btn-primary" : ""), onClick: async () => { await doExport("wechat_html", true); closeModal(); } }, "📋 复制公众号 HTML（含图链接）"),
         el("button", { type: "button", class: "btn", onClick: async () => { await doExport("markdown_zip", false); closeModal(); } }, "📦 导出 Markdown + 配图 ZIP 包"),
         el("button", { type: "button", class: "btn", onClick: async () => { await doExport("images_zip", false); closeModal(); } }, "🖼 仅导出全部配图 ZIP 包")
       ),
@@ -916,8 +1258,14 @@ export async function renderArticle(root, ctx, params = {}) {
         onClick: async () => {
           try {
             const res = await api("POST", "/api/article/import", { url: urlIn.value.trim() });
+            state.activeFile = "";
+            state.docId = "";
+            state.editorActive = true;
+            state.dirty = true;
+            state.viewMode = "editor";
             if (res.title) state.title = res.title;
             state.content = res.content || "";
+            state.slots = [];
             closeModal();
             renderAll();
             session.persist();
@@ -1084,15 +1432,74 @@ export async function renderArticle(root, ctx, params = {}) {
     }
   }
 
+  async function saveVaultFile(embedImages = false) {
+    let targetPath = state.activeFile;
+    if (!targetPath) {
+      const safe = (state.title || "未命名文章").replace(/[\\/:*?"<>|]/g, "-").trim() || "未命名文章";
+      targetPath = `${safe}.md`;
+    }
+    try {
+      const res = await api("PUT", "/api/article/vault/file", {
+        path: targetPath,
+        title: state.title,
+        content: state.content,
+        embedImages,
+        slots: state.slots.map((s) => ({
+          role: s.role,
+          anchor: s.anchor,
+          title: s.title,
+          imagePath: s.imagePath || "",
+        })),
+        meta: {
+          title: state.title,
+          style: state.style,
+          style2: state.style2,
+          fusion: state.fusion,
+          layout: state.layout,
+          color: state.color,
+          tone: state.tone,
+          mood: state.mood,
+          mode: state.mode,
+          coverRatio: state.coverRatio,
+          inlineRatio: state.inlineRatio,
+          includeCover: state.includeCover,
+          recommendedStyles: state.recommendedStyles,
+          slots: state.slots,
+        },
+      });
+      state.activeFile = res.path;
+      state.dirty = false;
+      if (embedImages && res.content) {
+        state.content = res.content;
+        renderFlow();
+      }
+      syncTopbarBreadcrumb();
+      await refreshVaultTree();
+      session.persist();
+      toast(embedImages
+        ? `已将 ${res.writtenImages || 0} 张配图写入 ${res.path}`
+        : `已保存到 ${res.path}`);
+    } catch (e) {
+      toast(e.message || "保存失败");
+    }
+  }
+
   async function saveDraft() {
+    if (!state.editorActive) return;
+    if (state.activeFile || !state.docId) {
+      await saveVaultFile(false);
+      return;
+    }
     try {
       const res = await api("PUT", `/api/docs/article/${encodeURIComponent(state.docId || "new")}`, {
         name: state.title || "未命名文章",
         data: { ...state, activeRun: null, slotMap: [] },
       });
       state.docId = res.doc.id;
+      state.dirty = false;
       const dRes = await api("GET", "/api/docs/article").catch(() => ({ items: [] }));
       drafts = dRes.items || [];
+      syncTopbarBreadcrumb();
       renderSidebar();
       session.persist();
       toast("文稿与配图位已保存");
