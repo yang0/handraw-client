@@ -110,3 +110,88 @@ func TestArticleVaultTreeReadWriteEmbedAndSecurity(t *testing.T) {
 		t.Fatalf("delete md failed: %d %s", rrDel.Code, rrDel.Body.String())
 	}
 }
+
+func TestArticleVaultMultiDirAddSwitchRemove(t *testing.T) {
+	srv, _ := setupTestServer(t, "http://127.0.0.1:1")
+	h := srv.Handler()
+
+	v1 := filepath.Join(t.TempDir(), "handraw-chat")
+	v2 := filepath.Join(t.TempDir(), "obsidian-notes")
+	v3 := filepath.Join(t.TempDir(), "weibo-data")
+	_ = os.MkdirAll(v1, 0o755)
+	_ = os.MkdirAll(v2, 0o755)
+	_ = os.MkdirAll(v3, 0o755)
+	_ = os.WriteFile(filepath.Join(v1, "chat.md"), []byte("# Chat Note"), 0o644)
+	_ = os.WriteFile(filepath.Join(v2, "note.md"), []byte("# Obsidian Note"), 0o644)
+	_ = os.WriteFile(filepath.Join(v3, "post.md"), []byte("# Weibo Post"), 0o644)
+
+	type vaultResp struct {
+		Dir       string         `json:"dir"`
+		Name      string         `json:"name"`
+		FileCount int            `json:"fileCount"`
+		Vaults    []vaultSummary `json:"vaults"`
+	}
+
+	// 1. Add first vault -> active & listed.
+	rr1 := doReq(t, h, srv.Token, "POST", "/api/article/vault/vaults", map[string]any{"dir": v1})
+	if rr1.Code != 200 {
+		t.Fatalf("add v1 failed: %d %s", rr1.Code, rr1.Body.String())
+	}
+	var res1 vaultResp
+	_ = json.Unmarshal(rr1.Body.Bytes(), &res1)
+	if res1.Name != "handraw-chat" || len(res1.Vaults) != 1 || !res1.Vaults[0].Active {
+		t.Fatalf("unexpected v1 resp: %+v", res1)
+	}
+
+	// 2. Add second & third vaults (third without activating).
+	rr2 := doReq(t, h, srv.Token, "POST", "/api/article/vault/vaults", map[string]any{"dir": v2})
+	if rr2.Code != 200 {
+		t.Fatalf("add v2 failed: %d %s", rr2.Code, rr2.Body.String())
+	}
+	rr3 := doReq(t, h, srv.Token, "POST", "/api/article/vault/vaults", map[string]any{"dir": v3, "activate": false})
+	if rr3.Code != 200 {
+		t.Fatalf("add v3 failed: %d %s", rr3.Code, rr3.Body.String())
+	}
+	var res3 vaultResp
+	_ = json.Unmarshal(rr3.Body.Bytes(), &res3)
+	if res3.Name != "obsidian-notes" || len(res3.Vaults) != 3 {
+		t.Fatalf("expected active=obsidian-notes and 3 vaults, got %+v", res3)
+	}
+
+	// 3. Switch back to v1 via /api/article/vault/root (no duplication).
+	rrSwitch := doReq(t, h, srv.Token, "POST", "/api/article/vault/root", map[string]any{"dir": v1})
+	if rrSwitch.Code != 200 {
+		t.Fatalf("switch v1 failed: %d %s", rrSwitch.Code, rrSwitch.Body.String())
+	}
+	var resSw vaultResp
+	_ = json.Unmarshal(rrSwitch.Body.Bytes(), &resSw)
+	if resSw.Name != "handraw-chat" || len(resSw.Vaults) != 3 {
+		t.Fatalf("expected active=handraw-chat and still 3 vaults, got %+v", resSw)
+	}
+
+	// 4. Remove active vault v1 -> auto-switches to remaining v2, and disk files in v1 stay untouched!
+	rrRem1 := doReq(t, h, srv.Token, "DELETE", "/api/article/vault/vaults", map[string]any{"dir": v1})
+	if rrRem1.Code != 200 {
+		t.Fatalf("remove v1 failed: %d %s", rrRem1.Code, rrRem1.Body.String())
+	}
+	var resRem1 vaultResp
+	_ = json.Unmarshal(rrRem1.Body.Bytes(), &resRem1)
+	if resRem1.Name != "obsidian-notes" || len(resRem1.Vaults) != 2 {
+		t.Fatalf("expected fallback to obsidian-notes with 2 vaults, got %+v", resRem1)
+	}
+	if _, err := os.Stat(filepath.Join(v1, "chat.md")); err != nil {
+		t.Fatalf("removing vault must NEVER delete disk files: %v", err)
+	}
+
+	// 5. Remove remaining vaults -> falls back gracefully to default <WorksDir>/articles.
+	_ = doReq(t, h, srv.Token, "DELETE", "/api/article/vault/vaults", map[string]any{"dir": v2})
+	rrRemLast := doReq(t, h, srv.Token, "DELETE", "/api/article/vault/vaults", map[string]any{"dir": v3})
+	if rrRemLast.Code != 200 {
+		t.Fatalf("remove last failed: %d %s", rrRemLast.Code, rrRemLast.Body.String())
+	}
+	var resLast vaultResp
+	_ = json.Unmarshal(rrRemLast.Body.Bytes(), &resLast)
+	if resLast.Name != "articles" || len(resLast.Vaults) != 1 || !resLast.Vaults[0].IsDefault {
+		t.Fatalf("expected fallback to default articles vault, got %+v", resLast)
+	}
+}

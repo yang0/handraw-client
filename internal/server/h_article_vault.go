@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -30,18 +31,141 @@ type vaultNode struct {
 	Children []vaultNode `json:"children,omitempty"`
 }
 
+type vaultSummary struct {
+	Dir       string `json:"dir"`
+	Name      string `json:"name"`
+	Active    bool   `json:"active"`
+	Exists    bool   `json:"exists"`
+	IsDefault bool   `json:"isDefault,omitempty"`
+}
+
+func sameVaultPath(a, b string) bool {
+	ca := filepath.Clean(strings.TrimSpace(a))
+	cb := filepath.Clean(strings.TrimSpace(b))
+	if ca == "" || cb == "" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(ca, cb)
+	}
+	return ca == cb
+}
+
+func defaultArticleVaultDir(st settings.Settings) string {
+	dir := filepath.Join(st.WorksDir, "articles")
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return filepath.Clean(dir)
+}
+
+func statIsDir(dir string) bool {
+	st, err := os.Stat(dir)
+	return err == nil && st.IsDir()
+}
+
+func dirHasMarkdown(dir string) bool {
+	if !statIsDir(dir) {
+		return false
+	}
+	_, count := scanVaultTree(dir)
+	return count > 0
+}
+
+func dedupeVaultDirs(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		p := strings.TrimSpace(item)
+		if p == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		} else {
+			p = filepath.Clean(p)
+		}
+		dup := false
+		for _, existing := range out {
+			if sameVaultPath(existing, p) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func (s *Server) activeArticleVaultDir() (string, error) {
 	st := settings.Get()
 	dir := strings.TrimSpace(st.ArticleVaultDir)
 	if dir == "" {
-		dir = filepath.Join(st.WorksDir, "articles")
-		_ = os.MkdirAll(dir, 0o755)
+		dirs := dedupeVaultDirs(st.ArticleVaultDirs)
+		if len(dirs) > 0 {
+			dir = dirs[0]
+		} else {
+			dir = defaultArticleVaultDir(st)
+			_ = os.MkdirAll(dir, 0o755)
+		}
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
 	}
 	return abs, nil
+}
+
+func buildVaultSummaries(st settings.Settings, activeAbs string) []vaultSummary {
+	defAbs := defaultArticleVaultDir(st)
+	dirs := dedupeVaultDirs(st.ArticleVaultDirs)
+	hasActive := false
+	for _, d := range dirs {
+		if sameVaultPath(d, activeAbs) {
+			hasActive = true
+			break
+		}
+	}
+	if !hasActive && activeAbs != "" {
+		dirs = append([]string{activeAbs}, dirs...)
+	}
+	out := make([]vaultSummary, 0, len(dirs))
+	for _, d := range dirs {
+		out = append(out, vaultSummary{
+			Dir:       d,
+			Name:      filepath.Base(d),
+			Active:    sameVaultPath(d, activeAbs),
+			Exists:    statIsDir(d),
+			IsDefault: sameVaultPath(d, defAbs),
+		})
+	}
+	return out
+}
+
+func (s *Server) vaultTreePayload(activeAbs string) map[string]any {
+	st := settings.Get()
+	vaults := buildVaultSummaries(st, activeAbs)
+	exists := statIsDir(activeAbs)
+	if !exists {
+		return map[string]any{
+			"dir":       activeAbs,
+			"name":      filepath.Base(activeAbs),
+			"exists":    false,
+			"tree":      []vaultNode{},
+			"fileCount": 0,
+			"vaults":    vaults,
+		}
+	}
+	tree, count := scanVaultTree(activeAbs)
+	return map[string]any{
+		"dir":       activeAbs,
+		"name":      filepath.Base(activeAbs),
+		"exists":    true,
+		"tree":      tree,
+		"fileCount": count,
+		"vaults":    vaults,
+	}
 }
 
 func isMarkdownExt(name string) bool {
@@ -188,30 +312,42 @@ func scanVaultTree(rootAbs string) ([]vaultNode, int) {
 	return nodes, fileCount
 }
 
+func registerVaultDir(st *settings.Settings, abs string, activate bool) {
+	dirs := dedupeVaultDirs(st.ArticleVaultDirs)
+	if len(dirs) == 0 {
+		if prev := strings.TrimSpace(st.ArticleVaultDir); prev != "" {
+			if pAbs, err := filepath.Abs(prev); err == nil {
+				dirs = append(dirs, pAbs)
+			}
+		} else {
+			defAbs := defaultArticleVaultDir(*st)
+			if dirHasMarkdown(defAbs) {
+				dirs = append(dirs, defAbs)
+			}
+		}
+	}
+	found := false
+	for _, d := range dirs {
+		if sameVaultPath(d, abs) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		dirs = append(dirs, abs)
+	}
+	st.ArticleVaultDirs = dirs
+	if activate || strings.TrimSpace(st.ArticleVaultDir) == "" {
+		st.ArticleVaultDir = abs
+	}
+}
+
 func (s *Server) articleVaultTree(w http.ResponseWriter, r *http.Request) (any, error) {
 	dir, err := s.activeArticleVaultDir()
 	if err != nil {
 		return nil, err
 	}
-	st, statErr := os.Stat(dir)
-	exists := statErr == nil && st.IsDir()
-	if !exists {
-		return map[string]any{
-			"dir":       dir,
-			"name":      filepath.Base(dir),
-			"exists":    false,
-			"tree":      []vaultNode{},
-			"fileCount": 0,
-		}, nil
-	}
-	tree, count := scanVaultTree(dir)
-	return map[string]any{
-		"dir":       dir,
-		"name":      filepath.Base(dir),
-		"exists":    true,
-		"tree":      tree,
-		"fileCount": count,
-	}, nil
+	return s.vaultTreePayload(dir), nil
 }
 
 func (s *Server) articleVaultSetRoot(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -233,20 +369,105 @@ func (s *Server) articleVaultSetRoot(w http.ResponseWriter, r *http.Request) (an
 	if err != nil || !st.IsDir() {
 		return nil, bad("找不到该本地目录：" + abs)
 	}
-	if _, err := settings.Update(func(s *settings.Settings) error {
-		s.ArticleVaultDir = abs
+	if _, err := settings.Update(func(st *settings.Settings) error {
+		registerVaultDir(st, abs, true)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	tree, count := scanVaultTree(abs)
-	return map[string]any{
-		"dir":       abs,
-		"name":      filepath.Base(abs),
-		"exists":    true,
-		"tree":      tree,
-		"fileCount": count,
-	}, nil
+	return s.vaultTreePayload(abs), nil
+}
+
+func (s *Server) articleVaultAdd(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		Dir      string `json:"dir"`
+		Activate *bool  `json:"activate"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	dir := strings.TrimSpace(body.Dir)
+	if dir == "" {
+		return nil, bad("请选择或输入本地文章目录路径")
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, bad("目录路径无效：" + err.Error())
+	}
+	st, err := os.Stat(abs)
+	if err != nil || !st.IsDir() {
+		return nil, bad("找不到该本地目录：" + abs)
+	}
+	activate := true
+	if body.Activate != nil {
+		activate = *body.Activate
+	}
+	if _, err := settings.Update(func(st *settings.Settings) error {
+		registerVaultDir(st, abs, activate)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	activeDir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	return s.vaultTreePayload(activeDir), nil
+}
+
+func (s *Server) articleVaultRemove(w http.ResponseWriter, r *http.Request) (any, error) {
+	target := strings.TrimSpace(r.URL.Query().Get("dir"))
+	if target == "" && r.Body != nil {
+		var body struct {
+			Dir string `json:"dir"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		target = strings.TrimSpace(body.Dir)
+	}
+	if target == "" {
+		return nil, bad("请指定要移出的本地目录")
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		targetAbs = filepath.Clean(target)
+	}
+	if _, err := settings.Update(func(st *settings.Settings) error {
+		dirs := dedupeVaultDirs(st.ArticleVaultDirs)
+		// If legacy single-dir config hasn't been materialized into ArticleVaultDirs yet.
+		if len(dirs) == 0 && strings.TrimSpace(st.ArticleVaultDir) != "" {
+			if pAbs, aErr := filepath.Abs(st.ArticleVaultDir); aErr == nil {
+				dirs = []string{pAbs}
+			}
+		}
+		remaining := make([]string, 0, len(dirs))
+		for _, d := range dirs {
+			if !sameVaultPath(d, targetAbs) {
+				remaining = append(remaining, d)
+			}
+		}
+		st.ArticleVaultDirs = remaining
+		if sameVaultPath(st.ArticleVaultDir, targetAbs) || strings.TrimSpace(st.ArticleVaultDir) == "" {
+			next := ""
+			for _, d := range remaining {
+				if statIsDir(d) {
+					next = d
+					break
+				}
+			}
+			if next == "" && len(remaining) > 0 {
+				next = remaining[0]
+			}
+			st.ArticleVaultDir = next
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	activeDir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	return s.vaultTreePayload(activeDir), nil
 }
 
 func (s *Server) articleVaultReadFile(w http.ResponseWriter, r *http.Request) (any, error) {

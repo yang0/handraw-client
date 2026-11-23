@@ -35,7 +35,7 @@ export async function renderArticle(root, ctx, params = {}) {
   const tones = tonesRes.items || [];
   const layouts = layoutsRes.items || [];
   let drafts = draftsRes.items || [];
-  let vault = vaultRes || { dir: "", name: "articles", exists: false, tree: [], fileCount: 0 };
+  let vault = vaultRes || { dir: "", name: "articles", exists: false, tree: [], fileCount: 0, vaults: [] };
 
   const session = studioSession(host, "article", {
     docId: params.docId || "",
@@ -69,18 +69,47 @@ export async function renderArticle(root, ctx, params = {}) {
   let planning = false;
   let activeSegTextarea = null;
   let treeQuery = "";
-  const expandedDirs = new Set();
-  try {
-    const savedExp = JSON.parse(sessionStorage.getItem("article-vault-expanded") || "[]");
-    if (Array.isArray(savedExp)) savedExp.forEach((p) => expandedDirs.add(p));
-  } catch {}
-  const persistExpanded = () => {
-    try { sessionStorage.setItem("article-vault-expanded", JSON.stringify(Array.from(expandedDirs))); } catch {}
-  };
-  // Default-expand top-level folders on first visit so files are immediately visible.
-  if (expandedDirs.size === 0 && Array.isArray(vault.tree)) {
-    vault.tree.forEach((n) => { if (n.kind === "dir") expandedDirs.add(n.path); });
+  const EXPANDED_STORAGE_KEY = "article-vault-expanded-v2";
+  let expandedDirs = new Set();
+
+  function readExpandedMap() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(EXPANDED_STORAGE_KEY) || "{}");
+      return raw && typeof raw === "object" ? raw : {};
+    } catch {
+      return {};
+    }
   }
+  function loadExpandedForVault(dir, tree) {
+    const map = readExpandedMap();
+    const key = String(dir || "").toLowerCase();
+    const saved = map[key];
+    expandedDirs = new Set();
+    if (Array.isArray(saved)) {
+      saved.forEach((p) => expandedDirs.add(p));
+    } else if (Array.isArray(tree)) {
+      // First visit to this vault: expand top-level folders so .md files are visible immediately.
+      tree.forEach((n) => { if (n.kind === "dir") expandedDirs.add(n.path); });
+    }
+  }
+  function persistExpanded() {
+    if (!vault?.dir) return;
+    try {
+      const map = readExpandedMap();
+      map[String(vault.dir).toLowerCase()] = Array.from(expandedDirs);
+      localStorage.setItem(EXPANDED_STORAGE_KEY, JSON.stringify(map));
+    } catch {}
+  }
+  function collectAllDirPaths(nodes, out = []) {
+    (nodes || []).forEach((n) => {
+      if (n.kind === "dir") {
+        out.push(n.path);
+        collectAllDirPaths(n.children || [], out);
+      }
+    });
+    return out;
+  }
+  loadExpandedForVault(vault.dir, vault.tree);
 
   const slotSignature = (sl) =>
     JSON.stringify([
@@ -207,8 +236,23 @@ export async function renderArticle(root, ctx, params = {}) {
     )
   );
 
-  // 2. Left Sidebar: Obsidian-style Local Markdown Vault File Tree (#65)
-  const vaultTitleEl = el("strong", { class: "ic-vault-name", title: vault.dir || "" }, vault.name || "本地文章库");
+  // 2. Left Sidebar: Obsidian-style Local Markdown Vault File Tree + Bottom Vault Switcher (#65, #66)
+  const sidebarCountBadge = el("span", { class: "ic-vault-count-pill" });
+  const collapseAllBtn = el("button", {
+    type: "button",
+    class: "ic-vault-ico-btn",
+    title: "折叠全部文件夹",
+    "aria-label": "折叠或展开全部文件夹",
+    onClick: () => {
+      const allDirs = collectAllDirPaths(vault.tree || []);
+      if (!allDirs.length) return;
+      if (expandedDirs.size > 0) expandedDirs.clear();
+      else allDirs.forEach((p) => expandedDirs.add(p));
+      persistExpanded();
+      renderSidebar();
+    },
+  }, "⊟");
+
   const vaultFilterIn = el("input", {
     type: "search",
     class: "input ic-vault-search",
@@ -222,24 +266,61 @@ export async function renderArticle(root, ctx, params = {}) {
 
   const treeBox = el("div", { class: "ic-vault-tree", role: "tree", "aria-label": "本地 Markdown 文件树" });
   const legacyDraftsWrap = el("details", { class: "ic-vault-legacy hidden" });
-  const sidebarCountBadge = el("span", { class: "muted", style: { fontSize: "11px" } });
+
+  const vaultSwitcherName = el("span", { class: "ic-vault-switcher-name" }, vault.name || "articles");
+  const vaultSwitcherCount = el("span", { class: "ic-vault-switcher-count hidden" }, "");
+  const vaultSwitcherBtn = el("button", {
+    type: "button",
+    class: "ic-vault-switcher-btn",
+    title: vault.dir || "切换本地目录",
+    "aria-haspopup": "menu",
+    "aria-expanded": "false",
+    onClick: (e) => {
+      e.stopPropagation();
+      toggleVaultPopover();
+    },
+  },
+    el("span", { class: "ic-vault-switcher-ico", "aria-hidden": "true" }, "⇅"),
+    vaultSwitcherName,
+    vaultSwitcherCount
+  );
+
+  const vaultFooter = el("div", { class: "ic-vault-footer" },
+    vaultSwitcherBtn,
+    el("div", { class: "ic-vault-footer-actions" },
+      el("button", {
+        type: "button",
+        class: "ic-vault-ico-btn",
+        title: "添加本地目录",
+        "aria-label": "添加本地目录",
+        onClick: () => { closeVaultPopover(); openAddVaultDialog(); },
+      }, "＋"),
+      el("button", {
+        type: "button",
+        class: "ic-vault-ico-btn",
+        title: "管理本地目录",
+        "aria-label": "管理本地目录",
+        onClick: () => { closeVaultPopover(); openManageVaultsModal(); },
+      }, "⚙")
+    )
+  );
 
   const sidebar = el("aside", { class: "ic-pv-outline ic-vault-sidebar", "aria-label": "本地 Markdown 文件树" },
     el("div", { class: "ic-vault-head" },
       el("div", { class: "ic-vault-head-title" },
-        el("span", { "aria-hidden": "true" }, "📂"),
-        vaultTitleEl
+        el("strong", { class: "ic-vault-name" }, "本地文档"),
+        sidebarCountBadge
       ),
       el("div", { class: "ic-vault-actions" },
-        el("button", { type: "button", class: "ic-vault-ico-btn", title: "切换本地文章目录", "aria-label": "切换本地目录", onClick: openChangeVaultDir }, "📁"),
         el("button", { type: "button", class: "ic-vault-ico-btn", title: "新建 Markdown 文件", "aria-label": "新建 Markdown 文件", onClick: openNewMarkdownModal }, "＋"),
+        collapseAllBtn,
         el("button", { type: "button", class: "ic-vault-ico-btn", title: "刷新目录树", "aria-label": "刷新目录树", onClick: refreshVaultTree }, "↻")
       )
     ),
     vaultFilterIn,
     treeBox,
     legacyDraftsWrap,
-    sidebarCountBadge
+    vaultFooter
   );
 
   // 3. Center Scroll Area (Vault Empty Welcome / Paper Editor / Preview Sheet)
@@ -369,13 +450,68 @@ export async function renderArticle(root, ctx, params = {}) {
     }
   }
 
+  let vaultPopoverEl = null;
+  let vaultPopoverCleanup = null;
+
+  function closeVaultPopover() {
+    if (vaultPopoverCleanup) {
+      vaultPopoverCleanup();
+      vaultPopoverCleanup = null;
+    }
+    if (vaultPopoverEl) {
+      vaultPopoverEl.remove();
+      vaultPopoverEl = null;
+    }
+    vaultSwitcherBtn.setAttribute("aria-expanded", "false");
+    vaultSwitcherBtn.classList.remove("is-open");
+  }
+
+  function applyVaultPayload(res, { resetEditor = false } = {}) {
+    vault = res || vault;
+    if (!Array.isArray(vault.vaults)) vault.vaults = [];
+    loadExpandedForVault(vault.dir, vault.tree);
+    if (resetEditor) {
+      state.activeFile = "";
+      state.docId = "";
+      state.editorActive = false;
+      state.dirty = false;
+    }
+    renderAll();
+    session.persist();
+  }
+
+  function guardDirtyBeforeSwitch(proceed) {
+    if (!state.editorActive || !state.dirty) {
+      proceed();
+      return;
+    }
+    showModal("当前文档有未保存修改", el("p", null, "切换目录前是否先保存当前文档的修改？"), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", {
+        type: "button",
+        class: "btn",
+        onClick: () => {
+          closeModal();
+          proceed();
+        },
+      }, "放弃修改并切换"),
+      el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: async () => {
+          await saveDraft();
+          closeModal();
+          proceed();
+        },
+      }, "保存并切换"),
+    ]);
+  }
+
   async function refreshVaultTree() {
     try {
       const res = await api("GET", "/api/article/vault/tree");
       vault = res || vault;
-      if (expandedDirs.size === 0 && Array.isArray(vault.tree)) {
-        vault.tree.forEach((n) => { if (n.kind === "dir") expandedDirs.add(n.path); });
-      }
+      if (!Array.isArray(vault.vaults)) vault.vaults = [];
       renderSidebar();
       if (!state.editorActive) renderWelcome();
     } catch (e) {
@@ -383,38 +519,85 @@ export async function renderArticle(root, ctx, params = {}) {
     }
   }
 
-  async function setVaultRootDir(dir) {
-    const res = await api("POST", "/api/article/vault/root", { dir });
-    vault = res;
-    expandedDirs.clear();
-    (vault.tree || []).forEach((n) => { if (n.kind === "dir") expandedDirs.add(n.path); });
-    persistExpanded();
-    state.activeFile = "";
-    state.docId = "";
-    state.editorActive = false;
-    state.dirty = false;
-    renderAll();
-    session.persist();
-    toast(`已切换本地文章目录：${vault.name || vault.dir}`);
+  async function switchVaultDir(dir) {
+    if (!dir) return;
+    const same = String(vault.dir || "").toLowerCase() === String(dir).toLowerCase();
+    if (same) {
+      closeVaultPopover();
+      return;
+    }
+    guardDirtyBeforeSwitch(async () => {
+      try {
+        const res = await api("POST", "/api/article/vault/root", { dir });
+        treeQuery = "";
+        vaultFilterIn.value = "";
+        applyVaultPayload(res, { resetEditor: true });
+        toast(`已切换目录：${vault.name || vault.dir}`);
+      } catch (e) {
+        toast(e.message || "切换目录失败");
+      }
+    });
   }
 
-  async function openChangeVaultDir() {
-    try {
-      const picked = await api("POST", "/api/host/pick-directory", {});
-      if (picked?.path) {
-        await setVaultRootDir(picked.path);
-        return;
-      }
-    } catch {
-      // Fall back to manual directory input modal (e.g. web mode).
+  async function addVaultDir(dir, activate = true) {
+    const res = await api("POST", "/api/article/vault/vaults", { dir, activate });
+    if (activate) {
+      treeQuery = "";
+      vaultFilterIn.value = "";
     }
+    applyVaultPayload(res, { resetEditor: activate });
+    toast(`已添加本地目录：${res.name || dir}`);
+  }
+
+  async function removeVaultDir(v, { skipConfirm = false } = {}) {
+    if (!v?.dir) return;
+    const list = Array.isArray(vault.vaults) ? vault.vaults : [];
+    if (list.length <= 1 && v.isDefault) {
+      toast("默认文章目录不可移出，可先添加其他目录");
+      return;
+    }
+    const doRemove = async () => {
+      try {
+        const wasActive = Boolean(v.active);
+        const res = await api("DELETE", `/api/article/vault/vaults?dir=${encodeURIComponent(v.dir)}`);
+        if (wasActive) {
+          treeQuery = "";
+          vaultFilterIn.value = "";
+        }
+        applyVaultPayload(res, { resetEditor: wasActive });
+        toast(`已从列表移出「${v.name}」（本地文件未删除）`);
+      } catch (e) {
+        toast(e.message || "移出目录失败");
+      }
+    };
+    if (skipConfirm) {
+      await doRemove();
+      return;
+    }
+    showModal("从目录列表移出", el("div", { class: "col", style: { gap: "6px" } },
+      el("p", { style: { margin: 0 } }, `确定将「${v.name}」从左侧目录列表中移出吗？`),
+      el("p", { class: "muted mono", style: { margin: 0, fontSize: "12px", wordBreak: "break-all" } }, v.dir),
+      el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, "仅从手绘风目录列表中移除，不会删除磁盘上的任何文件夹或 Markdown 文件。")
+    ), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", {
+        type: "button",
+        class: "btn btn-danger",
+        onClick: async () => {
+          closeModal();
+          await doRemove();
+        },
+      }, "移出列表"),
+    ]);
+  }
+
+  function openManualAddVaultModal() {
     const dirIn = el("input", {
       class: "input mono",
-      value: vault.dir || "",
-      placeholder: "例如：D:\\ObsidianVault\\文章 或 /Users/me/Notes",
+      placeholder: "例如：D:\\ObsidianVault\\知识库 或 /Users/me/Notes",
     });
-    showModal("选择本地 Markdown 文章目录", el("div", { class: "col", style: { gap: "8px" } },
-      el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, "指向你的 Obsidian 仓库或任意存放 .md 文章的本地文件夹，左侧将以树形结构实时浏览："),
+    showModal("添加本地 Markdown 目录", el("div", { class: "col", style: { gap: "8px" } },
+      el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, "可添加多个 Obsidian 仓库或任意本地 Markdown 文件夹，随时在左侧底部一键切换："),
       dirIn
     ), [
       el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
@@ -424,13 +607,249 @@ export async function renderArticle(root, ctx, params = {}) {
         onClick: async () => {
           if (!dirIn.value.trim()) return toast("请输入目录路径");
           try {
-            await setVaultRootDir(dirIn.value.trim());
+            await addVaultDir(dirIn.value.trim(), true);
             closeModal();
           } catch (e) { toast(e.message); }
         },
-      }, "确定切换"),
+      }, "添加并切换"),
     ]);
     dirIn.focus();
+  }
+
+  async function openAddVaultDialog() {
+    try {
+      const picked = await api("POST", "/api/host/pick-directory", {});
+      if (picked && typeof picked.path === "string") {
+        if (!picked.path.trim()) return; // user cancelled native dialog
+        await addVaultDir(picked.path.trim(), true);
+        return;
+      }
+    } catch {
+      // Fall back to manual directory path modal (e.g. browser/web mode).
+    }
+    openManualAddVaultModal();
+  }
+
+  function parentHint(fullPath) {
+    const norm = String(fullPath || "").replace(/[\\/]+$/, "");
+    const parts = norm.split(/[\\/]/).filter(Boolean);
+    if (parts.length <= 1) return "";
+    return parts.slice(Math.max(0, parts.length - 3), parts.length - 1).join("/");
+  }
+
+  function openManageVaultsModal() {
+    const listWrap = el("div", { class: "ic-vault-mgr-list" });
+    const renderMgrList = () => {
+      clear(listWrap);
+      const list = Array.isArray(vault.vaults) ? vault.vaults : [];
+      if (!list.length) {
+        listWrap.appendChild(el("p", { class: "muted", style: { margin: "8px 0", textAlign: "center" } }, "暂无已添加目录"));
+        return;
+      }
+      list.forEach((v) => {
+        const canRemove = list.length > 1 || !v.isDefault;
+        listWrap.appendChild(el("div", { class: "ic-vault-mgr-item" + (v.active ? " is-active" : "") },
+          el("div", { class: "ic-vault-mgr-meta" },
+            el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+              el("strong", { style: { fontSize: "13px" } }, v.name || v.dir),
+              v.active ? el("span", { class: "badge badge-accent" }, "当前使用") : null,
+              v.isDefault ? el("span", { class: "badge" }, "默认目录") : null,
+              !v.exists ? el("span", { class: "badge badge-warn" }, "路径不存在") : null
+            ),
+            el("div", { class: "ic-vault-mgr-path mono", title: v.dir }, v.dir)
+          ),
+          el("div", { class: "row", style: { gap: "6px", flexShrink: 0 } },
+            !v.active && v.exists
+              ? el("button", {
+                  type: "button",
+                  class: "btn btn-sm",
+                  onClick: () => {
+                    closeModal();
+                    switchVaultDir(v.dir);
+                  },
+                }, "切换")
+              : null,
+            el("button", {
+              type: "button",
+              class: "btn btn-sm btn-danger",
+              disabled: !canRemove,
+              title: canRemove ? "仅从列表移出，不删除本地文件" : "默认目录不可移出，可先添加其他目录",
+              onClick: async () => {
+                await removeVaultDir(v, { skipConfirm: true });
+                renderMgrList();
+              },
+            }, "移出")
+          )
+        ));
+      });
+    };
+    renderMgrList();
+
+    showModal("管理本地 Markdown 目录", el("div", { class: "col", style: { gap: "10px" } },
+      el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, "可添加多个 Obsidian 仓库或本地文章目录；移出目录仅从软件列表中移除，绝不会删除本地文件。"),
+      listWrap
+    ), [
+      el("button", {
+        type: "button",
+        class: "btn",
+        onClick: () => {
+          closeModal();
+          openManualAddVaultModal();
+        },
+      }, "手动输入路径"),
+      el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: async () => {
+          closeModal();
+          await openAddVaultDialog();
+        },
+      }, "＋ 添加本地目录"),
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
+    ]);
+  }
+
+  function openVaultPopover() {
+    closeVaultPopover();
+    const list = Array.isArray(vault.vaults) ? vault.vaults : [];
+    const nameCounts = new Map();
+    list.forEach((v) => {
+      const k = String(v.name || "").toLowerCase();
+      nameCounts.set(k, (nameCounts.get(k) || 0) + 1);
+    });
+
+    let popQuery = "";
+    const popList = el("div", { class: "ic-vault-pop-list", role: "menu" });
+    const renderPopItems = () => {
+      clear(popList);
+      const filtered = popQuery
+        ? list.filter((v) => `${v.name} ${v.dir}`.toLowerCase().includes(popQuery))
+        : list;
+      if (!filtered.length) {
+        popList.appendChild(el("div", { class: "ic-vault-pop-empty muted" }, "没有匹配的目录"));
+        return;
+      }
+      filtered.forEach((v) => {
+        const dupName = (nameCounts.get(String(v.name || "").toLowerCase()) || 0) > 1;
+        const canRemove = list.length > 1 || !v.isDefault;
+        const mainBtn = el("button", {
+          type: "button",
+          class: "ic-vault-pop-item" + (v.active ? " is-active" : ""),
+          role: "menuitemradio",
+          "aria-checked": String(Boolean(v.active)),
+          title: v.dir,
+          disabled: !v.exists && !v.active,
+          onClick: () => {
+            closeVaultPopover();
+            switchVaultDir(v.dir);
+          },
+        },
+          el("span", { class: "ic-vault-pop-label" },
+            el("span", { class: "ic-vault-pop-name" }, v.name || v.dir),
+            dupName ? el("span", { class: "ic-vault-pop-sub mono" }, parentHint(v.dir)) : null,
+            !v.exists ? el("span", { class: "ic-vault-pop-missing" }, "失效") : null
+          ),
+          v.active ? el("span", { class: "ic-vault-pop-check", "aria-hidden": "true" }, "✓") : null
+        );
+        const delBtn = canRemove
+          ? el("button", {
+              type: "button",
+              class: "ic-vault-pop-del",
+              title: `从列表移出「${v.name}」（不删除本地文件）`,
+              "aria-label": `移出目录 ${v.name}`,
+              onClick: (e) => {
+                e.stopPropagation();
+                closeVaultPopover();
+                removeVaultDir(v);
+              },
+            }, "×")
+          : null;
+        popList.appendChild(el("div", { class: "ic-vault-pop-row" + (v.active ? " is-active" : "") }, mainBtn, delBtn));
+      });
+    };
+
+    const popSearch = list.length >= 6
+      ? el("input", {
+          type: "search",
+          class: "input ic-vault-pop-search",
+          placeholder: "快速筛选目录…",
+          "aria-label": "筛选本地目录",
+        })
+      : null;
+    if (popSearch) {
+      popSearch.addEventListener("input", () => {
+        popQuery = popSearch.value.trim().toLowerCase();
+        renderPopItems();
+      });
+    }
+
+    renderPopItems();
+
+    const pop = el("div", { class: "ic-vault-popover", role: "dialog", "aria-label": "切换本地目录" },
+      popSearch ? el("div", { class: "ic-vault-pop-search-wrap" }, popSearch) : null,
+      popList,
+      el("div", { class: "ic-vault-pop-foot" },
+        el("button", {
+          type: "button",
+          class: "ic-vault-pop-action",
+          onClick: () => {
+            closeVaultPopover();
+            openAddVaultDialog();
+          },
+        },
+          el("span", { "aria-hidden": "true" }, "＋"),
+          el("span", null, "添加本地目录…")
+        ),
+        el("button", {
+          type: "button",
+          class: "ic-vault-pop-action",
+          onClick: () => {
+            closeVaultPopover();
+            openManageVaultsModal();
+          },
+        },
+          el("span", { "aria-hidden": "true" }, "⚙"),
+          el("span", null, `管理目录 (${list.length})…`)
+        )
+      )
+    );
+
+    const rect = vaultSwitcherBtn.getBoundingClientRect();
+    const popWidth = Math.min(310, Math.max(252, Math.round(rect.width + 64)));
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - popWidth - 8));
+    const bottom = Math.max(12, window.innerHeight - rect.top + 6);
+    pop.style.left = `${left}px`;
+    pop.style.bottom = `${bottom}px`;
+    pop.style.width = `${popWidth}px`;
+
+    document.body.appendChild(pop);
+    vaultPopoverEl = pop;
+    vaultSwitcherBtn.setAttribute("aria-expanded", "true");
+    vaultSwitcherBtn.classList.add("is-open");
+    if (popSearch) popSearch.focus();
+
+    const onDocDown = (e) => {
+      if (!pop.contains(e.target) && !vaultSwitcherBtn.contains(e.target)) {
+        closeVaultPopover();
+      }
+    };
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") closeVaultPopover();
+    };
+    const onResize = () => closeVaultPopover();
+    document.addEventListener("pointerdown", onDocDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("resize", onResize);
+    vaultPopoverCleanup = () => {
+      document.removeEventListener("pointerdown", onDocDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("resize", onResize);
+    };
+  }
+
+  function toggleVaultPopover() {
+    if (vaultPopoverEl) closeVaultPopover();
+    else openVaultPopover();
   }
 
   function openNewMarkdownModal() {
@@ -635,18 +1054,33 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function renderSidebar() {
-    vaultTitleEl.textContent = vault.name || "本地文章库";
-    vaultTitleEl.title = vault.dir || "";
     clear(treeBox);
 
     const visible = filterTreeNodes(vault.tree || [], treeQuery);
-    sidebarCountBadge.textContent = `${vault.fileCount || 0} 篇本地 Markdown`;
+    sidebarCountBadge.textContent = `${vault.fileCount || 0} 篇`;
     sidebarCountBadge.title = vault.dir || "";
+
+    const allDirs = collectAllDirPaths(vault.tree || []);
+    collapseAllBtn.disabled = allDirs.length === 0;
+    const anyExpanded = expandedDirs.size > 0;
+    collapseAllBtn.textContent = anyExpanded ? "⊟" : "⊞";
+    collapseAllBtn.title = anyExpanded ? "折叠全部文件夹" : "展开全部文件夹";
+
+    // Update Obsidian-style bottom Vault Switcher footer
+    const vaultsList = Array.isArray(vault.vaults) ? vault.vaults : [];
+    vaultSwitcherName.textContent = vault.name || "本地文章库";
+    vaultSwitcherBtn.title = `${vault.dir || "切换本地目录"}（点击切换目录）`;
+    if (vaultsList.length > 1) {
+      vaultSwitcherCount.textContent = String(vaultsList.length);
+      vaultSwitcherCount.classList.remove("hidden");
+    } else {
+      vaultSwitcherCount.classList.add("hidden");
+    }
 
     if (!visible.length) {
       treeBox.appendChild(el("div", { class: "ic-vault-tree-empty" },
         el("p", { class: "muted", style: { margin: 0, fontSize: "12px", lineHeight: "1.55" } },
-          treeQuery ? "没有匹配的 .md 文件" : "当前目录下还没有 .md 文件，可点击右上角 📁 切换本地目录，或点击 ＋ 新建。"
+          treeQuery ? "没有匹配的 .md 文件" : "当前目录下还没有 .md 文件，可在左下角切换/添加本地目录，或点击顶部 ＋ 新建。"
         )
       ));
     } else {
@@ -680,15 +1114,28 @@ export async function renderArticle(root, ctx, params = {}) {
 
   function renderWelcome() {
     clear(welcomeBox);
+    const vaultsList = Array.isArray(vault.vaults) ? vault.vaults : [];
+    const quickVaultChips = vaultsList.length > 1
+      ? el("div", { class: "ic-vault-quick-chips" },
+          ...vaultsList.slice(0, 8).map((v) => el("button", {
+            type: "button",
+            class: "ic-vault-quick-chip" + (v.active ? " is-active" : ""),
+            title: v.dir,
+            onClick: () => switchVaultDir(v.dir),
+          }, v.name || v.dir))
+        )
+      : null;
+
     welcomeBox.appendChild(el("div", { class: "ic-vault-welcome-card" },
       el("div", { class: "ic-vault-welcome-ico", "aria-hidden": "true" }, "📚"),
       el("h2", { style: { margin: 0, fontSize: "18px" } }, "本地 Markdown 文章库"),
       el("p", { class: "muted", style: { margin: 0, maxWidth: "460px", lineHeight: "1.6", fontSize: "13px" } },
-        "点击左侧目录树中的任意 .md 文件即可进入编辑与配图模式，支持 AI 自动规划配图、并发生成封面与正文插图，并将配图直接写回本地 Markdown 文件。"
+        "点击左侧目录树中的任意 .md 文件即可进入编辑与配图模式；左下角可随时添加、切换或移出多个本地目录（如 Obsidian 仓库）。"
       ),
       el("div", { class: "ic-vault-path-pill mono", title: vault.dir || "" }, vault.dir || "未选择目录"),
+      quickVaultChips,
       el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", justifyContent: "center" } },
-        el("button", { type: "button", class: "btn btn-primary", onClick: openChangeVaultDir }, "📁 打开本地目录（如 Obsidian 库）"),
+        el("button", { type: "button", class: "btn btn-primary", onClick: openAddVaultDialog }, "＋ 添加本地目录（如 Obsidian 库）"),
         el("button", { type: "button", class: "btn", onClick: openNewMarkdownModal }, "＋ 新建 Markdown"),
         el("button", { type: "button", class: "btn", onClick: () => fileIn.click() }, "📄 导入文档")
       )
@@ -1536,6 +1983,7 @@ export async function renderArticle(root, ctx, params = {}) {
 
   const unsub = onEvent(async (msg) => {
     if (!root.isConnected) {
+      closeVaultPopover();
       unsub();
       return;
     }

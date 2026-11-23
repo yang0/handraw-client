@@ -60,6 +60,7 @@ type Settings struct {
 	SiteBase           string               `json:"siteBase"`
 	WorksDir           string               `json:"worksDir"`
 	ArticleVaultDir    string               `json:"articleVaultDir,omitempty"`
+	ArticleVaultDirs   []string             `json:"articleVaultDirs,omitempty"`
 	Theme              string               `json:"theme"` // light | dark | system
 	AutoSyncResources  bool                 `json:"autoSyncResources"`
 	AutoCheckUpdate    bool                 `json:"autoCheckUpdate"`
