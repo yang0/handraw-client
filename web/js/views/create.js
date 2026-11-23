@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
+import { api, clear, closeModal, el, galleryImg, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
 import { openRecipeEditor } from "./recipes.js";
 import { mountSlotPanels } from "../plugins-host.js";
 import { choices, extraInstructions, field, ratioToCss, recipeControls, studioMount, studioSession } from "./studio-controls.js";
@@ -126,6 +126,7 @@ export async function renderCreate(root, ctx, params = {}) {
     count: 1,
     modelRef: params.modelRef || modRes.defaultModel || "site:seedream-4.5",
     refs: Array.isArray(params.refs) ? [...params.refs] : (params.editImage ? [params.editImage] : []),
+    galleryRefs: Array.isArray(params.galleryRefs) ? [...params.galleryRefs] : (params.galleryRef ? [params.galleryRef] : []),
     promptCustomized: Boolean(params.promptText),
     customPrompt: params.promptText || "",
     compiled: null,
@@ -149,6 +150,13 @@ export async function renderCreate(root, ctx, params = {}) {
     if (p.colors) state.color = p.colors.join(" + ");
     if (p.tones) state.tone = p.tones[0] || "";
     if (params.refs || params.editImage) state.refs = params.refs || [params.editImage];
+    if (Array.isArray(params.galleryRefs)) {
+      state.galleryRefs = [...params.galleryRefs];
+    } else if (params.galleryRef && params.galleryRef.kind && params.galleryRef.id) {
+      const list = Array.isArray(state.galleryRefs) ? state.galleryRefs : [];
+      const exists = list.some((g) => g.kind === params.galleryRef.kind && g.id === params.galleryRef.id);
+      state.galleryRefs = exists ? list : [...list, params.galleryRef];
+    }
     if (params.promptText) { state.customPrompt = params.promptText; state.promptCustomized = true; }
     if (params.run) state.activeRun = params.run;
     if (params.recipe?.id) state.recipeId = params.recipe.id;
@@ -338,7 +346,27 @@ export async function renderCreate(root, ctx, params = {}) {
 
   function renderRefs() {
     clear(refsStrip);
-    refsStrip.classList.toggle("hidden", state.refs.length === 0);
+    const gRefs = Array.isArray(state.galleryRefs) ? state.galleryRefs : [];
+    refsStrip.classList.toggle("hidden", state.refs.length === 0 && gRefs.length === 0);
+    gRefs.forEach((gr, idx) => {
+      const label = `${gr.galleryName || gr.kind} · ${gr.name || gr.id}`;
+      refsStrip.appendChild(el("div", { class: "make-image-ref-thumb", title: label, style: { position: "relative" } },
+        gr.imageUrl
+          ? el("img", { src: galleryImg(gr.imageUrl), alt: label })
+          : el("span", { class: "badge badge-accent", style: { padding: "6px 8px", display: "inline-flex", alignItems: "center" } }, label),
+        el("button", {
+          type: "button",
+          "aria-label": `移除画廊参考 ${label}`,
+          title: `移除 ${label}`,
+          onClick: () => {
+            state.galleryRefs.splice(idx, 1);
+            renderRefs();
+            scheduleRefresh();
+            session.persist();
+          },
+        }, "×")
+      ));
+    });
     state.refs.forEach((rp, idx) => {
       refsStrip.appendChild(el("div", { class: "make-image-ref-thumb" },
         el("img", { src: localImg(rp), alt: `参考图 ${idx + 1}` }),
@@ -614,6 +642,7 @@ export async function renderCreate(root, ctx, params = {}) {
         mode: state.mode,
         redraw: Boolean(state.redraw),
         extra: extraInstructions(state),
+        galleryRefs: (state.galleryRefs || []).map((g) => ({ kind: g.kind, id: g.id })),
       });
       if (revision !== promptRevision || !root.isConnected) return;
       state.compiled = res.result;
@@ -730,6 +759,7 @@ export async function renderCreate(root, ctx, params = {}) {
         promptCustomized: state.promptCustomized,
         customPrompt: state.promptCustomized ? promptEdit.value : "",
         refs: state.refs,
+        galleryRefs: (state.galleryRefs || []).map((g) => ({ kind: g.kind, id: g.id })),
         input: {
           style: state.style,
           style2: state.fusion ? state.style2 : "",

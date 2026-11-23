@@ -62,6 +62,7 @@ func sub(name string) string {
 }
 
 func Resources() string { return sub("resources") }
+func Galleries() string { return sub("galleries") }
 func Library() string   { return sub("library") }
 func Cache() string     { return sub("cache") }
 func Plugins() string   { return sub("plugins") }

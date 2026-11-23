@@ -93,6 +93,17 @@ export function localImg(p) {
   return "/files/local?p=" + encodeURIComponent(p) + "&t=" + encodeURIComponent(getToken());
 }
 
+export function galleryImg(url) {
+  if (!url) return "/img/logo.svg";
+  if (url.startsWith("http") || url.startsWith("data:")) return url;
+  if (url.startsWith("/api/galleries/")) {
+    const sep = url.includes("?") ? "&" : "?";
+    return url + sep + "t=" + encodeURIComponent(getToken());
+  }
+  if (url.startsWith("/")) return url;
+  return packImg(url);
+}
+
 export function remoteThumb(src, width = 480, siteBase = "") {
   if (!src) return "/img/logo.svg";
   if (src.startsWith("/img/") || src.startsWith("/files/") || src.startsWith("data:")) return src;

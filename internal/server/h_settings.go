@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yang0/handraw-client/internal/appdir"
+	"github.com/yang0/handraw-client/internal/galleries"
 	"github.com/yang0/handraw-client/internal/jobs"
 	"github.com/yang0/handraw-client/internal/plugins"
 	"github.com/yang0/handraw-client/internal/providers"
@@ -343,6 +344,9 @@ func (s *Server) pluginPatch(w http.ResponseWriter, r *http.Request) (any, error
 	if err != nil {
 		return nil, err
 	}
+	if isCommunity && body.Enabled != nil && !*body.Enabled && s.Galleries != nil {
+		s.Galleries.UnregisterByOwner(strings.TrimPrefix(id, "community:"))
+	}
 	s.Plugins.Reconcile(st.Plugins, st.PluginConfig)
 	s.Emit("plugins", s.Plugins.States())
 	return s.pluginList(w, r)
@@ -366,6 +370,9 @@ func (s *Server) pluginRemove(w http.ResponseWriter, r *http.Request) (any, erro
 	id := r.PathValue("id")
 	if err := s.Plugins.Remove(id); err != nil {
 		return nil, bad(err.Error())
+	}
+	if s.Galleries != nil {
+		s.Galleries.UnregisterByOwner(id)
 	}
 	_, _ = settings.Update(func(st *settings.Settings) error {
 		delete(st.Plugins, "community:"+id)
@@ -397,12 +404,119 @@ func (s *Server) pluginCall(w http.ResponseWriter, r *http.Request) (any, error)
 		}
 		return nil
 	}
+	needAny := func(perms ...string) error {
+		for _, p := range perms {
+			if c.Has(p) {
+				return nil
+			}
+		}
+		return &apiError{Status: 403, Msg: "插件未声明权限：" + strings.Join(perms, " / "), Code: "permission_denied"}
+	}
 	switch body.Action {
 	case "resources.summary":
-		if err := need("resources:read"); err != nil {
+		if err := needAny("resources:read", "galleries:read"); err != nil {
 			return nil, err
 		}
 		return s.resSummary(w, r)
+	case "galleries.list":
+		if err := needAny("galleries:read", "resources:read"); err != nil {
+			return nil, err
+		}
+		return s.galleryList(w, r)
+	case "galleries.items":
+		if err := needAny("galleries:read", "resources:read"); err != nil {
+			return nil, err
+		}
+		var a struct {
+			Kind     string `json:"kind"`
+			Q        string `json:"q"`
+			Category string `json:"category"`
+			Source   string `json:"source"`
+			Limit    int    `json:"limit"`
+			Offset   int    `json:"offset"`
+		}
+		if err := json.Unmarshal(body.Args, &a); err != nil {
+			return nil, bad("参数无效")
+		}
+		items, total, ok := s.Galleries.Items(s.Pack(), a.Kind, galleries.Query{
+			Q: a.Q, Category: a.Category, Source: a.Source, Limit: a.Limit, Offset: a.Offset,
+		}, s.galleryExtraDirs()...)
+		if !ok {
+			return nil, notFound("找不到画廊 " + a.Kind)
+		}
+		return map[string]any{"kind": a.Kind, "items": items, "total": total}, nil
+	case "galleries.item":
+		if err := needAny("galleries:read", "resources:read"); err != nil {
+			return nil, err
+		}
+		var a struct {
+			Kind string `json:"kind"`
+			ID   string `json:"id"`
+		}
+		if err := json.Unmarshal(body.Args, &a); err != nil {
+			return nil, bad("参数无效")
+		}
+		it, ok := s.Galleries.Item(s.Pack(), a.Kind, a.ID, s.galleryExtraDirs()...)
+		if !ok {
+			return nil, notFound(fmt.Sprintf("找不到画廊资源 %s/%s", a.Kind, a.ID))
+		}
+		return map[string]any{"item": it}, nil
+	case "galleries.register":
+		if err := need("galleries:register"); err != nil {
+			return nil, err
+		}
+		var reg galleries.Registration
+		if err := json.Unmarshal(body.Args, &reg); err != nil {
+			return nil, bad("画廊注册参数无效")
+		}
+		reg.Owner = c.ID
+		reg.ImageRoot = c.Dir
+		if err := s.Galleries.Register(reg); err != nil {
+			return nil, bad(err.Error())
+		}
+		return okv, nil
+	case "models.list":
+		if err := needAny("models:text", "models:vision", "models:image", "generate"); err != nil {
+			return nil, err
+		}
+		var a struct {
+			Purpose string `json:"purpose"`
+		}
+		_ = json.Unmarshal(body.Args, &a)
+		return s.hostModelsSummary(r.Context(), a.Purpose)
+	case "models.chat":
+		if err := needAny("models:text", "models:vision"); err != nil {
+			return nil, err
+		}
+		var a hostChatRequest
+		if err := json.Unmarshal(body.Args, &a); err != nil {
+			return nil, bad("对话参数无效")
+		}
+		if strings.EqualFold(strings.TrimSpace(a.Capability), "vision") {
+			if err := need("models:vision"); err != nil {
+				return nil, err
+			}
+		}
+		return s.executeHostChat(r.Context(), a)
+	case "models.quote":
+		if err := needAny("models:image", "generate"); err != nil {
+			return nil, err
+		}
+		var a map[string]any
+		_ = json.Unmarshal(body.Args, &a)
+		return s.invokeLocalJSON(r.Context(), s.quote, a)
+	case "models.generate":
+		if err := needAny("models:image", "generate"); err != nil {
+			return nil, err
+		}
+		var a map[string]any
+		if err := json.Unmarshal(body.Args, &a); err != nil || a == nil {
+			return nil, bad("生图参数无效")
+		}
+		if _, ok := a["mode"]; !ok {
+			a["mode"] = "plugin"
+		}
+		return s.invokeLocalJSON(r.Context(), s.generate, a)
 	case "works.list":
 		if err := need("works:read"); err != nil {
 			return nil, err

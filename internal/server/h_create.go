@@ -30,9 +30,36 @@ func (s *Server) buildPrompt(w http.ResponseWriter, r *http.Request) (any, error
 	if err != nil {
 		return nil, err
 	}
-	var in prompt.Input
-	if err := decode(r, &in); err != nil {
+	var body struct {
+		prompt.Input
+		GalleryRefs []GalleryRef `json:"galleryRefs,omitempty"`
+	}
+	if err := decode(r, &body); err != nil {
 		return nil, err
+	}
+	in := body.Input
+	if len(body.GalleryRefs) > 0 {
+		gctx := s.resolveGalleryRefs(body.GalleryRefs)
+		if in.Style == "" && gctx.Style != "" {
+			in.Style = gctx.Style
+		}
+		if in.Layout == "" && gctx.Layout != "" {
+			in.Layout = gctx.Layout
+		}
+		if in.Color == "" && gctx.Color != "" {
+			in.Color = gctx.Color
+		}
+		if in.Tone == "" && gctx.Tone != "" {
+			in.Tone = gctx.Tone
+		}
+		if len(gctx.PromptCues) > 0 {
+			cues := strings.Join(gctx.PromptCues, "\n")
+			if strings.TrimSpace(in.Extra) != "" {
+				in.Extra = strings.TrimSpace(in.Extra) + "\n" + cues
+			} else {
+				in.Extra = cues
+			}
+		}
 	}
 	res, err := prompt.Build(p, s.Rules(), in)
 	if err != nil {
@@ -379,6 +406,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		Annotations      []map[string]any `json:"annotations"`
 		MaskDataURL      string           `json:"maskDataUrl"`
 		Refs             []string         `json:"refs"`
+		GalleryRefs      []GalleryRef     `json:"galleryRefs"`
 		Items            []struct {
 			Theme  string `json:"theme"`
 			Style  string `json:"style"`
@@ -444,6 +472,12 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		}
 	}
 
+	// Resolve extensible gallery references (e.g. hairstyles, poses) into prompt cues and reference images (#48).
+	galCtx := s.resolveGalleryRefs(body.GalleryRefs)
+	if len(galCtx.RefImages) > 0 {
+		body.Refs = append(body.Refs, galCtx.RefImages...)
+	}
+
 	// Build prompts for each item.
 	_, rawModel, _ := strings.Cut(body.ModelRef, ":")
 	var built []prompt.Result
@@ -452,8 +486,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	var itemThemes []string
 	for _, it := range body.Items {
 		in := prompt.Input{
-			Style: it.Style, Style2: it.Style2, Layout: it.Layout, Color: it.Color,
-			Tone: it.Tone, Mood: it.Mood, Theme: it.Theme, Ratio: it.Ratio,
+			Style: firstStr(it.Style, galCtx.Style), Style2: it.Style2,
+			Layout: firstStr(it.Layout, galCtx.Layout), Color: firstStr(it.Color, galCtx.Color),
+			Tone: firstStr(it.Tone, galCtx.Tone), Mood: it.Mood, Theme: it.Theme, Ratio: it.Ratio,
 			Text: it.Text, Model: rawModel, Mode: it.Mode, Redraw: it.Redraw, Extra: it.Extra,
 		}
 		var pr prompt.Result
@@ -471,6 +506,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			pr.Primary, pr.Zh = it.Theme, it.Theme
 		}
 		finalPrompt := prompt.ForGeneration(pr, s.Rules())
+		if len(galCtx.PromptCues) > 0 {
+			finalPrompt += "\n" + strings.Join(galCtx.PromptCues, "\n")
+		}
 		if len(body.Annotations) > 0 {
 			var notes []string
 			for _, a := range body.Annotations {

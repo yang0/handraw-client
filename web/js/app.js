@@ -404,6 +404,9 @@ async function start() {
     if (msg.type === "plugins") {
       refreshNav();
     }
+    if (msg.type === "galleries" && currentView === "atlas") {
+      go("atlas", currentParams);
+    }
     if (msg.type === "settings" && msg.data?.theme) {
       setColorScheme(msg.data.theme);
     }

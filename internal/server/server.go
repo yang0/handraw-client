@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yang0/handraw-client/internal/galleries"
 	"github.com/yang0/handraw-client/internal/jobs"
 	"github.com/yang0/handraw-client/internal/plugins"
 	"github.com/yang0/handraw-client/internal/profile"
@@ -62,9 +63,10 @@ type Server struct {
 	DB       *store.DB
 	Site     *site.Client
 	Jobs     *jobs.Manager
-	Updater  *updater.Updater
-	Plugins  *plugins.Runtime
-	Host     Host
+	Updater   *updater.Updater
+	Plugins   *plugins.Runtime
+	Galleries *galleries.Registry
+	Host      Host
 	Web      fs.FS // embedded UI
 	PackDir  string
 	Bundled  string // pack shipped next to the program (first run)
@@ -86,7 +88,20 @@ type cached struct {
 func New(version string) *Server {
 	b := make([]byte, 24)
 	_, _ = rand.Read(b)
-	return &Server{Version: version, Token: hex.EncodeToString(b), events: newHub(), login: &loginState{}, cache: map[string]cached{}, Host: nopHost{}, Log: slog.Default()}
+	s := &Server{
+		Version:   version,
+		Token:     hex.EncodeToString(b),
+		Galleries: galleries.New(),
+		events:    newHub(),
+		login:     &loginState{},
+		cache:     map[string]cached{},
+		Host:      nopHost{},
+		Log:       slog.Default(),
+	}
+	s.Galleries.OnChange = func() {
+		s.Emit("galleries", map[string]any{"updated": true})
+	}
+	return s
 }
 
 // Emit pushes an event to every open page.

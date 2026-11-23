@@ -337,14 +337,19 @@ func (r *Runtime) ValidateConfig(id string, cfg map[string]any) (map[string]any,
 
 // Permission names a host capability a community plugin may use.
 var KnownPermissions = map[string]string{
-	"resources:read": "读取画风、图型、主题色等资源",
-	"works:read":     "读取本地作品列表和图片",
-	"recipes:read":   "读取配方",
-	"generate":       "发起生图（会按所选模型计费）",
-	"image:save":     "把图片保存到本地作品",
-	"clipboard":      "复制文字或图片到剪贴板",
-	"open:url":       "在浏览器中打开网址",
-	"provider":       "注册新的生图接口",
+	"resources:read":     "读取画风、图型、主题色等资源",
+	"galleries:read":     "读取宿主全部画廊（画风、图型、主题色、影调及发型/姿势等扩展画廊）",
+	"galleries:register": "向宿主注册新的扩展画廊供画册和其他插件调用",
+	"models:text":        "调用宿主配置的文字模型",
+	"models:vision":      "调用宿主配置的视觉理解模型",
+	"models:image":       "调用宿主配置的生图模型（受单次费用上限保护）",
+	"works:read":         "读取本地作品列表和图片",
+	"recipes:read":       "读取配方",
+	"generate":           "发起生图（会按所选模型计费）",
+	"image:save":         "把图片保存到本地作品",
+	"clipboard":          "复制文字或图片到剪贴板",
+	"open:url":           "在浏览器中打开网址",
+	"provider":           "注册新的生图接口",
 }
 
 type Page struct {
