@@ -347,8 +347,99 @@ func Download(ctx context.Context, url string) ([]byte, error) {
 
 // ChatMessage is an OpenAI chat message; content may include image parts.
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
+	Role       string     `json:"role"`
+	Content    any        `json:"content,omitempty"`
+	Name       string     `json:"name,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+}
+
+// ToolDef declares a function tool in OpenAI chat/completions format.
+type ToolDef struct {
+	Type     string          `json:"type"`
+	Function ToolFunctionDef `json:"function"`
+}
+
+type ToolFunctionDef struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+}
+
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolCallFunction `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type ChatTurnResult struct {
+	Content      string
+	ToolCalls    []ToolCall
+	FinishReason string
+}
+
+// ChatWithTools calls /chat/completions with optional OpenAI function tools.
+// If the relay rejects the tools parameter with HTTP 400/422, it retries once without tools.
+func ChatWithTools(ctx context.Context, p Provider, model string, msgs []ChatMessage, tools []ToolDef) (ChatTurnResult, error) {
+	body := map[string]any{"model": model, "messages": msgs, "temperature": 0.7}
+	if len(tools) > 0 {
+		body["tools"] = tools
+		body["tool_choice"] = "auto"
+	}
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint(p, "/chat/completions"), bytes.NewReader(b))
+	if err != nil {
+		return ChatTurnResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if k := key(p); k != "" {
+		req.Header.Set("Authorization", "Bearer "+k)
+	}
+	c := &http.Client{Timeout: 3 * time.Minute}
+	resp, err := c.Do(req)
+	if err != nil {
+		return ChatTurnResult{}, fmt.Errorf("请求文字模型失败：%w", err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if resp.StatusCode >= 400 {
+		if len(tools) > 0 && (resp.StatusCode == 400 || resp.StatusCode == 422) {
+			return ChatWithTools(ctx, p, model, msgs, nil)
+		}
+		return ChatTurnResult{}, apiErr(resp.StatusCode, data)
+	}
+	var out struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   any        `json:"content"`
+				ToolCalls []ToolCall `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return ChatTurnResult{}, errors.New("文字模型返回无法解析")
+	}
+	if len(out.Choices) == 0 {
+		if out.Error.Message != "" {
+			return ChatTurnResult{}, fmt.Errorf("接口返回错误：%s", out.Error.Message)
+		}
+		return ChatTurnResult{}, errors.New("文字模型返回无法解析")
+	}
+	ch := out.Choices[0]
+	return ChatTurnResult{
+		Content:      extractContentText(ch.Message.Content),
+		ToolCalls:    ch.Message.ToolCalls,
+		FinishReason: ch.FinishReason,
+	}, nil
 }
 
 // Chat calls /chat/completions and returns the text reply.

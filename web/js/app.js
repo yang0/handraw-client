@@ -7,6 +7,7 @@ import { renderHome } from "./views/home.js";
 import { renderAtlas } from "./views/atlas.js";
 import { renderRecipes } from "./views/recipes.js";
 import { renderStudio } from "./views/studio.js";
+import { renderChat } from "./views/chat.js";
 import { renderArticle } from "./views/article.js";
 import { renderCanvas } from "./views/canvas.js";
 import { renderAnnotate } from "./views/annotate.js";
@@ -19,6 +20,7 @@ const VIEWS = {
   atlas: renderAtlas,
   recipes: renderRecipes,
   create: renderStudio,
+  chat: renderChat,
   article: renderArticle,
   canvas: renderCanvas,
   annotate: renderAnnotate,
@@ -32,6 +34,7 @@ const CORE_NAV = [
   { id: "atlas", ico: "🎨", label: "画册" },
   { id: "recipes", ico: "⚗", label: "配方" },
   { id: "create", ico: "✨", label: "生图" },
+  { id: "chat", ico: "💬", label: "会话" },
   { id: "article", ico: "📰", label: "文章", plugin: "article" },
   { id: "canvas", ico: "🧩", label: "画布", plugin: "canvas" },
   { id: "annotate", ico: "📌", label: "批注", plugin: "annotate" },

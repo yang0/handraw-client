@@ -32,6 +32,7 @@ import (
 	"github.com/yang0/handraw-client/internal/resources"
 	"github.com/yang0/handraw-client/internal/settings"
 	"github.com/yang0/handraw-client/internal/site"
+	"github.com/yang0/handraw-client/internal/skills"
 	"github.com/yang0/handraw-client/internal/store"
 	"github.com/yang0/handraw-client/internal/updater"
 )
@@ -67,6 +68,7 @@ type Server struct {
 	Jobs     *jobs.Manager
 	Updater   *updater.Updater
 	Plugins   *plugins.Runtime
+	Skills    *skills.Manager
 	Galleries *galleries.Registry
 	DSH       *dshbridge.Manager
 	Host      Host
@@ -94,6 +96,7 @@ func New(version string) *Server {
 	s := &Server{
 		Version:   version,
 		Token:     hex.EncodeToString(b),
+		Skills:    skills.New(appdir.Skills()),
 		Galleries: galleries.New(),
 		DSH:       dshbridge.New(filepath.Join(appdir.Cache(), "dsh-bridge")),
 		events:    newHub(),
