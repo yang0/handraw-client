@@ -238,12 +238,24 @@
         }
       }
 
+      let scriptLoadError = null;
+      window.addEventListener('error', (ev) => {
+        if (!scriptLoadError) {
+          scriptLoadError = (ev.error && (ev.error.stack || ev.error.message)) ||
+            (ev.message ? `${ev.message}${ev.lineno ? ` (第 ${ev.lineno} 行)` : ''}` : '插件脚本执行错误');
+        }
+      });
+
       const script = document.createElement('script');
       script.src = '/files/dsh-client/' + encodeURIComponent(pluginId) + '?t=' + encodeURIComponent(readCookie('hw'));
       script.async = false;
-      script.onerror = () => showError('无法加载 DSH 插件前端脚本', script.src);
+      script.onerror = () => showError('无法加载 DSH 插件前端脚本', scriptLoadError || script.src);
       script.onload = () => {
         try {
+          if (scriptLoadError && !registeredModules.length) {
+            showError('DSH 插件前端脚本解析或执行失败', scriptLoadError);
+            return;
+          }
           if (!registeredModules.length) {
             showError('插件未注册前端模块', '未检测到 window.__ModuleLoader__.load(...) 调用。');
             return;

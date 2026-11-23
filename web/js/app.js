@@ -1,6 +1,7 @@
 import { api, clear, closeModal, connectEvents, el, getToken, installDialogLightDismiss, money, onEvent, openURL, setColorScheme, setToken, showModal, toast } from "./api.js";
 import { economySyncHint, formatEconomyPillText, parseEconomy } from "./economy.js";
 import { initPalette } from "./palette.js";
+import { fallbackPluginIcon } from "./plugin-icons.js";
 import { mountPluginFrame } from "./plugins-host.js";
 import { renderHome } from "./views/home.js";
 import { renderAtlas } from "./views/atlas.js";
@@ -53,16 +54,80 @@ async function start() {
 
   const main = document.getElementById("main");
   const sidebar = document.getElementById("sidebar");
+  const sidebarResizer = document.getElementById("sidebar-resizer");
   const navList = document.getElementById("nav-list");
   const settingsNavBtn = document.querySelector('.sidebar-foot .nav-item[data-view="settings"]');
 
+  const MIN_SIDEBAR_W = 156;
+  const MAX_SIDEBAR_W = 340;
+  const COLLAPSE_THRESHOLD = 104;
+
+  const applySavedSidebarWidth = () => {
+    try {
+      const saved = Number(localStorage.getItem("nav-width") || 0);
+      if (Number.isFinite(saved) && saved >= MIN_SIDEBAR_W && saved <= MAX_SIDEBAR_W) {
+        sidebar.style.setProperty("--sidebar-width", `${Math.round(saved)}px`);
+      } else {
+        sidebar.style.removeProperty("--sidebar-width");
+      }
+    } catch {}
+  };
+
   try {
-    if (localStorage.getItem("nav-expanded") === "1") sidebar.classList.add("expanded");
+    if (localStorage.getItem("nav-expanded") === "1") {
+      sidebar.classList.add("expanded");
+      applySavedSidebarWidth();
+    }
   } catch {}
+
   document.getElementById("btn-nav-toggle")?.addEventListener("click", () => {
-    sidebar.classList.toggle("expanded");
-    try { localStorage.setItem("nav-expanded", sidebar.classList.contains("expanded") ? "1" : "0"); } catch {}
+    const expanded = sidebar.classList.toggle("expanded");
+    if (expanded) applySavedSidebarWidth();
+    try { localStorage.setItem("nav-expanded", expanded ? "1" : "0"); } catch {}
   });
+
+  if (sidebarResizer) {
+    sidebarResizer.addEventListener("dblclick", () => {
+      sidebar.classList.add("expanded");
+      sidebar.style.removeProperty("--sidebar-width");
+      try {
+        localStorage.removeItem("nav-width");
+        localStorage.setItem("nav-expanded", "1");
+      } catch {}
+    });
+    sidebarResizer.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      sidebarResizer.setPointerCapture(ev.pointerId);
+      document.body.classList.add("is-resizing-sidebar");
+      const startLeft = sidebar.getBoundingClientRect().left;
+      const onMove = (e) => {
+        const w = Math.round(e.clientX - startLeft);
+        if (w < COLLAPSE_THRESHOLD) {
+          sidebar.classList.remove("expanded");
+          try { localStorage.setItem("nav-expanded", "0"); } catch {}
+          return;
+        }
+        const clamped = Math.max(MIN_SIDEBAR_W, Math.min(MAX_SIDEBAR_W, w));
+        sidebar.classList.add("expanded");
+        sidebar.style.setProperty("--sidebar-width", `${clamped}px`);
+        try {
+          localStorage.setItem("nav-expanded", "1");
+          localStorage.setItem("nav-width", String(clamped));
+        } catch {}
+      };
+      const onUp = (e) => {
+        document.body.classList.remove("is-resizing-sidebar");
+        try { sidebarResizer.releasePointerCapture(e.pointerId); } catch {}
+        sidebarResizer.removeEventListener("pointermove", onMove);
+        sidebarResizer.removeEventListener("pointerup", onUp);
+        sidebarResizer.removeEventListener("pointercancel", onUp);
+      };
+      sidebarResizer.addEventListener("pointermove", onMove);
+      sidebarResizer.addEventListener("pointerup", onUp);
+      sidebarResizer.addEventListener("pointercancel", onUp);
+    });
+  }
 
   const ctx = {
     boot,
@@ -80,6 +145,10 @@ async function start() {
     clear(navList);
 
     const addBtn = (id, ico, label) => {
+      const isImg = typeof ico === "string" && (ico.startsWith("/") || ico.startsWith("http") || ico.startsWith("data:"));
+      const icoNode = isImg
+        ? el("span", { class: "nav-ico" }, el("img", { src: ico, alt: "", class: "nav-ico-img" }))
+        : el("span", { class: "nav-ico" }, ico);
       const btn = el("button", {
         type: "button",
         class: "nav-item" + (currentView === id ? " active" : ""),
@@ -87,7 +156,7 @@ async function start() {
         title: label,
         onClick: () => go(id),
       },
-        el("span", { class: "nav-ico" }, ico),
+        icoNode,
         el("span", { class: "nav-label" }, label)
       );
       navList.appendChild(btn);
@@ -100,16 +169,17 @@ async function start() {
 
     for (const c of plugRes.community || []) {
       if (!c.enabled) continue;
+      const plugIco = c.page?.icon || fallbackPluginIcon(c);
       if (c.kind === "dsh" && c.dsh?.clientEntry) {
-        addBtn(`dsh:${c.id}`, "⚡", c.name || c.id);
+        addBtn(`dsh:${c.id}`, plugIco, c.name || c.id);
         continue;
       }
       if (c.page && c.page.file) {
-        addBtn(`plugin:${c.id}:page`, c.page.icon || "🔌", c.page.title || c.name);
+        addBtn(`plugin:${c.id}:page`, plugIco, c.page.title || c.name);
       }
       (c.panels || []).forEach((p, idx) => {
         if (!p.slot || p.slot === "nav" || p.slot === "page") {
-          addBtn(`plugin:${c.id}:${idx}`, "🔌", p.title || c.name);
+          addBtn(`plugin:${c.id}:${idx}`, plugIco, p.title || c.name);
         }
       });
     }
@@ -125,7 +195,6 @@ async function start() {
   async function go(view, params = {}) {
     if (view === "series") {
       view = "create";
-      params = { ...(params || {}), studioMode: "series" };
     }
     if (view === "settings" && params?.anchor === "settings-plugins") {
       view = "plugins";

@@ -1,4 +1,5 @@
 import { api, clear, closeModal, el, showModal, toast } from "../api.js";
+import { fallbackPluginIcon } from "../plugin-icons.js";
 
 const state = {
   tab: "market", // market | installed | builtin
@@ -168,17 +169,20 @@ function renderMarketTab(stage, root, ctx) {
     }
 
     list.forEach((p) => {
+      const fallbackUrl = fallbackPluginIcon(p);
       const iconUrl = p.icon
         ? (p.icon.startsWith("data:") ? p.icon : `/files/market-icon?url=${encodeURIComponent(p.icon)}&t=${encodeURIComponent(ctx.token || "")}`)
-        : "";
-      const iconNode = iconUrl
-        ? el("img", {
-          src: iconUrl,
-          alt: "",
-          style: { width: "40px", height: "40px", borderRadius: "10px", objectFit: "contain", flex: "none", background: "var(--paper)", border: "1px solid var(--line)" },
-          onError: (ev) => { ev.currentTarget.style.display = "none"; },
-        })
-        : el("span", { style: { width: "40px", height: "40px", borderRadius: "10px", display: "grid", placeItems: "center", background: "var(--paper)", border: "1px solid var(--line)", flex: "none" } }, "🧩");
+        : fallbackUrl;
+      const iconNode = el("img", {
+        src: iconUrl,
+        alt: "",
+        style: { width: "40px", height: "40px", borderRadius: "10px", objectFit: "contain", flex: "none", background: "transparent" },
+        onError: (ev) => {
+          if (ev.currentTarget.dataset.fb) return;
+          ev.currentTarget.dataset.fb = "1";
+          ev.currentTarget.src = fallbackUrl;
+        },
+      });
 
       const badges = [el("span", { class: "badge" }, `v${p.latestVersion}`)];
       if (p.installType) badges.push(el("span", { class: "badge" }, p.installType));
@@ -401,13 +405,22 @@ function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap
       ? `启动异常：${rt.error}`
       : (c.dsh?.compatReasons?.length ? `${c.description || c.dsh.packageName} · ${c.dsh.compatReasons.join("；")}` : (c.description || c.desc || c.author || ""));
 
+    const plugIcon = el("img", {
+      src: fallbackPluginIcon(c),
+      alt: "",
+      style: { width: "36px", height: "36px", objectFit: "contain", flex: "none" },
+    });
+
     stage.appendChild(el("div", { class: "card row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
-      el("div", { class: "col", style: { gap: "4px", minWidth: 0, flex: "1" } },
-        el("div", { class: "row", style: { flexWrap: "wrap" } },
-          el("strong", null, `${c.name} (${c.version || "dev"})`),
-          ...badges
-        ),
-        el("span", { class: "muted" }, subText)
+      el("div", { class: "row", style: { gap: "10px", minWidth: 0, flex: "1", alignItems: "center" } },
+        plugIcon,
+        el("div", { class: "col", style: { gap: "4px", minWidth: 0, flex: "1" } },
+          el("div", { class: "row", style: { flexWrap: "wrap" } },
+            el("strong", null, `${c.name} (${c.version || "dev"})`),
+            ...badges
+          ),
+          el("span", { class: "muted" }, subText)
+        )
       ),
       el("div", { class: "row" },
         isDSH && c.enabled && c.dsh?.clientEntry
