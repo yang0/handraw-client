@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -326,6 +327,66 @@ func (m *Manager) requoteSiteItem(ctx context.Context, im store.Image, spec *Spe
 	return nil
 }
 
+func sniffRefMime(raw []byte) string {
+	switch {
+	case bytes.HasPrefix(raw, []byte{0x89, 'P', 'N', 'G'}):
+		return "image/png"
+	case bytes.HasPrefix(raw, []byte{0xFF, 0xD8}):
+		return "image/jpeg"
+	case len(raw) > 12 && string(raw[0:4]) == "RIFF" && string(raw[8:12]) == "WEBP":
+		return "image/webp"
+	case bytes.HasPrefix(raw, []byte("GIF8")):
+		return "image/gif"
+	}
+	return ""
+}
+
+// encodeSiteRefDataURL encodes a local reference image as a compact data URL
+// accepted by handraw-web's /api/studio/generate refImages field (#67).
+func encodeSiteRefDataURL(refPath string) (string, error) {
+	refPath = strings.TrimSpace(refPath)
+	if refPath == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(refPath, "data:image/") || strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") || strings.HasPrefix(refPath, "/images/") {
+		return refPath, nil
+	}
+	raw, err := os.ReadFile(refPath)
+	if err != nil {
+		return "", fmt.Errorf("读取参考图失败：%w", err)
+	}
+	mime := sniffRefMime(raw)
+	// Re-encode oversized files (>2 MiB) or unknown formats to <=1600px JPEG so
+	// multi-reference edit uploads stay well below web proxy payload limits.
+	if mime == "" || len(raw) > 2<<20 {
+		if src, _, dErr := image.Decode(bytes.NewReader(raw)); dErr == nil {
+			b := src.Bounds()
+			w, h := b.Dx(), b.Dy()
+			const maxEdge = 1600
+			if w > maxEdge || h > maxEdge {
+				if w >= h {
+					h = h * maxEdge / w
+					w = maxEdge
+				} else {
+					w = w * maxEdge / h
+					h = maxEdge
+				}
+			}
+			dst := image.NewRGBA(image.Rect(0, 0, w, h))
+			draw.CatmullRom.Scale(dst, dst.Bounds(), src, b, draw.Over, nil)
+			var buf bytes.Buffer
+			if eErr := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 88}); eErr == nil {
+				raw = buf.Bytes()
+				mime = "image/jpeg"
+			}
+		}
+	}
+	if mime == "" {
+		mime = "image/png"
+	}
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw), nil
+}
+
 func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byte, int, error) {
 	body := map[string]any{}
 	for k, v := range spec.SiteBody {
@@ -334,8 +395,32 @@ func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byt
 	body["requestId"] = spec.RequestID
 	body["clientRequestId"] = spec.RequestID
 	body["source"] = "client"
-	if settings.Get().KeepSiteGenerationsPrivate {
+	if settings.Get().KeepSiteGenerationsPrivate || len(spec.Refs) > 0 {
 		body["visibility"] = "private"
+	}
+	if len(spec.Refs) > 0 {
+		refURLs := make([]string, 0, len(spec.Refs))
+		seen := map[string]bool{}
+		for _, rp := range spec.Refs {
+			if len(refURLs) >= 6 {
+				break
+			}
+			rp = strings.TrimSpace(rp)
+			if rp == "" || seen[rp] {
+				continue
+			}
+			seen[rp] = true
+			dataURL, rErr := encodeSiteRefDataURL(rp)
+			if rErr != nil {
+				return nil, 0, rErr
+			}
+			if dataURL != "" {
+				refURLs = append(refURLs, dataURL)
+			}
+		}
+		if len(refURLs) > 0 {
+			body["refImages"] = refURLs
+		}
 	}
 	requoted := false
 	if spec.QuoteID != "" {

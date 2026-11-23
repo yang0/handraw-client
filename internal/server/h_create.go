@@ -512,11 +512,12 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		GroupID          string           `json:"groupId"`
 		ParentID         string           `json:"parentId"`
 		Recipe           json.RawMessage  `json:"recipe"`
-		PromptCustomized bool             `json:"promptCustomized"`
-		CustomPrompt     string           `json:"customPrompt"`
-		Annotations      []map[string]any `json:"annotations"`
-		MaskDataURL      string           `json:"maskDataUrl"`
-		Refs             []string         `json:"refs"`
+		PromptCustomized      bool             `json:"promptCustomized"`
+		CustomPrompt          string           `json:"customPrompt"`
+		Annotations           []map[string]any `json:"annotations"`
+		MaskDataURL           string           `json:"maskDataUrl"`
+		AnnotatedGuideDataURL string           `json:"annotatedGuideDataUrl"`
+		Refs                  []string         `json:"refs"`
 		GalleryRefs      []GalleryRef     `json:"galleryRefs"`
 		Items            []struct {
 			Theme  string `json:"theme"`
@@ -617,22 +618,29 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			pr.Primary, pr.Zh = it.Theme, it.Theme
 		}
 		finalPrompt := prompt.ForGeneration(pr, s.Rules())
-		if !body.PromptCustomized && strings.TrimSpace(it.Prompt) == "" {
+		if !body.PromptCustomized && strings.TrimSpace(it.Prompt) == "" && body.Mode != "edit" {
 			finalPrompt = appendChineseTypographyDirective(finalPrompt, it.Mode, firstStr(it.Layout, galCtx.Layout), it.Theme, it.Text)
 		}
 		if len(galCtx.PromptCues) > 0 {
 			finalPrompt += "\n" + strings.Join(galCtx.PromptCues, "\n")
 		}
 		if len(body.Annotations) > 0 {
-			var notes []string
-			for _, a := range body.Annotations {
-				txt, _ := a["text"].(string)
-				if txt != "" {
-					notes = append(notes, txt)
+			if body.Mode == "edit" {
+				if editPrompt := buildAnnotateEditPrompt(body.Annotations, strings.TrimSpace(body.AnnotatedGuideDataURL) != ""); editPrompt != "" {
+					finalPrompt = editPrompt
+					pr.Primary, pr.Zh = editPrompt, editPrompt
 				}
-			}
-			if len(notes) > 0 {
-				finalPrompt += "\n局部修改要求：" + strings.Join(notes, "；")
+			} else {
+				var notes []string
+				for _, a := range body.Annotations {
+					txt, _ := a["text"].(string)
+					if txt != "" {
+						notes = append(notes, txt)
+					}
+				}
+				if len(notes) > 0 {
+					finalPrompt += "\n局部修改要求：" + strings.Join(notes, "；")
+				}
 			}
 		}
 		built = append(built, pr)
@@ -697,6 +705,13 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			_ = os.WriteFile(maskPath, mBytes, 0o644)
 		}
 	}
+	guidePath := ""
+	if body.AnnotatedGuideDataURL != "" {
+		if gBytes, err := decodeDataURL(body.AnnotatedGuideDataURL); err == nil {
+			guidePath = filepath.Join(dir, "annotated_guide"+sniffImageExt(gBytes))
+			_ = os.WriteFile(guidePath, gBytes, 0o644)
+		}
+	}
 	src := "provider"
 	if isSite {
 		src = "site"
@@ -723,11 +738,14 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 
 	imgs := make([]store.Image, 0, len(body.Items))
 	canRef := providerSupportsRef(body.ModelRef)
-	baseRefs := make([]string, 0, len(body.Refs))
+	baseRefs := make([]string, 0, len(body.Refs)+1)
 	for _, ref := range body.Refs {
 		if resolved := normalizeLocalRef(ref); resolved != "" {
 			baseRefs = append(baseRefs, resolved)
 		}
+	}
+	if guidePath != "" {
+		baseRefs = append(baseRefs, guidePath)
 	}
 	for i, it := range body.Items {
 		refs := append([]string{}, baseRefs...)
@@ -749,6 +767,12 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			QuoteIndex: i,
 		}
 		if isSite {
+			siteMode := firstStr(it.Mode, "pure-image")
+			siteTheme := it.Theme
+			if body.Mode == "edit" {
+				siteMode = "edit"
+				siteTheme = itemPrompts[i]
+			}
 			sb := map[string]any{
 				"model":          rawModel,
 				"resolution":     spec.Resolution,
@@ -761,13 +785,13 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 				"colors":         splitParamList(it.Color),
 				"tones":          splitParamList(it.Tone),
 				"moods":          splitParamList(it.Mood),
-				"theme":          it.Theme,
+				"theme":          siteTheme,
 				"displayCopy":    strings.TrimSpace(it.Text),
-				"mode":           firstStr(it.Mode, "pure-image"),
+				"mode":           siteMode,
 				"creationSource": body.Mode,
 				"autoPublish":    false,
 			}
-			if body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" {
+			if body.Mode == "edit" || body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" {
 				sb["promptFromSkill"] = true
 			}
 			if siteSpecID != "" {
@@ -1432,4 +1456,85 @@ func appendChineseTypographyDirective(finalPrompt, mode, layout, theme, displayC
 		return finalPrompt
 	}
 	return finalPrompt + "\n画面文字语言：画面中所有标题与可见文字均须使用简体中文，不得擅自使用英文。"
+}
+
+func annotatePositionLabel(x, y float64) string {
+	h := "中部"
+	switch {
+	case x < 0.33:
+		h = "左侧"
+	case x > 0.67:
+		h = "右侧"
+	}
+	v := "中部"
+	switch {
+	case y < 0.33:
+		v = "上方"
+	case y > 0.67:
+		v = "下方"
+	}
+	if h == "中部" && v == "中部" {
+		return "画面中央"
+	}
+	if h == "中部" {
+		return "画面中" + v
+	}
+	if v == "中部" {
+		return "画面" + h + "中部"
+	}
+	return "画面" + strings.TrimSuffix(h, "侧") + v
+}
+
+// buildAnnotateEditPrompt turns pin annotations (with x/y coordinates and optional
+// numbered visual guide reference image) into a clear image-editing instruction (#67).
+func buildAnnotateEditPrompt(annotations []map[string]any, hasGuide bool) string {
+	var lines []string
+	idx := 0
+	for _, a := range annotations {
+		txt, _ := a["text"].(string)
+		txt = strings.TrimSpace(txt)
+		if txt == "" {
+			continue
+		}
+		idx++
+		x, xOk := a["x"].(float64)
+		y, yOk := a["y"].(float64)
+		if xOk && yOk {
+			if x < 0 {
+				x = 0
+			} else if x > 1 {
+				x = 1
+			}
+			if y < 0 {
+				y = 0
+			} else if y > 1 {
+				y = 1
+			}
+			pos := annotatePositionLabel(x, y)
+			lines = append(lines, fmt.Sprintf("%d. 【标记 %d · %s（约 x=%.0f%%, y=%.0f%%）】：%s", idx, idx, pos, x*100, y*100, txt))
+		} else {
+			lines = append(lines, fmt.Sprintf("%d. 【标记 %d】：%s", idx, idx, txt))
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("请严格基于所附参考图进行局部精准编辑修改：\n")
+	if hasGuide {
+		sb.WriteString("- 参考图 1 是需要修改的干净原图；参考图 2 是带醒目红色编号圆点（1、2、3…）的位置指引图，红色编号圆点仅用于指示修改坐标。\n")
+	} else {
+		sb.WriteString("- 参考图 1 是需要修改的原图。\n")
+	}
+	sb.WriteString("- 必须严格保留原图的整体构图、画风笔触、材质肌理、配色氛围、原有文字与所有未标注区域完全不变。\n")
+	sb.WriteString("- 仅在以下标注位置执行对应修改：\n")
+	for _, ln := range lines {
+		sb.WriteString("  " + ln + "\n")
+	}
+	if hasGuide {
+		sb.WriteString("- 重要：最终生成的图片中严禁保留或出现任何红色圆点、白圈或数字编号标记；新增或修改的内容必须自然融入原图的画风、透视与光影中。")
+	} else {
+		sb.WriteString("- 新增或修改的内容必须自然融入原图的画风、透视与光影中。")
+	}
+	return sb.String()
 }
