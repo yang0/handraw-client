@@ -376,7 +376,7 @@ func (c *Client) Task(ctx context.Context, taskID, requestID string) (GenerateRe
 func (c *Client) ArticlePlan(ctx context.Context, body map[string]any) (json.RawMessage, error) {
 	var out json.RawMessage
 	c2 := *c
-	c2.HTTP = &http.Client{Timeout: 4 * time.Minute}
+	c2.HTTP = &http.Client{Timeout: 4 * time.Minute, Transport: c.HTTP.Transport}
 	err := c2.Do(ctx, "POST", "/api/studio/article-plan", body, &out)
 	return out, err
 }

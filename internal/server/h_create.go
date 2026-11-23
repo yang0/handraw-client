@@ -773,6 +773,16 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 				siteMode = "edit"
 				siteTheme = itemPrompts[i]
 			}
+			siteCreationSource := body.Mode
+			// Local desktop Markdown articles are not cloud-saved articles with remote articleId/slotId;
+			// the website rejects creationSource="article" without those cloud bindings (#72).
+			if siteCreationSource == "article" {
+				if len(body.Items) > 1 {
+					siteCreationSource = "series"
+				} else {
+					siteCreationSource = "single"
+				}
+			}
 			sb := map[string]any{
 				"model":          rawModel,
 				"resolution":     spec.Resolution,
@@ -788,7 +798,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 				"theme":          siteTheme,
 				"displayCopy":    strings.TrimSpace(it.Text),
 				"mode":           siteMode,
-				"creationSource": body.Mode,
+				"creationSource": siteCreationSource,
 				"autoPublish":    false,
 			}
 			if body.Mode == "edit" || body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" {
@@ -956,6 +966,28 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 	return map[string]any{"cards": cards, "source": "local"}, nil
 }
 
+func buildArticlePlanMessages(title, content string, includeCover bool) []providers.ChatMessage {
+	sys := strings.TrimSpace(`你是资深的公众号与专栏插画视觉总监。请通读用户提供的 Markdown 文章，为其规划最能提升阅读氛围与传播力的配图方案。
+
+核心要求：
+1. 若需要封面（includeCover=true），第 1 个槽位必须是 role="cover"（anchor 留空 ""），提炼整篇文章最具情绪张力或视觉隐喻的封面画面。
+2. 正文插图（role="inline"）根据文章篇幅规划 2~5 张，均匀分布在关键情绪转折点、核心观点或故事节点之后。
+3. 每个 inline 槽位的 anchor 必须是文章原文中真实存在的连续文字片段（10~35 字，不要编造或改写），以便精准定位插入位置。
+4. 每个槽位的 theme 必须是具体的中文视觉画面描述（35~90 字：包含画面主体、动作神态、场景道具、光影氛围与构图隐喻），严禁机械照抄原文段落或 Markdown 标记符号。
+5. title 为简洁的 4~12 字配图小标题；recommendedStyles 推荐 2~3 个合适的画风编号（如 "FA-013", "FB-001", "FE-001"）。
+6. 严格只输出一个合法 JSON 对象，不要包含额外解释或代码块围栏，格式如下：
+{"recommendedStyles":["FA-013"],"slots":[{"role":"cover|inline","anchor":"正文原文片段或空","title":"配图小标题","theme":"具体视觉画面描述","layout":""}]}`)
+	trimmedContent := content
+	if runes := []rune(trimmedContent); len(runes) > 9000 {
+		trimmedContent = string(runes[:9000]) + "\n……（正文已截断）"
+	}
+	user := fmt.Sprintf("请分析下面文章，规划配图位（包含封面：%t）。\n文章标题：%s\n\n文章正文：\n%s", includeCover, firstStr(strings.TrimSpace(title), "（未命名）"), trimmedContent)
+	return []providers.ChatMessage{
+		{Role: "system", Content: sys},
+		{Role: "user", Content: user},
+	}
+}
+
 func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
 		Title        string `json:"title"`
@@ -980,21 +1012,64 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 	if err != nil {
 		return nil, err
 	}
-	planWithSite := func() (map[string]any, error) {
+	planMsgs := buildArticlePlanMessages(body.Title, body.Content, includeCover)
+
+	planWithSiteEndpoint := func() (map[string]any, error) {
 		request := articlePlanRequest(body.Title, body.Content, body.StyleID, body.CoverRatio, body.InlineRatio, includeCover)
 		raw, err := s.Site.ArticlePlan(r.Context(), request)
 		if err != nil {
 			return nil, err
 		}
+		src := planningSource(raw)
+		if src == "local" {
+			return nil, bad("网站 article-plan 接口返回了模板结果，改用 AI 对话规划")
+		}
 		slots, styles := articleSlots(raw, body.Content, body.CoverRatio, body.InlineRatio, includeCover)
 		if len(slots) == 0 {
 			return nil, bad("线上接口未能规划出有效配图位")
 		}
-		return map[string]any{"slots": slots, "recommendedStyles": styles, "source": planningSource(raw)}, nil
+		return map[string]any{"slots": slots, "recommendedStyles": styles, "source": src, "model": "官方文章规划服务"}, nil
+	}
+	planWithSiteAIChat := func() (map[string]any, error) {
+		res, err := s.Site.AIChat(r.Context(), site.AIChatRequest{
+			Capability:   "text",
+			Messages:     planMsgs,
+			JSONMode:     true,
+			FeatureScope: "article_plan",
+		})
+		if err != nil {
+			return nil, err
+		}
+		slots, styles := articleSlots(json.RawMessage(extractJSON(firstStr(res.Content, res.Text))), body.Content, body.CoverRatio, body.InlineRatio, includeCover)
+		if len(slots) == 0 {
+			return nil, bad("官方智能文字服务返回的配图规划无法解析")
+		}
+		return map[string]any{
+			"slots":             slots,
+			"recommendedStyles": styles,
+			"source":            "site",
+			"model":             firstStr(res.Service, "官方智能文字服务"),
+		}, nil
+	}
+	planWithSite := func() (map[string]any, error) {
+		if res, err := planWithSiteEndpoint(); err == nil {
+			return res, nil
+		} else {
+			if chatRes, chatErr := planWithSiteAIChat(); chatErr == nil {
+				return chatRes, nil
+			} else {
+				return nil, fmt.Errorf("%v；AI 文本规划失败：%v", err, chatErr)
+			}
+		}
 	}
 	planWithProvider := func(tp settings.Provider, model string) (map[string]any, error) {
-		ask := fmt.Sprintf("分析下面文章，规划配图位（包含封面：%t）。正文 anchor 必须引用正文中的原文。返回严格 JSON: {\"recommendedStyles\":[],\"slots\":[{\"role\":\"cover|inline\",\"anchor\":\"\",\"title\":\"\",\"theme\":\"\"}]}\n\n标题：%s\n正文：%s", includeCover, body.Title, body.Content)
-		reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: ask}}, true)
+		reply, err := providers.Chat(r.Context(), tp, model, planMsgs, true)
+		if err != nil {
+			// Some OpenAI-compatible relays reject response_format=json_object; retry once without JSONMode.
+			if retryReply, retryErr := providers.Chat(r.Context(), tp, model, planMsgs, false); retryErr == nil {
+				reply, err = retryReply, nil
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1002,8 +1077,16 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 		if len(slots) == 0 {
 			return nil, bad("自定义文本模型返回的配图规划无法解析")
 		}
-		return map[string]any{"slots": slots, "recommendedStyles": styles, "source": "provider"}, nil
+		return map[string]any{
+			"slots":             slots,
+			"recommendedStyles": styles,
+			"source":            "provider",
+			"model":             model,
+			"provider":          tp.ID,
+		}, nil
 	}
+
+	var fallbackReason string
 	switch route.Mode {
 	case "provider":
 		return planWithProvider(route.Provider, route.Model)
@@ -1013,15 +1096,25 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 		}
 		return planWithSite()
 	default:
+		var errs []string
 		if s.Site.LoggedIn() {
 			if res, err := planWithSite(); err == nil {
 				return res, nil
+			} else {
+				errs = append(errs, "官方接口："+err.Error())
 			}
 		}
 		if tp, model, ok := findTextProviderFor("text"); ok {
 			if res, err := planWithProvider(tp, model); err == nil {
 				return res, nil
+			} else {
+				errs = append(errs, "自定义模型："+err.Error())
 			}
+		}
+		if len(errs) > 0 {
+			fallbackReason = strings.Join(errs, "；")
+		} else {
+			fallbackReason = "未登录手绘风账号且未配置自定义文本模型"
 		}
 	}
 	// Heuristic local fallback: split headings/paragraphs into cover + inline illustration slots.
@@ -1029,8 +1122,8 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 	slots := []map[string]any{}
 	if includeCover {
 		slots = append(slots, map[string]any{
-			"id": "slot_cover", "role": "cover", "anchor": body.Title, "title": "文章封面",
-			"theme": firstStr(body.Title, firstNRunes(body.Content, 40)), "ratio": body.CoverRatio,
+			"id": "slot_cover", "role": "cover", "anchor": "", "title": "文章封面",
+			"theme": firstStr(stripMarkdownLead(body.Title), firstNRunes(stripMarkdownLead(body.Content), 40)), "ratio": body.CoverRatio,
 		})
 	}
 	step := 1
@@ -1041,11 +1134,12 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 		slots = append(slots, map[string]any{
 			"id": fmt.Sprintf("slot_%d", len(slots)), "role": "inline",
 			"anchor": firstNRunes(paras[i], 28), "title": fmt.Sprintf("正文配图 %d", len(slots)),
-			"theme": firstNRunes(paras[i], 80), "ratio": body.InlineRatio,
+			"theme": firstNRunes(stripMarkdownLead(paras[i]), 80), "ratio": body.InlineRatio,
 		})
 	}
 	return map[string]any{
 		"source":            "local",
+		"fallbackReason":    fallbackReason,
 		"recommendedStyles": []string{"FA-013", "FB-001", "FE-001"},
 		"slots":             slots,
 	}, nil

@@ -2574,7 +2574,9 @@ export async function renderArticle(root, ctx, params = {}) {
     }
     planning = true;
     planBtn.disabled = true;
-    planNotice.textContent = "正在分析文章结构与配图位置…";
+    const prevPlanText = planBtn.textContent;
+    planBtn.textContent = "⏳ AI 规划中…";
+    planNotice.textContent = "正在调用 AI 分析文章结构并设计配图方案…";
     const request = {
       title: state.title,
       content: state.content,
@@ -2582,6 +2584,7 @@ export async function renderArticle(root, ctx, params = {}) {
       coverRatio: state.coverRatio,
       inlineRatio: state.inlineRatio,
       includeCover: state.includeCover,
+      modelRef: state.aiTextModelRef || "",
     };
     try {
       const res = await api("POST", "/api/article/plan", request);
@@ -2590,6 +2593,12 @@ export async function renderArticle(root, ctx, params = {}) {
         return;
       }
       const fresh = (res.slots || []).map((sl) => ({ ...sl, id: crypto.randomUUID(), imagePath: "", variants: [], selected: true }));
+      const viaModel = res.model ? `（${res.model}）` : (res.source === "site" ? "（官方智能文字服务）" : (res.source === "provider" ? "（自定义文本模型）" : ""));
+      const noticeMsg = res.source === "local"
+        ? (res.fallbackReason
+            ? `AI 规划暂不可用（${res.fallbackReason}），已降级为本地规则分段模板。`
+            : "已使用本地规则分段模板（未调用 AI，可登录账号或在底部选择文本模型后重试）。")
+        : `AI 规划完成${viaModel}，已生成 ${fresh.length} 个配图位并插入正文对应段落下方。`;
       const apply = () => {
         const used = new Set();
         const merged = fresh.map((sl) => {
@@ -2601,13 +2610,17 @@ export async function renderArticle(root, ctx, params = {}) {
         });
         state.slots = [...merged, ...state.slots.filter((sl) => !used.has(sl.id))];
         state.recommendedStyles = res.recommendedStyles || [];
-        planNotice.textContent = res.source === "local" ? "已使用本地模板规划，封面和插图卡已插入正文中对应段落之后。" : "AI 规划完成，封面和插图卡已插入到正文对应段落下方。";
+        planNotice.textContent = noticeMsg;
+        toast(res.source === "local" ? "AI 暂不可用，已降级为本地模板规划" : `AI 规划完成${viaModel}`);
         renderAll();
         session.persist();
       };
       if (state.slots.length) {
-        showModal("更新配图规划", el("div", { class: "col" }, el("p", null, "匹配的配图位保留已有设置和图片，未匹配的旧图位也会保留，可自行删除。"),
-          ...fresh.map((sl) => el("p", null, `${sl.role === "cover" ? "封面" : "正文"}：${sl.theme}`))), [
+        showModal("更新配图规划", el("div", { class: "col" },
+          el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, noticeMsg),
+          el("p", null, "匹配的配图位保留已有设置和图片，未匹配的旧图位也会保留，可自行删除。"),
+          ...fresh.map((sl) => el("p", null, `${sl.role === "cover" ? "封面" : "正文"}：${sl.theme}`))
+        ), [
           el("button", { type: "button", class: "btn", onClick: closeModal }, "保留当前规划"),
           el("button", { type: "button", class: "btn btn-primary", onClick: () => { closeModal(); apply(); } }, "更新规划"),
         ]);
@@ -2615,9 +2628,11 @@ export async function renderArticle(root, ctx, params = {}) {
       } else apply();
     } catch (e) {
       planNotice.textContent = e.message;
+      toast(e.message || "AI 规划配图失败");
     } finally {
       planning = false;
       planBtn.disabled = false;
+      planBtn.textContent = prevPlanText;
     }
   }
 
@@ -2680,6 +2695,7 @@ export async function renderArticle(root, ctx, params = {}) {
         ]);
         return;
       }
+      slots.forEach((sl) => { sl.error = ""; });
       state.activeRun = { ...res.run, images: res.images };
       state.slotMap = slots.map((sl, i) => ({ id: sl.id, signature: signatures[i] }));
       planNotice.textContent = `已提交 ${slots.length} 张配图，完成后自动插入正文。`;

@@ -72,6 +72,49 @@ func articleBlocks(content string) []map[string]any {
 	return blocks
 }
 
+func stripMarkdownLead(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimLeft(s, "#>*+-` \t")
+	s = strings.ReplaceAll(s, "**", "")
+	s = strings.ReplaceAll(s, "__", "")
+	return strings.TrimSpace(s)
+}
+
+func snapAnchorToContent(anchor, content string, blocks []map[string]any) string {
+	anchor = strings.TrimSpace(anchor)
+	if anchor != "" && strings.Contains(content, anchor) {
+		return anchor
+	}
+	if anchor != "" {
+		clean := stripMarkdownLead(anchor)
+		if clean != "" && strings.Contains(content, clean) {
+			return clean
+		}
+		// Match against article blocks by normalized containment or prefix overlap.
+		for _, blk := range blocks {
+			txt, _ := blk["text"].(string)
+			if txt == "" {
+				continue
+			}
+			cleanBlk := stripMarkdownLead(txt)
+			if clean != "" && (strings.Contains(cleanBlk, clean) || strings.Contains(clean, cleanBlk)) {
+				return txt
+			}
+		}
+		// Try matching the first 12 runes of cleaned anchor.
+		prefix := firstNRunes(clean, 12)
+		if utf8.RuneCountInString(prefix) >= 4 {
+			for _, blk := range blocks {
+				txt, _ := blk["text"].(string)
+				if strings.Contains(txt, prefix) {
+					return txt
+				}
+			}
+		}
+	}
+	return anchor
+}
+
 func articleSlots(raw json.RawMessage, content, coverRatio, inlineRatio string, includeCover bool) ([]map[string]any, []string) {
 	var obj struct {
 		Cover             map[string]any   `json:"cover"`
@@ -113,6 +156,9 @@ func articleSlots(raw json.RawMessage, content, coverRatio, inlineRatio string, 
 			if index, ok := row["afterBlockIdx"].(float64); ok && int(index) >= 0 && int(index) < len(blocks) {
 				anchor, _ = blocks[int(index)]["text"].(string)
 			}
+		}
+		if role != "cover" {
+			anchor = snapAnchorToContent(anchor, content, blocks)
 		}
 		slots = append(slots, map[string]any{
 			"role": role, "theme": theme, "anchor": anchor, "ratio": ratio,
