@@ -617,6 +617,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			pr.Primary, pr.Zh = it.Theme, it.Theme
 		}
 		finalPrompt := prompt.ForGeneration(pr, s.Rules())
+		if !body.PromptCustomized && strings.TrimSpace(it.Prompt) == "" {
+			finalPrompt = appendChineseTypographyDirective(finalPrompt, it.Mode, firstStr(it.Layout, galCtx.Layout), it.Theme, it.Text)
+		}
 		if len(galCtx.PromptCues) > 0 {
 			finalPrompt += "\n" + strings.Join(galCtx.PromptCues, "\n")
 		}
@@ -755,13 +758,17 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 				"style1":         it.Style,
 				"style2":         it.Style2,
 				"layout":         it.Layout,
-				"colors":         it.Color,
-				"tone":           it.Tone,
-				"mood":           it.Mood,
+				"colors":         splitParamList(it.Color),
+				"tones":          splitParamList(it.Tone),
+				"moods":          splitParamList(it.Mood),
 				"theme":          it.Theme,
+				"displayCopy":    strings.TrimSpace(it.Text),
 				"mode":           firstStr(it.Mode, "pure-image"),
 				"creationSource": body.Mode,
 				"autoPublish":    false,
+			}
+			if body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" {
+				sb["promptFromSkill"] = true
 			}
 			if siteSpecID != "" {
 				sb["specId"] = siteSpecID
@@ -1380,4 +1387,49 @@ func imageTagHTML(b []byte, alt string) string {
 	}
 	return fmt.Sprintf(`<p style="margin:18px 0;text-align:center;"><img src="data:%s;base64,%s" alt="%s" style="max-width:100%%;border-radius:8px;" /></p>`,
 		mime, base64.StdEncoding.EncodeToString(b), html.EscapeString(alt))
+}
+
+func splitParamList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '+' || r == '、' || r == '/' || r == ';' || r == '；'
+	})
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// appendChineseTypographyDirective locks on-image typography to Simplified Chinese
+// for Chinese graphic-text/poster requests so English style names do not nudge
+// image models into inventing English headings (#63).
+func appendChineseTypographyDirective(finalPrompt, mode, layout, theme, displayCopy string) string {
+	m := strings.ToLower(strings.TrimSpace(mode))
+	isGraphicText := m == "graphic-text" || m == "poster" || (strings.TrimSpace(layout) != "" && m != "pure-image" && m != "pure")
+	if !isGraphicText || strings.TrimSpace(finalPrompt) == "" {
+		return finalPrompt
+	}
+	if strings.Contains(finalPrompt, "画面文字语言：") || strings.Contains(finalPrompt, "简体中文") {
+		return finalPrompt
+	}
+	copyTrim := strings.TrimSpace(displayCopy)
+	if copyTrim != "" {
+		if prompt.DetectLanguage(copyTrim) != "zh" {
+			return finalPrompt
+		}
+		return finalPrompt + "\n画面文字语言：请严格呈现以上中文文案，画面中所有可见文字均须使用简体中文，不得擅自改成或添加英文标题。"
+	}
+	if prompt.DetectLanguage(strings.TrimSpace(theme)) != "zh" {
+		return finalPrompt
+	}
+	return finalPrompt + "\n画面文字语言：画面中所有标题与可见文字均须使用简体中文，不得擅自使用英文。"
 }

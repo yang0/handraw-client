@@ -444,6 +444,7 @@ func buildChatSystemPrompt(p *resources.Pack, activeSkills []skills.Skill, invok
 - 如果用户只是普通聊天、问问题或探讨方案，直接文字回复，不要误调用生图工具。
 - 生图时请优先直接从下方目录选定 style / layout / color 编号并立即调用 generate_images；不要反复调用 search_resources（仅在确需查某画风特征细节时最多调用 1-2 次）。
 - 默认比例为 3:4（除非用户在消息中另有要求或指明海报 9:16 / 横版等）。
+- 用户以中文提出需求且未明确要求英文或双语时，海报/图文模式的 items[].text 必须全部使用简体中文文案（不要擅自在主标题前加英文大字）；海报/社媒卡模式务必把需要呈现在画面中的中文文案完整填入 items[].text。
 - 回复简洁清晰，使用中文 Markdown 排版。`)
 
 	if catalog := buildCompactCatalogBlock(p); catalog != "" {
@@ -519,7 +520,7 @@ func chatAgentToolDefs() []providers.ToolDef {
 									"layout": map[string]any{"type": "string", "description": "可选图型编号，如 SC-001"},
 									"color":  map[string]any{"type": "string", "description": "可选主题色编号"},
 									"ratio":  map[string]any{"type": "string", "description": "单张比例，可省略继承默认"},
-									"text":   map[string]any{"type": "string", "description": "图文/海报模式下画面内文字"},
+									"text":   map[string]any{"type": "string", "description": "图文/海报模式下画面内必现文字；中文需求下默认全部使用简体中文文案，不要擅自添加英文主标题"},
 									"mode":   map[string]any{"type": "string", "enum": []string{"graphic-text", "pure-image", "poster"}},
 								},
 								"required": []string{"theme"},
