@@ -258,13 +258,20 @@ func scanVaultTree(rootAbs string) ([]vaultNode, int) {
 				if low == "node_modules" || low == "__pycache__" || low == "vendor" {
 					continue
 				}
+				subDir := filepath.Join(dir, name)
 				subRel := name
 				if relPrefix != "" {
 					subRel = relPrefix + "/" + name
 				}
-				children := walk(filepath.Join(dir, name), subRel, depth+1)
+				children := walk(subDir, subRel, depth+1)
 				if len(children) == 0 {
-					continue
+					// Keep genuinely empty newly-created folders visible so users can select them
+					// and create notes inside, while still pruning non-empty asset-only folders (#71).
+					subEntries, rErr := os.ReadDir(subDir)
+					if rErr != nil || len(subEntries) > 0 || low == "assets" || low == "images" || low == "attachments" {
+						continue
+					}
+					children = []vaultNode{}
 				}
 				dirs = append(dirs, vaultNode{
 					Name:     name,
@@ -657,4 +664,286 @@ func (s *Server) articleVaultDeleteFile(w http.ResponseWriter, r *http.Request) 
 		_ = s.DB.DeleteDocHard("article_meta", vaultMetaKey(absPath))
 	}
 	return map[string]any{"ok": true, "deleted": normRel}, nil
+}
+
+// resolveVaultRelPath validates any relative path (file or directory) strictly inside rootDir.
+func resolveVaultRelPath(rootDir, relPath string, allowRoot bool) (absPath string, normRel string, err error) {
+	rootAbs, err := filepath.Abs(rootDir)
+	if err != nil {
+		return "", "", err
+	}
+	raw := strings.TrimSpace(strings.ReplaceAll(relPath, "\\", "/"))
+	raw = strings.Trim(raw, "/")
+	if raw == "" || raw == "." {
+		if allowRoot {
+			return rootAbs, "", nil
+		}
+		return "", "", bad("请指定文章库内的相对路径")
+	}
+	if strings.Contains(raw, ":") {
+		return "", "", bad("路径只能是文章库内的相对路径")
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(raw))
+	if cleaned == "." || cleaned == ".." || filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+		return "", "", bad("不允许访问文章库目录之外的路径")
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(cleaned), "/") {
+		if seg == "" || seg == "." || seg == ".." || strings.HasPrefix(seg, ".") {
+			return "", "", bad("名称无效或不能以点号开头")
+		}
+		if strings.ContainsAny(seg, `<>:"|?*`) {
+			return "", "", bad("名称包含非法字符")
+		}
+	}
+	target := filepath.Join(rootAbs, cleaned)
+	relCheck, err := filepath.Rel(rootAbs, target)
+	if err != nil || relCheck == "." || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(os.PathSeparator)) {
+		return "", "", bad("不允许访问文章库目录之外的路径")
+	}
+	if realRoot, rErr := filepath.EvalSymlinks(rootAbs); rErr == nil {
+		checkPath := target
+		if _, stErr := os.Stat(checkPath); stErr != nil {
+			checkPath = filepath.Dir(target)
+		}
+		if realCheck, cErr := filepath.EvalSymlinks(checkPath); cErr == nil {
+			if relReal, err := filepath.Rel(realRoot, realCheck); err != nil || strings.HasPrefix(relReal, "..") {
+				return "", "", bad("不允许访问文章库目录之外的符号链接")
+			}
+		}
+	}
+	return target, filepath.ToSlash(relCheck), nil
+}
+
+func (s *Server) migrateVaultMeta(oldAbs, newAbs, newRel string) {
+	if s.DB == nil {
+		return
+	}
+	oldKey := vaultMetaKey(oldAbs)
+	newKey := vaultMetaKey(newAbs)
+	if oldKey == newKey {
+		return
+	}
+	if doc, err := s.DB.GetDoc("article_meta", oldKey); err == nil && len(doc.Data) > 0 {
+		next := store.Doc{
+			Kind: "article_meta",
+			ID:   newKey,
+			Name: newRel,
+			Data: doc.Data,
+		}
+		_ = s.DB.PutDoc(&next)
+		_ = s.DB.DeleteDocHard("article_meta", oldKey)
+	}
+}
+
+func (s *Server) articleVaultMkdir(w http.ResponseWriter, r *http.Request) (any, error) {
+	dir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	absPath, normRel, err := resolveVaultRelPath(dir, body.Path, false)
+	if err != nil {
+		return nil, err
+	}
+	if st, stErr := os.Stat(absPath); stErr == nil {
+		if st.IsDir() {
+			return nil, bad("该文件夹已存在：" + normRel)
+		}
+		return nil, bad("同名文件已存在：" + normRel)
+	}
+	if err := os.MkdirAll(absPath, 0o755); err != nil {
+		return nil, bad("创建文件夹失败：" + err.Error())
+	}
+	return map[string]any{
+		"ok":   true,
+		"path": normRel,
+		"name": filepath.Base(absPath),
+	}, nil
+}
+
+func (s *Server) articleVaultRename(w http.ResponseWriter, r *http.Request) (any, error) {
+	dir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	var body struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	fromAbs, fromRel, err := resolveVaultRelPath(dir, body.From, false)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(fromAbs)
+	if err != nil {
+		return nil, notFound("找不到原路径：" + fromRel)
+	}
+	toInput := strings.TrimSpace(body.To)
+	if !info.IsDir() && toInput != "" && !isMarkdownExt(toInput) {
+		toInput += ".md"
+	}
+	toAbs, toRel, err := resolveVaultRelPath(dir, toInput, false)
+	if err != nil {
+		return nil, err
+	}
+	if fromRel == toRel {
+		return map[string]any{"ok": true, "from": fromRel, "to": toRel, "isDir": info.IsDir()}, nil
+	}
+	if !sameVaultPath(fromAbs, toAbs) {
+		if _, stErr := os.Stat(toAbs); stErr == nil {
+			return nil, bad("目标路径已存在：" + toRel)
+		}
+	}
+	if info.IsDir() && strings.HasPrefix(strings.ToLower(toRel)+"/", strings.ToLower(fromRel)+"/") {
+		return nil, bad("不能将文件夹移动到自身子目录内")
+	}
+
+	// Collect markdown paths inside directory before rename so we can migrate sidecar metadata.
+	var movedMDs []string
+	if info.IsDir() {
+		_ = filepath.WalkDir(fromAbs, func(p string, d os.DirEntry, wErr error) error {
+			if wErr == nil && !d.IsDir() && isMarkdownExt(d.Name()) {
+				if rel, rErr := filepath.Rel(fromAbs, p); rErr == nil {
+					movedMDs = append(movedMDs, rel)
+				}
+			}
+			return nil
+		})
+	}
+	if err := os.MkdirAll(filepath.Dir(toAbs), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(fromAbs, toAbs); err != nil {
+		return nil, bad("重命名失败：" + err.Error())
+	}
+	if info.IsDir() {
+		for _, subRel := range movedMDs {
+			oldFile := filepath.Join(fromAbs, subRel)
+			newFile := filepath.Join(toAbs, subRel)
+			s.migrateVaultMeta(oldFile, newFile, filepath.ToSlash(filepath.Join(toRel, subRel)))
+		}
+	} else {
+		s.migrateVaultMeta(fromAbs, toAbs, toRel)
+	}
+	return map[string]any{
+		"ok":    true,
+		"from":  fromRel,
+		"to":    toRel,
+		"name":  filepath.Base(toAbs),
+		"isDir": info.IsDir(),
+	}, nil
+}
+
+func (s *Server) articleVaultDuplicate(w http.ResponseWriter, r *http.Request) (any, error) {
+	dir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	srcAbs, srcRel, err := resolveVaultMarkdownPath(dir, body.Path, false)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(srcAbs)
+	if err != nil {
+		return nil, notFound("找不到原 Markdown 文件：" + srcRel)
+	}
+	ext := filepath.Ext(srcAbs)
+	stem := strings.TrimSuffix(filepath.Base(srcAbs), ext)
+	parentAbs := filepath.Dir(srcAbs)
+	var dstAbs string
+	for i := 1; i <= 99; i++ {
+		suffix := " 副本"
+		if i > 1 {
+			suffix = fmt.Sprintf(" 副本 %d", i)
+		}
+		cand := filepath.Join(parentAbs, stem+suffix+ext)
+		if _, stErr := os.Stat(cand); os.IsNotExist(stErr) {
+			dstAbs = cand
+			break
+		}
+	}
+	if dstAbs == "" {
+		return nil, bad("无法生成可用的副本文件名")
+	}
+	if err := os.WriteFile(dstAbs, raw, 0o644); err != nil {
+		return nil, bad("复制文件失败：" + err.Error())
+	}
+	relNew, _ := filepath.Rel(dir, dstAbs)
+	return map[string]any{
+		"ok":   true,
+		"path": filepath.ToSlash(relNew),
+		"name": filepath.Base(dstAbs),
+	}, nil
+}
+
+func (s *Server) articleVaultDeleteDir(w http.ResponseWriter, r *http.Request) (any, error) {
+	dir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	absPath, normRel, err := resolveVaultRelPath(dir, r.URL.Query().Get("path"), false)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(absPath)
+	if err != nil || !info.IsDir() {
+		return nil, notFound("找不到该文件夹：" + normRel)
+	}
+	var mdFiles []string
+	_ = filepath.WalkDir(absPath, func(p string, d os.DirEntry, wErr error) error {
+		if wErr == nil && !d.IsDir() && isMarkdownExt(d.Name()) {
+			mdFiles = append(mdFiles, p)
+		}
+		return nil
+	})
+	if err := os.RemoveAll(absPath); err != nil {
+		return nil, bad("删除文件夹失败：" + err.Error())
+	}
+	if s.DB != nil {
+		for _, fp := range mdFiles {
+			_ = s.DB.DeleteDocHard("article_meta", vaultMetaKey(fp))
+		}
+	}
+	return map[string]any{"ok": true, "deleted": normRel}, nil
+}
+
+func (s *Server) articleVaultReveal(w http.ResponseWriter, r *http.Request) (any, error) {
+	dir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	_ = decode(r, &body)
+	absPath, _, err := resolveVaultRelPath(dir, body.Path, true)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, notFound("本地路径不存在")
+	}
+	target := absPath
+	if !info.IsDir() {
+		target = filepath.Dir(absPath)
+	}
+	if s.Host == nil {
+		return nil, bad("当前环境不支持打开系统文件管理器")
+	}
+	return okv, s.Host.OpenPath(target)
 }

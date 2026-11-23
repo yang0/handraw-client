@@ -92,6 +92,11 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/article/vault/file", s.h(s.articleVaultReadFile))
 	m.HandleFunc("PUT /api/article/vault/file", s.h(s.articleVaultWriteFile))
 	m.HandleFunc("DELETE /api/article/vault/file", s.h(s.articleVaultDeleteFile))
+	m.HandleFunc("POST /api/article/vault/mkdir", s.h(s.articleVaultMkdir))
+	m.HandleFunc("POST /api/article/vault/rename", s.h(s.articleVaultRename))
+	m.HandleFunc("POST /api/article/vault/duplicate", s.h(s.articleVaultDuplicate))
+	m.HandleFunc("DELETE /api/article/vault/dir", s.h(s.articleVaultDeleteDir))
+	m.HandleFunc("POST /api/article/vault/reveal", s.h(s.articleVaultReveal))
 	m.HandleFunc("POST /api/canvas/assistant", s.h(s.canvasAssistant))
 	m.HandleFunc("POST /api/images/import", s.h(s.uploadImage))
 

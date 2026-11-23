@@ -43,6 +43,7 @@ export async function renderArticle(root, ctx, params = {}) {
   const session = studioSession(host, "article", {
     docId: params.docId || "",
     activeFile: "",
+    selectedDir: "",
     editorActive: Boolean(params.docId),
     dirty: false,
     title: "",
@@ -241,8 +242,56 @@ export async function renderArticle(root, ctx, params = {}) {
     )
   );
 
-  // 2. Left Sidebar: Obsidian-style Local Markdown Vault File Tree + Bottom Vault Switcher (#65, #66)
+  // 2. Left Sidebar: Obsidian-style Local Markdown Vault File Tree + Bottom Vault Switcher (#65, #66, #71)
+  function makeIconSvg(d, size = 15) {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", String(size));
+    svg.setAttribute("height", String(size));
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.45");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    const paths = Array.isArray(d) ? d : [d];
+    paths.forEach((pd) => {
+      const p = document.createElementNS(ns, "path");
+      p.setAttribute("d", pd);
+      svg.appendChild(p);
+    });
+    return svg;
+  }
+
+  const ICONS = {
+    newNote: ["M9.5 2H4.2A1.2 1.2 0 0 0 3 3.2v9.6A1.2 1.2 0 0 0 4.2 14h7.6a1.2 1.2 0 0 0 1.2-1.2V6.5", "M12.6 2.4a1.1 1.1 0 0 1 1.55 1.55L8.6 9.5l-2.1.55.55-2.1 5.55-5.55Z"],
+    newFolder: ["M2 4.2A1.2 1.2 0 0 1 3.2 3h2.9l1.3 1.5h5.4A1.2 1.2 0 0 1 14 5.7v6.1a1.2 1.2 0 0 1-1.2 1.2H3.2A1.2 1.2 0 0 1 2 11.8V4.2Z", "M8 7v3.6", "M6.2 8.8h3.6"],
+    collapse: ["M4.5 5.5 8 2.5l3.5 3", "M4.5 10.5 8 13.5l3.5-3"],
+    expand: ["M4.5 6.5 8 3.5l3.5 3", "M4.5 9.5 8 12.5l3.5-3"],
+    refresh: ["M13 8a5 5 0 1 1-1.35-3.42", "M13 2.5v2.7h-2.7"],
+    rename: ["M11.8 2.7a1.2 1.2 0 0 1 1.7 1.7L6 11.9l-2.6.7.7-2.6 7.7-7.3Z"],
+    duplicate: ["M5.5 5.5h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Z", "M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"],
+    reveal: ["M2.2 4.5A1.2 1.2 0 0 1 3.4 3.3h2.8l1.2 1.4h5.2a1.2 1.2 0 0 1 1.2 1.2v5.8a1.2 1.2 0 0 1-1.2 1.2H3.4a1.2 1.2 0 0 1-1.2-1.2V4.5Z"],
+    copy: ["M6 2.8h5.6a1.2 1.2 0 0 1 1.2 1.2v6.6", "M4.4 5.2h5.2a1.2 1.2 0 0 1 1.2 1.2v6a1.2 1.2 0 0 1-1.2 1.2H4.4a1.2 1.2 0 0 1-1.2-1.2v-6a1.2 1.2 0 0 1 1.2-1.2Z"],
+    trash: ["M3 4.5h10", "M6 4.5V3.2A1 1 0 0 1 7 2.2h2a1 1 0 0 1 1 1v1.3", "M4.5 4.5l.6 8.3a1.1 1.1 0 0 0 1.1 1h3.6a1.1 1.1 0 0 0 1.1-1l.6-8.3"],
+    open: ["M9.5 2.5h4v4", "M13.5 2.5 8 8", "M11.5 9v3.3a1.2 1.2 0 0 1-1.2 1.2H3.7a1.2 1.2 0 0 1-1.2-1.2V5.7a1.2 1.2 0 0 1 1.2-1.2H7"],
+  };
+
   const sidebarCountBadge = el("span", { class: "ic-vault-count-pill" });
+  const newNoteBtn = el("button", {
+    type: "button",
+    class: "ic-vault-ico-btn",
+    title: "新建 Markdown 文件",
+    "aria-label": "新建 Markdown 文件",
+    onClick: () => openNewMarkdownModal(state.selectedDir || ""),
+  }, makeIconSvg(ICONS.newNote));
+  const newFolderBtn = el("button", {
+    type: "button",
+    class: "ic-vault-ico-btn",
+    title: "新建文件夹",
+    "aria-label": "新建文件夹",
+    onClick: () => openNewFolderModal(state.selectedDir || ""),
+  }, makeIconSvg(ICONS.newFolder));
   const collapseAllBtn = el("button", {
     type: "button",
     class: "ic-vault-ico-btn",
@@ -256,7 +305,7 @@ export async function renderArticle(root, ctx, params = {}) {
       persistExpanded();
       renderSidebar();
     },
-  }, "⊟");
+  }, makeIconSvg(ICONS.collapse));
 
   const vaultFilterIn = el("input", {
     type: "search",
@@ -269,7 +318,20 @@ export async function renderArticle(root, ctx, params = {}) {
     renderSidebar();
   });
 
+  const selectedDirBar = el("div", { class: "ic-vault-selected-dir hidden" });
   const treeBox = el("div", { class: "ic-vault-tree", role: "tree", "aria-label": "本地 Markdown 文件树" });
+  treeBox.addEventListener("click", (e) => {
+    if (e.target === treeBox && state.selectedDir) {
+      state.selectedDir = "";
+      renderSidebar();
+      session.persist();
+    }
+  });
+  treeBox.addEventListener("contextmenu", (e) => {
+    if (e.target === treeBox || e.target.closest(".ic-vault-tree-empty")) {
+      openTreeContextMenu(e, { kind: "root", path: "", name: vault.name || "根目录" });
+    }
+  });
   const legacyDraftsWrap = el("details", { class: "ic-vault-legacy hidden" });
 
   const vaultSwitcherName = el("span", { class: "ic-vault-switcher-name" }, vault.name || "articles");
@@ -317,12 +379,14 @@ export async function renderArticle(root, ctx, params = {}) {
         sidebarCountBadge
       ),
       el("div", { class: "ic-vault-actions" },
-        el("button", { type: "button", class: "ic-vault-ico-btn", title: "新建 Markdown 文件", "aria-label": "新建 Markdown 文件", onClick: openNewMarkdownModal }, "＋"),
+        newNoteBtn,
+        newFolderBtn,
         collapseAllBtn,
-        el("button", { type: "button", class: "ic-vault-ico-btn", title: "刷新目录树", "aria-label": "刷新目录树", onClick: refreshVaultTree }, "↻")
+        el("button", { type: "button", class: "ic-vault-ico-btn", title: "刷新目录树", "aria-label": "刷新目录树", onClick: refreshVaultTree }, makeIconSvg(ICONS.refresh))
       )
     ),
     vaultFilterIn,
+    selectedDirBar,
     treeBox,
     legacyDraftsWrap,
     vaultFooter
@@ -702,6 +766,30 @@ export async function renderArticle(root, ctx, params = {}) {
 
   let vaultPopoverEl = null;
   let vaultPopoverCleanup = null;
+  let treeCtxMenuEl = null;
+  let treeCtxMenuCleanup = null;
+  let treeCtxTargetEl = null;
+
+  function parentDirOf(relPath) {
+    const clean = String(relPath || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const idx = clean.lastIndexOf("/");
+    return idx > 0 ? clean.slice(0, idx) : "";
+  }
+
+  function closeTreeContextMenu() {
+    if (treeCtxMenuCleanup) {
+      treeCtxMenuCleanup();
+      treeCtxMenuCleanup = null;
+    }
+    if (treeCtxMenuEl) {
+      treeCtxMenuEl.remove();
+      treeCtxMenuEl = null;
+    }
+    if (treeCtxTargetEl) {
+      treeCtxTargetEl.classList.remove("is-ctx-target");
+      treeCtxTargetEl = null;
+    }
+  }
 
   function closeVaultPopover() {
     if (vaultPopoverCleanup) {
@@ -717,11 +805,13 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function applyVaultPayload(res, { resetEditor = false } = {}) {
+    closeTreeContextMenu();
     vault = res || vault;
     if (!Array.isArray(vault.vaults)) vault.vaults = [];
     loadExpandedForVault(vault.dir, vault.tree);
     if (resetEditor) {
       state.activeFile = "";
+      state.selectedDir = "";
       state.docId = "";
       state.editorActive = false;
       state.dirty = false;
@@ -960,6 +1050,7 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function openVaultPopover() {
+    closeTreeContextMenu();
     closeVaultPopover();
     const list = Array.isArray(vault.vaults) ? vault.vaults : [];
     const nameCounts = new Map();
@@ -1102,43 +1193,468 @@ export async function renderArticle(root, ctx, params = {}) {
     else openVaultPopover();
   }
 
-  function openNewMarkdownModal() {
+  function buildTargetDirBanner(initialDir, onChange) {
+    let dir = String(initialDir || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const banner = el("div", { class: "ic-vault-modal-target" });
+    const render = () => {
+      clear(banner);
+      banner.appendChild(el("span", { class: "ic-vault-modal-target-label" }, "位置"));
+      banner.appendChild(el("span", { class: "ic-vault-modal-target-path mono", title: dir || vault.dir || "" },
+        dir ? `${dir}/` : `${vault.name || "根目录"}（根目录）`
+      ));
+      if (dir) {
+        banner.appendChild(el("button", {
+          type: "button",
+          class: "ic-vault-modal-target-reset",
+          onClick: () => {
+            dir = "";
+            onChange("");
+            render();
+          },
+        }, "切到根目录"));
+      }
+    };
+    render();
+    return { el: banner, getDir: () => dir };
+  }
+
+  function openNewMarkdownModal(targetDir) {
+    const initialDir = typeof targetDir === "string" ? targetDir : (state.selectedDir || "");
+    let currentDir = String(initialDir || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const targetBanner = buildTargetDirBanner(currentDir, (next) => { currentDir = next; });
     const pathIn = el("input", {
       class: "input",
-      placeholder: "例如：春日手账.md 或 2026/咖啡笔记.md",
+      placeholder: currentDir ? "例如：春日手账 或 子目录/咖啡笔记" : "例如：春日手账.md 或 2026/咖啡笔记.md",
     });
-    showModal("新建本地 Markdown 文章", el("div", { class: "col", style: { gap: "8px" } },
-      el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, `将在当前目录（${vault.name || vault.dir}）下创建 .md 文件，支持用 / 创建子文件夹：`),
-      pathIn
+
+    const submit = async () => {
+      const raw = pathIn.value.trim().replace(/\\/g, "/").replace(/^\/+/, "");
+      if (!raw) return toast("请输入文件名");
+      const fullRel = currentDir ? `${currentDir}/${raw}` : raw;
+      const baseName = raw.split("/").pop().replace(/\.(md|markdown)$/i, "") || "未命名文章";
+      try {
+        const created = await api("PUT", "/api/article/vault/file", {
+          path: fullRel,
+          title: baseName,
+          content: `# ${baseName}\n\n`,
+        });
+        closeModal();
+        const parts = String(created.path || "").split("/");
+        for (let i = 1; i < parts.length; i++) {
+          expandedDirs.add(parts.slice(0, i).join("/"));
+        }
+        persistExpanded();
+        state.selectedDir = parentDirOf(created.path);
+        await refreshVaultTree();
+        await openVaultFile(created.path);
+        toast(`已创建 ${created.path}`);
+      } catch (e) { toast(e.message); }
+    };
+
+    pathIn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      }
+    });
+
+    showModal("新建本地 Markdown 文章", el("div", { class: "col", style: { gap: "10px" } },
+      targetBanner.el,
+      pathIn,
+      el("p", { class: "muted", style: { margin: 0, fontSize: "12px" } }, "自动补全 .md 后缀，也支持用 / 一次创建多级子目录。")
+    ), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", { type: "button", class: "btn btn-primary", onClick: submit }, "创建并编辑"),
+    ]);
+    pathIn.focus();
+  }
+
+  function openNewFolderModal(targetDir) {
+    const initialDir = typeof targetDir === "string" ? targetDir : (state.selectedDir || "");
+    let currentDir = String(initialDir || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const targetBanner = buildTargetDirBanner(currentDir, (next) => { currentDir = next; });
+    const nameIn = el("input", {
+      class: "input",
+      placeholder: currentDir ? "例如：灵感草稿 或 01-素材" : "例如：2026/随笔 或 公众号合集",
+    });
+
+    const submit = async () => {
+      const raw = nameIn.value.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      if (!raw) return toast("请输入文件夹名称");
+      const fullRel = currentDir ? `${currentDir}/${raw}` : raw;
+      try {
+        const created = await api("POST", "/api/article/vault/mkdir", { path: fullRel });
+        closeModal();
+        const parts = String(created.path || "").split("/").filter(Boolean);
+        for (let i = 1; i <= parts.length; i++) {
+          expandedDirs.add(parts.slice(0, i).join("/"));
+        }
+        persistExpanded();
+        state.selectedDir = created.path || fullRel;
+        await refreshVaultTree();
+        session.persist();
+        toast(`已新建文件夹 ${state.selectedDir}`);
+      } catch (e) { toast(e.message); }
+    };
+
+    nameIn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      }
+    });
+
+    showModal("新建文件夹", el("div", { class: "col", style: { gap: "10px" } },
+      targetBanner.el,
+      nameIn,
+      el("p", { class: "muted", style: { margin: 0, fontSize: "12px" } }, "新建后会自动选中该文件夹，随后新建的 Markdown 文件会直接放入其中。")
+    ), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", { type: "button", class: "btn btn-primary", onClick: submit }, "创建文件夹"),
+    ]);
+    nameIn.focus();
+  }
+
+  function rewritePathPrefix(value, oldPrefix, newPrefix) {
+    if (!value) return value;
+    if (value === oldPrefix) return newPrefix;
+    if (value.startsWith(`${oldPrefix}/`)) return `${newPrefix}${value.slice(oldPrefix.length)}`;
+    return value;
+  }
+
+  function openRenameModal(target) {
+    if (!target?.path) return;
+    const isFile = target.kind === "file";
+    const parent = parentDirOf(target.path);
+    const currentBase = target.name || target.path.split("/").pop() || "";
+    const initialVal = isFile ? currentBase.replace(/\.(md|markdown)$/i, "") : currentBase;
+    const nameIn = el("input", {
+      class: "input",
+      value: initialVal,
+      placeholder: isFile ? "输入新文件名（自动保留 .md）" : "输入新文件夹名称",
+    });
+
+    const submit = async () => {
+      const raw = nameIn.value.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      if (!raw) return toast(isFile ? "请输入新文件名" : "请输入新文件夹名");
+      if (raw.includes("/")) return toast("名称不能包含斜杠 /");
+      const finalLeaf = isFile && !/\.(md|markdown)$/i.test(raw) ? `${raw}.md` : raw;
+      const toPath = parent ? `${parent}/${finalLeaf}` : finalLeaf;
+      if (toPath === target.path) {
+        closeModal();
+        return;
+      }
+      try {
+        const res = await api("POST", "/api/article/vault/rename", {
+          from: target.path,
+          to: toPath,
+        });
+        closeModal();
+        const nextPath = res.path || toPath;
+        if (isFile) {
+          if (state.activeFile === target.path) {
+            state.activeFile = nextPath;
+            syncTopbarBreadcrumb();
+          }
+        } else {
+          const nextExpanded = new Set();
+          expandedDirs.forEach((p) => nextExpanded.add(rewritePathPrefix(p, target.path, nextPath)));
+          expandedDirs = nextExpanded;
+          persistExpanded();
+          state.selectedDir = rewritePathPrefix(state.selectedDir, target.path, nextPath);
+          if (state.activeFile) {
+            const rewritten = rewritePathPrefix(state.activeFile, target.path, nextPath);
+            if (rewritten !== state.activeFile) {
+              state.activeFile = rewritten;
+              syncTopbarBreadcrumb();
+            }
+          }
+        }
+        await refreshVaultTree();
+        session.persist();
+        toast(`已重命名为 ${nextPath}`);
+      } catch (e) { toast(e.message); }
+    };
+
+    nameIn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      }
+    });
+
+    showModal(isFile ? "重命名 Markdown 文件" : "重命名文件夹", el("div", { class: "col", style: { gap: "8px" } },
+      el("p", { class: "muted mono", style: { margin: 0, fontSize: "12px", wordBreak: "break-all" } }, `当前路径：${target.path}`),
+      nameIn
+    ), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", { type: "button", class: "btn btn-primary", onClick: submit }, "确认重命名"),
+    ]);
+    nameIn.focus();
+    nameIn.select();
+  }
+
+  async function duplicateVaultFile(relPath) {
+    if (!relPath) return;
+    try {
+      const res = await api("POST", "/api/article/vault/duplicate", { path: relPath });
+      const parts = String(res.path || "").split("/");
+      for (let i = 1; i < parts.length; i++) {
+        expandedDirs.add(parts.slice(0, i).join("/"));
+      }
+      persistExpanded();
+      await refreshVaultTree();
+      if (res.path) await openVaultFile(res.path);
+      toast(`已创建副本 ${res.path}`);
+    } catch (e) {
+      toast(e.message || "创建副本失败");
+    }
+  }
+
+  async function revealVaultPath(relPath) {
+    try {
+      await api("POST", "/api/article/vault/reveal", { path: relPath || "" });
+      toast("已在系统文件管理器中打开");
+    } catch (e) {
+      toast(e.message || "打开系统目录失败");
+    }
+  }
+
+  async function copyVaultRelPath(relPath) {
+    const text = relPath || vault.dir || "";
+    if (!text) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = el("textarea", { value: text, style: { position: "fixed", opacity: "0" } });
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+      toast(`已复制路径：${text}`);
+    } catch {
+      toast("复制路径失败");
+    }
+  }
+
+  function confirmDeleteFile(node) {
+    if (!node?.path) return;
+    showModal("删除本地 Markdown 文件", el("p", null, `确定删除「${node.path}」吗？该操作会直接从本地目录移除文件。`), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", {
+        type: "button",
+        class: "btn btn-danger",
+        onClick: async () => {
+          try {
+            await api("DELETE", `/api/article/vault/file?path=${encodeURIComponent(node.path)}`);
+            closeModal();
+            if (state.activeFile === node.path) {
+              state.activeFile = "";
+              state.editorActive = false;
+              state.dirty = false;
+            }
+            await refreshVaultTree();
+            renderStageMode();
+            session.persist();
+            toast(`已删除 ${node.name || node.path}`);
+          } catch (err) { toast(err.message); }
+        },
+      }, "确认删除"),
+    ]);
+  }
+
+  function confirmDeleteDir(node) {
+    if (!node?.path) return;
+    showModal("删除文件夹", el("div", { class: "col", style: { gap: "6px" } },
+      el("p", { style: { margin: 0 } }, `确定删除文件夹「${node.path}」吗？`),
+      el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, "该操作会直接移除磁盘上的该文件夹及其中的全部子文件和子目录，无法撤销。")
     ), [
       el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
       el("button", {
         type: "button",
-        class: "btn btn-primary",
+        class: "btn btn-danger",
         onClick: async () => {
-          const raw = pathIn.value.trim();
-          if (!raw) return toast("请输入文件名");
-          const baseName = raw.split(/[\\/]/).pop().replace(/\.(md|markdown)$/i, "") || "未命名文章";
           try {
-            const created = await api("PUT", "/api/article/vault/file", {
-              path: raw,
-              title: baseName,
-              content: `# ${baseName}\n\n`,
-            });
+            await api("DELETE", `/api/article/vault/dir?path=${encodeURIComponent(node.path)}`);
             closeModal();
-            const parts = String(created.path || "").split("/");
-            for (let i = 1; i < parts.length; i++) {
-              expandedDirs.add(parts.slice(0, i).join("/"));
+            const prefix = `${node.path}/`;
+            if (state.activeFile === node.path || String(state.activeFile || "").startsWith(prefix)) {
+              state.activeFile = "";
+              state.editorActive = false;
+              state.dirty = false;
             }
+            if (state.selectedDir === node.path || String(state.selectedDir || "").startsWith(prefix)) {
+              state.selectedDir = parentDirOf(node.path);
+            }
+            Array.from(expandedDirs).forEach((p) => {
+              if (p === node.path || p.startsWith(prefix)) expandedDirs.delete(p);
+            });
             persistExpanded();
             await refreshVaultTree();
-            await openVaultFile(created.path);
-            toast(`已创建 ${created.path}`);
-          } catch (e) { toast(e.message); }
+            renderStageMode();
+            session.persist();
+            toast(`已删除文件夹 ${node.name || node.path}`);
+          } catch (err) { toast(err.message); }
         },
-      }, "创建并编辑"),
+      }, "确认删除"),
     ]);
-    pathIn.focus();
+  }
+
+  function openTreeContextMenu(ev, target, rowEl = null) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    closeVaultPopover();
+    closeTreeContextMenu();
+
+    const kind = target?.kind || "root";
+    const relPath = target?.path || "";
+    const allDirs = collectAllDirPaths(vault.tree || []);
+    const items = [];
+
+    if (kind === "dir") {
+      const isExpanded = expandedDirs.has(relPath);
+      items.push(
+        { label: "在此新建 Markdown", icon: ICONS.newNote, run: () => openNewMarkdownModal(relPath) },
+        { label: "新建子文件夹", icon: ICONS.newFolder, run: () => openNewFolderModal(relPath) },
+        { sep: true },
+        {
+          label: isExpanded ? "折叠文件夹" : "展开文件夹",
+          icon: isExpanded ? ICONS.collapse : ICONS.expand,
+          run: () => {
+            if (expandedDirs.has(relPath)) expandedDirs.delete(relPath);
+            else expandedDirs.add(relPath);
+            persistExpanded();
+            renderSidebar();
+          },
+        },
+        { label: "重命名", icon: ICONS.rename, run: () => openRenameModal(target) },
+        { sep: true },
+        { label: "在文件管理器中打开", icon: ICONS.reveal, run: () => revealVaultPath(relPath) },
+        { label: "复制相对路径", icon: ICONS.copy, run: () => copyVaultRelPath(relPath) },
+        { sep: true },
+        { label: "删除文件夹", icon: ICONS.trash, danger: true, run: () => confirmDeleteDir(target) }
+      );
+    } else if (kind === "file") {
+      const parent = parentDirOf(relPath);
+      items.push(
+        { label: "打开编辑", icon: ICONS.open, run: () => openVaultFile(relPath) },
+        { label: "在同目录新建 Markdown", icon: ICONS.newNote, run: () => openNewMarkdownModal(parent) },
+        { sep: true },
+        { label: "重命名", icon: ICONS.rename, run: () => openRenameModal(target) },
+        { label: "创建副本", icon: ICONS.duplicate, run: () => duplicateVaultFile(relPath) },
+        { sep: true },
+        { label: "在文件管理器中打开", icon: ICONS.reveal, run: () => revealVaultPath(relPath) },
+        { label: "复制相对路径", icon: ICONS.copy, run: () => copyVaultRelPath(relPath) },
+        { sep: true },
+        { label: "删除文件", icon: ICONS.trash, danger: true, run: () => confirmDeleteFile(target) }
+      );
+    } else {
+      const anyExpanded = expandedDirs.size > 0;
+      items.push(
+        { label: "在根目录新建 Markdown", icon: ICONS.newNote, run: () => openNewMarkdownModal("") },
+        { label: "在根目录新建文件夹", icon: ICONS.newFolder, run: () => openNewFolderModal("") },
+        { sep: true },
+        { label: "刷新目录树", icon: ICONS.refresh, run: () => refreshVaultTree() },
+        ...(allDirs.length > 0 ? [{
+          label: anyExpanded ? "折叠全部文件夹" : "展开全部文件夹",
+          icon: anyExpanded ? ICONS.collapse : ICONS.expand,
+          run: () => {
+            if (expandedDirs.size > 0) expandedDirs.clear();
+            else allDirs.forEach((p) => expandedDirs.add(p));
+            persistExpanded();
+            renderSidebar();
+          },
+        }] : []),
+        { sep: true },
+        { label: "在文件管理器中打开", icon: ICONS.reveal, run: () => revealVaultPath("") }
+      );
+    }
+
+    const menu = el("div", {
+      class: "ic-vault-ctx-menu",
+      role: "menu",
+      "aria-label": kind === "dir" ? `文件夹操作：${target.name}` : (kind === "file" ? `文件操作：${target.name}` : "目录操作"),
+    });
+
+    const headerText = kind === "root" ? `${vault.name || "根目录"}（根目录）` : relPath;
+    menu.appendChild(el("div", { class: "ic-vault-ctx-head mono", title: headerText }, headerText));
+
+    const buttons = [];
+    items.forEach((item) => {
+      if (item.sep) {
+        menu.appendChild(el("div", { class: "ic-vault-ctx-sep", role: "separator" }));
+        return;
+      }
+      const btn = el("button", {
+        type: "button",
+        class: "ic-vault-ctx-item" + (item.danger ? " is-danger" : ""),
+        role: "menuitem",
+        onClick: () => {
+          closeTreeContextMenu();
+          item.run();
+        },
+      },
+        el("span", { class: "ic-vault-ctx-ico", "aria-hidden": "true" }, makeIconSvg(item.icon, 14)),
+        el("span", { class: "ic-vault-ctx-label" }, item.label)
+      );
+      buttons.push(btn);
+      menu.appendChild(btn);
+    });
+
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    menu.style.visibility = "hidden";
+    document.body.appendChild(menu);
+
+    const rect = menu.getBoundingClientRect();
+    const pad = 8;
+    const left = Math.max(pad, Math.min(ev.clientX, window.innerWidth - rect.width - pad));
+    const top = Math.max(pad, Math.min(ev.clientY, window.innerHeight - rect.height - pad));
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+    menu.style.visibility = "visible";
+
+    treeCtxMenuEl = menu;
+    if (rowEl) {
+      rowEl.classList.add("is-ctx-target");
+      treeCtxTargetEl = rowEl;
+    }
+
+    let focusedIdx = -1;
+    const onDocDown = (e) => {
+      if (!menu.contains(e.target)) closeTreeContextMenu();
+    };
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeTreeContextMenu();
+        return;
+      }
+      if (!buttons.length) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        focusedIdx = (focusedIdx + 1) % buttons.length;
+        buttons[focusedIdx].focus();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        focusedIdx = (focusedIdx - 1 + buttons.length) % buttons.length;
+        buttons[focusedIdx].focus();
+      }
+    };
+    const onResize = () => closeTreeContextMenu();
+    const onScroll = () => closeTreeContextMenu();
+    document.addEventListener("pointerdown", onDocDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("resize", onResize);
+    treeBox.addEventListener("scroll", onScroll, { passive: true });
+    treeCtxMenuCleanup = () => {
+      document.removeEventListener("pointerdown", onDocDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("resize", onResize);
+      treeBox.removeEventListener("scroll", onScroll);
+    };
   }
 
   async function openVaultFile(relPath) {
@@ -1154,6 +1670,7 @@ export async function renderArticle(root, ctx, params = {}) {
       Object.assign(state, {
         docId: "",
         activeFile: res.path,
+        selectedDir: parentDirOf(res.path),
         editorActive: true,
         dirty: false,
         title: meta.title || res.title || "",
@@ -1246,23 +1763,54 @@ export async function renderArticle(root, ctx, params = {}) {
     (nodes || []).forEach((node) => {
       if (node.kind === "dir") {
         const isOpen = Boolean(treeQuery) || expandedDirs.has(node.path);
+        const isSelected = Boolean(state.selectedDir && state.selectedDir === node.path);
+        const dirWrap = el("div", {
+          class: "ic-vault-dir-wrap" + (isSelected ? " is-selected" : ""),
+          "data-dir-path": node.path,
+        });
         const dirBtn = el("button", {
           type: "button",
-          class: "ic-vault-row ic-vault-dir" + (isOpen ? " is-open" : ""),
+          class: "ic-vault-row ic-vault-dir" + (isOpen ? " is-open" : "") + (isSelected ? " is-selected" : ""),
           role: "treeitem",
           "aria-expanded": String(isOpen),
+          "aria-selected": String(isSelected),
           style: { paddingLeft: `${6 + depth * 16}px` },
           onClick: () => {
+            state.selectedDir = node.path;
             if (expandedDirs.has(node.path)) expandedDirs.delete(node.path);
             else expandedDirs.add(node.path);
             persistExpanded();
             renderSidebar();
+            session.persist();
           },
         },
           el("span", { class: "ic-vault-chevron", "aria-hidden": "true" }, makeChevronSvg()),
           el("span", { class: "ic-vault-node-name", title: node.path }, node.name)
         );
-        frag.appendChild(dirBtn);
+        const quickAddBtn = el("button", {
+          type: "button",
+          class: "ic-vault-dir-add",
+          title: `在「${node.name}」中新建 Markdown`,
+          "aria-label": `在 ${node.name} 中新建 Markdown`,
+          onClick: (e) => {
+            e.stopPropagation();
+            state.selectedDir = node.path;
+            renderSidebar();
+            session.persist();
+            openNewMarkdownModal(node.path);
+          },
+        }, "＋");
+        dirWrap.append(dirBtn, quickAddBtn);
+        dirWrap.addEventListener("contextmenu", (e) => {
+          state.selectedDir = node.path;
+          session.persist();
+          renderSidebar();
+          const freshWrap = Array.from(treeBox.querySelectorAll(".ic-vault-dir-wrap")).find(
+            (elNode) => elNode.getAttribute("data-dir-path") === node.path
+          ) || null;
+          openTreeContextMenu(e, { kind: "dir", path: node.path, name: node.name }, freshWrap);
+        });
+        frag.appendChild(dirWrap);
         if (isOpen && node.children?.length) {
           frag.appendChild(renderTreeBranch(node.children, depth + 1));
         }
@@ -1273,6 +1821,7 @@ export async function renderArticle(root, ctx, params = {}) {
       const displayName = node.name.replace(/\.(md|markdown)$/i, "");
       const row = el("div", {
         class: "ic-vault-file-wrap" + (isActive ? " is-active" : ""),
+        "data-file-path": node.path,
       },
         el("button", {
           type: "button",
@@ -1293,30 +1842,13 @@ export async function renderArticle(root, ctx, params = {}) {
           "aria-label": `删除文件 ${node.name}`,
           onClick: (e) => {
             e.stopPropagation();
-            showModal("删除本地 Markdown 文件", el("p", null, `确定删除「${node.path}」吗？该操作会直接从本地目录移除文件。`), [
-              el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
-              el("button", {
-                type: "button",
-                class: "btn btn-danger",
-                onClick: async () => {
-                  try {
-                    await api("DELETE", `/api/article/vault/file?path=${encodeURIComponent(node.path)}`);
-                    closeModal();
-                    if (state.activeFile === node.path) {
-                      state.activeFile = "";
-                      state.editorActive = false;
-                      state.dirty = false;
-                    }
-                    await refreshVaultTree();
-                    renderStageMode();
-                    toast(`已删除 ${node.name}`);
-                  } catch (err) { toast(err.message); }
-                },
-              }, "确认删除"),
-            ]);
+            confirmDeleteFile(node);
           },
         }, "×")
       );
+      row.addEventListener("contextmenu", (e) => {
+        openTreeContextMenu(e, { kind: "file", path: node.path, name: node.name }, row);
+      });
       frag.appendChild(row);
     });
     return frag;
@@ -1330,9 +1862,44 @@ export async function renderArticle(root, ctx, params = {}) {
     sidebarCountBadge.title = vault.dir || "";
 
     const allDirs = collectAllDirPaths(vault.tree || []);
+    const dirSet = new Set(allDirs);
+    if (state.selectedDir && !dirSet.has(state.selectedDir)) {
+      state.selectedDir = "";
+    }
+
+    const activeTargetLabel = state.selectedDir ? `「${state.selectedDir}」` : "根目录";
+    newNoteBtn.title = `在${activeTargetLabel}新建 Markdown 文件`;
+    newFolderBtn.title = `在${activeTargetLabel}新建文件夹`;
+
+    clear(selectedDirBar);
+    if (state.selectedDir) {
+      selectedDirBar.classList.remove("hidden");
+      selectedDirBar.append(
+        el("span", { class: "ic-vault-selected-dir-ico", "aria-hidden": "true" }, makeIconSvg(ICONS.reveal, 13)),
+        el("span", {
+          class: "ic-vault-selected-dir-path mono",
+          title: `新建文件与文件夹将放入：${state.selectedDir}`,
+        }, state.selectedDir),
+        el("button", {
+          type: "button",
+          class: "ic-vault-selected-dir-clear",
+          title: "取消选中（切回根目录）",
+          "aria-label": "取消选中文件夹，切回根目录",
+          onClick: () => {
+            state.selectedDir = "";
+            renderSidebar();
+            session.persist();
+          },
+        }, "×")
+      );
+    } else {
+      selectedDirBar.classList.add("hidden");
+    }
+
     collapseAllBtn.disabled = allDirs.length === 0;
     const anyExpanded = expandedDirs.size > 0;
-    collapseAllBtn.textContent = anyExpanded ? "⊟" : "⊞";
+    clear(collapseAllBtn);
+    collapseAllBtn.appendChild(makeIconSvg(anyExpanded ? ICONS.collapse : ICONS.expand));
     collapseAllBtn.title = anyExpanded ? "折叠全部文件夹" : "展开全部文件夹";
 
     // Update Obsidian-style bottom Vault Switcher footer
@@ -1349,7 +1916,7 @@ export async function renderArticle(root, ctx, params = {}) {
     if (!visible.length) {
       treeBox.appendChild(el("div", { class: "ic-vault-tree-empty" },
         el("p", { class: "muted", style: { margin: 0, fontSize: "12px", lineHeight: "1.55" } },
-          treeQuery ? "没有匹配的 .md 文件" : "当前目录下还没有 .md 文件，可在左下角切换/添加本地目录，或点击顶部 ＋ 新建。"
+          treeQuery ? "没有匹配的 .md 文件" : "当前目录下还没有 .md 文件，可在左下角切换/添加本地目录，或点击顶部新建文件 / 文件夹。"
         )
       ));
     } else {
@@ -1399,13 +1966,13 @@ export async function renderArticle(root, ctx, params = {}) {
       el("div", { class: "ic-vault-welcome-ico", "aria-hidden": "true" }, "📚"),
       el("h2", { style: { margin: 0, fontSize: "18px" } }, "本地 Markdown 文章库"),
       el("p", { class: "muted", style: { margin: 0, maxWidth: "460px", lineHeight: "1.6", fontSize: "13px" } },
-        "点击左侧目录树中的任意 .md 文件即可进入编辑与配图模式；左下角可随时添加、切换或移出多个本地目录（如 Obsidian 仓库）。"
+        "点击左侧目录树中的任意 .md 文件即可进入编辑与配图模式；选中文件夹或右键目录树可快速新建、重命名与管理文件。"
       ),
       el("div", { class: "ic-vault-path-pill mono", title: vault.dir || "" }, vault.dir || "未选择目录"),
       quickVaultChips,
       el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", justifyContent: "center" } },
         el("button", { type: "button", class: "btn btn-primary", onClick: openAddVaultDialog }, "＋ 添加本地目录（如 Obsidian 库）"),
-        el("button", { type: "button", class: "btn", onClick: openNewMarkdownModal }, "＋ 新建 Markdown"),
+        el("button", { type: "button", class: "btn", onClick: () => openNewMarkdownModal(state.selectedDir || "") }, "＋ 新建 Markdown"),
         el("button", { type: "button", class: "btn", onClick: () => fileIn.click() }, "📄 导入文档")
       )
     ));
@@ -2256,6 +2823,7 @@ export async function renderArticle(root, ctx, params = {}) {
   const unsub = onEvent(async (msg) => {
     if (!root.isConnected) {
       closeVaultPopover();
+      closeTreeContextMenu();
       unsub();
       return;
     }

@@ -1227,6 +1227,253 @@ dialog.modal-picker .modal-body {
   font-weight: 400;
   color: var(--ink);
 }
+.ic-vault-dir-wrap {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 6px;
+  min-width: 0;
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+.ic-vault-dir-wrap:hover {
+  background: var(--surface-2);
+}
+.ic-vault-dir-wrap .ic-vault-dir:hover {
+  background: transparent;
+}
+.ic-vault-dir-wrap.is-selected {
+  background: color-mix(in srgb, var(--accent-soft) 62%, var(--paper));
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.ic-vault-dir-wrap.is-selected .ic-vault-chevron {
+  color: var(--accent);
+}
+.ic-vault-dir-wrap.is-selected .ic-vault-node-name {
+  color: var(--ink);
+  font-weight: 400;
+}
+.ic-vault-dir-add {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  margin-right: 2px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 13px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, background-color 0.12s ease, color 0.12s ease;
+}
+.ic-vault-dir-wrap:hover .ic-vault-dir-add,
+.ic-vault-dir-wrap.is-selected .ic-vault-dir-add,
+.ic-vault-dir-add:focus-visible {
+  opacity: 0.85;
+}
+.ic-vault-dir-add:hover {
+  color: var(--accent);
+  background: var(--paper);
+  opacity: 1;
+}
+.ic-vault-dir-wrap.is-ctx-target,
+.ic-vault-file-wrap.is-ctx-target {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 50%, var(--surface-2));
+}
+.ic-vault-selected-dir {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent-soft) 58%, var(--paper));
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+  font-size: 11.5px;
+  color: var(--ink);
+  min-width: 0;
+  flex-shrink: 0;
+}
+.ic-vault-selected-dir-ico {
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.ic-vault-selected-dir-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+.ic-vault-selected-dir-clear {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 13px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.ic-vault-selected-dir-clear:hover {
+  background: var(--paper);
+  color: var(--accent);
+}
+.ic-vault-modal-target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  min-width: 0;
+}
+.ic-vault-modal-target-label {
+  color: var(--ink-muted);
+  flex-shrink: 0;
+}
+.ic-vault-modal-target-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ic-vault-modal-target-reset {
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+.ic-vault-modal-target-reset:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Custom Context Menu for Vault File Tree (#71) */
+@keyframes icVaultCtxIn {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+.ic-vault-ctx-menu {
+  position: fixed;
+  z-index: 1300;
+  min-width: 214px;
+  max-width: 272px;
+  padding: 5px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: 0 14px 36px rgba(28, 25, 23, 0.16), 0 2px 8px rgba(28, 25, 23, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  animation: icVaultCtxIn 0.11s cubic-bezier(0.2, 0.8, 0.2, 1);
+  transform-origin: top left;
+}
+.ic-vault-ctx-head {
+  padding: 5px 9px 6px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ic-vault-ctx-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+.ic-vault-ctx-item:hover,
+.ic-vault-ctx-item:focus-visible {
+  background: var(--surface-2);
+  color: var(--ink);
+  outline: none;
+}
+.ic-vault-ctx-ico {
+  width: 15px;
+  height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-muted);
+  flex-shrink: 0;
+}
+.ic-vault-ctx-item:hover .ic-vault-ctx-ico,
+.ic-vault-ctx-item:focus-visible .ic-vault-ctx-ico {
+  color: var(--accent);
+}
+.ic-vault-ctx-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ic-vault-ctx-item.is-danger {
+  color: var(--err);
+}
+.ic-vault-ctx-item.is-danger .ic-vault-ctx-ico {
+  color: var(--err);
+}
+.ic-vault-ctx-item.is-danger:hover,
+.ic-vault-ctx-item.is-danger:focus-visible {
+  background: color-mix(in srgb, var(--err) 11%, var(--surface));
+  color: var(--err);
+}
+.ic-vault-ctx-sep {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ic-vault-ctx-menu {
+    animation: none;
+  }
+  .ic-vault-dir-wrap,
+  .ic-vault-dir-add,
+  .ic-vault-ctx-item,
+  .ic-vault-chevron svg {
+    transition: none;
+  }
+}
 .ic-vault-chevron {
   width: 16px;
   height: 16px;

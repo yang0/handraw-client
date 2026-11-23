@@ -195,3 +195,74 @@ func TestArticleVaultMultiDirAddSwitchRemove(t *testing.T) {
 		t.Fatalf("expected fallback to default articles vault, got %+v", resLast)
 	}
 }
+
+func TestArticleVaultFolderMkdirRenameDuplicateDeleteAndSecurity(t *testing.T) {
+	srv, _ := setupTestServer(t, "http://127.0.0.1:1")
+	h := srv.Handler()
+
+	vault := t.TempDir()
+	_ = doReq(t, h, srv.Token, "POST", "/api/article/vault/root", map[string]any{"dir": vault})
+
+	// 1. Create empty nested folder -> visible in tree!
+	rrMk := doReq(t, h, srv.Token, "POST", "/api/article/vault/mkdir", map[string]any{"path": "2026/灵感草稿"})
+	if rrMk.Code != 200 {
+		t.Fatalf("mkdir failed: %d %s", rrMk.Code, rrMk.Body.String())
+	}
+	rrTree := doReq(t, h, srv.Token, "GET", "/api/article/vault/tree", nil)
+	if !strings.Contains(rrTree.Body.String(), "灵感草稿") {
+		t.Fatalf("expected empty created folder visible in tree, got %s", rrTree.Body.String())
+	}
+
+	// 2. Reject path traversal & hidden dir creation.
+	if rrBad := doReq(t, h, srv.Token, "POST", "/api/article/vault/mkdir", map[string]any{"path": "../escape"}); rrBad.Code != 400 {
+		t.Fatalf("expected 400 on mkdir traversal, got %d", rrBad.Code)
+	}
+	if rrHid := doReq(t, h, srv.Token, "POST", "/api/article/vault/mkdir", map[string]any{"path": ".hidden"}); rrHid.Code != 400 {
+		t.Fatalf("expected 400 on hidden mkdir, got %d", rrHid.Code)
+	}
+
+	// 3. Create note with meta inside 2026/灵感草稿, then rename file -> meta migrates!
+	_ = doReq(t, h, srv.Token, "PUT", "/api/article/vault/file", map[string]any{
+		"path":    "2026/灵感草稿/草稿一.md",
+		"content": "# 草稿一\n\n测试正文",
+		"meta":    map[string]any{"style": "FA-099"},
+	})
+	rrRenFile := doReq(t, h, srv.Token, "POST", "/api/article/vault/rename", map[string]any{
+		"from": "2026/灵感草稿/草稿一.md",
+		"to":   "2026/灵感草稿/正式稿",
+	})
+	if rrRenFile.Code != 200 || !strings.Contains(rrRenFile.Body.String(), "2026/灵感草稿/正式稿.md") {
+		t.Fatalf("rename file failed: %d %s", rrRenFile.Code, rrRenFile.Body.String())
+	}
+
+	// 4. Rename parent folder -> meta still migrates!
+	rrRenDir := doReq(t, h, srv.Token, "POST", "/api/article/vault/rename", map[string]any{
+		"from": "2026/灵感草稿",
+		"to":   "2026/已归档",
+	})
+	if rrRenDir.Code != 200 {
+		t.Fatalf("rename dir failed: %d %s", rrRenDir.Code, rrRenDir.Body.String())
+	}
+	rrRead := doReq(t, h, srv.Token, "GET", "/api/article/vault/file?path=2026/%E5%B7%B2%E5%BD%92%E6%A1%A3/%E6%AD%A3%E5%BC%8F%E7%A8%BF.md", nil)
+	if rrRead.Code != 200 || !strings.Contains(rrRead.Body.String(), "FA-099") {
+		t.Fatalf("expected migrated meta FA-099 after folder rename, got %d %s", rrRead.Code, rrRead.Body.String())
+	}
+
+	// 5. Duplicate file -> creates 正式稿 副本.md.
+	rrDup := doReq(t, h, srv.Token, "POST", "/api/article/vault/duplicate", map[string]any{"path": "2026/已归档/正式稿.md"})
+	if rrDup.Code != 200 || !strings.Contains(rrDup.Body.String(), "正式稿 副本.md") {
+		t.Fatalf("duplicate failed: %d %s", rrDup.Code, rrDup.Body.String())
+	}
+
+	// 6. Delete folder cleanly (and refuse deleting root).
+	if rrDelRoot := doReq(t, h, srv.Token, "DELETE", "/api/article/vault/dir?path=", nil); rrDelRoot.Code != 400 {
+		t.Fatalf("expected 400 deleting root dir, got %d", rrDelRoot.Code)
+	}
+	rrDelDir := doReq(t, h, srv.Token, "DELETE", "/api/article/vault/dir?path=2026/%E5%B7%B2%E5%BD%92%E6%A1%A3", nil)
+	if rrDelDir.Code != 200 {
+		t.Fatalf("delete dir failed: %d %s", rrDelDir.Code, rrDelDir.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(vault, "2026", "已归档")); !os.IsNotExist(err) {
+		t.Fatalf("expected folder removed from disk")
+	}
+}
