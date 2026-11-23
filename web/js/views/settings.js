@@ -530,6 +530,8 @@ export async function renderSettings(root, ctx, params = {}) {
   });
   plugSection.appendChild(builtinList);
 
+  const dshStatus = plugRes.dshStatus || {};
+  const dshRuntimeMap = new Map((dshStatus.plugins || []).map((p) => [p.id, p]));
   const srcIn = el("input", {
     id: "plugin-install-src",
     class: "input",
@@ -537,47 +539,153 @@ export async function renderSettings(root, ctx, params = {}) {
     autocorrect: "off",
     autocapitalize: "none",
     spellcheck: "false",
-    placeholder: "安装社区插件：输入本地文件夹路径或 ZIP / Manifest URL…",
+    placeholder: "输入本地插件目录（支持 DSH 插件）、GitHub 仓库或 ZIP 地址…",
   });
-  plugSection.appendChild(el("div", { class: "col", style: { gap: "8px", marginTop: "4px" } },
-    el("label", { for: "plugin-install-src", class: "settings-subhead" }, "社区插件扩展"),
-    el("div", { class: "row" },
+
+  const discoverBox = el("div", { class: "col", style: { gap: "6px", display: "none" } });
+  const loadDiscover = async () => {
+    discoverBox.style.display = "flex";
+    clear(discoverBox);
+    discoverBox.appendChild(el("span", { class: "muted" }, "正在扫描本机 ~/.dsh/profiles/desktop 插件…"));
+    try {
+      const res = await api("GET", "/api/plugins/dsh/discover");
+      clear(discoverBox);
+      const items = res.items || [];
+      if (!items.length) {
+        discoverBox.appendChild(el("span", { class: "muted" }, "未在本机 ~/.dsh/profiles/desktop 中发现可导入的 DSH 插件。"));
+        return;
+      }
+      items.forEach((it) => {
+        const badgeClass = it.compat === "full" ? "badge badge-ok" : (it.compat === "partial" ? "badge badge-warn" : "badge badge-err");
+        const badgeText = it.compat === "full" ? "完全兼容" : (it.compat === "partial" ? "部分兼容" : "需完整 DSH");
+        discoverBox.appendChild(el("div", { class: "settings-subcard row", style: { justifyContent: "space-between", padding: "8px 10px" } },
+          el("div", { class: "col", style: { gap: "2px", minWidth: 0 } },
+            el("div", { class: "row", style: { flexWrap: "wrap" } },
+              el("strong", null, `${it.name} (${it.version || "dev"})`),
+              el("span", { class: "badge" }, it.packageName),
+              el("span", { class: badgeClass, title: (it.compatReasons || []).join("；") }, badgeText)
+            ),
+            el("span", { class: "muted mono", style: { fontSize: "11px" } }, it.dir)
+          ),
+          it.installed
+            ? el("span", { class: "badge" }, "已导入")
+            : el("button", {
+              type: "button",
+              class: "btn btn-sm btn-primary",
+              disabled: it.compat === "unsupported",
+              onClick: async () => {
+                try {
+                  await api("POST", "/api/plugins/install", { source: "link:" + it.dir });
+                  toast(`已导入 DSH 插件「${it.name}」`);
+                  renderSettings(root, ctx, { preserveScroll: true });
+                } catch (e) { toast(e.message); }
+              },
+            }, "导入")
+        ));
+      });
+    } catch (e) {
+      clear(discoverBox);
+      discoverBox.appendChild(el("span", { class: "muted" }, "扫描失败：" + e.message));
+    }
+  };
+
+  const dshNodeBadge = dshStatus.nodeVersion
+    ? el("span", { class: "badge" + (dshStatus.running ? " badge-ok" : "") },
+      dshStatus.running
+        ? `DSH 兼容运行时运行中 · Node ${dshStatus.nodeVersion}`
+        : `DSH 兼容就绪 · Node ${dshStatus.nodeVersion}（按需启动）`)
+    : el("span", { class: "badge badge-warn" }, "未检测到 Node.js（启用 DSH 插件需要 Node >= 20）");
+
+  plugSection.appendChild(el("div", { class: "col", style: { gap: "8px", marginTop: "6px" } },
+    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap" } },
+      el("label", { for: "plugin-install-src", class: "settings-subhead" }, "社区插件与 DSH 插件扩展"),
+      dshNodeBadge
+    ),
+    el("div", { class: "row", style: { flexWrap: "wrap" } },
       srcIn,
       el("button", {
         type: "button",
         class: "btn btn-sm",
         onClick: async () => {
+          try {
+            const r = await api("POST", "/api/host/pick-directory", {});
+            if (r?.path) srcIn.value = r.path;
+          } catch (e) { toast(e.message); }
+        },
+      }, "选择目录"),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        onClick: async () => {
           if (!srcIn.value.trim()) return toast("请输入插件来源路径或网址");
           try {
             await api("POST", "/api/plugins/install", { source: srcIn.value.trim() });
-            toast("社区插件已安装");
+            toast("插件已安装（请在下方开关中启用）");
             renderSettings(root, ctx, { preserveScroll: true });
           } catch (e) {
             toast(e.message);
           }
         },
-      }, "安装插件")
-    )
+      }, "安装插件"),
+      el("button", { type: "button", class: "btn btn-sm", onClick: loadDiscover }, "扫描本机 DSH 插件")
+    ),
+    discoverBox
   ));
 
   const permsMap = plugRes.knownPermissions || {};
   (plugRes.community || []).forEach((c) => {
+    const isDSH = c.kind === "dsh";
+    const rt = dshRuntimeMap.get(c.id);
     const chkId = `comm-${c.id}`;
-    const chk = el("input", { id: chkId, type: "checkbox", checked: Boolean(c.enabled) });
-    chk.addEventListener("change", async () => {
-      await api("PATCH", `/api/plugins/community:${encodeURIComponent(c.id)}`, { enabled: chk.checked });
-      ctx.refreshNav?.();
-      toast(chk.checked ? "插件已启用" : "插件已停用");
+    const chk = el("input", {
+      id: chkId,
+      type: "checkbox",
+      checked: Boolean(c.enabled),
+      disabled: isDSH && c.dsh?.compat === "unsupported",
     });
-    plugSection.appendChild(el("div", { class: "settings-subcard row", style: { justifyContent: "space-between" } },
-      el("div", { class: "col", style: { gap: "4px", minWidth: 0 } },
-        el("div", { class: "row" },
-          el("strong", null, `${c.name} (${c.version})`),
-          ...(c.permissions || []).map((pm) => el("span", { class: "badge badge-warn", title: permsMap[pm] || pm }, pm))
+    chk.addEventListener("change", async () => {
+      try {
+        await api("PATCH", `/api/plugins/community:${encodeURIComponent(c.id)}`, { enabled: chk.checked });
+        ctx.refreshNav?.();
+        toast(chk.checked ? "插件已启用" : "插件已停用");
+        renderSettings(root, ctx, { preserveScroll: true });
+      } catch (e) {
+        chk.checked = !chk.checked;
+        toast(e.message);
+      }
+    });
+    const badges = [];
+    if (isDSH) {
+      badges.push(el("span", { class: "badge badge-accent", title: "本地 Node 进程运行（L2 本机权限）" }, "DSH · L2"));
+      const cmp = c.dsh?.compat || "full";
+      const cmpClass = cmp === "full" ? "badge badge-ok" : (cmp === "partial" ? "badge badge-warn" : "badge badge-err");
+      const cmpLabel = cmp === "full" ? "完全兼容" : (cmp === "partial" ? "部分兼容" : "需完整 DSH");
+      badges.push(el("span", { class: cmpClass, title: (c.dsh?.compatReasons || []).join("；") }, cmpLabel));
+      if (rt?.error) {
+        badges.push(el("span", { class: "badge badge-err", title: rt.error }, "加载异常"));
+      }
+    } else {
+      (c.permissions || []).forEach((pm) => {
+        badges.push(el("span", { class: "badge badge-warn", title: permsMap[pm] || pm }, pm));
+      });
+    }
+
+    const subText = rt?.error
+      ? `启动异常：${rt.error}`
+      : (c.dsh?.compatReasons?.length ? `${c.description || c.dsh.packageName} · ${c.dsh.compatReasons.join("；")}` : (c.description || c.desc || c.author || ""));
+
+    plugSection.appendChild(el("div", { class: "settings-subcard row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+      el("div", { class: "col", style: { gap: "4px", minWidth: 0, flex: "1" } },
+        el("div", { class: "row", style: { flexWrap: "wrap" } },
+          el("strong", null, `${c.name} (${c.version || "dev"})`),
+          ...badges
         ),
-        el("span", { class: "muted" }, c.desc || c.author || "")
+        el("span", { class: "muted" }, subText)
       ),
       el("div", { class: "row" },
+        isDSH && c.enabled && c.dsh?.clientEntry
+          ? el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go(`dsh:${c.id}`) }, "打开")
+          : null,
         el("label", { for: chkId, class: "row", style: { cursor: "pointer" } }, chk, "启用"),
         el("button", {
           type: "button",

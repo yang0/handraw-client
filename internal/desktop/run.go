@@ -57,6 +57,20 @@ func (h *desktopHost) OpenURL(url string) error {
 
 func (h *desktopHost) OpenPath(path string) error  { return OpenFolder(path) }
 func (h *desktopHost) CopyImage(path string) error { return CopyImageFile(path) }
+func (h *desktopHost) PickDirectory() (string, error) {
+	if h.app != nil {
+		res, err := h.app.Dialog.OpenFile().
+			CanChooseDirectories(true).
+			CanChooseFiles(false).
+			CanCreateDirectories(true).
+			SetTitle("选择文件夹").
+			PromptForSingleSelection()
+		if err == nil {
+			return strings.TrimSpace(res), nil
+		}
+	}
+	return PickDirectoryOS()
+}
 func (h *desktopHost) CopyText(text string) error {
 	if application.InvokeSyncWithResult(func() bool { return h.app.Clipboard.SetText(text) }) {
 		return nil

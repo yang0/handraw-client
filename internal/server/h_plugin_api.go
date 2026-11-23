@@ -80,6 +80,7 @@ func (s *Server) executeHostChat(ctx context.Context, req hostChatRequest) (map[
 		}
 		return map[string]any{
 			"text":     reply,
+			"content":  reply,
 			"source":   "provider",
 			"provider": tp.ID,
 			"model":    model,
@@ -104,6 +105,10 @@ func (s *Server) executeHostChat(ctx context.Context, req hostChatRequest) (map[
 	}
 }
 
+func (s *Server) hostModelsList(w http.ResponseWriter, r *http.Request) (any, error) {
+	return s.hostModelsSummary(r.Context(), r.URL.Query().Get("purpose"))
+}
+
 func (s *Server) hostModelsChat(w http.ResponseWriter, r *http.Request) (any, error) {
 	var req hostChatRequest
 	if err := decode(r, &req); err != nil {
@@ -112,27 +117,87 @@ func (s *Server) hostModelsChat(w http.ResponseWriter, r *http.Request) (any, er
 	return s.executeHostChat(r.Context(), req)
 }
 
-func (s *Server) hostGalleryRegister(w http.ResponseWriter, r *http.Request) (any, error) {
-	var body struct {
-		Owner string                 `json:"owner"`
-		Reg   galleries.Registration `json:"gallery"`
+type directoryPickerHost interface {
+	PickDirectory() (string, error)
+}
+
+func (s *Server) hostPickDirectory(w http.ResponseWriter, r *http.Request) (any, error) {
+	picker, ok := s.Host.(directoryPickerHost)
+	if !ok {
+		return nil, &apiError{Status: 503, Msg: "当前运行环境不支持系统目录选择器"}
 	}
-	if err := decode(r, &body); err != nil {
+	p, err := picker.PickDirectory()
+	if err != nil {
+		return nil, bad(err.Error())
+	}
+	return map[string]any{"path": p}, nil
+}
+
+func (s *Server) hostGalleryRegister(w http.ResponseWriter, r *http.Request) (any, error) {
+	var raw json.RawMessage
+	if err := decode(r, &raw); err != nil {
 		return nil, err
 	}
-	if body.Reg.ID == "" {
+	var wrapped struct {
+		Owner     string                  `json:"owner"`
+		ImageRoot string                  `json:"imageRoot"`
+		Reg       *galleries.Registration `json:"gallery"`
+	}
+	_ = json.Unmarshal(raw, &wrapped)
+	var reg galleries.Registration
+	if wrapped.Reg != nil && wrapped.Reg.ID != "" {
+		reg = *wrapped.Reg
+	} else if err := json.Unmarshal(raw, &reg); err != nil {
+		return nil, bad("画廊注册参数无效")
+	}
+	if reg.ID == "" {
 		return nil, bad("缺少 gallery.id")
 	}
-	body.Reg.Owner = strings.TrimSpace(body.Owner)
-	if body.Reg.Owner != "" && body.Reg.ImageRoot == "" {
-		if c, err := s.Plugins.Community(body.Reg.Owner); err == nil && c.Dir != "" {
-			body.Reg.ImageRoot = c.Dir
+	reg.Owner = strings.TrimSpace(wrapped.Owner)
+	if strings.TrimSpace(wrapped.ImageRoot) != "" {
+		reg.ImageRoot = strings.TrimSpace(wrapped.ImageRoot)
+	}
+	if reg.Owner != "" && reg.ImageRoot == "" && s.Plugins != nil {
+		if c, err := s.Plugins.Community(reg.Owner); err == nil && c.Dir != "" {
+			reg.ImageRoot = c.Dir
 		}
 	}
-	if err := s.Galleries.Register(body.Reg); err != nil {
+	if err := s.Galleries.Register(reg); err != nil {
 		return nil, bad(err.Error())
 	}
 	return okv, nil
+}
+
+func (s *Server) pluginDSHDiscover(w http.ResponseWriter, r *http.Request) (any, error) {
+	items := s.Plugins.DiscoverDSHProfile()
+	if items == nil {
+		return map[string]any{"items": []any{}}, nil
+	}
+	return map[string]any{"items": items}, nil
+}
+
+func (s *Server) pluginDSHStatus(w http.ResponseWriter, r *http.Request) (any, error) {
+	if s.DSH == nil {
+		return map[string]any{"running": false, "plugins": []any{}, "exactRoutes": []any{}, "prefixRoutes": []any{}}, nil
+	}
+	return s.DSH.Status(), nil
+}
+
+func (s *Server) dshClientFile(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	c, err := s.Plugins.Community(id)
+	if err != nil || c.Kind != "dsh" || c.DSH == nil || c.DSH.ClientEntry == "" {
+		http.NotFound(w, r)
+		return
+	}
+	fp, ok := s.Plugins.FilePath(id, c.DSH.ClientEntry)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, fp)
 }
 
 func (s *Server) hostGalleryUnregister(w http.ResponseWriter, r *http.Request) (any, error) {

@@ -379,6 +379,8 @@ type ProviderSpec struct {
 
 type Community struct {
 	ID          string         `json:"id"`
+	Kind        string         `json:"kind,omitempty"`       // handraw | dsh
+	TrustLevel  string         `json:"trustLevel,omitempty"` // L1 | L2
 	Name        string         `json:"name"`
 	Version     string         `json:"version"`
 	Description string         `json:"description"`
@@ -390,6 +392,7 @@ type Community struct {
 	Panels      []Panel        `json:"panels,omitempty"`
 	Actions     []Action       `json:"actions,omitempty"`
 	Providers   []ProviderSpec `json:"providers,omitempty"`
+	DSH         *DSHMeta       `json:"dsh,omitempty"`
 	Enabled     bool           `json:"enabled"`
 	Dir         string         `json:"-"`
 	Source      string         `json:"source"`
@@ -400,8 +403,23 @@ var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,40}$`)
 var slots = map[string]bool{"work-detail": true, "create-footer": true, "home": true, "settings": true}
 var menus = map[string]bool{"work": true, "style": true, "layout": true}
 
-// ReadCommunity parses a plugin folder's package.json.
+// ReadCommunity parses a plugin folder's package.json (supports native handraw and DSH plugins, plus .link pointers).
 func ReadCommunity(dir string) (Community, error) {
+	targetDir, linked := resolveLinkedDir(dir)
+	b, err := os.ReadFile(filepath.Join(targetDir, "package.json"))
+	if err != nil {
+		return Community{}, errors.New("缺少 package.json")
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return Community{}, fmt.Errorf("package.json 无法解析：%w", err)
+	}
+	_, hasHandraw := raw["handraw"]
+	_, hasDSH := raw["dsh"]
+	if !hasHandraw && hasDSH {
+		return readDSHCommunity(targetDir, linked, raw)
+	}
+
 	var pkg struct {
 		Name        string    `json:"name"`
 		Version     string    `json:"version"`
@@ -410,15 +428,13 @@ func ReadCommunity(dir string) (Community, error) {
 		Homepage    string    `json:"homepage"`
 		Handraw     Community `json:"handraw"`
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "package.json"))
-	if err != nil {
-		return Community{}, errors.New("缺少 package.json")
-	}
 	if err := json.Unmarshal(b, &pkg); err != nil {
 		return Community{}, fmt.Errorf("package.json 无法解析：%w", err)
 	}
 	c := pkg.Handraw
-	c.Dir = dir
+	c.Kind = "handraw"
+	c.TrustLevel = "L1"
+	c.Dir = targetDir
 	if c.ID == "" {
 		c.ID = strings.TrimPrefix(strings.ToLower(pkg.Name), "@")
 		c.ID = strings.NewReplacer("/", "-", "_", "-").Replace(c.ID)
@@ -447,14 +463,14 @@ func ReadCommunity(dir string) (Community, error) {
 			return c, fmt.Errorf("未知权限 %s", p)
 		}
 	}
-	if c.Page != nil && !inside(dir, c.Page.File) {
+	if c.Page != nil && !inside(targetDir, c.Page.File) {
 		return c, errors.New("页面文件必须在插件目录内")
 	}
 	if len(c.Panels) > 8 {
 		return c, errors.New("面板最多 8 个")
 	}
 	for _, p := range c.Panels {
-		if !slots[p.Slot] || !inside(dir, p.File) {
+		if !slots[p.Slot] || !inside(targetDir, p.File) {
 			return c, fmt.Errorf("面板 %s 无效", p.Slot)
 		}
 	}
@@ -536,15 +552,23 @@ func (r *Runtime) Community(id string) (Community, error) {
 
 var ghRe = regexp.MustCompile(`^(?:https://github\.com/)?([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$`)
 
-// Install downloads a GitHub repository (default branch zip) or a zip URL
-// and installs it after validation. It returns the plugin, not yet enabled.
+// Install downloads a GitHub repository (default branch zip), a zip URL,
+// or links a local plugin directory (including DSH plugins) after validation.
+// It returns the plugin, not yet enabled.
 func (r *Runtime) Install(ctx context.Context, source string) (Community, error) {
 	source = strings.TrimSpace(source)
+	if strings.HasPrefix(source, "link:") {
+		return r.InstallLocal(source)
+	}
+	trimmedPath := strings.Trim(source, `"'`)
+	if st, err := os.Stat(trimmedPath); err == nil && st.IsDir() {
+		return r.InstallLocal(trimmedPath)
+	}
 	url := source
 	if m := ghRe.FindStringSubmatch(source); m != nil {
 		url = fmt.Sprintf("https://codeload.github.com/%s/%s/zip/HEAD", m[1], m[2])
 	} else if !strings.HasPrefix(source, "https://") {
-		return Community{}, errors.New("请填写 GitHub 仓库（owner/repo）或 https 开头的 zip 地址")
+		return Community{}, errors.New("请填写本地插件目录路径、GitHub 仓库（owner/repo）或 https 开头的 zip 地址")
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -652,12 +676,13 @@ func (r *Runtime) Remove(id string) error {
 	return os.RemoveAll(filepath.Join(r.Dir, id))
 }
 
-// FilePath resolves a file inside a community plugin's folder.
+// FilePath resolves a file inside a community plugin's folder (following .link pointers).
 func (r *Runtime) FilePath(id, rel string) (string, bool) {
 	if !idRe.MatchString(id) || strings.Contains(rel, "..") {
 		return "", false
 	}
-	p := filepath.Join(r.Dir, id, filepath.FromSlash(rel))
+	base, _ := resolveLinkedDir(filepath.Join(r.Dir, id))
+	p := filepath.Join(base, filepath.FromSlash(rel))
 	st, err := os.Stat(p)
 	if err != nil || st.IsDir() {
 		return "", false

@@ -38,7 +38,9 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/galleries/{kind}/items", s.h(s.galleryItems))
 	m.HandleFunc("GET /api/galleries/{kind}/items/{id}", s.h(s.galleryItem))
 	m.HandleFunc("GET /api/galleries/{kind}/items/{id}/image", s.galleryItemImage)
+	m.HandleFunc("GET /api/host/models", s.h(s.hostModelsList))
 	m.HandleFunc("POST /api/host/models/chat", s.h(s.hostModelsChat))
+	m.HandleFunc("POST /api/host/pick-directory", s.h(s.hostPickDirectory))
 	m.HandleFunc("POST /api/host/galleries/register", s.h(s.hostGalleryRegister))
 	m.HandleFunc("DELETE /api/host/galleries/{kind}", s.h(s.hostGalleryUnregister))
 
@@ -46,6 +48,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /files/local", s.fileLocal)
 	m.HandleFunc("GET /files/remote", s.fileRemote)
 	m.HandleFunc("GET /files/plugin/{id}/", s.filePlugin)
+	m.HandleFunc("GET /files/dsh-client/{id}", s.dshClientFile)
 
 	// my styles / layouts / recipes
 	m.HandleFunc("GET /api/mine/{kind}", s.h(s.mineList))
@@ -110,6 +113,8 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/providers/{id}/models", s.h(s.providerModels))
 	m.HandleFunc("POST /api/providers/{id}/test", s.h(s.providerTest))
 	m.HandleFunc("GET /api/plugins", s.h(s.pluginList))
+	m.HandleFunc("GET /api/plugins/dsh/discover", s.h(s.pluginDSHDiscover))
+	m.HandleFunc("GET /api/plugins/dsh/status", s.h(s.pluginDSHStatus))
 	m.HandleFunc("PATCH /api/plugins/{id}", s.h(s.pluginPatch))
 	m.HandleFunc("POST /api/plugins/install", s.h(s.pluginInstall))
 	m.HandleFunc("DELETE /api/plugins/{id}", s.h(s.pluginRemove))
@@ -138,7 +143,7 @@ func (s *Server) ui(w http.ResponseWriter, r *http.Request) {
 	if _, err := fs.Stat(s.Web, p); err != nil {
 		p = "index.html"
 	}
-	if p == "index.html" || p == "quick.html" {
+	if p == "index.html" || p == "quick.html" || p == "dsh-host.html" {
 		// The page needs the API token; a cookie scoped to this origin carries it.
 		http.SetCookie(w, &http.Cookie{Name: "hw", Value: s.Token, Path: "/", HttpOnly: false, SameSite: http.SameSiteStrictMode})
 		w.Header().Set("Cache-Control", "no-store")

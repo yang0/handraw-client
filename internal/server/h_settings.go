@@ -296,11 +296,15 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) (any, erro
 // ---------- plugins ----------
 
 func (s *Server) pluginList(w http.ResponseWriter, r *http.Request) (any, error) {
-	return map[string]any{
+	out := map[string]any{
 		"builtin":          s.Plugins.States(),
 		"community":        s.Plugins.ListCommunity(s.enabledPlugins()),
 		"knownPermissions": plugins.KnownPermissions,
-	}, nil
+	}
+	if s.DSH != nil {
+		out["dshStatus"] = s.DSH.Status()
+	}
+	return out, nil
 }
 
 func (s *Server) pluginPatch(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -313,6 +317,12 @@ func (s *Server) pluginPatch(w http.ResponseWriter, r *http.Request) (any, error
 		return nil, err
 	}
 	isCommunity := strings.HasPrefix(id, "community:")
+	if isCommunity && body.Enabled != nil && *body.Enabled {
+		cid := strings.TrimPrefix(id, "community:")
+		if c, err := s.Plugins.Community(cid); err == nil && c.Kind == "dsh" && c.DSH != nil && c.DSH.Compat == "unsupported" {
+			return nil, bad("该 DSH 插件暂不支持在手绘风中直接运行：" + strings.Join(c.DSH.CompatReasons, "；"))
+		}
+	}
 	if !isCommunity && body.Enabled != nil && !*body.Enabled {
 		if err := s.Plugins.CanDisable(id); err != nil {
 			return nil, conflict(err.Error())
@@ -348,6 +358,19 @@ func (s *Server) pluginPatch(w http.ResponseWriter, r *http.Request) (any, error
 		s.Galleries.UnregisterByOwner(strings.TrimPrefix(id, "community:"))
 	}
 	s.Plugins.Reconcile(st.Plugins, st.PluginConfig)
+	if isCommunity && s.DSH != nil {
+		if err := s.SyncDSH(r.Context()); err != nil {
+			// Roll back enabling on startup failure so UI reflects real state.
+			if body.Enabled != nil && *body.Enabled {
+				_, _ = settings.Update(func(st *settings.Settings) error {
+					st.Plugins[id] = false
+					return nil
+				})
+				_ = s.SyncDSH(r.Context())
+			}
+			return nil, bad(err.Error())
+		}
+	}
 	s.Emit("plugins", s.Plugins.States())
 	return s.pluginList(w, r)
 }
@@ -378,6 +401,10 @@ func (s *Server) pluginRemove(w http.ResponseWriter, r *http.Request) (any, erro
 		delete(st.Plugins, "community:"+id)
 		return nil
 	})
+	if s.DSH != nil {
+		_ = s.SyncDSH(r.Context())
+	}
+	s.Emit("plugins", s.Plugins.States())
 	return okv, nil
 }
 

@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yang0/handraw-client/internal/appdir"
+	"github.com/yang0/handraw-client/internal/dshbridge"
 	"github.com/yang0/handraw-client/internal/galleries"
 	"github.com/yang0/handraw-client/internal/jobs"
 	"github.com/yang0/handraw-client/internal/plugins"
@@ -66,6 +68,7 @@ type Server struct {
 	Updater   *updater.Updater
 	Plugins   *plugins.Runtime
 	Galleries *galleries.Registry
+	DSH       *dshbridge.Manager
 	Host      Host
 	Web      fs.FS // embedded UI
 	PackDir  string
@@ -92,6 +95,7 @@ func New(version string) *Server {
 		Version:   version,
 		Token:     hex.EncodeToString(b),
 		Galleries: galleries.New(),
+		DSH:       dshbridge.New(filepath.Join(appdir.Cache(), "dsh-bridge")),
 		events:    newHub(),
 		login:     &loginState{},
 		cache:     map[string]cached{},
@@ -138,15 +142,34 @@ func (s *Server) Listen(ctx context.Context, port int) (string, error) {
 		}
 	}
 	s.addr = "http://" + ln.Addr().String()
+	if s.DSH != nil {
+		s.DSH.SetHostEndpoint(s.addr, s.Token)
+	}
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
+		if s.DSH != nil {
+			s.DSH.Stop()
+		}
 		sh, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sh)
 	}()
 	go func() { _ = srv.Serve(ln) }()
+	if s.DSH != nil && s.Plugins != nil {
+		go func() { _ = s.SyncDSH(ctx) }()
+	}
 	return s.addr, nil
+}
+
+// SyncDSH reconciles the optional Node DSH sidecar with enabled DSH plugins.
+func (s *Server) SyncDSH(ctx context.Context) error {
+	if s.DSH == nil || s.Plugins == nil {
+		return nil
+	}
+	st := settings.Get()
+	list := s.Plugins.ListCommunity(st.Plugins)
+	return s.DSH.Sync(ctx, list)
 }
 
 func (s *Server) Addr() string { return s.addr }
@@ -158,6 +181,14 @@ func (s *Server) Handler() http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if s.DSH != nil && s.DSH.MatchRoute(r.URL.Path) {
+			if !s.authorized(r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			s.DSH.ServeHTTP(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/files/") {
 			if !s.authorized(r) {
 				http.Error(w, "forbidden", http.StatusForbidden)

@@ -135,7 +135,12 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 		return settings.Get().AutoCheckUpdate
 	})
 
-	return srv, func() { _ = db.Close() }, nil
+	return srv, func() {
+		if srv.DSH != nil {
+			srv.DSH.Stop()
+		}
+		_ = db.Close()
+	}, nil
 }
 
 func newServer(db *store.DB, sc *site.Client, upd *updater.Updater, packDir, bundledDir string) *server.Server {

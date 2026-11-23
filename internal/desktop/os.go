@@ -113,16 +113,41 @@ func CopyTextOS(text string) error {
 	}
 }
 
+// PickDirectoryOS opens a native OS folder selection dialog and returns the
+// chosen directory path (or empty string if canceled).
+func PickDirectoryOS() (string, error) {
+	switch runtime.GOOS {
+	case "windows":
+		cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-STA", "-Command",
+			`Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = '选择文件夹'; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }`)
+		out, err := cmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("打开目录选择器失败：%w", err)
+		}
+		return strings.TrimSpace(string(out)), nil
+	case "darwin":
+		cmd := exec.Command("osascript", "-e", `POSIX path of (choose folder with prompt "选择文件夹")`)
+		out, err := cmd.Output()
+		if err != nil {
+			return "", nil
+		}
+		return strings.TrimRight(strings.TrimSpace(string(out)), "/"), nil
+	default:
+		return "", fmt.Errorf("当前系统不支持原生目录选择器")
+	}
+}
+
 type webHost struct{}
 
 // WebHost returns a server.Host backed by OS tools for `handraw web` debug mode.
 func WebHost() server.Host { return webHost{} }
 
-func (webHost) OpenURL(url string) error   { return OpenBrowser(url) }
-func (webHost) OpenPath(path string) error { return OpenFolder(path) }
-func (webHost) CopyImage(path string) error { return CopyImageFile(path) }
-func (webHost) CopyText(text string) error  { return CopyTextOS(text) }
-func (webHost) ShowMain()                   {}
-func (webHost) HideQuick()                  {}
-func (webHost) Restart()                    {}
-func (webHost) SetHotkey(string) error      { return nil }
+func (webHost) OpenURL(url string) error     { return OpenBrowser(url) }
+func (webHost) OpenPath(path string) error   { return OpenFolder(path) }
+func (webHost) CopyImage(path string) error  { return CopyImageFile(path) }
+func (webHost) CopyText(text string) error   { return CopyTextOS(text) }
+func (webHost) PickDirectory() (string, error) { return PickDirectoryOS() }
+func (webHost) ShowMain()                    {}
+func (webHost) HideQuick()                   {}
+func (webHost) Restart()                     {}
+func (webHost) SetHotkey(string) error       { return nil }

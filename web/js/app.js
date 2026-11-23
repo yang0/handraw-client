@@ -100,6 +100,13 @@ async function start() {
 
     for (const c of plugRes.community || []) {
       if (!c.enabled) continue;
+      if (c.kind === "dsh" && c.dsh?.clientEntry) {
+        addBtn(`dsh:${c.id}`, "⚡", c.name || c.id);
+        continue;
+      }
+      if (c.page && c.page.file) {
+        addBtn(`plugin:${c.id}:page`, c.page.icon || "🔌", c.page.title || c.name);
+      }
       (c.panels || []).forEach((p, idx) => {
         if (!p.slot || p.slot === "nav" || p.slot === "page") {
           addBtn(`plugin:${c.id}:${idx}`, "🔌", p.title || c.name);
@@ -124,11 +131,50 @@ async function start() {
     updateActiveNav();
     clear(main);
 
+    if (currentView.startsWith("dsh:")) {
+      const pid = currentView.slice(4);
+      const plugRes = await api("GET", "/api/plugins").catch(() => ({ community: [] }));
+      const comm = (plugRes.community || []).find((x) => x.id === pid && x.enabled && x.kind === "dsh");
+      if (!comm) {
+        main.appendChild(el("div", { class: "card muted" }, "该 DSH 插件未启用或不存在。请先在「设置 → 模块管理与社区插件」中启用。"));
+        return;
+      }
+      const titleEl = el("h1", { class: "page-title" }, comm.name || comm.id);
+      const onMeta = (ev) => {
+        if (ev.origin !== location.origin || ev.data?.kind !== "dsh-panel-meta" || ev.data?.pluginId !== comm.id) return;
+        if (ev.data.label) titleEl.textContent = ev.data.label;
+      };
+      window.addEventListener("message", onMeta);
+      const frame = el("iframe", {
+        src: `/dsh-host.html?plugin=${encodeURIComponent(comm.id)}`,
+        class: "dsh-plugin-frame",
+        "data-dsh-plugin": comm.id,
+        style: {
+          width: "100%",
+          height: "calc(100vh - 132px)",
+          border: "1px solid var(--line)",
+          borderRadius: "12px",
+          background: "var(--surface)",
+          display: "block",
+        },
+      });
+      main.appendChild(el("div", { class: "page-head", style: { marginBottom: "10px" } },
+        titleEl,
+        el("div", { class: "row" },
+          el("span", { class: "badge badge-accent" }, "DSH 兼容插件"),
+          comm.dsh?.compat === "partial" ? el("span", { class: "badge badge-warn", title: (comm.dsh.compatReasons || []).join("；") }, "部分兼容") : null,
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => { frame.src = frame.src; } }, "刷新")
+        )
+      ));
+      main.appendChild(frame);
+      return;
+    }
+
     if (currentView.startsWith("plugin:")) {
       const [, pid, idxStr] = currentView.split(":");
       const plugRes = await api("GET", "/api/plugins").catch(() => ({ community: [] }));
       const comm = (plugRes.community || []).find((x) => x.id === pid && x.enabled);
-      const panel = comm?.panels?.[Number(idxStr || 0)];
+      const panel = idxStr === "page" ? comm?.page : comm?.panels?.[Number(idxStr || 0)];
       if (!comm || !panel) {
         main.appendChild(el("div", { class: "card muted" }, "该社区插件未启用或面板不存在。"));
         return;

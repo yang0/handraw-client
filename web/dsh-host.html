@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DSH 插件容器 · 手绘风</title>
+  <style>
+    html, body, #dsh-root {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #f6f3ec;
+      color: #1e1b18;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    .dsh-host-status {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 24px;
+      text-align: center;
+      box-sizing: border-box;
+    }
+    .dsh-host-card {
+      max-width: 560px;
+      background: #fffdf9;
+      border: 1px solid #e2ddd2;
+      border-radius: 12px;
+      padding: 20px 24px;
+      text-align: left;
+      box-shadow: 0 4px 16px rgba(30, 27, 24, 0.05);
+    }
+    .dsh-host-card h3 { margin: 0 0 8px; font-size: 16px; }
+    .dsh-host-card pre {
+      margin: 8px 0 0;
+      padding: 10px;
+      background: #f6f3ec;
+      border-radius: 8px;
+      overflow: auto;
+      font-size: 12px;
+      max-height: 220px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .dsh-host-btn {
+      margin-top: 12px;
+      padding: 6px 14px;
+      border-radius: 8px;
+      border: 1px solid #d5cfc2;
+      background: #b74227;
+      color: #fff;
+      cursor: pointer;
+      font: inherit;
+    }
+  </style>
+  <script src="/vendor/react.production.min.js"></script>
+  <script src="/vendor/react-dom.production.min.js"></script>
+</head>
+<body>
+  <div id="dsh-root">
+    <div class="dsh-host-status">正在加载 DSH 插件界面…</div>
+  </div>
+  <script>
+    (function () {
+      'use strict';
+      const React = window.React;
+      const ReactDOM = window.ReactDOM;
+      const rootEl = document.getElementById('dsh-root');
+      const params = new URLSearchParams(location.search);
+      const pluginId = params.get('plugin') || '';
+
+      function readCookie(name) {
+        const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+        return m ? decodeURIComponent(m[1]) : '';
+      }
+
+      async function hostAPI(method, path, body) {
+        const headers = { 'X-Handraw-Token': readCookie('hw') };
+        const init = { method, headers };
+        if (body !== undefined) {
+          headers['Content-Type'] = 'application/json';
+          init.body = JSON.stringify(body);
+        }
+        const res = await fetch(path, init);
+        const txt = await res.text();
+        let data = null;
+        try { data = txt ? JSON.parse(txt) : null; } catch { data = { error: txt }; }
+        if (!res.ok) throw new Error((data && data.error) || ('请求失败 ' + res.status));
+        return data;
+      }
+
+      // Expose Handraw gallery & model client API to DSH plugin UIs too.
+      window.handraw = {
+        galleries: {
+          list: () => hostAPI('GET', '/api/galleries').then((r) => r.galleries || []),
+          items: (kind, q) => {
+            const sp = new URLSearchParams(q || {});
+            const qs = sp.toString() ? '?' + sp.toString() : '';
+            return hostAPI('GET', '/api/galleries/' + encodeURIComponent(kind) + '/items' + qs);
+          },
+          item: (kind, id) => hostAPI('GET', '/api/galleries/' + encodeURIComponent(kind) + '/items/' + encodeURIComponent(id)).then((r) => r.item),
+        },
+        models: {
+          list: (purpose) => hostAPI('GET', '/api/host/models' + (purpose ? '?purpose=' + encodeURIComponent(purpose) : '')),
+          chat: (req) => hostAPI('POST', '/api/host/models/chat', req),
+          quote: (req) => hostAPI('POST', '/api/quote', req),
+          generate: (req) => hostAPI('POST', '/api/generate', Object.assign({ mode: 'plugin' }, req || {})),
+        },
+      };
+
+      function showError(title, detail) {
+        rootEl.innerHTML = '';
+        const wrap = document.createElement('div');
+        wrap.className = 'dsh-host-status';
+        const card = document.createElement('div');
+        card.className = 'dsh-host-card';
+        const h3 = document.createElement('h3');
+        h3.textContent = title;
+        const pre = document.createElement('pre');
+        pre.textContent = String(detail || '未知错误');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'dsh-host-btn';
+        btn.textContent = '重新加载';
+        btn.onclick = () => location.reload();
+        card.appendChild(h3);
+        card.appendChild(pre);
+        card.appendChild(btn);
+        wrap.appendChild(card);
+        rootEl.appendChild(wrap);
+      }
+
+      if (!pluginId) {
+        showError('缺少插件标识', 'URL 缺少 ?plugin=<id> 参数。');
+        return;
+      }
+
+      // JSX runtime shim in case any plugin bundles react/jsx-runtime externally.
+      function jsxShim(type, props, key) {
+        const nextProps = props ? Object.assign({}, props) : {};
+        if (key !== undefined) nextProps.key = key;
+        const children = nextProps.children;
+        delete nextProps.children;
+        if (children === undefined) return React.createElement(type, nextProps);
+        if (Array.isArray(children)) return React.createElement.apply(React, [type, nextProps].concat(children));
+        return React.createElement(type, nextProps, children);
+      }
+      const jsxRuntime = { Fragment: React.Fragment, jsx: jsxShim, jsxs: jsxShim, jsxDEV: jsxShim };
+
+      const registeredModules = [];
+      function shimRequire(name) {
+        if (name === 'react') return React;
+        if (name === 'react-dom' || name === 'react-dom/client') return ReactDOM;
+        if (name === 'react/jsx-runtime' || name === 'react/jsx-dev-runtime') return jsxRuntime;
+        throw new Error('DSH 兼容容器暂未提供前端模块：' + name);
+      }
+
+      window.__ModuleLoader__ = {
+        load(def) {
+          if (!def || typeof def.factory !== 'function') return;
+          registeredModules.push(def);
+        },
+      };
+
+      const disposers = [];
+      let mainComponent = null;
+      let panelLabel = '';
+
+      const slots = {
+        inject(slotName, fn) {
+          if (typeof fn !== 'function') return () => {};
+          const off = fn();
+          if (typeof off === 'function') disposers.push(off);
+          return typeof off === 'function' ? off : () => {};
+        },
+        register(meta, Component) {
+          const name = meta && meta.name;
+          if (name === 'main' && Component) {
+            mainComponent = Component;
+          } else if (name === 'sidebar.panellist' && meta) {
+            try {
+              panelLabel = typeof meta.label === 'function' ? String(meta.label() || '') : String(meta.label || '');
+            } catch {}
+          }
+          return () => {
+            if (name === 'main' && mainComponent === Component) mainComponent = null;
+          };
+        },
+      };
+
+      const ctx = {
+        name: pluginId,
+        slots,
+        handraw: window.handraw,
+        get(name) {
+          if (name === 'slots') return slots;
+          if (name === 'handraw') return window.handraw;
+          return undefined;
+        },
+        effect(fn) {
+          if (typeof fn !== 'function') return () => {};
+          const off = fn();
+          if (typeof off === 'function') disposers.push(off);
+          return typeof off === 'function' ? off : () => {};
+        },
+      };
+
+      window.addEventListener('beforeunload', () => {
+        for (let i = disposers.length - 1; i >= 0; i--) {
+          try { disposers[i](); } catch {}
+        }
+      });
+
+      class PluginErrorBoundary extends React.Component {
+        constructor(props) {
+          super(props);
+          this.state = { error: null };
+        }
+        static getDerivedStateFromError(error) {
+          return { error };
+        }
+        render() {
+          if (this.state.error) {
+            return React.createElement('div', { className: 'dsh-host-status' },
+              React.createElement('div', { className: 'dsh-host-card' },
+                React.createElement('h3', null, 'DSH 插件渲染异常'),
+                React.createElement('pre', null, String(this.state.error && (this.state.error.stack || this.state.error.message || this.state.error))),
+                React.createElement('button', { type: 'button', className: 'dsh-host-btn', onClick: () => location.reload() }, '重新加载')
+              )
+            );
+          }
+          return this.props.children;
+        }
+      }
+
+      const script = document.createElement('script');
+      script.src = '/files/dsh-client/' + encodeURIComponent(pluginId) + '?t=' + encodeURIComponent(readCookie('hw'));
+      script.async = false;
+      script.onerror = () => showError('无法加载 DSH 插件前端脚本', script.src);
+      script.onload = () => {
+        try {
+          if (!registeredModules.length) {
+            showError('插件未注册前端模块', '未检测到 window.__ModuleLoader__.load(...) 调用。');
+            return;
+          }
+          for (const def of registeredModules) {
+            const exported = def.factory(shimRequire);
+            const target = exported && exported.default && typeof exported.default.apply === 'function'
+              ? exported.default
+              : exported;
+            if (target && typeof target.apply === 'function') {
+              target.apply(ctx);
+            } else if (typeof target === 'function') {
+              target(ctx);
+            }
+          }
+          if (!mainComponent) {
+            showError('插件未注册主界面面板', '插件未向 ctx.slots 注册 main 视图组件。');
+            return;
+          }
+          if (panelLabel && window.parent && window.parent !== window) {
+            try {
+              window.parent.postMessage({ kind: 'dsh-panel-meta', pluginId, label: panelLabel }, location.origin);
+            } catch {}
+          }
+          const root = ReactDOM.createRoot(rootEl);
+          root.render(
+            React.createElement(PluginErrorBoundary, null, React.createElement(mainComponent, null))
+          );
+        } catch (err) {
+          showError('DSH 插件初始化失败', err && (err.stack || err.message || String(err)));
+        }
+      };
+      document.head.appendChild(script);
+    })();
+  </script>
+</body>
+</html>
