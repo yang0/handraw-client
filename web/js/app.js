@@ -344,11 +344,45 @@ async function start() {
       qBtn.classList.toggle("hidden", cnt <= 0);
     }
     latestUpdateStatus = upd || {};
-    if (updBtn) {
-      const hasUpd = Boolean(upd.available || upd.ready || upd.resourceNew);
+    if (updBtn && !updatingNow && !updateFeedbackHold) {
+      const hasUpd = Boolean(upd.available || upd.ready || upd.resourceNew || upd.downloading);
       updBtn.classList.toggle("hidden", !hasUpd);
-      updBtn.textContent = "更新";
-      updBtn.disabled = updatingNow;
+      if (upd.downloading) {
+        const pct = Math.max(0, Math.min(100, Number(upd.progress || 0)));
+        setTopbarUpdateBtn("busy", pct > 0 ? `下载中 ${pct}%` : "下载更新中…", pct);
+      } else if (upd.ready) {
+        setTopbarUpdateBtn("idle", "重启升级", 0, "新版本已下载完成，点击重启并升级");
+      } else {
+        setTopbarUpdateBtn("idle", "更新", 0, "点击立即更新");
+      }
+    }
+  }
+
+  let updateFeedbackHold = false;
+  let updateFeedbackTimer = null;
+
+  function setTopbarUpdateBtn(state, label, pct = 0, titleText = "") {
+    const updBtn = document.getElementById("btn-update");
+    if (!updBtn) return;
+    updBtn.classList.add("btn-update-inline");
+    updBtn.dataset.state = state;
+    updBtn.style.setProperty("--upd-pct", `${Math.max(0, Math.min(100, Number(pct || 0)))}%`);
+    updBtn.disabled = state === "busy";
+    updBtn.setAttribute("aria-busy", String(state === "busy"));
+    if (titleText) updBtn.title = titleText;
+    clear(updBtn);
+    if (state === "busy") {
+      updBtn.append(
+        el("span", { class: "upd-spinner", "aria-hidden": "true" }),
+        el("span", null, label)
+      );
+    } else if (state === "done") {
+      updBtn.append(
+        el("span", { class: "upd-check", "aria-hidden": "true" }, "✓"),
+        el("span", null, label)
+      );
+    } else {
+      updBtn.append(el("span", null, label));
     }
   }
 
@@ -440,41 +474,47 @@ async function start() {
   async function runImmediateUpdate() {
     if (updatingNow) return;
     const updBtn = document.getElementById("btn-update");
+    clearTimeout(updateFeedbackTimer);
+    updateFeedbackHold = false;
     updatingNow = true;
-    if (updBtn) updBtn.disabled = true;
-    const finish = () => {
-      updatingNow = false;
-      if (updBtn) updBtn.disabled = false;
-    };
+    if (updBtn) {
+      updBtn.classList.remove("hidden");
+      setTopbarUpdateBtn("busy", "准备更新…", 6, "正在检查并执行更新");
+    }
     try {
       const st = await api("GET", "/api/update").catch(() => latestUpdateStatus || {});
+      let didResourceUpdate = false;
       if (st.resourceNew) {
-        toast("正在更新资源包…");
+        setTopbarUpdateBtn("busy", "更新资源中…", 10, "正在增量更新本地资源包");
         const r = await api("POST", "/api/update/resources");
         if (r?.updated) {
-          toast("资源包已更新");
+          didResourceUpdate = true;
         }
       }
       const afterRes = await api("GET", "/api/update").catch(() => st);
       if (afterRes.ready) {
-        toast("正在应用更新并重启…");
+        setTopbarUpdateBtn("busy", "正在重启…", 100, "正在应用新版本并重启客户端");
         await api("POST", "/api/update/apply");
         return;
       }
       if (afterRes.available) {
-        toast("正在下载更新…");
+        setTopbarUpdateBtn("busy", "下载更新…", Math.max(8, Number(afterRes.progress || 0)), "正在下载客户端新版安装包");
         if (!afterRes.downloading) {
           await api("POST", "/api/update/download");
         }
         const deadline = Date.now() + 10 * 60 * 1000;
         while (Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 800));
+          await new Promise((r) => setTimeout(r, 600));
           const cur = await api("GET", "/api/update").catch(() => null);
           if (!cur) continue;
           if (cur.ready) {
-            toast("正在应用更新并重启…");
+            setTopbarUpdateBtn("busy", "正在重启…", 100, "正在应用新版本并重启客户端");
             await api("POST", "/api/update/apply");
             return;
+          }
+          if (cur.downloading) {
+            const pct = Math.max(0, Math.min(100, Number(cur.progress || 0)));
+            setTopbarUpdateBtn("busy", pct > 0 ? `下载中 ${pct}%` : "下载更新…", pct, `正在下载新版 ${cur.latest || ""}`);
           }
           if (!cur.downloading && cur.error) {
             throw new Error(cur.error);
@@ -484,12 +524,21 @@ async function start() {
           }
         }
       }
-      await refreshTopbar();
-      finish();
+      updatingNow = false;
+      updateFeedbackHold = true;
+      setTopbarUpdateBtn("done", didResourceUpdate ? "已更新" : "已是最新", 100, "更新已完成");
+      updateFeedbackTimer = setTimeout(async () => {
+        updateFeedbackHold = false;
+        await refreshTopbar();
+      }, 2000);
     } catch (e) {
-      toast(e?.message || "更新失败");
-      finish();
-      await refreshTopbar();
+      updatingNow = false;
+      updateFeedbackHold = true;
+      setTopbarUpdateBtn("error", "更新失败，点击重试", 0, e?.message || "更新失败，点击重试");
+      updateFeedbackTimer = setTimeout(async () => {
+        updateFeedbackHold = false;
+        await refreshTopbar();
+      }, 4500);
     }
   }
 
@@ -521,6 +570,13 @@ async function start() {
   });
 
   onEvent((msg) => {
+    if (msg.type === "resource_update" && updatingNow) {
+      const done = Number(msg.data?.done || 0);
+      const total = Number(msg.data?.total || 0);
+      const pct = total > 0 ? Math.round((done / total) * 100) : 25;
+      setTopbarUpdateBtn("busy", total > 0 ? `资源 ${done}/${total}` : "更新资源中…", pct, "正在增量更新本地资源包");
+      return;
+    }
     if (msg.type === "account" || msg.type === "balance" || msg.type === "job" || msg.type === "run" || msg.type === "update") {
       refreshTopbar();
     }

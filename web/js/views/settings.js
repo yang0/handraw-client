@@ -750,8 +750,147 @@ export async function renderSettings(root, ctx, params = {}) {
   );
 
   // 4. Version & Incremental Resource Updates
-  const resProg = el("span", { class: "muted" }, "");
   const hasAnyUpdate = Boolean(updRes.available || updRes.ready || updRes.resourceNew);
+  let dlPollTimer = null;
+  let updatingResourcesInline = false;
+
+  function setInlineActionBtn(btn, state, label, pct = 0, titleText = "") {
+    if (!btn) return;
+    btn.classList.add("btn-update-inline");
+    btn.dataset.state = state;
+    btn.style.setProperty("--upd-pct", `${Math.max(0, Math.min(100, Number(pct || 0)))}%`);
+    btn.disabled = state === "busy";
+    btn.setAttribute("aria-busy", String(state === "busy"));
+    if (titleText) btn.title = titleText;
+    clear(btn);
+    if (state === "busy") {
+      btn.append(el("span", { class: "upd-spinner", "aria-hidden": "true" }), el("span", null, label));
+    } else if (state === "done") {
+      btn.append(el("span", { class: "upd-check", "aria-hidden": "true" }, "✓"), el("span", null, label));
+    } else {
+      btn.append(el("span", null, label));
+    }
+  }
+
+  const checkUpdBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm btn-update-inline",
+    onClick: async () => {
+      setInlineActionBtn(checkUpdBtn, "busy", "检查更新中…", 20);
+      try {
+        const r = await api("POST", "/api/update/check");
+        const st = r?.status || {};
+        if (st.available || st.ready || st.resourceNew) {
+          setInlineActionBtn(checkUpdBtn, "done", st.available ? `发现新版 ${st.latest || ""}`.trim() : "发现资源更新", 100);
+          setTimeout(() => {
+            if (root.isConnected && root._settingsRenderSeq === seq) {
+              renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
+            }
+          }, 900);
+        } else if (r?.error) {
+          setInlineActionBtn(checkUpdBtn, "error", "检查失败，重试", 0, r.error);
+        } else {
+          setInlineActionBtn(checkUpdBtn, "done", "已是最新版本", 100);
+          setTimeout(() => {
+            if (root.isConnected && root._settingsRenderSeq === seq) {
+              setInlineActionBtn(checkUpdBtn, "idle", "检查版本与资源更新", 0);
+            }
+          }, 1800);
+        }
+      } catch (e) {
+        setInlineActionBtn(checkUpdBtn, "error", "检查失败，重试", 0, e?.message || "检查失败");
+      }
+    },
+  }, "检查版本与资源更新");
+
+  let dlUpdBtn = null;
+  function startDownloadPoll() {
+    clearInterval(dlPollTimer);
+    dlPollTimer = setInterval(async () => {
+      if (!root.isConnected || root._settingsRenderSeq !== seq) {
+        clearInterval(dlPollTimer);
+        return;
+      }
+      const cur = await api("GET", "/api/update").catch(() => null);
+      if (!cur || !dlUpdBtn) return;
+      if (cur.ready) {
+        clearInterval(dlPollTimer);
+        setInlineActionBtn(dlUpdBtn, "done", "下载完成", 100);
+        setTimeout(() => {
+          if (root.isConnected && root._settingsRenderSeq === seq) {
+            renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
+          }
+        }, 700);
+      } else if (cur.downloading) {
+        const pct = Math.max(0, Math.min(100, Number(cur.progress || 0)));
+        setInlineActionBtn(dlUpdBtn, "busy", pct > 0 ? `下载中 ${pct}%` : "下载更新中…", pct);
+      } else if (cur.error) {
+        clearInterval(dlPollTimer);
+        setInlineActionBtn(dlUpdBtn, "error", "下载失败，重试", 0, cur.error);
+      } else {
+        clearInterval(dlPollTimer);
+        setInlineActionBtn(dlUpdBtn, "idle", "下载客户端更新", 0);
+      }
+    }, 600);
+  }
+
+  if (updRes.available) {
+    dlUpdBtn = el("button", {
+      type: "button",
+      class: "btn btn-sm btn-primary btn-update-inline",
+      onClick: async () => {
+        setInlineActionBtn(dlUpdBtn, "busy", "准备下载…", 8);
+        try {
+          await api("POST", "/api/update/download");
+          startDownloadPoll();
+        } catch (e) {
+          setInlineActionBtn(dlUpdBtn, "error", "下载失败，重试", 0, e?.message || "下载失败");
+        }
+      },
+    }, "下载客户端更新");
+    if (updRes.downloading) {
+      const pct = Math.max(0, Math.min(100, Number(updRes.progress || 0)));
+      setInlineActionBtn(dlUpdBtn, "busy", pct > 0 ? `下载中 ${pct}%` : "下载更新中…", pct);
+      startDownloadPoll();
+    }
+  }
+
+  const applyUpdBtn = updRes.ready ? el("button", {
+    type: "button",
+    class: "btn btn-sm btn-primary btn-update-inline",
+    onClick: async () => {
+      setInlineActionBtn(applyUpdBtn, "busy", "正在重启升级…", 100);
+      try {
+        await api("POST", "/api/update/apply");
+      } catch (e) {
+        setInlineActionBtn(applyUpdBtn, "error", "升级失败，重试", 0, e?.message || "升级失败");
+      }
+    },
+  }, "重启完成升级") : null;
+
+  const resUpdBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm btn-update-inline",
+    onClick: async () => {
+      if (updatingResourcesInline) return;
+      updatingResourcesInline = true;
+      setInlineActionBtn(resUpdBtn, "busy", "更新资源中…", 10);
+      try {
+        const r = await api("POST", "/api/update/resources");
+        updatingResourcesInline = false;
+        setInlineActionBtn(resUpdBtn, "done", r?.updated ? `已更新 ${r.changed || 0} 项` : "已是最新资源", 100);
+        setTimeout(() => {
+          if (root.isConnected && root._settingsRenderSeq === seq) {
+            renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
+          }
+        }, 1400);
+      } catch (e) {
+        updatingResourcesInline = false;
+        setInlineActionBtn(resUpdBtn, "error", "更新失败，重试", 0, e?.message || "资源更新失败");
+      }
+    },
+  }, "增量更新资源包");
+
   const updSection = el("section", {
     id: "settings-updates",
     class: "card settings-section",
@@ -780,43 +919,11 @@ export async function renderSettings(root, ctx, params = {}) {
         el("strong", { class: "mono" }, `${updRes.resourceLocal || "?"}${updRes.resourceNew ? " → " + updRes.resourceNew : ""}`)
       )
     ),
-    resProg,
     el("div", { class: "row" },
-      el("button", {
-        type: "button",
-        class: "btn btn-sm",
-        onClick: async () => {
-          const r = await api("POST", "/api/update/check").catch((e) => ({ error: e.message }));
-          toast(r.status?.available ? `发现新版 ${r.status.latest}` : (r.error || "已是最新版本"));
-          renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
-        },
-      }, "检查版本与资源更新"),
-      updRes.available ? el("button", {
-        type: "button",
-        class: "btn btn-sm btn-primary",
-        onClick: async () => {
-          await api("POST", "/api/update/download");
-          toast("正在后台下载更新包…");
-        },
-      }, updRes.downloading ? `下载中 ${updRes.progress}%` : "下载客户端更新") : null,
-      updRes.ready ? el("button", {
-        type: "button",
-        class: "btn btn-sm btn-primary",
-        onClick: () => api("POST", "/api/update/apply"),
-      }, "重启完成升级") : null,
-      el("button", {
-        type: "button",
-        class: "btn btn-sm",
-        onClick: async () => {
-          try {
-            const r = await api("POST", "/api/update/resources");
-            toast(r.updated ? `已增量更新 ${r.changed} 个资源文件` : "本地资源包已是最新");
-            renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
-          } catch (e) {
-            toast(e.message);
-          }
-        },
-      }, "增量更新资源包")
+      checkUpdBtn,
+      dlUpdBtn,
+      applyUpdBtn,
+      resUpdBtn
     )
   );
 
@@ -903,6 +1010,7 @@ export async function renderSettings(root, ctx, params = {}) {
 
   const cleanup = () => {
     stopLoginTimers();
+    clearInterval(dlPollTimer);
     window.removeEventListener("focus", onReturnFocus);
     document.removeEventListener("visibilitychange", onReturnFocus);
     unsub();
@@ -913,7 +1021,10 @@ export async function renderSettings(root, ctx, params = {}) {
       return;
     }
     if (msg.type === "resource_update") {
-      resProg.textContent = `资源包增量下载进度：${msg.data?.done || 0} / ${msg.data?.total || 0}`;
+      const done = Number(msg.data?.done || 0);
+      const total = Number(msg.data?.total || 0);
+      const pct = total > 0 ? Math.round((done / total) * 100) : 25;
+      setInlineActionBtn(resUpdBtn, "busy", total > 0 ? `更新中 ${done}/${total}` : "更新资源中…", pct);
     } else if (msg.type === "account") {
       const data = msg.data || {};
       if (data.status === "pending" || data.status === "syncing" || data.status === "ok" || data.status === "error" || data.status === "idle") {
