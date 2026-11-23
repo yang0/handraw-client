@@ -12,6 +12,7 @@ import (
 	"github.com/yang0/handraw-client/internal/providers"
 	"github.com/yang0/handraw-client/internal/settings"
 	"github.com/yang0/handraw-client/internal/site"
+	"github.com/yang0/handraw-client/internal/skills"
 )
 
 // hostModelsSummary returns a sanitized, secret-free model catalog for plugins
@@ -51,8 +52,45 @@ type hostChatRequest struct {
 	ModelRef   string                  `json:"modelRef"`
 	Capability string                  `json:"capability"` // text | vision
 	System     string                  `json:"system"`
+	SkillIDs   []string                `json:"skillIds,omitempty"`
 	Messages   []providers.ChatMessage `json:"messages"`
 	JSONMode   bool                    `json:"jsonMode"`
+}
+
+func (s *Server) buildSkillSystemSuffix(skillIDs []string) (string, []map[string]string) {
+	if len(skillIDs) == 0 {
+		return "", nil
+	}
+	all, _ := s.skillsManager().List()
+	byID := map[string]skills.Skill{}
+	for _, sk := range all {
+		if sk.Enabled {
+			byID[sk.ID] = sk
+		}
+	}
+	var sb strings.Builder
+	var used []map[string]string
+	seen := map[string]bool{}
+	for _, rawID := range skillIDs {
+		id := skills.SanitizeID(rawID)
+		if id == "" || seen[id] {
+			continue
+		}
+		sk, ok := byID[id]
+		if !ok {
+			continue
+		}
+		seen[id] = true
+		used = append(used, map[string]string{"id": sk.ID, "name": sk.Name})
+		body := strings.TrimSpace(sk.Body)
+		if body == "" {
+			body = strings.TrimSpace(sk.Content)
+		}
+		sb.WriteString("\n\n<skill id=\"" + sk.ID + "\" name=\"" + sk.Name + "\">\n")
+		sb.WriteString(body)
+		sb.WriteString("\n</skill>")
+	}
+	return sb.String(), used
 }
 
 func (s *Server) executeHostChat(ctx context.Context, req hostChatRequest) (map[string]any, error) {
@@ -61,8 +99,16 @@ func (s *Server) executeHostChat(ctx context.Context, req hostChatRequest) (map[
 		capStr = "text"
 	}
 	msgs := make([]providers.ChatMessage, 0, len(req.Messages)+1)
-	if strings.TrimSpace(req.System) != "" {
-		msgs = append(msgs, providers.ChatMessage{Role: "system", Content: req.System})
+	sysText := strings.TrimSpace(req.System)
+	if skillSuffix, _ := s.buildSkillSystemSuffix(req.SkillIDs); skillSuffix != "" {
+		if sysText != "" {
+			sysText += "\n\n请严格遵循以下已启用的 Agent Skill 规范执行任务：" + skillSuffix
+		} else {
+			sysText = "请严格遵循以下已启用的 Agent Skill 规范执行任务：" + skillSuffix
+		}
+	}
+	if sysText != "" {
+		msgs = append(msgs, providers.ChatMessage{Role: "system", Content: sysText})
 	}
 	msgs = append(msgs, req.Messages...)
 	if len(msgs) == 0 {
@@ -147,6 +193,39 @@ func (s *Server) hostModelsChat(w http.ResponseWriter, r *http.Request) (any, er
 		return nil, err
 	}
 	return s.executeHostChat(r.Context(), req)
+}
+
+// hostSkillsList exposes enabled installed Agent Skills to plugins (DSH L2 & L1).
+func (s *Server) hostSkillsList(w http.ResponseWriter, r *http.Request) (any, error) {
+	all, err := s.skillsManager().List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(all))
+	for _, sk := range all {
+		if !sk.Enabled {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":          sk.ID,
+			"name":        sk.Name,
+			"description": sk.Description,
+			"version":     sk.Version,
+			"builtin":     sk.Builtin,
+			"source":      sk.Source,
+		})
+	}
+	return map[string]any{"items": out}, nil
+}
+
+// hostSkillGet returns one enabled installed Agent Skill's full instructions.
+func (s *Server) hostSkillGet(w http.ResponseWriter, r *http.Request) (any, error) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	sk, err := s.skillsManager().Get(id)
+	if err != nil || !sk.Enabled {
+		return nil, notFound("未找到已启用的 Skill：" + id)
+	}
+	return map[string]any{"skill": sk}, nil
 }
 
 type directoryPickerHost interface {

@@ -298,7 +298,15 @@ func (m *Manager) InstallFromSource(ctx context.Context, source string) (Skill, 
 	return m.installFromLocal(source)
 }
 
+func (m *Manager) InstallFromLocalWithSource(src, sourceTag string) (Skill, error) {
+	return m.installFromLocalWithSource(src, sourceTag)
+}
+
 func (m *Manager) installFromLocal(src string) (Skill, error) {
+	return m.installFromLocalWithSource(src, src)
+}
+
+func (m *Manager) installFromLocalWithSource(src, sourceTag string) (Skill, error) {
 	info, err := os.Stat(src)
 	if err != nil {
 		return Skill{}, fmt.Errorf("找不到本地路径：%s", src)
@@ -308,7 +316,7 @@ func (m *Manager) installFromLocal(src string) (Skill, error) {
 		if err != nil {
 			return Skill{}, err
 		}
-		return m.InstallFromBytes(filepath.Base(src), raw, src)
+		return m.InstallFromBytes(filepath.Base(src), raw, firstNonEmpty(sourceTag, src))
 	}
 
 	// Find SKILL.md directly in dir or one level deep.
@@ -333,10 +341,13 @@ func (m *Manager) installFromLocal(src string) (Skill, error) {
 	if err != nil {
 		return Skill{}, err
 	}
-	name, _, _ := ParseFrontmatter(string(raw))
+	name, _, _, pVer := ParseFrontmatterFull(string(raw))
 	id := SanitizeID(firstNonEmpty(name, filepath.Base(skillDir)))
 	if id == "" {
 		id = fmt.Sprintf("skill-%d", time.Now().Unix())
+	}
+	if id == BuiltinHandrawSkillID {
+		id = id + "-imported"
 	}
 
 	m.mu.Lock()
@@ -386,11 +397,15 @@ func (m *Manager) installFromLocal(src string) (Skill, error) {
 	if err != nil {
 		return Skill{}, err
 	}
+	now := time.Now().UnixMilli()
 	if err := writeMeta(dest, metaFile{
 		ID:          id,
 		Enabled:     true,
-		Source:      src,
-		InstalledAt: time.Now().UnixMilli(),
+		Version:     pVer,
+		Source:      firstNonEmpty(sourceTag, src),
+		InstalledAt: now,
+		UpdatedAt:   now,
+		ContentSHA:  sha256Hex(raw),
 	}); err != nil {
 		return Skill{}, err
 	}

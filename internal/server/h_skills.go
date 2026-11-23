@@ -3,6 +3,7 @@ package server
 import (
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/yang0/handraw-client/internal/appdir"
@@ -160,5 +161,62 @@ func (s *Server) skillUpdate(w http.ResponseWriter, r *http.Request) (any, error
 		"skill":           sk,
 		"previousVersion": prev.Version,
 		"version":         sk.Version,
+	}, nil
+}
+
+func (s *Server) skillDiscover(w http.ResponseWriter, r *http.Request) (any, error) {
+	mgr := s.skillsManager()
+	extraDir := strings.TrimSpace(r.URL.Query().Get("extraDir"))
+	homeOverride := strings.TrimSpace(os.Getenv("HANDRAW_SKILL_DISCOVER_HOME"))
+	res := mgr.DiscoverHarnessSkills(homeOverride, extraDir)
+	return res, nil
+}
+
+func (s *Server) skillImportLocal(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		Items []struct {
+			Dir        string `json:"dir"`
+			ClientID   string `json:"clientId"`
+			ClientName string `json:"clientName"`
+		} `json:"items"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	if len(body.Items) == 0 {
+		return nil, bad("请先勾选要导入的 Skill")
+	}
+	mgr := s.skillsManager()
+	imported := make([]skills.Skill, 0, len(body.Items))
+	failed := make([]map[string]string, 0)
+	for _, it := range body.Items {
+		dir := strings.TrimSpace(it.Dir)
+		if dir == "" {
+			continue
+		}
+		cid := strings.TrimSpace(it.ClientID)
+		if cid == "" {
+			cid = "local"
+		}
+		sourceTag := "harness:" + cid + ":" + dir
+		sk, err := mgr.InstallFromLocalWithSource(dir, sourceTag)
+		if err != nil {
+			failed = append(failed, map[string]string{"dir": dir, "error": err.Error()})
+			continue
+		}
+		imported = append(imported, sk)
+	}
+	if len(imported) > 0 {
+		s.Emit("skills", map[string]any{"updated": true, "importedCount": len(imported)})
+	}
+	all, _ := mgr.List()
+	if all == nil {
+		all = []skills.Skill{}
+	}
+	return map[string]any{
+		"ok":       len(imported) > 0 || len(failed) == 0,
+		"imported": imported,
+		"failed":   failed,
+		"items":    all,
 	}, nil
 }

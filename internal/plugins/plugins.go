@@ -341,6 +341,7 @@ var KnownPermissions = map[string]string{
 	"models:text":        "调用宿主配置的文字模型",
 	"models:vision":      "调用宿主配置的视觉理解模型",
 	"models:image":       "调用宿主配置的生图模型（受单次费用上限保护）",
+	"skills:read":        "读取宿主已安装的 Agent Skill 列表与指令内容",
 	"works:read":         "读取本地作品列表和图片",
 	"recipes:read":       "读取配方",
 	"generate":           "发起生图（会按所选模型计费）",

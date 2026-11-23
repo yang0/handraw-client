@@ -1,4 +1,5 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
+import { buildTextModelSelect, openSharedSkillPickerModal } from "../skills-ui.js";
 import { buildGroupedModelSelect } from "./create.js";
 import {
   choices,
@@ -19,7 +20,7 @@ import {
 export async function renderArticle(root, ctx, params = {}) {
   const host = studioMount(root);
 
-  const [stylesRes, colorsRes, tonesRes, modRes, draftsRes, layoutsRes, vaultRes] = await Promise.all([
+  const [stylesRes, colorsRes, tonesRes, modRes, draftsRes, layoutsRes, vaultRes, skillsRes] = await Promise.all([
     api("GET", "/api/resources/styles").catch(() => ({ items: [] })),
     api("GET", "/api/resources/colors").catch(() => ({ items: [] })),
     api("GET", "/api/resources/tones").catch(() => ({ items: [] })),
@@ -27,6 +28,7 @@ export async function renderArticle(root, ctx, params = {}) {
     api("GET", "/api/docs/article").catch(() => ({ items: [] })),
     api("GET", "/api/resources/layouts").catch(() => ({ items: [] })),
     api("GET", "/api/article/vault/tree").catch(() => ({ dir: "", name: "articles", exists: false, tree: [], fileCount: 0 })),
+    api("GET", "/api/skills").catch(() => ({ items: [] })),
   ]);
   if (!host.isConnected) return;
 
@@ -36,6 +38,7 @@ export async function renderArticle(root, ctx, params = {}) {
   const layouts = layoutsRes.items || [];
   let drafts = draftsRes.items || [];
   let vault = vaultRes || { dir: "", name: "articles", exists: false, tree: [], fileCount: 0, vaults: [] };
+  let installedSkills = (skillsRes.items || []).filter((sk) => sk.enabled !== false);
 
   const session = studioSession(host, "article", {
     docId: params.docId || "",
@@ -56,6 +59,8 @@ export async function renderArticle(root, ctx, params = {}) {
     includeCover: true,
     resolution: "2k",
     modelRef: modRes.defaultModel || "site:seedream-4.5",
+    textModelRef: modRes.defaultTextModel || "",
+    aiSkillIds: [],
     recommendedStyles: [],
     slots: [],
     viewMode: "editor", // editor | preview
@@ -358,6 +363,251 @@ export async function renderArticle(root, ctx, params = {}) {
   const previewStageBox = el("div", { class: "col hidden", style: { gap: "12px" } });
   const scrollArea = el("div", { class: "ic-wechat-scroll-area" }, welcomeBox, paperSheet, previewStageBox);
 
+  // 3.5. AI Article Revision Bar (with installed Skill invocation) (#70)
+  let aiEditing = false;
+  let pendingAiRevision = null; // { title, content, summary, usedSkills, prevTitle, prevContent }
+  let lastAiUndo = null; // { title, content }
+
+  const aiResultBox = el("div", { class: "ic-art-ai-result hidden", role: "status" });
+  const aiSkillsStrip = el("div", { class: "ic-art-ai-skills hidden" });
+  const aiInput = el("textarea", {
+    class: "ic-art-ai-input",
+    rows: "1",
+    placeholder: "告诉 AI 如何修改这篇文章（如「去掉 AI 味、压缩开头」），或点击右侧「选择 Skill」调用已安装 Skill…（Ctrl+Enter 执行）",
+    "aria-label": "AI 改稿指令输入框",
+  });
+  const resizeAiInput = () => {
+    aiInput.style.height = "auto";
+    aiInput.style.height = `${Math.min(108, Math.max(34, aiInput.scrollHeight))}px`;
+  };
+  aiInput.addEventListener("input", resizeAiInput);
+  aiInput.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      runAiArticleEdit();
+    }
+  });
+
+  const textModelSel = buildTextModelSelect(modRes, state.textModelRef);
+  state.textModelRef = textModelSel.value;
+  textModelSel.addEventListener("change", () => {
+    state.textModelRef = textModelSel.value;
+    session.persist();
+  });
+
+  const aiPickSkillBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm ic-art-ai-skill-btn",
+    onClick: () => {
+      openSharedSkillPickerModal({
+        title: "选择改稿 Skill",
+        selectedIds: Array.isArray(state.aiSkillIds) ? state.aiSkillIds : [],
+        onChange: (ids, freshSkills) => {
+          state.aiSkillIds = ids;
+          if (Array.isArray(freshSkills)) installedSkills = freshSkills;
+          renderAiSkillsBar();
+          session.persist();
+        },
+        onSkillsUpdated: (freshSkills) => {
+          if (Array.isArray(freshSkills)) installedSkills = freshSkills;
+          renderAiSkillsBar();
+        },
+      });
+    },
+  }, "选择 Skill");
+
+  const aiUndoBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm hidden",
+    title: "撤销最近一次应用的 AI 改稿",
+    onClick: () => {
+      if (!lastAiUndo) return;
+      state.title = lastAiUndo.title;
+      state.content = lastAiUndo.content;
+      state.dirty = true;
+      lastAiUndo = null;
+      syncAiEditBar();
+      renderFlow();
+      syncBottomBar();
+      syncTopbarBreadcrumb();
+      session.persist();
+      toast("已撤销上次 AI 改稿");
+    },
+  }, "↩ 撤销改稿");
+
+  const aiRunBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm btn-primary",
+    onClick: () => runAiArticleEdit(),
+  }, "✨ AI 改稿");
+
+  function renderAiSkillsBar() {
+    clear(aiSkillsStrip);
+    const ids = Array.isArray(state.aiSkillIds) ? state.aiSkillIds : [];
+    const byId = new Map(installedSkills.map((sk) => [sk.id, sk]));
+    const valid = ids.filter((id) => byId.has(id));
+    if (valid.length !== ids.length) state.aiSkillIds = valid;
+    aiSkillsStrip.classList.toggle("hidden", valid.length === 0);
+    aiPickSkillBtn.textContent = valid.length > 0 ? `选择 Skill (${valid.length})` : "选择 Skill";
+    aiPickSkillBtn.classList.toggle("is-has-skills", valid.length > 0);
+    valid.forEach((id) => {
+      const sk = byId.get(id);
+      aiSkillsStrip.appendChild(el("span", { class: "ic-art-skill-chip", title: sk.description || sk.id },
+        el("span", null, `⚡ ${sk.name || sk.id}`),
+        el("button", {
+          type: "button",
+          class: "ic-art-skill-chip-x",
+          "aria-label": `移除 Skill ${sk.name || sk.id}`,
+          onClick: () => {
+            state.aiSkillIds = (state.aiSkillIds || []).filter((x) => x !== id);
+            renderAiSkillsBar();
+            session.persist();
+          },
+        }, "×")
+      ));
+    });
+  }
+
+  function openAiCompareModal(rev) {
+    const beforePre = el("pre", { class: "ic-art-diff-pre mono" }, `# ${rev.prevTitle || "（无标题）"}\n\n${rev.prevContent || ""}`);
+    const afterPre = el("pre", { class: "ic-art-diff-pre mono" }, `# ${rev.title || "（无标题）"}\n\n${rev.content || ""}`);
+    showModal("AI 改稿前后对照", el("div", { class: "col", style: { gap: "10px" } },
+      el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, `修改摘要：${rev.summary || "已完成文章修改"}`),
+      el("div", { class: "ic-art-diff-grid" },
+        el("div", { class: "col", style: { gap: "4px", minWidth: 0 } },
+          el("strong", { style: { fontSize: "12px" } }, `修改前（${(rev.prevContent || "").length} 字）`),
+          beforePre
+        ),
+        el("div", { class: "col", style: { gap: "4px", minWidth: 0 } },
+          el("strong", { style: { fontSize: "12px", color: "var(--accent)" } }, `AI 改稿后（${(rev.content || "").length} 字）`),
+          afterPre
+        )
+      )
+    ), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
+      el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: () => {
+          closeModal();
+          applyPendingAiRevision();
+        },
+      }, "✓ 应用到正文"),
+    ]);
+  }
+
+  function applyPendingAiRevision() {
+    if (!pendingAiRevision) return;
+    lastAiUndo = { title: state.title || "", content: state.content || "" };
+    state.title = pendingAiRevision.title;
+    state.content = pendingAiRevision.content;
+    state.dirty = true;
+    pendingAiRevision = null;
+    syncAiEditBar();
+    renderFlow();
+    syncBottomBar();
+    syncTopbarBreadcrumb();
+    session.persist();
+    toast("已应用 AI 改稿到正文，按 Ctrl+S 可写回本地 Markdown");
+  }
+
+  function syncAiEditBar() {
+    renderAiSkillsBar();
+    aiUndoBtn.classList.toggle("hidden", !lastAiUndo);
+    aiRunBtn.disabled = aiEditing;
+    aiRunBtn.textContent = aiEditing ? "AI 改稿中…" : "✨ AI 改稿";
+
+    clear(aiResultBox);
+    if (!pendingAiRevision) {
+      aiResultBox.classList.add("hidden");
+      return;
+    }
+    aiResultBox.classList.remove("hidden");
+    const rev = pendingAiRevision;
+    const skillTags = (rev.usedSkills || []).map((u) => el("span", { class: "badge badge-accent" }, `⚡ ${u.name || u.id}`));
+    const charDelta = `${(rev.prevContent || "").length} → ${(rev.content || "").length} 字`;
+    aiResultBox.append(
+      el("div", { class: "col", style: { gap: "4px", flex: "1", minWidth: 0 } },
+        el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+          el("strong", { style: { fontSize: "12.5px" } }, "AI 改稿建议已生成"),
+          ...skillTags,
+          el("span", { class: "muted mono", style: { fontSize: "11px" } }, charDelta)
+        ),
+        el("span", { class: "muted", style: { fontSize: "12px", lineHeight: "1.45" } }, rev.summary || "已完成文章修改")
+      ),
+      el("div", { class: "row", style: { gap: "6px", flexShrink: 0, flexWrap: "wrap" } },
+        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: applyPendingAiRevision }, "✓ 应用到正文"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => openAiCompareModal(rev) }, "查看对照"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => {
+            pendingAiRevision = null;
+            syncAiEditBar();
+          },
+        }, "放弃")
+      )
+    );
+  }
+
+  async function runAiArticleEdit() {
+    if (aiEditing) return;
+    const instruction = aiInput.value.trim();
+    if (!instruction) {
+      toast("请先输入希望 AI 修改文章的要求");
+      aiInput.focus();
+      return;
+    }
+    if (!state.content?.trim() && !state.title?.trim()) {
+      toast("当前文章正文为空，请先打开或输入文章内容");
+      return;
+    }
+    aiEditing = true;
+    syncAiEditBar();
+    const prevTitle = state.title || "";
+    const prevContent = state.content || "";
+    try {
+      const res = await api("POST", "/api/article/edit", {
+        title: prevTitle,
+        content: prevContent,
+        instruction,
+        skillIds: Array.isArray(state.aiSkillIds) ? state.aiSkillIds : [],
+        textModelRef: state.textModelRef,
+      });
+      pendingAiRevision = {
+        title: res.title ?? prevTitle,
+        content: res.content ?? prevContent,
+        summary: res.summary || "已完成文章修改",
+        usedSkills: res.usedSkills || [],
+        prevTitle,
+        prevContent,
+      };
+      aiInput.value = "";
+      resizeAiInput();
+      toast("AI 改稿完成，请查看摘要并确认应用");
+    } catch (e) {
+      toast(e.message || "AI 改稿失败");
+    } finally {
+      aiEditing = false;
+      if (aiEditBar.isConnected) syncAiEditBar();
+    }
+  }
+
+  const aiEditBar = el("section", { class: "ic-art-ai-bar hidden", "aria-label": "AI 改稿与 Skill 助手" },
+    aiResultBox,
+    aiSkillsStrip,
+    el("div", { class: "ic-art-ai-composer" },
+      aiInput,
+      el("div", { class: "ic-art-ai-actions" },
+        textModelSel,
+        aiPickSkillBtn,
+        aiUndoBtn,
+        aiRunBtn
+      )
+    )
+  );
+  const centerCol = el("div", { class: "ic-wechat-center-col" }, scrollArea, aiEditBar);
+
   // 4. Fixed Bottom Bar
   const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
   state.modelRef = modelSel.value;
@@ -418,7 +668,7 @@ export async function renderArticle(root, ctx, params = {}) {
 
   root.appendChild(el("div", { class: "ic-wechat-editor-root" },
     topbar,
-    el("div", { class: "ic-wechat-body" }, sidebar, scrollArea),
+    el("div", { class: "ic-wechat-body" }, sidebar, centerCol),
     bottombar
   ));
 
@@ -899,6 +1149,8 @@ export async function renderArticle(root, ctx, params = {}) {
       try {
         meta = typeof res.meta === "string" ? JSON.parse(res.meta) : (res.meta || {});
       } catch {}
+      pendingAiRevision = null;
+      lastAiUndo = null;
       Object.assign(state, {
         docId: "",
         activeFile: res.path,
@@ -1633,6 +1885,7 @@ export async function renderArticle(root, ctx, params = {}) {
     if (!active) {
       paperSheet.classList.add("hidden");
       previewStageBox.classList.add("hidden");
+      aiEditBar.classList.add("hidden");
       renderWelcome();
       return;
     }
@@ -1642,8 +1895,10 @@ export async function renderArticle(root, ctx, params = {}) {
     previewSwitchBtn.classList.toggle("is-active", !isEditor);
     toolsGroup.classList.toggle("hidden", !isEditor);
     paperSheet.classList.toggle("hidden", !isEditor);
+    aiEditBar.classList.toggle("hidden", !isEditor);
     previewStageBox.classList.toggle("hidden", isEditor);
-    if (!isEditor) renderPreviewStage();
+    if (isEditor) syncAiEditBar();
+    else renderPreviewStage();
   }
 
   function renderAll() {
@@ -2008,6 +2263,13 @@ export async function renderArticle(root, ctx, params = {}) {
     if ((msg.type === "job" || msg.type === "run") && state.activeRun && rid === state.activeRun.id) {
       try {
         await refreshRun();
+      } catch {}
+    }
+    if (msg.type === "skills") {
+      try {
+        const sRes = await api("GET", "/api/skills");
+        installedSkills = (sRes.items || []).filter((sk) => sk.enabled !== false);
+        renderAiSkillsBar();
       } catch {}
     }
   });

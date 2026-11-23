@@ -1,10 +1,12 @@
 import { api, clear, closeModal, el, openURL, showModal, toast } from "../api.js";
 import { fallbackPluginIcon } from "../plugin-icons.js";
+import { formatSkillSourceLabel, openHarnessSkillImportModal } from "../skills-ui.js";
 
 const state = {
-  tab: "market", // market | installed | builtin
+  tab: "market", // market | installed | skills | builtin
   marketCategory: "",
   marketQuery: "",
+  skillQuery: "",
   onlyNotInstalled: false,
   checkingUpdates: false,
   updatingAll: false,
@@ -66,7 +68,10 @@ function makePluginIcon(src, fb, cls = "pm-logo-img") {
 
 export async function renderPlugins(root, ctx, params = {}) {
   if (params.tab) state.tab = params.tab;
-  const plugRes = await api("GET", "/api/plugins").catch(() => ({ builtin: [], community: [], dshStatus: {} }));
+  const [plugRes, skillsRes] = await Promise.all([
+    api("GET", "/api/plugins").catch(() => ({ builtin: [], community: [], dshStatus: {} })),
+    api("GET", "/api/skills").catch(() => ({ items: [] })),
+  ]);
   if (!root.isConnected) return;
 
   if (plugRes.updates && (!state.lastCheck || (plugRes.updates.at || 0) >= (state.lastCheck.at || 0))) {
@@ -77,6 +82,7 @@ export async function renderPlugins(root, ctx, params = {}) {
 
   const builtins = plugRes.builtin || [];
   const community = plugRes.community || [];
+  const skillsList = skillsRes.items || [];
   const enabledBuiltinsCount = builtins.filter((b) => b.enabled).length;
   const dshStatus = plugRes.dshStatus || {};
   const dshRuntimeMap = new Map((dshStatus.plugins || []).map((p) => [p.id, p]));
@@ -95,6 +101,7 @@ export async function renderPlugins(root, ctx, params = {}) {
   const tabs = [
     ["market", "插件市场", 0],
     ["installed", `已安装 (${community.length})`, outdatedCount],
+    ["skills", `Skills 技能库 (${skillsList.length})`, 0],
     ["builtin", `内置模块 (${enabledBuiltinsCount}/${builtins.length})`, 0],
   ];
 
@@ -145,6 +152,8 @@ export async function renderPlugins(root, ctx, params = {}) {
     renderMarketTab(stage, root, ctx);
   } else if (state.tab === "installed") {
     renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap, dshStatus);
+  } else if (state.tab === "skills") {
+    renderSkillsTab(stage, root, ctx, skillsList);
   } else {
     renderBuiltinTab(stage, ctx, builtins);
   }
@@ -949,4 +958,228 @@ function renderBuiltinTab(stage, ctx, builtins) {
     });
     stage.appendChild(row);
   });
+}
+
+function renderSkillsTab(stage, root, ctx, initialSkills) {
+  let skillsList = Array.isArray(initialSkills) ? initialSkills : [];
+  const gridHost = el("div", { class: "col", style: { gap: "10px" } });
+
+  const searchIn = el("input", {
+    type: "search",
+    class: "input pm-search-input",
+    value: state.skillQuery,
+    placeholder: "搜索已安装 Skill…",
+    "aria-label": "搜索已安装 Skill",
+  });
+  searchIn.addEventListener("input", () => {
+    state.skillQuery = searchIn.value;
+    paint();
+  });
+
+  const openManualInstallSkillModal = () => {
+    const srcIn = el("input", {
+      class: "input",
+      placeholder: "本地文件夹路径、SKILL.md 文件路径或 GitHub 链接…",
+    });
+    showModal("手动安装 Skill", el("div", { class: "col", style: { gap: "8px" } },
+      el("span", { class: "muted", style: { fontSize: "12.5px" } }, "输入包含 SKILL.md 的本地目录、文件路径或远端链接："),
+      el("div", { class: "row", style: { gap: "6px" } },
+        srcIn,
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: async () => {
+            try {
+              const r = await api("POST", "/api/host/pick-directory", {});
+              if (r?.path) srcIn.value = r.path;
+            } catch (e) { toast(e.message); }
+          },
+        }, "选择目录")
+      )
+    ), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: async () => {
+          if (!srcIn.value.trim()) return toast("请输入 Skill 路径或链接");
+          try {
+            const res = await api("POST", "/api/skills/install", { source: srcIn.value.trim() });
+            closeModal();
+            toast(`已安装 Skill「${res.skill?.name || res.skill?.id}」`);
+            renderPlugins(root, ctx);
+          } catch (e) { toast(e.message); }
+        },
+      }, "安装"),
+    ]);
+    srcIn.focus();
+  };
+
+  const openSkillDetailModal = (sk) => {
+    const editor = el("textarea", {
+      class: "textarea mono",
+      rows: "14",
+      style: { fontSize: "12px", lineHeight: "1.55" },
+    });
+    editor.value = sk.content || "";
+    showModal(`Skill 详情 · ${sk.name || sk.id}`, el("div", { class: "col", style: { gap: "10px" } },
+      el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+        el("span", { class: "badge badge-accent" }, `/${sk.id}`),
+        el("span", { class: "badge" }, formatSkillSourceLabel(sk)),
+        sk.version ? el("span", { class: "badge" }, `v${sk.version}`) : null
+      ),
+      el("span", { class: "muted", style: { fontSize: "12px" } }, "可在「会话」、「文章 AI 改稿」及兼容插件中通过 Skill 选择器或 /" + sk.id + " 直接调用。"),
+      editor
+    ), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
+      el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: async () => {
+          try {
+            await api("PATCH", `/api/skills/${encodeURIComponent(sk.id)}`, { content: editor.value });
+            closeModal();
+            toast("已保存 Skill 内容");
+            renderPlugins(root, ctx);
+          } catch (e) { toast(e.message); }
+        },
+      }, "保存修改"),
+    ]);
+  };
+
+  const paint = () => {
+    clear(gridHost);
+    const q = state.skillQuery.trim().toLowerCase();
+    const list = skillsList.filter((sk) =>
+      !q || `${sk.name} ${sk.id} ${sk.description || ""} ${sk.source || ""}`.toLowerCase().includes(q)
+    );
+    if (!list.length) {
+      gridHost.appendChild(el("div", { class: "card col", style: { alignItems: "center", gap: "10px", padding: "28px 16px", textAlign: "center" } },
+        el("strong", null, skillsList.length === 0 ? "尚未导入任何 Skill" : "没有匹配的 Skill"),
+        el("span", { class: "muted" }, "点击「从本机 AI 客户端导入」，可自动扫描 Claude Code / Codex / Antigravity / Cursor / DSH 中的 Skill 并勾选导入。"),
+        el("button", {
+          type: "button",
+          class: "btn btn-primary btn-sm",
+          onClick: () => openHarnessSkillImportModal({ onImported: () => renderPlugins(root, ctx) }),
+        }, "📥 从本机 AI 客户端导入")
+      ));
+      return;
+    }
+
+    const grid = el("div", { class: "pm-grid" });
+    list.forEach((sk) => {
+      const srcLabel = formatSkillSourceLabel(sk);
+      const chkId = `skill-en-${sk.id}`;
+      const chk = el("input", { id: chkId, type: "checkbox", checked: sk.enabled !== false });
+      chk.addEventListener("change", async () => {
+        try {
+          await api("PATCH", `/api/skills/${encodeURIComponent(sk.id)}`, { enabled: chk.checked });
+          toast(chk.checked ? `已启用 Skill「${sk.name}」` : `已停用 Skill「${sk.name}」`);
+          sk.enabled = chk.checked;
+        } catch (e) {
+          chk.checked = !chk.checked;
+          toast(e.message);
+        }
+      });
+
+      const card = el("article", {
+        class: "pm-card",
+        onClick: (ev) => {
+          if (ev.target.closest("button, label, input")) return;
+          openSkillDetailModal(sk);
+        },
+      },
+        el("div", { class: "pm-card-top" },
+          el("div", { class: "pm-logo", style: { fontSize: "18px" } }, "⚡"),
+          el("div", { class: "pm-card-who" },
+            el("div", { class: "pm-card-name" }, el("strong", null, sk.name || sk.id)),
+            el("div", { class: "pm-card-by" },
+              el("span", { class: "mono" }, `/${sk.id}`),
+              srcLabel ? el("span", { class: "pm-chip soft" }, srcLabel) : null
+            )
+          ),
+          el("label", { for: chkId, class: "pm-toggle-inline", title: "启用或停用该 Skill" }, chk, "启用")
+        ),
+        el("p", { class: "pm-card-desc", title: sk.description || "" }, sk.description || "暂无简介"),
+        el("div", { class: "pm-card-meta", style: { justifyContent: "space-between" } },
+          el("div", { class: "row", style: { gap: "6px" } },
+            sk.version ? el("span", { class: "pm-ver mono" }, `v${sk.version}`) : null,
+            sk.updateAvailable ? el("span", { class: "pm-chip up" }, `v${sk.latestVersion} 可更新`) : null
+          ),
+          el("div", { class: "row", style: { gap: "6px" } },
+            sk.updatable
+              ? el("button", {
+                  type: "button",
+                  class: "btn btn-sm",
+                  onClick: async (ev) => {
+                    ev.stopPropagation();
+                    try {
+                      const r = await api("POST", `/api/skills/${encodeURIComponent(sk.id)}/update`);
+                      toast(r.updated ? `已更新「${sk.name}」到 v${r.version}` : "已是最新版本");
+                      renderPlugins(root, ctx);
+                    } catch (e) { toast(e.message); }
+                  },
+                }, sk.updateAvailable ? "更新" : "同步")
+              : null,
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              onClick: (ev) => { ev.stopPropagation(); openSkillDetailModal(sk); },
+            }, "查看"),
+            !sk.builtin
+              ? el("button", {
+                  type: "button",
+                  class: "btn btn-sm btn-danger",
+                  onClick: async (ev) => {
+                    ev.stopPropagation();
+                    try {
+                      await api("DELETE", `/api/skills/${encodeURIComponent(sk.id)}`);
+                      toast(`已删除 Skill「${sk.name}」`);
+                      renderPlugins(root, ctx);
+                    } catch (e) { toast(e.message); }
+                  },
+                }, "删除")
+              : null
+          )
+        )
+      );
+      grid.appendChild(card);
+    });
+    gridHost.appendChild(grid);
+  };
+
+  stage.appendChild(el("div", { class: "card col", style: { gap: "10px" } },
+    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+      el("div", { class: "col", style: { gap: "2px" } },
+        el("strong", null, "共享 Skills 技能库"),
+        el("span", { class: "muted", style: { fontSize: "12px" } }, "导入或安装的 Skill 可在「会话」、「文章 AI 改稿」以及兼容插件中统一调用")
+      ),
+      el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: () => openHarnessSkillImportModal({ onImported: () => renderPlugins(root, ctx) }),
+        }, "📥 从本机 AI 客户端导入"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: openManualInstallSkillModal }, "＋ 手动安装"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: async () => {
+            try {
+              const r = await api("POST", "/api/skills/check-updates");
+              const ups = (r.items || []).filter((x) => x.updateAvailable).length;
+              toast(ups > 0 ? `发现 ${ups} 个 Skill 有更新` : "所有可更新 Skill 均已是最新");
+              renderPlugins(root, ctx);
+            } catch (e) { toast(e.message); }
+          },
+        }, "↻ 检查更新")
+      )
+    ),
+    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+      el("span", { class: "muted", style: { fontSize: "12px" } }, `共 ${skillsList.length} 个已安装 Skill`),
+      searchIn
+    )
+  ));
+  stage.appendChild(gridHost);
+  paint();
 }

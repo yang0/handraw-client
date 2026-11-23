@@ -2013,3 +2013,97 @@ dialog::backdrop {
   gap: 6px;
 }
 
+/* ================= SHARED SKILL DISCOVERY & PICKER (.sk-*) (#69) ================= */
+.sk-discover-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.sk-discover-empty {
+  padding: 22px 12px;
+  text-align: center;
+  font-size: 12.5px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+}
+.sk-discover-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  cursor: pointer;
+}
+.sk-discover-row:hover {
+  border-color: color-mix(in srgb, var(--ink) 22%, var(--line));
+}
+.sk-discover-row.is-checked {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.sk-discover-row input[type="checkbox"] {
+  margin-top: 3px;
+  accent-color: var(--accent);
+  flex: none;
+}
+.sk-discover-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.sk-discover-desc {
+  font-size: 12px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.sk-pick-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sk-pick-item:hover {
+  border-color: var(--accent);
+}
+.sk-pick-item.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.sk-pick-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.sk-pick-check {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.sk-pick-item.is-selected .sk-pick-check {
+  color: var(--accent);
+}
+
+

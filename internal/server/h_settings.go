@@ -537,6 +537,26 @@ func (s *Server) pluginCall(w http.ResponseWriter, r *http.Request) (any, error)
 			}
 		}
 		return s.executeHostChat(r.Context(), a)
+	case "skills.list":
+		if err := needAny("skills:read", "models:text"); err != nil {
+			return nil, err
+		}
+		return s.hostSkillsList(w, r)
+	case "skills.get":
+		if err := needAny("skills:read", "models:text"); err != nil {
+			return nil, err
+		}
+		var a struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(body.Args, &a); err != nil || strings.TrimSpace(a.ID) == "" {
+			return nil, bad("缺少 skill id")
+		}
+		sk, err := s.skillsManager().Get(a.ID)
+		if err != nil || !sk.Enabled {
+			return nil, notFound("未找到已启用的 Skill：" + a.ID)
+		}
+		return map[string]any{"skill": sk}, nil
 	case "models.quote":
 		if err := needAny("models:image", "generate"); err != nil {
 			return nil, err

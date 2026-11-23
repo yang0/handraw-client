@@ -1,4 +1,5 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, showModal, toast } from "../api.js";
+import { openHarnessSkillImportModal } from "../skills-ui.js";
 import { buildGroupedAIModelSelect, buildGroupedModelSelect } from "./create.js";
 import { RATIOS } from "./studio-controls.js";
 
@@ -925,6 +926,20 @@ export async function renderChat(root, ctx, params = {}) {
       el("button", {
         type: "button",
         class: "btn",
+        onClick: () => {
+          closeModal();
+          openHarnessSkillImportModal({
+            onImported: async () => {
+              await reloadSkills();
+              renderSelectedSkills();
+              openSkillPickerModal();
+            },
+          });
+        },
+      }, "📥 从本机客户端导入"),
+      el("button", {
+        type: "button",
+        class: "btn",
         style: { marginRight: "auto" },
         onClick: () => {
           closeModal();
@@ -932,7 +947,7 @@ export async function renderChat(root, ctx, params = {}) {
           autoResize();
           inputEl.focus();
         },
-      }, "＋ 用指令安装新 Skill"),
+      }, "＋ 用指令安装"),
       checkAllBtn,
       el("button", { type: "button", class: "btn btn-primary", onClick: closeModal }, "关闭"),
     ]);
