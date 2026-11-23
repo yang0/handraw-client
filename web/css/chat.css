@@ -9,7 +9,7 @@
 
 .chat-workspace {
   display: grid;
-  grid-template-columns: 272px minmax(0, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
   background: var(--surface);
@@ -18,7 +18,7 @@
   overflow: hidden;
 }
 
-/* Left sidebar: threads + installed skills */
+/* Left sidebar: clean thread list */
 .chat-sidebar {
   display: flex;
   flex-direction: column;
@@ -47,7 +47,7 @@
 
 .chat-thread-list {
   flex: 1 1 auto;
-  min-height: 120px;
+  min-height: 0;
   overflow-y: auto;
   padding: 8px;
   display: flex;
@@ -128,104 +128,6 @@
   opacity: 1;
 }
 
-/* Docked Skills panel */
-.chat-skills-panel {
-  flex: 0 0 auto;
-  max-height: 42%;
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--line);
-  background: var(--surface);
-}
-
-.chat-skills-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.chat-skills-head strong {
-  font-size: 12px;
-  color: var(--ink);
-}
-
-.chat-skills-list {
-  overflow-y: auto;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  overscroll-behavior: contain;
-}
-
-.chat-skill-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--paper);
-  min-width: 0;
-}
-
-.chat-skill-row input[type="checkbox"] {
-  accent-color: var(--accent);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.chat-skill-info {
-  flex: 1;
-  min-width: 0;
-  background: transparent;
-  border: 0;
-  padding: 0;
-  text-align: left;
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  font: inherit;
-}
-
-.chat-skill-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chat-skill-desc {
-  font-size: 10.5px;
-  color: var(--ink-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chat-skill-use {
-  flex-shrink: 0;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--ink-muted);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  padding: 2px 6px;
-  cursor: pointer;
-}
-
-.chat-skill-use:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
 /* Right main pane */
 .chat-main {
   display: flex;
@@ -235,41 +137,11 @@
   background: var(--paper);
 }
 
-.chat-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 18px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
-  flex-shrink: 0;
-  flex-wrap: wrap;
-}
-
-.chat-topbar-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  flex: 1 1 200px;
-}
-
-.chat-session-title {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .chat-messages {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 22px;
+  padding: 20px 22px;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -641,6 +513,54 @@
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* Selected Skill chips echoed above textarea */
+.chat-selected-skills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-skill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px 3px 9px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  max-width: 240px;
+}
+
+.chat-skill-chip-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-skill-chip-remove {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--accent);
+  font-size: 14px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.chat-skill-chip-remove:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
 .chat-composer-input {
   width: 100%;
   min-height: 54px;
@@ -685,11 +605,76 @@
   gap: 6px;
 }
 
-/* Skill install modal tabs */
-.skill-tabs {
+.chat-pick-skill-btn.is-has-skills {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Skill Picker Modal */
+.chat-skill-picker-list {
   display: flex;
-  gap: 6px;
-  margin-bottom: 10px;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 48vh;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.chat-skill-picker-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background-color 0.14s ease;
+}
+
+.chat-skill-picker-item:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.chat-skill-picker-item.is-selected {
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+.chat-skill-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chat-skill-picker-name {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.chat-skill-picker-desc {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-muted);
+  line-height: 1.5;
+}
+
+.chat-skill-picker-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 12px;
+  text-align: center;
 }
 
 @media (max-width: 960px) {
@@ -704,11 +689,7 @@
   .chat-sidebar {
     border-right: 0;
     border-bottom: 1px solid var(--line);
-    max-height: 300px;
-    overflow: hidden;
-  }
-  .chat-skills-panel {
-    max-height: 140px;
+    max-height: 200px;
     overflow: hidden;
   }
   .chat-starters {
@@ -722,5 +703,6 @@
 @media (prefers-reduced-motion: reduce) {
   .chat-thread-item,
   .chat-starter-card,
-  .chat-composer { transition: none !important; }
+  .chat-composer,
+  .chat-skill-picker-item { transition: none !important; }
 }

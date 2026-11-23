@@ -8,7 +8,7 @@ document.head.appendChild(chatCss);
 const STARTERS = [
   { tag: "💬 自由对话", text: "帮我构思 3 个小红书手账内容选题，并给出吸睛封面标题建议" },
   { tag: "🎨 对话生图", text: "帮我画 2 张清晨窗台手冲咖啡的手绘治愈插画" },
-  { tag: "⚡ 安装 Skill", text: "帮我创建一个「小红书爆款标题助手」Skill，每次给 5 个高点击率标题" },
+  { tag: "⚡ 安装 Skill", text: "帮我安装 Skill（可贴入本地目录、GitHub 链接，或直接描述想创建的能力）：" },
   { tag: "🔌 查找插件", text: "帮我搜索插件市场里有什么好用的插件" },
 ];
 
@@ -153,6 +153,7 @@ export async function renderChat(root, ctx, params = {}) {
       updatedAt: d.updatedAt || data.updatedAt || Date.now(),
       data: {
         messages: Array.isArray(data.messages) ? data.messages : [],
+        skillIds: Array.isArray(data.skillIds) ? data.skillIds : [],
         textModelRef: data.textModelRef || modRes.defaultTextModel || "site:auto",
         imageModelRef: data.imageModelRef || modRes.defaultModel || "site:seedream-4.5",
         ratio: data.ratio || "3:4",
@@ -167,6 +168,7 @@ export async function renderChat(root, ctx, params = {}) {
     persisted: false,
     data: {
       messages: [],
+      skillIds: [],
       textModelRef: modRes.defaultTextModel || "site:auto",
       imageModelRef: modRes.defaultModel || "site:seedream-4.5",
       ratio: "3:4",
@@ -198,12 +200,10 @@ export async function renderChat(root, ctx, params = {}) {
     } catch {}
   }
 
-  // ---------- Left Sidebar ----------
+  // ---------- Left Sidebar (clean thread list only) ----------
   const threadList = el("div", { class: "chat-thread-list", role: "listbox", "aria-label": "会话列表" });
-  const skillsTitle = el("strong", null, "Skills");
-  const skillsBox = el("div", { class: "chat-skills-list" });
 
-  const sidebar = el("aside", { class: "chat-sidebar", "aria-label": "会话与技能" },
+  const sidebar = el("aside", { class: "chat-sidebar", "aria-label": "会话列表" },
     el("div", { class: "chat-sidebar-head" },
       el("h1", { class: "chat-sidebar-title" }, "会话"),
       el("button", {
@@ -214,41 +214,22 @@ export async function renderChat(root, ctx, params = {}) {
           sessions = [ns, ...sessions];
           activeId = ns.id;
           draftRefs = [];
+          syncModelPickers();
           renderAll();
           inputEl.focus();
         },
       }, "＋ 新会话")
     ),
-    threadList,
-    el("div", { class: "chat-skills-panel" },
-      el("div", { class: "chat-skills-head" },
-        skillsTitle,
-        el("button", {
-          type: "button",
-          class: "btn btn-sm",
-          onClick: () => openInstallSkillModal(),
-        }, "＋ 安装")
-      ),
-      skillsBox
-    )
+    threadList
   );
 
   // ---------- Right Main Pane ----------
-  const sessionTitleEl = el("h2", { class: "chat-session-title" }, "新会话");
-  const activeSkillsSummary = el("span", { class: "badge" }, "");
-  const topbar = el("div", { class: "chat-topbar" },
-    el("div", { class: "chat-topbar-left" }, sessionTitleEl, activeSkillsSummary),
-    el("div", { class: "row", style: { gap: "6px" } },
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => openInstallSkillModal() }, "⚡ 安装 Skill"),
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("settings") }, "⚙ 模型设置")
-    )
-  );
-
   const messagesBox = el("div", { class: "chat-messages", "aria-live": "polite" });
 
   // Composer
   const slashMenu = el("div", { class: "chat-slash-menu hidden", role: "listbox", "aria-label": "技能快捷命令" });
   const refsStrip = el("div", { class: "make-image-composer-attachments hidden" });
+  const selectedSkillsBar = el("div", { class: "chat-selected-skills hidden", "aria-label": "已选择的 Skill" });
   const fileInput = el("input", { type: "file", accept: "image/*", multiple: true, class: "hidden" });
 
   async function importRefFile(file) {
@@ -283,6 +264,42 @@ export async function renderChat(root, ctx, params = {}) {
         }, "×")
       ));
     });
+  }
+
+  function renderSelectedSkills() {
+    const sess = activeSession();
+    const byID = new Map(skillsList.map((sk) => [sk.id, sk]));
+    const validIds = (sess.data.skillIds || []).filter((id) => byID.has(id));
+    if (validIds.length !== (sess.data.skillIds || []).length) {
+      sess.data.skillIds = validIds;
+    }
+
+    clear(selectedSkillsBar);
+    selectedSkillsBar.classList.toggle("hidden", validIds.length === 0);
+    validIds.forEach((id) => {
+      const sk = byID.get(id);
+      if (!sk) return;
+      selectedSkillsBar.appendChild(el("span", {
+        class: "chat-skill-chip",
+        title: sk.description ? `${sk.name}：${sk.description}` : sk.name,
+      },
+        el("span", { class: "chat-skill-chip-label" }, `⚡ ${sk.name}`),
+        el("button", {
+          type: "button",
+          class: "chat-skill-chip-remove",
+          "aria-label": `移除 Skill ${sk.name}`,
+          title: `移除 ${sk.name}`,
+          onClick: () => {
+            sess.data.skillIds = (sess.data.skillIds || []).filter((x) => x !== id);
+            renderSelectedSkills();
+            if (sess.persisted) persistSession(sess);
+          },
+        }, "×")
+      ));
+    });
+
+    pickSkillBtn.textContent = validIds.length > 0 ? `选择 Skill (${validIds.length})` : "选择 Skill";
+    pickSkillBtn.classList.toggle("is-has-skills", validIds.length > 0);
   }
 
   const inputEl = el("textarea", {
@@ -396,18 +413,25 @@ export async function renderChat(root, ctx, params = {}) {
     onClick: () => fileInput.click(),
   }, "+");
 
+  const pickSkillBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm chat-pick-skill-btn",
+    onClick: () => openSkillPickerModal(),
+  }, "选择 Skill");
+
   const sendBtn = el("button", { type: "submit", class: "btn btn-primary btn-sm" }, "发送");
 
   const composerForm = el("form", { class: "chat-composer" },
     fileInput,
     refsStrip,
+    selectedSkillsBar,
     inputEl,
     el("div", { class: "chat-composer-bar" },
       addRefBtn,
       el("label", { class: "chat-model-chip" }, el("span", null, "文本"), textModelSel),
       el("label", { class: "chat-model-chip" }, el("span", null, "生图"), imageModelSel),
       ratioSel,
-      el("div", { class: "chat-composer-right" }, sendBtn)
+      el("div", { class: "chat-composer-right" }, pickSkillBtn, sendBtn)
     )
   );
   composerForm.addEventListener("submit", (e) => {
@@ -432,7 +456,6 @@ export async function renderChat(root, ctx, params = {}) {
   });
 
   const mainPane = el("section", { class: "chat-main", "aria-label": "对话内容" },
-    topbar,
     messagesBox,
     el("div", { class: "chat-composer-wrap" }, slashMenu, composerForm)
   );
@@ -481,56 +504,6 @@ export async function renderChat(root, ctx, params = {}) {
           : null
       );
       threadList.appendChild(row);
-    });
-  }
-
-  function renderSkillsPanel() {
-    const enabledCount = skillsList.filter((s) => s.enabled).length;
-    skillsTitle.textContent = `Skills (${enabledCount}/${skillsList.length})`;
-    activeSkillsSummary.textContent = enabledCount > 0 ? `已启用 ${enabledCount} 个 Skill` : "未启用 Skill";
-    activeSkillsSummary.className = "badge" + (enabledCount > 0 ? " badge-accent" : "");
-
-    clear(skillsBox);
-    if (!skillsList.length) {
-      skillsBox.appendChild(el("div", { class: "muted", style: { fontSize: "11.5px", padding: "6px 4px", lineHeight: "1.5" } },
-        "暂无已安装 Skill。点击「＋ 安装」或直接在聊天里让 AI 创建/安装。"
-      ));
-      return;
-    }
-    skillsList.forEach((sk) => {
-      const chk = el("input", { type: "checkbox", checked: Boolean(sk.enabled), "aria-label": `启用 Skill ${sk.name}` });
-      chk.addEventListener("change", async () => {
-        try {
-          const res = await api("PATCH", `/api/skills/${encodeURIComponent(sk.id)}`, { enabled: chk.checked });
-          sk.enabled = Boolean(res.skill?.enabled);
-          renderSkillsPanel();
-        } catch (e) {
-          chk.checked = !chk.checked;
-          toast(e.message);
-        }
-      });
-      skillsBox.appendChild(el("div", { class: "chat-skill-row" },
-        chk,
-        el("button", {
-          type: "button",
-          class: "chat-skill-info",
-          title: sk.description || sk.name,
-          onClick: () => openSkillDetailModal(sk),
-        },
-          el("span", { class: "chat-skill-name" }, sk.name),
-          el("span", { class: "chat-skill-desc" }, sk.description || sk.id)
-        ),
-        el("button", {
-          type: "button",
-          class: "chat-skill-use",
-          title: `在输入框插入 /${sk.id}`,
-          onClick: () => {
-            inputEl.value = `/${sk.id} ` + inputEl.value.replace(/^\/\S+\s*/, "");
-            autoResize();
-            inputEl.focus();
-          },
-        }, `/${sk.id}`)
-      ));
     });
   }
 
@@ -628,14 +601,13 @@ export async function renderChat(root, ctx, params = {}) {
 
   function renderMessages(scrollToBottom = true) {
     const sess = activeSession();
-    sessionTitleEl.textContent = sess.name || "新会话";
     clear(messagesBox);
 
     if (!sess.data.messages.length && !isSending) {
       messagesBox.appendChild(el("div", { class: "chat-empty" },
         el("div", { class: "chat-empty-badge", "aria-hidden": "true" }, "💬"),
         el("h2", null, "手绘风 AI 会话工作台"),
-        el("p", null, "像 Codex / DSH 一样自由对话：可随时切换文本模型与生图模型，挂载自定义 Skill，直接在聊天中生图、装 Skill 或安装插件。"),
+        el("p", null, "像 Codex / DSH 一样自由对话：可随时切换文本模型与生图模型，在发送旁选择自定义 Skill，直接在聊天中生图、装 Skill 或安装插件。"),
         el("div", { class: "chat-starters" },
           ...STARTERS.map((st) => el("button", {
             type: "button",
@@ -659,6 +631,11 @@ export async function renderChat(root, ctx, params = {}) {
       const bubble = el("div", { class: "chat-bubble" });
 
       if (msg.role === "user") {
+        if (msg.skillNames?.length) {
+          bubble.appendChild(el("div", { class: "row", style: { gap: "4px", flexWrap: "wrap", marginBottom: "4px" } },
+            ...msg.skillNames.map((nm) => el("span", { class: "badge badge-accent" }, `⚡ ${nm}`))
+          ));
+        }
         if (msg.refs?.length) {
           bubble.appendChild(el("div", { class: "chat-msg-refs" },
             ...msg.refs.map((rp) => el("img", { src: localImg(rp), alt: "参考图" }))
@@ -740,162 +717,117 @@ export async function renderChat(root, ctx, params = {}) {
 
   function renderAll() {
     renderThreads();
-    renderSkillsPanel();
+    renderSelectedSkills();
     renderDraftRefs();
     renderMessages(true);
     sendBtn.disabled = isSending;
     sendBtn.textContent = isSending ? "处理中…" : "发送";
   }
 
-  // ---------- Skill Modals ----------
+  // ---------- Skill Picker Modal ----------
   async function reloadSkills() {
     const r = await api("GET", "/api/skills").catch(() => ({ items: [] }));
     skillsList = Array.isArray(r.items) ? r.items : [];
-    renderSkillsPanel();
+    renderSelectedSkills();
   }
 
-  function openSkillDetailModal(sk) {
-    const editor = el("textarea", { class: "textarea mono", rows: "12", style: { fontSize: "12px" }, value: sk.content || "" });
-    const body = el("div", { class: "col", style: { gap: "10px" } },
-      el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap" } },
-        el("span", { class: "badge badge-accent mono" }, `/${sk.id}`),
-        el("span", { class: "muted", style: { fontSize: "12px" } }, `来源：${sk.source || "本地"}`)
-      ),
-      el("label", { style: { fontSize: "12px", fontWeight: "600" } }, "SKILL.md 内容（可直接编辑保存）"),
-      editor
-    );
-    showModal(`Skill · ${sk.name}`, body, [
+  async function openSkillPickerModal() {
+    await reloadSkills();
+    const sess = activeSession();
+    const searchIn = el("input", {
+      class: "input",
+      type: "search",
+      placeholder: "筛选 Skill 名称、ID 或介绍…",
+      "aria-label": "筛选 Skill",
+    });
+    const listWrap = el("div", { class: "chat-skill-picker-list" });
+    const countLabel = el("span", { class: "muted", style: { fontSize: "12px" } }, "");
+
+    const renderList = () => {
+      clear(listWrap);
+      const q = searchIn.value.trim().toLowerCase();
+      const selectedSet = new Set(sess.data.skillIds || []);
+      const filtered = skillsList.filter((sk) => {
+        if (!q) return true;
+        return `${sk.name} ${sk.id} ${sk.description || ""}`.toLowerCase().includes(q);
+      });
+      countLabel.textContent = `共 ${filtered.length} 个 Skill`;
+
+      if (!skillsList.length) {
+        listWrap.appendChild(el("div", { class: "chat-skill-picker-empty" },
+          el("p", { class: "muted", style: { margin: 0 } }, "还没有已安装的 Skill。可以直接在聊天框输入指令让 AI 安装或创建。"),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm btn-primary",
+            onClick: () => {
+              closeModal();
+              inputEl.value = STARTERS[2].text;
+              autoResize();
+              inputEl.focus();
+            },
+          }, "去输入框安装 Skill")
+        ));
+        return;
+      }
+
+      if (!filtered.length) {
+        listWrap.appendChild(el("p", { class: "muted", style: { textAlign: "center", padding: "20px 0", margin: 0 } }, "没有匹配的 Skill"));
+        return;
+      }
+
+      filtered.forEach((sk) => {
+        const isSel = selectedSet.has(sk.id);
+        const card = el("button", {
+          type: "button",
+          class: "chat-skill-picker-item" + (isSel ? " is-selected" : ""),
+          "aria-pressed": String(isSel),
+          onClick: () => {
+            const cur = Array.isArray(sess.data.skillIds) ? [...sess.data.skillIds] : [];
+            if (!cur.includes(sk.id)) {
+              cur.push(sk.id);
+              sess.data.skillIds = cur;
+            }
+            renderSelectedSkills();
+            if (sess.persisted) persistSession(sess);
+            closeModal();
+            inputEl.focus();
+          },
+        },
+          el("div", { class: "chat-skill-picker-head" },
+            el("strong", { class: "chat-skill-picker-name" }, sk.name),
+            el("div", { class: "row", style: { gap: "6px" } },
+              el("span", { class: "badge mono" }, `/${sk.id}`),
+              isSel ? el("span", { class: "badge badge-accent" }, "已选") : null
+            )
+          ),
+          el("p", { class: "chat-skill-picker-desc" }, sk.description || "暂无介绍")
+        );
+        listWrap.appendChild(card);
+      });
+    };
+
+    searchIn.addEventListener("input", renderList);
+    renderList();
+
+    showModal("选择 Skill", el("div", { class: "col", style: { gap: "10px" } },
+      searchIn,
+      countLabel,
+      listWrap
+    ), [
       el("button", {
         type: "button",
         class: "btn",
-        style: { color: "var(--err, #b8332a)", marginRight: "auto" },
-        onClick: async () => {
-          try {
-            await api("DELETE", `/api/skills/${encodeURIComponent(sk.id)}`);
-            closeModal();
-            await reloadSkills();
-            toast(`已卸载 Skill：${sk.name}`);
-          } catch (e) { toast(e.message); }
-        },
-      }, "卸载"),
-      el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
-      el("button", {
-        type: "button",
-        class: "btn btn-primary",
-        onClick: async () => {
-          try {
-            await api("PATCH", `/api/skills/${encodeURIComponent(sk.id)}`, { content: editor.value });
-            closeModal();
-            await reloadSkills();
-            toast("Skill 已保存");
-          } catch (e) { toast(e.message); }
-        },
-      }, "保存修改"),
-    ]);
-  }
-
-  function openInstallSkillModal() {
-    let tab = "source"; // source | upload | create
-    const tabBar = el("div", { class: "skill-tabs" });
-    const pane = el("div", { class: "col", style: { gap: "10px" } });
-
-    const sourceIn = el("input", {
-      class: "input",
-      placeholder: "本地 Skill 目录、SKILL.md/.zip 路径，或 GitHub/HTTP 链接",
-    });
-    const uploadIn = el("input", { type: "file", accept: ".md,.zip,text/markdown,application/zip", class: "input" });
-    const nameIn = el("input", { class: "input", placeholder: "例如：小红书爆款标题助手" });
-    const descIn = el("input", { class: "input", placeholder: "一句话说明这个 Skill 做什么" });
-    const contentIn = el("textarea", {
-      class: "textarea mono",
-      rows: "8",
-      style: { fontSize: "12px" },
-      placeholder: "输入给 AI 遵循的指令内容（Markdown）…",
-    });
-
-    const installBtn = el("button", {
-      type: "button",
-      class: "btn btn-primary",
-      onClick: async () => {
-        installBtn.disabled = true;
-        try {
-          if (tab === "source") {
-            if (!sourceIn.value.trim()) return toast("请填写路径或链接");
-            const res = await api("POST", "/api/skills/install", { source: sourceIn.value.trim() });
-            toast(`已安装 Skill：${res.skill?.name || ""}`);
-          } else if (tab === "upload") {
-            const f = uploadIn.files?.[0];
-            if (!f) return toast("请选择 .md 或 .zip 文件");
-            const fd = new FormData();
-            fd.append("file", f);
-            const res = await api("POST", "/api/skills/install", fd);
-            toast(`已安装 Skill：${res.skill?.name || ""}`);
-          } else {
-            if (!contentIn.value.trim()) return toast("请填写 Skill 指令正文");
-            const res = await api("POST", "/api/skills/install", {
-              name: nameIn.value.trim(),
-              description: descIn.value.trim(),
-              content: contentIn.value.trim(),
-            });
-            toast(`已创建并安装 Skill：${res.skill?.name || ""}`);
-          }
+        style: { marginRight: "auto" },
+        onClick: () => {
           closeModal();
-          await reloadSkills();
-        } catch (e) {
-          toast(e.message || "安装失败");
-        } finally {
-          installBtn.disabled = false;
-        }
-      },
-    }, "安装 Skill");
-
-    const drawTabs = () => {
-      clear(tabBar);
-      clear(pane);
-      [["source", "路径 / 链接"], ["upload", "上传文件"], ["create", "直接编写"]].forEach(([k, lbl]) => {
-        tabBar.appendChild(el("button", {
-          type: "button",
-          class: "btn btn-sm" + (tab === k ? " btn-primary" : ""),
-          onClick: () => { tab = k; drawTabs(); },
-        }, lbl));
-      });
-      if (tab === "source") {
-        pane.append(
-          el("div", { class: "row", style: { gap: "8px" } },
-            sourceIn,
-            el("button", {
-              type: "button",
-              class: "btn btn-sm",
-              onClick: async () => {
-                try {
-                  const r = await api("POST", "/api/host/pick-directory", {});
-                  if (r.path) sourceIn.value = r.path;
-                } catch (e) { toast(e.message); }
-              },
-            }, "选择目录")
-          ),
-          el("p", { class: "muted", style: { margin: 0, fontSize: "12px" } },
-            "支持含 SKILL.md 的本地目录、单个 .md/.zip 文件，以及 GitHub 仓库/子目录链接（如 https://github.com/owner/repo/tree/main/skills/xxx）。"
-          )
-        );
-      } else if (tab === "upload") {
-        pane.append(
-          uploadIn,
-          el("p", { class: "muted", style: { margin: 0, fontSize: "12px" } }, "上传 SKILL.md 或包含 SKILL.md 的 .zip 压缩包。")
-        );
-      } else {
-        pane.append(
-          el("div", { class: "field" }, el("label", null, "名称"), nameIn),
-          el("div", { class: "field" }, el("label", null, "简介（可选）"), descIn),
-          el("div", { class: "field" }, el("label", null, "Skill 指令内容（Markdown）"), contentIn)
-        );
-      }
-    };
-    drawTabs();
-    showModal("安装自定义 Skill", el("div", { class: "col" }, tabBar, pane), [
-      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
-      installBtn,
+          inputEl.value = "/install-skill ";
+          autoResize();
+          inputEl.focus();
+        },
+      }, "＋ 用指令安装新 Skill"),
+      el("button", { type: "button", class: "btn btn-primary", onClick: closeModal }, "关闭"),
     ]);
+    searchIn.focus();
   }
 
   // ---------- Send Turn ----------
@@ -904,11 +836,13 @@ export async function renderChat(root, ctx, params = {}) {
     renderAll();
     const apiMessages = sess.data.messages.map((m) => ({ role: m.role, content: m.content || "" }));
     const lastUser = [...sess.data.messages].reverse().find((m) => m.role === "user");
+    const activeIds = [...(sess.data.skillIds || [])];
     try {
       const res = await api("POST", "/api/chat/turn", {
         messages: apiMessages,
         textModelRef: textModelSel.value,
         imageModelRef: imageModelSel.value,
+        skillIds: activeIds,
         ratio: ratioSel.value,
         refs: lastUser?.refs || [],
         confirmed,
@@ -929,7 +863,6 @@ export async function renderChat(root, ctx, params = {}) {
       await persistSession(sess);
       if (res.skillsChanged) await reloadSkills();
       if (res.pluginsChanged) await ctx.refreshNav?.();
-      // Immediately reconcile any run still marked queued/running (guards against SSE arriving before HTTP returns).
       for (const r of (res.runs || [])) {
         if (r?.id && (r.images || []).some((im) => im.status === "queued" || im.status === "running")) {
           syncRun(r.id);
@@ -956,11 +889,14 @@ export async function renderChat(root, ctx, params = {}) {
     if (sess.data.messages.length === 0) {
       sess.name = text.replace(/^\/\S+\s*/, "").slice(0, 22) || "新会话";
     }
+    const byID = new Map(skillsList.map((sk) => [sk.id, sk.name]));
+    const skillNames = (sess.data.skillIds || []).map((id) => byID.get(id)).filter(Boolean);
     sess.data.messages.push({
       id: uid("msg"),
       role: "user",
       content: text,
       refs: [...draftRefs],
+      skillNames,
       ts: Date.now(),
     });
     inputEl.value = "";
