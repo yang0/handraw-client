@@ -1108,15 +1108,28 @@ dialog.modal-picker .modal-body {
   background: var(--surface-2);
 }
 .ic-vault-dir {
-  font-weight: 600;
+  font-weight: 400;
   color: var(--ink);
 }
 .ic-vault-chevron {
-  width: 12px;
-  text-align: center;
-  font-size: 10px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--ink-muted);
   flex-shrink: 0;
+}
+.ic-vault-chevron svg {
+  display: block;
+  transition: transform 0.14s ease, color 0.14s ease;
+}
+.ic-vault-dir:hover .ic-vault-chevron {
+  color: var(--ink);
+}
+.ic-vault-dir.is-open .ic-vault-chevron svg,
+.ic-vault-dir[aria-expanded="true"] .ic-vault-chevron svg {
+  transform: rotate(90deg);
 }
 .ic-vault-file-wrap {
   display: flex;
@@ -2889,5 +2902,6 @@ dialog.modal-picker .modal-body {
   .sc-example-btn,
   .sc-nav-btn,
   .sc-thumb-item,
-  .sc-thumb-add { transition: none !important; }
+  .sc-thumb-add,
+  .ic-vault-chevron svg { transition: none !important; }
 }

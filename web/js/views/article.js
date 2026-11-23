@@ -972,6 +972,23 @@ export async function renderArticle(root, ctx, params = {}) {
     return out;
   }
 
+  function makeChevronSvg() {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "15");
+    svg.setAttribute("height", "15");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.65");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    const path = document.createElementNS(ns, "path");
+    path.setAttribute("d", "M6 3.75L10.25 8L6 12.25");
+    svg.appendChild(path);
+    return svg;
+  }
+
   function renderTreeBranch(nodes, depth) {
     const frag = document.createDocumentFragment();
     (nodes || []).forEach((node) => {
@@ -979,10 +996,10 @@ export async function renderArticle(root, ctx, params = {}) {
         const isOpen = Boolean(treeQuery) || expandedDirs.has(node.path);
         const dirBtn = el("button", {
           type: "button",
-          class: "ic-vault-row ic-vault-dir",
+          class: "ic-vault-row ic-vault-dir" + (isOpen ? " is-open" : ""),
           role: "treeitem",
           "aria-expanded": String(isOpen),
-          style: { paddingLeft: `${8 + depth * 14}px` },
+          style: { paddingLeft: `${6 + depth * 16}px` },
           onClick: () => {
             if (expandedDirs.has(node.path)) expandedDirs.delete(node.path);
             else expandedDirs.add(node.path);
@@ -990,7 +1007,7 @@ export async function renderArticle(root, ctx, params = {}) {
             renderSidebar();
           },
         },
-          el("span", { class: "ic-vault-chevron", "aria-hidden": "true" }, isOpen ? "▾" : "▸"),
+          el("span", { class: "ic-vault-chevron", "aria-hidden": "true" }, makeChevronSvg()),
           el("span", { class: "ic-vault-node-name", title: node.path }, node.name)
         );
         frag.appendChild(dirBtn);
@@ -1011,7 +1028,7 @@ export async function renderArticle(root, ctx, params = {}) {
           role: "treeitem",
           "aria-selected": String(isActive),
           title: node.path,
-          style: { paddingLeft: `${20 + depth * 14}px` },
+          style: { paddingLeft: `${22 + depth * 16}px` },
           onClick: () => openVaultFile(node.path),
         },
           el("span", { class: "ic-vault-file-ico", "aria-hidden": "true" }, "📄"),
