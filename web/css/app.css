@@ -890,16 +890,41 @@ dialog::backdrop {
   min-height: 220px;
 }
 .dot-pulse {
+  position: relative;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
+  flex-shrink: 0;
+}
+#btn-queue {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+}
+#btn-queue:hover {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  border-color: var(--accent);
+}
+#btn-queue .dot-pulse::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  opacity: 0;
 }
 @media (prefers-reduced-motion: no-preference) {
   .dot-pulse { animation: pulse 1.2s ease-in-out infinite; }
+  #btn-queue .dot-pulse::after { animation: queueHalo 1.5s ease-out infinite; }
   .reveal-img { animation: develop 0.35s ease-out; }
 }
-@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.45; transform: scale(0.8); } }
+@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.55; transform: scale(0.85); } }
+@keyframes queueHalo {
+  0% { transform: scale(0.85); opacity: 0.7; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
 @keyframes develop { from { opacity: 0.35; filter: blur(6px); } to { opacity: 1; filter: blur(0); } }
 
 /* Quick Shot */

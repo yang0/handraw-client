@@ -342,8 +342,12 @@ async function start() {
       }
     }
     if (qBtn && qCnt) {
-      const cnt = Number(queue.active || queue.count || 0);
-      qCnt.textContent = String(cnt);
+      const rawCount = Number.isFinite(Number(queue?.count))
+        ? Number(queue.count)
+        : (Array.isArray(queue?.active) ? queue.active.length : (Number.isFinite(Number(queue?.active)) ? Number(queue.active) : 0));
+      const cnt = Math.max(0, Math.trunc(rawCount));
+      qCnt.textContent = cnt > 0 ? `绘图中 ${cnt}` : "0";
+      qBtn.title = cnt > 0 ? `后台有 ${cnt} 张图正在绘制，点击查看队列` : "后台任务队列";
       qBtn.classList.toggle("hidden", cnt <= 0);
     }
     latestUpdateStatus = upd || {};
