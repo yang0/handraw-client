@@ -1,6 +1,13 @@
 import { api, clear, closeModal, el, money, onEvent, openURL, setColorScheme, showModal, toast } from "../api.js";
 import { economySyncHint, formatQuotaSummary, parseEconomy } from "../economy.js";
-import { buildGroupedAIModelSelect, buildGroupedModelSelect } from "./create.js";
+
+const VALID_SETTINGS_TABS = new Set([
+  "settings-account",
+  "settings-models",
+  "settings-preferences",
+  "settings-updates",
+]);
+let activeSettingsTab = "settings-account";
 
 function createAccountAvatar(accRes, displayName) {
   const wrap = el("div", { class: "settings-avatar", "aria-hidden": "true" });
@@ -34,12 +41,16 @@ export async function renderSettings(root, ctx, params = {}) {
   const scrollContainerEl = root.closest(".main") || root;
   const savedScrollTop = params?.preserveScroll ? scrollContainerEl.scrollTop : null;
 
-  const [accRes, balRes, settRes, updRes, modRes] = await Promise.all([
+  const requestedTab = params?.tab || params?.anchor;
+  if (requestedTab && VALID_SETTINGS_TABS.has(requestedTab)) {
+    activeSettingsTab = requestedTab;
+  }
+
+  const [accRes, balRes, settRes, updRes] = await Promise.all([
     api("GET", "/api/account").catch(() => ({ loggedIn: false })),
     api("GET", "/api/account/balance").catch((e) => ({ loggedIn: false, error: e?.message || "" })),
     api("GET", "/api/settings").catch(() => ({ settings: {}, providers: [] })),
     api("GET", "/api/update").catch(() => ({})),
-    api("GET", "/api/models").catch(() => ({ site: [], providers: [] })),
   ]);
   if (!root.isConnected || root._settingsRenderSeq !== seq) return;
 
@@ -55,7 +66,7 @@ export async function renderSettings(root, ctx, params = {}) {
   root.appendChild(el("div", { class: "page-head" },
     el("div", { class: "col", style: { gap: "2px" } },
       el("h1", { class: "page-title" }, "设置与管理"),
-      el("span", { class: "muted" }, "配置网站账号与资产同步、模型接口、本地存储、内置模块与客户端更新")
+      el("span", { class: "muted" }, "按功能分类管理账号资产、第三方接口、本地偏好与客户端更新")
     ),
     el("span", { class: "muted mono" }, `数据目录：${settRes.dataDir || ""}`)
   ));
@@ -83,7 +94,7 @@ export async function renderSettings(root, ctx, params = {}) {
           if (poll?.loggedIn || poll?.status === "ok") {
             clearInterval(loginPollTimer);
             await ctx.refreshTopbar?.(true);
-            renderSettings(root, ctx, { anchor: "settings-account" });
+            renderSettings(root, ctx, { tab: "settings-account" });
             toast("登录成功");
           } else if (poll?.status === "error") {
             clearInterval(loginPollTimer);
@@ -97,14 +108,20 @@ export async function renderSettings(root, ctx, params = {}) {
   }
 
   // 1. Account & Assets
-  const accSection = el("section", { id: "settings-account", class: "card settings-section", tabindex: "-1" });
+  const accSection = el("section", {
+    id: "settings-account",
+    class: "card settings-section",
+    role: "tabpanel",
+    "aria-labelledby": "tab-settings-account",
+    tabindex: "0",
+  });
   const accStatusBadge = accRes.loggedIn
     ? el("span", { class: "badge " + (eco.offline ? "badge-warn" : "badge-ok") }, eco.offline ? "已登录 · 离线缓存" : "已登录")
     : el("span", { class: "badge" }, "未登录");
 
   accSection.appendChild(el("div", { class: "settings-section-head" },
     el("div", { class: "col", style: { gap: "2px" } },
-      el("h2", { class: "settings-section-title" }, "1. 网站账户与资产同步"),
+      el("h2", { class: "settings-section-title" }, "网站账户与资产同步"),
       el("p", { class: "muted", style: { margin: 0 } }, "同步手绘风账号、可用余额、社区积分与各档位免费生图额度")
     ),
     accStatusBadge
@@ -146,7 +163,7 @@ export async function renderSettings(root, ctx, params = {}) {
           onClick: async () => {
             await api("POST", "/api/account/logout");
             await ctx.refreshTopbar?.(true);
-            renderSettings(root, ctx, { anchor: "settings-account" });
+            renderSettings(root, ctx, { tab: "settings-account" });
             toast("已退出登录");
           },
         }, "退出登录")
@@ -218,86 +235,58 @@ export async function renderSettings(root, ctx, params = {}) {
     accSection.appendChild(loginStatusArea);
   } else {
     accSection.appendChild(el("div", { class: "settings-account-bar" },
-      el("span", { class: "muted" }, accRes.error || "登录后可使用网站模型、同步可用余额、社区积分与免费额度，并支持发布作品与收藏同步"),
+      el("span", { class: "muted" }, accRes.error || "登录后可同步可用余额、社区积分与免费额度，并支持发布作品与收藏同步"),
       el("button", { type: "button", class: "btn btn-primary", onClick: startDeviceLogin(loginStatusArea) }, "登录手绘风账号")
     ));
     accSection.appendChild(loginStatusArea);
   }
 
-  // 2. Models & Providers
-  const provSection = el("section", { id: "settings-models", class: "card settings-section", tabindex: "-1" },
+  // 2. Third-Party Providers Only (no official interface selectors here)
+  const provSection = el("section", {
+    id: "settings-models",
+    class: "card settings-section",
+    role: "tabpanel",
+    "aria-labelledby": "tab-settings-models",
+    tabindex: "0",
+  },
     el("div", { class: "settings-section-head" },
       el("div", { class: "col", style: { gap: "2px" } },
-        el("h2", { class: "settings-section-title" }, "2. 模型与接口配置"),
-        el("p", { class: "muted", style: { margin: 0 } }, "生图模型与文字/视觉服务默认使用网站官方固定接口（平台自动调度），也可自由接入 OpenAI 兼容第三方中转站")
+        el("h2", { class: "settings-section-title" }, "第三方接口管理"),
+        el("p", { class: "muted", style: { margin: 0 } }, "添加并管理 OpenAI 兼容的第三方生图、文字与视觉解析中转站；拉取模型后直接勾选启用")
       ),
-      el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openProviderModal(null, () => renderSettings(root, ctx, { preserveScroll: true })) }, "+ 添加第三方接口")
+      el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        onClick: () => openProviderModal(null, () => renderSettings(root, ctx, { tab: "settings-models", preserveScroll: true })),
+      }, "+ 添加第三方接口")
     )
   );
 
-  const defModelSel = buildGroupedModelSelect(modRes, settings.defaultModel);
-  defModelSel.id = "def-image-model";
-  defModelSel.addEventListener("change", async () => {
-    await api("PATCH", "/api/settings", { defaultModel: defModelSel.value });
-    toast("已更新默认生图模型");
-  });
-
-  const defTextSel = buildGroupedAIModelSelect(modRes, settings.defaultTextModel, "text");
-  defTextSel.id = "def-text-model";
-  defTextSel.addEventListener("change", async () => {
-    await api("PATCH", "/api/settings", { defaultTextModel: defTextSel.value });
-    toast("已更新默认文字模型");
-  });
-
-  const defVisionSel = buildGroupedAIModelSelect(modRes, settings.defaultVisionModel, "vision");
-  defVisionSel.id = "def-vision-model";
-  defVisionSel.addEventListener("change", async () => {
-    await api("PATCH", "/api/settings", { defaultVisionModel: defVisionSel.value });
-    toast("已更新默认视觉解析模型");
-  });
-
-  provSection.appendChild(el("div", { class: "settings-rows" },
-    el("div", { class: "settings-row" },
-      el("div", { class: "settings-row-meta" },
-        el("label", { for: "def-image-model", class: "settings-row-label" }, "全局默认生图模型"),
-        el("span", { class: "muted" }, "各工作室页面可随时单独切换")
-      ),
-      defModelSel
-    ),
-    el("div", { class: "settings-row" },
-      el("div", { class: "settings-row-meta" },
-        el("label", { for: "def-text-model", class: "settings-row-label" }, "全局文字服务接口"),
-        el("span", { class: "muted" }, "用于主题扩写、系列规划、文章配图与画布助手；网站官方自动调度，也可切到第三方 OpenAI 接口")
-      ),
-      defTextSel
-    ),
-    el("div", { class: "settings-row" },
-      el("div", { class: "settings-row-meta" },
-        el("label", { for: "def-vision-model", class: "settings-row-label" }, "全局视觉服务接口"),
-        el("span", { class: "muted" }, "用于以图找风格与提取参考图画风特征；网站官方自动调度，也可切到第三方 OpenAI 视觉接口")
-      ),
-      defVisionSel
-    )
-  ));
-
-  const provList = el("div", { class: "col", style: { gap: "8px" } },
-    el("div", { class: "settings-subhead" }, `第三方中转站 / 自定义接口（${providers.length}）`)
+  const provList = el("div", { class: "col", style: { gap: "10px" } },
+    el("div", { class: "settings-subhead" }, `已配置第三方接口（${providers.length}）`)
   );
   if (!providers.length) {
-    provList.appendChild(el("div", { class: "settings-empty muted" }, "尚未添加第三方中转站；当前默认使用网站线上接口（生图、文字与视觉解析均可随时添加 OpenAI 兼容中转站）。"));
+    provList.appendChild(el("div", { class: "settings-empty muted" }, "尚未添加第三方接口。点击右上角「+ 添加第三方接口」，填入地址与密钥后拉取模型并勾选启用。"));
   } else {
     providers.forEach((p) => {
       const isTextProv = p.purpose === "text" || p.purpose === "vision";
-      provList.appendChild(el("div", { class: "settings-subcard row", style: { justifyContent: "space-between" } },
-        el("div", { class: "col", style: { gap: "2px", minWidth: 0 } },
+      const modelList = p.models || [];
+      const previewChips = modelList.length ? el("div", { class: "provider-model-preview" },
+        ...modelList.slice(0, 8).map((m) => el("span", { class: "provider-model-pill" }, m.id)),
+        modelList.length > 8 ? el("span", { class: "provider-model-pill" }, `+${modelList.length - 8}`) : null
+      ) : null;
+
+      provList.appendChild(el("div", { class: "settings-subcard row", style: { justifyContent: "space-between", alignItems: "flex-start" } },
+        el("div", { class: "col", style: { gap: "3px", minWidth: 0, flex: "1 1 280px" } },
           el("div", { class: "row" },
             el("strong", null, p.name),
             el("span", { class: "badge" }, isTextProv ? "文字与视觉解析" : "生图接口"),
             p.hasKey ? el("span", { class: "badge badge-ok" }, "已存密钥") : el("span", { class: "badge badge-warn" }, "未填密钥")
           ),
-          el("span", { class: "muted mono" }, `${p.baseUrl} · ${(p.models || []).length} 个模型`)
+          el("span", { class: "muted mono", style: { overflowWrap: "anywhere" } }, `${p.baseUrl} · 已勾选 ${modelList.length} 个模型`),
+          previewChips
         ),
-        el("div", { class: "row" },
+        el("div", { class: "row", style: { flexShrink: 0 } },
           el("button", {
             type: "button",
             class: "btn btn-sm",
@@ -307,13 +296,17 @@ export async function renderSettings(root, ctx, params = {}) {
               toast(t.ok ? `连通正常（${t.latencyMs}ms）` : `测试失败：${t.error}`);
             },
           }, "测试连通"),
-          el("button", { type: "button", class: "btn btn-sm", onClick: () => openProviderModal(p, () => renderSettings(root, ctx, { preserveScroll: true })) }, "编辑"),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm",
+            onClick: () => openProviderModal(p, () => renderSettings(root, ctx, { tab: "settings-models", preserveScroll: true })),
+          }, "编辑"),
           el("button", {
             type: "button",
             class: "btn btn-sm btn-danger",
             onClick: async () => {
               await api("DELETE", `/api/providers/${encodeURIComponent(p.id)}`);
-              renderSettings(root, ctx, { preserveScroll: true });
+              renderSettings(root, ctx, { tab: "settings-models", preserveScroll: true });
               toast("已删除接口");
             },
           }, "删除")
@@ -459,10 +452,16 @@ export async function renderSettings(root, ctx, params = {}) {
     )
   );
 
-  const prefSection = el("section", { id: "settings-preferences", class: "card settings-section", tabindex: "-1" },
+  const prefSection = el("section", {
+    id: "settings-preferences",
+    class: "card settings-section",
+    role: "tabpanel",
+    "aria-labelledby": "tab-settings-preferences",
+    tabindex: "0",
+  },
     el("div", { class: "settings-section-head" },
       el("div", { class: "col", style: { gap: "2px" } },
-        el("h2", { class: "settings-section-title" }, "3. 通用偏好与本地存储"),
+        el("h2", { class: "settings-section-title" }, "通用偏好与本地存储"),
         el("p", { class: "muted", style: { margin: 0 } }, "外观配色、本地作品目录、费用保护阈值与托盘快捷键")
       )
     ),
@@ -472,10 +471,16 @@ export async function renderSettings(root, ctx, params = {}) {
   // 4. Version & Incremental Resource Updates
   const resProg = el("span", { class: "muted" }, "");
   const hasAnyUpdate = Boolean(updRes.available || updRes.ready || updRes.resourceNew);
-  const updSection = el("section", { id: "settings-updates", class: "card settings-section", tabindex: "-1" },
+  const updSection = el("section", {
+    id: "settings-updates",
+    class: "card settings-section",
+    role: "tabpanel",
+    "aria-labelledby": "tab-settings-updates",
+    tabindex: "0",
+  },
     el("div", { class: "settings-section-head" },
       el("div", { class: "col", style: { gap: "2px" } },
-        el("h2", { class: "settings-section-title" }, "4. 客户端版本与资源包更新"),
+        el("h2", { class: "settings-section-title" }, "客户端版本与资源包更新"),
         el("p", { class: "muted", style: { margin: 0 } }, "检查客户端新版发布与画风/图型静态资源包增量热更新")
       ),
       hasAnyUpdate ? el("span", { class: "badge badge-accent" }, "发现可更新内容") : el("span", { class: "badge" }, `v${updRes.current || "?"}`)
@@ -502,7 +507,7 @@ export async function renderSettings(root, ctx, params = {}) {
         onClick: async () => {
           const r = await api("POST", "/api/update/check").catch((e) => ({ error: e.message }));
           toast(r.status?.available ? `发现新版 ${r.status.latest}` : (r.error || "已是最新版本"));
-          renderSettings(root, ctx, { preserveScroll: true });
+          renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
         },
       }, "检查版本与资源更新"),
       updRes.available ? el("button", {
@@ -525,7 +530,7 @@ export async function renderSettings(root, ctx, params = {}) {
           try {
             const r = await api("POST", "/api/update/resources");
             toast(r.updated ? `已增量更新 ${r.changed} 个资源文件` : "本地资源包已是最新");
-            renderSettings(root, ctx, { preserveScroll: true });
+            renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
           } catch (e) {
             toast(e.message);
           }
@@ -534,16 +539,16 @@ export async function renderSettings(root, ctx, params = {}) {
     )
   );
 
-  // Two-column settings shell: sticky left anchor navigation + single-page sections
-  const navItems = [
-    { id: "settings-account", label: "账户与资产", meta: accRes.loggedIn ? "已登录" : "未登录" },
-    { id: "settings-models", label: "模型与接口", meta: providers.length ? `${providers.length} 个第三方` : "默认线上" },
-    { id: "settings-preferences", label: "通用偏好与存储", meta: "" },
-    { id: "settings-updates", label: "版本与资源更新", meta: hasAnyUpdate ? "有更新" : (updRes.current || "") },
+  // Two-column settings shell: left tab list + single active panel on the right
+  const tabDefs = [
+    { id: "settings-account", label: "账户与资产", meta: accRes.loggedIn ? "已登录" : "未登录", panel: accSection },
+    { id: "settings-models", label: "第三方接口", meta: providers.length ? `${providers.length} 个接口` : "未配置", panel: provSection },
+    { id: "settings-preferences", label: "通用偏好与存储", meta: "", panel: prefSection },
+    { id: "settings-updates", label: "版本与资源更新", meta: hasAnyUpdate ? "有更新" : (updRes.current || ""), panel: updSection },
   ];
 
-  const navLinks = [];
-  const nav = el("nav", { class: "settings-nav", "aria-label": "设置目录" });
+  const navButtons = [];
+  const nav = el("div", { class: "settings-nav", role: "tablist", "aria-label": "设置分组", "aria-orientation": "vertical" });
   const content = el("div", { class: "settings-content" },
     accSection,
     provSection,
@@ -551,88 +556,65 @@ export async function renderSettings(root, ctx, params = {}) {
     updSection
   );
 
-  const supportsScrollTargetGroup = typeof CSS !== "undefined" && CSS.supports("scroll-target-group: auto");
-  function setActiveNav(activeId, applyClass = !supportsScrollTargetGroup) {
-    for (const link of navLinks) {
-      const isActive = link.dataset.target === activeId;
-      link.setAttribute("aria-current", isActive ? "true" : "false");
-      if (applyClass) link.classList.toggle("target-current", isActive);
+  function activateTab(tabId, { focusTab = false, resetScroll = false } = {}) {
+    if (!VALID_SETTINGS_TABS.has(tabId)) tabId = tabDefs[0].id;
+    activeSettingsTab = tabId;
+    tabDefs.forEach((def, idx) => {
+      const isCurrent = def.id === tabId;
+      const btn = navButtons[idx];
+      btn.classList.toggle("is-active", isCurrent);
+      btn.setAttribute("aria-selected", String(isCurrent));
+      btn.tabIndex = isCurrent ? 0 : -1;
+      def.panel.hidden = !isCurrent;
+      if (isCurrent && focusTab) btn.focus();
+    });
+    if (resetScroll) {
+      scrollContainerEl.scrollTop = 0;
     }
   }
 
-  navItems.forEach((item, index) => {
-    const link = el("a", {
+  tabDefs.forEach((item, index) => {
+    const btn = el("button", {
+      type: "button",
+      id: `tab-${item.id}`,
       class: "settings-nav-link",
-      href: `#${item.id}`,
+      role: "tab",
+      "aria-controls": item.id,
+      "aria-selected": "false",
       dataset: { target: item.id },
-      "aria-current": index === 0 ? "true" : "false",
-      onClick: (e) => {
-        e.preventDefault();
-        const target = content.querySelector(`#${item.id}`);
-        if (!target) return;
-        const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-        target.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
-        target.focus({ preventScroll: true });
-        setActiveNav(item.id, !supportsScrollTargetGroup);
+      onClick: () => activateTab(item.id, { resetScroll: true }),
+      onKeydown: (e) => {
+        let nextIdx = -1;
+        if (e.key === "ArrowDown" || e.key === "ArrowRight") nextIdx = (index + 1) % tabDefs.length;
+        else if (e.key === "ArrowUp" || e.key === "ArrowLeft") nextIdx = (index - 1 + tabDefs.length) % tabDefs.length;
+        else if (e.key === "Home") nextIdx = 0;
+        else if (e.key === "End") nextIdx = tabDefs.length - 1;
+        if (nextIdx >= 0) {
+          e.preventDefault();
+          activateTab(tabDefs[nextIdx].id, { focusTab: true, resetScroll: true });
+        }
       },
     },
-      el("span", { class: "settings-nav-title" }, `${index + 1}. ${item.label}`),
+      el("span", { class: "settings-nav-title" }, item.label),
       item.meta ? el("span", { class: "settings-nav-meta" }, item.meta) : null
     );
-    navLinks.push(link);
-    nav.appendChild(link);
+    navButtons.push(btn);
+    nav.appendChild(btn);
   });
 
   const shell = el("div", { class: "settings-shell" }, nav, content);
   root.appendChild(shell);
 
-  // Scrollspy: native :target-current aria sync when supported, IntersectionObserver fallback otherwise
-  const scrollContainer = root.closest(".main") || root;
-  const sections = [accSection, provSection, prefSection, updSection];
-  let observer = null;
-  let onScrollEnd = null;
+  activateTab(activeSettingsTab, { resetScroll: savedScrollTop === null });
 
-  if (supportsScrollTargetGroup) {
-    const syncNativeAria = () => {
-      const currentLink = nav.querySelector("a:target-current");
-      if (currentLink) {
-        setActiveNav(currentLink.dataset.target, false);
-      }
-    };
-    onScrollEnd = syncNativeAria;
-    scrollContainer.addEventListener("scrollend", onScrollEnd);
-    requestAnimationFrame(syncNativeAria);
-  } else {
-    setActiveNav(navItems[0].id, true);
-    observer = new IntersectionObserver((entries) => {
-      const visible = entries.filter((entry) => entry.isIntersecting);
-      if (!visible.length) return;
-      visible.sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
-      setActiveNav(visible[0].target.id, true);
-    }, { root: scrollContainer === root ? null : scrollContainer, rootMargin: "-10% 0px -70% 0px", threshold: 0 });
-    sections.forEach((sec) => observer.observe(sec));
-  }
-
-  if (params?.anchor) {
-    const anchorTarget = content.querySelector(`#${CSS.escape(params.anchor)}`);
-    if (anchorTarget) {
-      requestAnimationFrame(() => {
-        const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-        anchorTarget.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
-        anchorTarget.focus({ preventScroll: true });
-        setActiveNav(anchorTarget.id, !supportsScrollTargetGroup);
-      });
-    }
-  } else if (savedScrollTop !== null) {
+  if (savedScrollTop !== null) {
     requestAnimationFrame(() => {
-      scrollContainer.scrollTop = savedScrollTop;
+      scrollContainerEl.scrollTop = savedScrollTop;
     });
   }
 
   const cleanup = () => {
     clearInterval(loginPollTimer);
-    observer?.disconnect();
-    if (onScrollEnd) scrollContainer.removeEventListener("scrollend", onScrollEnd);
     unsub();
   };
   const unsub = onEvent((msg) => {
@@ -662,18 +644,37 @@ function openProviderModal(existing, onSaved) {
   const isNew = !existing;
   const prov = existing ? structuredClone(existing) : { id: "", name: "", kind: "openai", purpose: "image", baseUrl: "", enabled: true, models: [] };
   if (prov.purpose === "vision") prov.purpose = "text";
+  if (!Array.isArray(prov.models)) prov.models = [];
 
-  const nameIn = el("input", { class: "input", value: prov.name || "", placeholder: "例如：火山方舟 / OpenRouter / 中转站" });
+  const nameIn = el("input", { class: "input", value: prov.name || "", placeholder: "例如：火山方舟 / OpenRouter / 本地号池" });
   const purposeSel = el("select", { class: "select" },
     el("option", { value: "image", selected: prov.purpose !== "text" }, "生图接口"),
     el("option", { value: "text", selected: prov.purpose === "text" }, "文字与视觉解析接口")
   );
   const urlIn = el("input", { class: "input", value: prov.baseUrl || "", placeholder: "https://api.example.com/v1", autocorrect: "off", autocapitalize: "none", spellcheck: "false" });
   const keyIn = el("input", { class: "input", type: "password", autocomplete: "new-password", placeholder: prov.hasKey ? "留空则保留现有密钥" : "输入 API Key（存入系统凭据库）" });
-  const modelsWrap = el("div", { class: "col", style: { gap: "6px", maxHeight: "190px", overflowY: "auto" } });
-  const manualIdIn = el("input", { class: "input", placeholder: "手动添加模型 ID（回车或点添加）", autocorrect: "off", autocapitalize: "none", spellcheck: "false" });
-  const fetchedWrap = el("div", { class: "col hidden", style: { gap: "6px", padding: "8px", border: "1px solid var(--line)", borderRadius: "8px", background: "var(--paper)" } });
+
+  const selectedCountBadge = el("span", { class: "badge" }, `已勾选 ${prov.models.length} 个`);
+  const tagSearchIn = el("input", {
+    class: "input",
+    placeholder: "搜索模型标签…",
+    autocorrect: "off",
+    autocapitalize: "none",
+    spellcheck: "false",
+  });
+  const filterPillsWrap = el("div", { class: "provider-filter-pills" });
+  const tagGrid = el("div", { class: "model-tag-grid" });
+  const tagHint = el("div", { class: "muted", style: { fontSize: "12px" } });
+  const tagToolbar = el("div", { class: "provider-tag-toolbar hidden" }, tagSearchIn, filterPillsWrap);
+  const tagPanel = el("div", { class: "provider-tag-panel" }, tagToolbar, tagGrid, tagHint);
+
+  const selectedHead = el("div", { class: "provider-selected-head hidden" });
+  const modelsWrap = el("div", { class: "col", style: { gap: "6px", maxHeight: "170px", overflowY: "auto" } });
+
   let fetchedModels = [];
+  let fetchQuery = "";
+  let activeFilter = "all"; // all | recommended | selected
+  let fetching = false;
   const testStates = new Map();
   const testViews = new Map();
   let testTimer = null;
@@ -711,6 +712,31 @@ function openProviderModal(existing, onSaved) {
       view.detail.hidden = !test?.detail;
       if (test?.running) view.elapsed.textContent = `已等待 ${elapsedLabel(performance.now() - test.startedAt)}`;
     }
+  }
+
+  function validateBeforeSave() {
+    if (!nameIn.value.trim()) {
+      nameIn.focus();
+      throw new Error("请填写接口名称");
+    }
+    if (!urlIn.value.trim()) {
+      urlIn.focus();
+      throw new Error("请填写 Base URL");
+    }
+    if (!(prov.models || []).length) {
+      throw new Error("请先拉取模型并勾选至少一个模型");
+    }
+  }
+
+  async function saveProviderPayload() {
+    validateBeforeSave();
+    prov.name = nameIn.value.trim();
+    prov.purpose = purposeSel.value;
+    prov.baseUrl = urlIn.value.trim();
+    const res = await api("POST", "/api/providers", { ...prov, apiKey: keyIn.value.trim() });
+    const latest = (res.providers || []).find((x) => x.name === prov.name && x.baseUrl === prov.baseUrl) || (res.providers || []).slice(-1)[0];
+    if (!prov.id && latest?.id) prov.id = latest.id;
+    return res;
   }
 
   async function testModel(model, isText) {
@@ -769,15 +795,146 @@ function openProviderModal(existing, onSaved) {
     return true;
   }
 
-  function renderModels() {
+  function removeModelEntry(id) {
+    const idx = (prov.models || []).findIndex((m) => m.id === id);
+    if (idx < 0) return false;
+    prov.models.splice(idx, 1);
+    testStates.delete(id);
+    return true;
+  }
+
+  function toggleModelEntry(item) {
+    const exists = (prov.models || []).some((m) => m.id === item.id);
+    if (exists) {
+      removeModelEntry(item.id);
+    } else {
+      addModelEntry(item.id, { canVision: item.isVision });
+    }
+    syncModelSelectionUI();
+  }
+
+  function buildCatalog() {
+    const map = new Map();
+    for (const item of fetchedModels) {
+      map.set(item.id, item);
+    }
+    for (const m of prov.models || []) {
+      if (!map.has(m.id)) {
+        map.set(m.id, {
+          id: m.id,
+          isImage: purposeSel.value !== "text" && !looksVisionModelId(m.id),
+          isVision: Boolean(m.canVision) || looksVisionModelId(m.id),
+        });
+      }
+    }
+    return [...map.values()];
+  }
+
+  function updateSelectedCount() {
+    const count = (prov.models || []).length;
+    selectedCountBadge.textContent = `已勾选 ${count} 个`;
+    selectedCountBadge.className = count > 0 ? "badge badge-ok" : "badge";
+  }
+
+  function renderTagGrid() {
+    clear(filterPillsWrap);
+    clear(tagGrid);
+
+    const isText = purposeSel.value === "text";
+    const selectedSet = new Set((prov.models || []).map((m) => m.id));
+    const catalog = buildCatalog();
+
+    if (!catalog.length) {
+      tagToolbar.classList.add("hidden");
+      tagHint.textContent = "请先填写 Base URL 与 API Key，点击「🔍 拉取模型」后在模型标签上直接打勾选择。";
+      return;
+    }
+
+    tagToolbar.classList.remove("hidden");
+
+    const recList = catalog.filter((m) => (isText ? m.isVision && !m.isImage : m.isImage));
+    const filterItems = [
+      { id: "all", label: `全部 (${catalog.length})` },
+      ...(recList.length ? [{ id: "recommended", label: isText ? `识图推荐 (${recList.length})` : `生图推荐 (${recList.length})` }] : []),
+      { id: "selected", label: `已勾选 (${selectedSet.size})` },
+    ];
+    if (!filterItems.some((f) => f.id === activeFilter)) activeFilter = "all";
+
+    filterItems.forEach((f) => {
+      filterPillsWrap.appendChild(el("button", {
+        type: "button",
+        class: "provider-filter-pill" + (activeFilter === f.id ? " is-active" : ""),
+        onClick: () => {
+          activeFilter = f.id;
+          renderTagGrid();
+        },
+      }, f.label));
+    });
+
+    if (selectedSet.size > 0) {
+      filterPillsWrap.appendChild(el("button", {
+        type: "button",
+        class: "provider-filter-pill",
+        onClick: () => {
+          prov.models = [];
+          testStates.clear();
+          syncModelSelectionUI();
+        },
+      }, "清空勾选"));
+    }
+
+    const q = fetchQuery.trim().toLowerCase();
+    let visible = catalog.filter((m) => !q || m.id.toLowerCase().includes(q));
+    if (activeFilter === "recommended") {
+      visible = visible.filter((m) => (isText ? m.isVision && !m.isImage : m.isImage));
+    } else if (activeFilter === "selected") {
+      visible = visible.filter((m) => selectedSet.has(m.id));
+    }
+
+    // Show checked tags first only when viewing "all" without active search? Keep stable order so chips don't jump under cursor!
+    const shown = visible.slice(0, 120);
+    if (!shown.length) {
+      tagGrid.appendChild(el("span", { class: "muted", style: { fontSize: "12px", padding: "4px 2px" } }, "没有匹配的模型标签"));
+    } else {
+      shown.forEach((m) => {
+        const checked = selectedSet.has(m.id);
+        const kindLabel = m.isImage ? "生图" : (m.isVision ? "识图" : "");
+        tagGrid.appendChild(el("button", {
+          type: "button",
+          class: "model-tag-chip" + (checked ? " is-checked" : ""),
+          "aria-pressed": String(checked),
+          dataset: { modelId: m.id },
+          onClick: () => toggleModelEntry(m),
+        },
+          el("span", { class: "model-tag-check", "aria-hidden": "true" }, checked ? "✓" : ""),
+          el("span", { class: "model-tag-id mono" }, m.id),
+          kindLabel ? el("span", { class: "model-tag-kind" }, kindLabel) : null
+        ));
+      });
+    }
+
+    if (!fetchedModels.length) {
+      tagHint.textContent = "当前展示已勾选模型；点击「🔍 拉取模型」可刷新远端列表并增减勾选。";
+    } else if (visible.length > 120) {
+      tagHint.textContent = `当前展示前 120 个标签（共匹配 ${visible.length} 个），请输入关键词继续筛选。点击标签直接打勾即可选择。`;
+    } else {
+      tagHint.textContent = "点击模型标签即可打勾选中或取消选中。";
+    }
+  }
+
+  function renderSelectedModels() {
     clear(modelsWrap);
     testViews.clear();
     const isText = purposeSel.value === "text";
-    if (!(prov.models || []).length) {
-      modelsWrap.appendChild(el("div", { class: "muted", style: { fontSize: "12px" } }, "尚未添加模型，可点击「🔍 拉取 /models」或手动输入模型 ID"));
+    const list = prov.models || [];
+    if (!list.length) {
+      selectedHead.classList.add("hidden");
       return;
     }
-    (prov.models || []).forEach((m, idx) => {
+    selectedHead.classList.remove("hidden");
+    selectedHead.textContent = `已勾选模型能力配置与测试（${list.length}）`;
+
+    list.forEach((m) => {
       const controls = el("div", { class: "row" });
       if (isText) {
         const visChk = el("input", { type: "checkbox", checked: Boolean(m.canVision) });
@@ -794,7 +951,15 @@ function openProviderModal(existing, onSaved) {
         );
       }
       const testButton = el("button", { type: "button", class: "btn btn-sm", onClick: () => testModel(m, isText) }, "测试");
-      const removeButton = el("button", { type: "button", class: "btn btn-sm btn-danger", onClick: () => { prov.models.splice(idx, 1); testStates.delete(m.id); renderModels(); renderFetched(); } }, "×");
+      const removeButton = el("button", {
+        type: "button",
+        class: "btn btn-sm btn-danger",
+        title: "取消勾选此模型",
+        onClick: () => {
+          removeModelEntry(m.id);
+          syncModelSelectionUI();
+        },
+      }, "×");
       controls.append(testButton, removeButton);
       const progress = el("progress", { "aria-label": `${m.id} 测试中`, style: { width: "64px", height: "6px" } });
       const message = el("span", { role: "status", "aria-live": "polite", "aria-atomic": "true" });
@@ -816,126 +981,78 @@ function openProviderModal(existing, onSaved) {
     updateTestViews();
   }
 
-  let fetchQuery = "";
-  function renderFetched() {
-    clear(fetchedWrap);
-    if (!fetchedModels.length) {
-      fetchedWrap.classList.add("hidden");
-      return;
-    }
-    fetchedWrap.classList.remove("hidden");
-    const isText = purposeSel.value === "text";
-    const existingSet = new Set((prov.models || []).map((m) => m.id));
-    const q = fetchQuery.trim().toLowerCase();
-    const list = fetchedModels.filter((m) => !q || m.id.toLowerCase().includes(q));
-    const searchIn = el("input", { class: "input", value: fetchQuery, placeholder: "筛选拉取的模型 ID…" });
-    searchIn.addEventListener("input", () => { fetchQuery = searchIn.value; renderFetched(); });
-
-    const recList = fetchedModels.filter((m) => (isText ? m.isVision && !m.isImage : m.isImage));
-    const addRecBtn = recList.length ? el("button", {
-      type: "button",
-      class: "btn btn-sm",
-      onClick: () => {
-        let added = 0;
-        recList.forEach((m) => { if (addModelEntry(m.id, { canVision: m.isVision })) added++; });
-        renderModels();
-        renderFetched();
-        toast(added ? `已添加 ${added} 个推荐模型` : "推荐模型均已添加");
-      },
-    }, isText ? `+ 添加识图模型 (${recList.length})` : `+ 添加生图模型 (${recList.length})`) : null;
-
-    fetchedWrap.appendChild(el("div", { class: "row", style: { justifyContent: "space-between" } },
-      searchIn,
-      addRecBtn,
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => { fetchedModels = []; renderFetched(); } }, "收起")
-    ));
-
-    const listBox = el("div", { class: "col", style: { gap: "4px", maxHeight: "150px", overflowY: "auto" } });
-    list.slice(0, 80).forEach((m) => {
-      const added = existingSet.has(m.id);
-      const badge = m.isImage ? el("span", { class: "badge" }, "生图") : (m.isVision ? el("span", { class: "badge badge-ok" }, "识图") : null);
-      listBox.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", padding: "3px 4px" } },
-        el("div", { class: "row" }, el("span", { class: "mono", style: { fontSize: "12px" } }, m.id), badge),
-        el("button", {
-          type: "button",
-          class: "btn btn-sm",
-          disabled: added,
-          onClick: () => {
-            addModelEntry(m.id, { canVision: m.isVision });
-            renderModels();
-            renderFetched();
-          },
-        }, added ? "已添加" : "+ 添加")
-      ));
-    });
-    if (list.length > 80) {
-      listBox.appendChild(el("div", { class: "muted", style: { fontSize: "11.5px" } }, `仅展示前 80 条，请输入关键词继续筛选（共 ${list.length} 条）`));
-    }
-    fetchedWrap.appendChild(listBox);
+  function syncModelSelectionUI() {
+    updateSelectedCount();
+    renderTagGrid();
+    renderSelectedModels();
   }
+
+  tagSearchIn.addEventListener("input", () => {
+    fetchQuery = tagSearchIn.value;
+    renderTagGrid();
+  });
 
   purposeSel.addEventListener("change", () => {
-    renderModels();
-    renderFetched();
+    syncModelSelectionUI();
   });
-  manualIdIn.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      if (addModelEntry(manualIdIn.value, { canRefImage: purposeSel.value !== "text" })) {
-        manualIdIn.value = "";
-        renderModels();
-      }
-    }
-  });
-  renderModels();
 
-  async function saveProviderPayload() {
-    prov.name = nameIn.value.trim();
-    prov.purpose = purposeSel.value;
-    prov.baseUrl = urlIn.value.trim();
-    const res = await api("POST", "/api/providers", { ...prov, apiKey: keyIn.value.trim() });
-    const latest = (res.providers || []).find((x) => x.name === prov.name && x.baseUrl === prov.baseUrl) || (res.providers || []).slice(-1)[0];
-    if (!prov.id && latest?.id) prov.id = latest.id;
-    return res;
-  }
+  syncModelSelectionUI();
 
   const fetchBtn = el("button", {
     type: "button",
-    class: "btn btn-sm",
+    class: "btn btn-sm btn-primary",
     onClick: async () => {
+      if (fetching) return;
+      const baseUrl = urlIn.value.trim();
+      if (!baseUrl) {
+        urlIn.focus();
+        toast("请先填写 Base URL");
+        return;
+      }
+      fetching = true;
+      fetchBtn.disabled = true;
+      fetchBtn.textContent = "拉取中…";
       try {
-        if (!prov.id) await saveProviderPayload();
-        const r = await api("POST", `/api/providers/${encodeURIComponent(prov.id)}/models`, { baseUrl: urlIn.value.trim(), apiKey: keyIn.value.trim() });
+        const targetId = prov.id || "_preview";
+        const r = await api("POST", `/api/providers/${encodeURIComponent(targetId)}/models`, {
+          baseUrl,
+          apiKey: keyIn.value.trim(),
+        });
         fetchedModels = (r.models || []).map((item) => (typeof item === "string"
           ? { id: item, isImage: false, isVision: looksVisionModelId(item) }
           : { id: item.id, owned_by: item.owned_by || "", isImage: Boolean(item.isImage), isVision: Boolean(item.isVision) || looksVisionModelId(item.id) }
         )).filter((m) => m.id);
-        renderFetched();
-        toast(`获取到 ${fetchedModels.length} 个模型，请点击添加需要的模型并保存`);
-      } catch (e) { toast(e.message); }
+        activeFilter = "all";
+        syncModelSelectionUI();
+        if (fetchedModels.length) {
+          toast(`已拉取 ${fetchedModels.length} 个模型，请点击标签打勾选择`);
+        } else {
+          toast("接口未返回任何可用模型");
+        }
+      } catch (e) {
+        toast(e.message || "拉取模型失败");
+      } finally {
+        fetching = false;
+        fetchBtn.disabled = false;
+        fetchBtn.textContent = "🔍 拉取模型";
+      }
     },
-  }, "🔍 拉取 /models");
+  }, "🔍 拉取模型");
 
-  const dialog = showModal(isNew ? "添加第三方接口" : "编辑接口", el("div", { class: "col" },
+  const dialog = showModal(isNew ? "添加第三方接口" : "编辑第三方接口", el("div", { class: "col", style: { gap: "10px" } },
     el("div", { class: "field" }, el("label", null, "接口名称"), nameIn),
-    el("div", { class: "field" }, el("label", null, "用途"), purposeSel),
+    el("div", { class: "field" }, el("label", null, "接口用途"), purposeSel),
     el("div", { class: "field" }, el("label", null, "Base URL"), urlIn),
     el("div", { class: "field" }, el("label", null, "API Key"), keyIn),
-    el("div", { class: "row", style: { justifyContent: "space-between" } }, el("strong", null, "可用模型"), fetchBtn),
-    fetchedWrap,
-    el("div", { class: "row" },
-      manualIdIn,
-      el("button", {
-        type: "button",
-        class: "btn btn-sm",
-        onClick: () => {
-          if (addModelEntry(manualIdIn.value, { canRefImage: purposeSel.value !== "text" })) {
-            manualIdIn.value = "";
-            renderModels();
-          }
-        },
-      }, "+ 添加模型")
+    el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", marginTop: "4px" } },
+      el("div", { class: "row", style: { gap: "8px" } },
+        el("strong", null, "模型选择"),
+        selectedCountBadge
+      ),
+      fetchBtn
     ),
+    tagPanel,
+    selectedHead,
     modelsWrap
   ), [
     el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
@@ -947,13 +1064,15 @@ function openProviderModal(existing, onSaved) {
           await saveProviderPayload();
           closeModal();
           onSaved?.();
-          toast("接口已保存");
+          toast("第三方接口已保存");
         } catch (e) { toast(e.message); }
       },
     }, "保存"),
   ]);
+  dialog.classList.add("modal-provider");
   dialog.addEventListener("close", () => {
     dialogClosed = true;
+    dialog.classList.remove("modal-provider");
     stopTestClock();
   }, { once: true });
 }

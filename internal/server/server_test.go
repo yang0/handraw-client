@@ -465,3 +465,46 @@ func TestRemoteMediaProxyAndCache(t *testing.T) {
 		t.Fatalf("expected disk cache hit with 1 origin hit, got code=%d cache=%q hits=%d", rr2.Code, rr2.Header().Get("X-Handraw-Cache"), hits.Load())
 	}
 }
+
+func TestProviderModelsStatelessPreview(t *testing.T) {
+	var gotAuth string
+	mockOpenAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			w.WriteHeader(404)
+			return
+		}
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-image-2.6","owned_by":"relay"},{"id":"gpt-4o","owned_by":"relay"}]}`))
+	}))
+	defer mockOpenAI.Close()
+
+	srv, _ := setupTestServer(t, "http://127.0.0.1:1")
+	h := srv.Handler()
+
+	// Preview with baseUrl + apiKey works without pre-saving a provider.
+	rr := doReq(t, h, srv.Token, "POST", "/api/providers/_preview/models", map[string]any{
+		"baseUrl": mockOpenAI.URL + "/v1",
+		"apiKey":  "sk-preview-key",
+	})
+	if rr.Code != 200 {
+		t.Fatalf("stateless preview failed: %d %s", rr.Code, rr.Body.String())
+	}
+	if gotAuth != "Bearer sk-preview-key" {
+		t.Fatalf("expected Bearer sk-preview-key, got %q", gotAuth)
+	}
+	if !strings.Contains(rr.Body.String(), "gpt-image-2.6") || !strings.Contains(rr.Body.String(), "gpt-4o") {
+		t.Fatalf("missing fetched models in body: %s", rr.Body.String())
+	}
+	if len(settings.Get().Providers) != 0 {
+		t.Fatalf("stateless preview must not persist a draft provider, got %d", len(settings.Get().Providers))
+	}
+	if secrets.Has(secrets.ProviderKey("_preview")) {
+		t.Fatal("stateless preview must not persist api key into keyring")
+	}
+
+	// Unknown provider without baseUrl still returns 404.
+	rr404 := doReq(t, h, srv.Token, "POST", "/api/providers/missing-prov/models", nil)
+	if rr404.Code != 404 {
+		t.Fatalf("expected 404 for unknown provider without baseUrl, got %d %s", rr404.Code, rr404.Body.String())
+	}
+}

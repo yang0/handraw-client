@@ -88,13 +88,19 @@ func LooksVision(id string) bool {
 
 var httpClient = &http.Client{Timeout: 6 * time.Minute}
 
-// ListModels fetches GET /models.
+// ListModels fetches GET /models using the provider's stored API key.
 func ListModels(ctx context.Context, p Provider) ([]ModelInfo, error) {
+	return ListModelsWithKey(ctx, p, key(p))
+}
+
+// ListModelsWithKey fetches GET /models using an explicit API key (may be empty).
+// This allows previewing models for a draft provider before saving it.
+func ListModelsWithKey(ctx context.Context, p Provider, apiKey string) ([]ModelInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint(p, "/models"), nil)
 	if err != nil {
 		return nil, err
 	}
-	if k := key(p); k != "" {
+	if k := strings.TrimSpace(apiKey); k != "" {
 		req.Header.Set("Authorization", "Bearer "+k)
 	}
 	c := &http.Client{Timeout: 30 * time.Second}

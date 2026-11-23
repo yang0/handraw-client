@@ -201,22 +201,28 @@ func findProvider(id string) (settings.Provider, bool) {
 
 func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) (any, error) {
 	id := r.PathValue("id")
-	p, ok := findProvider(id)
-	if !ok {
-		return nil, notFound("找不到接口 " + id)
-	}
 	var body struct {
 		BaseURL string `json:"baseUrl"`
 		APIKey  string `json:"apiKey"`
 	}
 	_ = decode(r, &body)
-	if body.BaseURL != "" {
-		p.BaseURL = body.BaseURL
+	p, ok := findProvider(id)
+	if !ok {
+		if strings.TrimSpace(body.BaseURL) == "" {
+			return nil, notFound("找不到接口 " + id)
+		}
+		p = settings.Provider{
+			Kind:    "openai",
+			BaseURL: strings.TrimSpace(body.BaseURL),
+		}
+	} else if strings.TrimSpace(body.BaseURL) != "" {
+		p.BaseURL = strings.TrimSpace(body.BaseURL)
 	}
-	if strings.TrimSpace(body.APIKey) != "" {
-		_ = secrets.Set(secrets.ProviderKey(p.ID), strings.TrimSpace(body.APIKey))
+	apiKey := strings.TrimSpace(body.APIKey)
+	if apiKey == "" && ok {
+		apiKey, _ = secrets.Get(secrets.ProviderKey(p.ID))
 	}
-	models, err := providers.ListModels(r.Context(), p)
+	models, err := providers.ListModelsWithKey(r.Context(), p, apiKey)
 	if err != nil {
 		return nil, err
 	}
