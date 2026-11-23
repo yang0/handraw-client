@@ -377,19 +377,37 @@ type ToolCallFunction struct {
 	Arguments string `json:"arguments"`
 }
 
+type TokenUsage struct {
+	InputTokens      int `json:"input_tokens"`
+	OutputTokens     int `json:"output_tokens"`
+	CacheReadTokens  int `json:"cache_read_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 type ChatTurnResult struct {
 	Content      string
 	ToolCalls    []ToolCall
 	FinishReason string
+	Usage        *TokenUsage
 }
 
 // ChatWithTools calls /chat/completions with optional OpenAI function tools.
-// If the relay rejects the tools parameter with HTTP 400/422, it retries once without tools.
 func ChatWithTools(ctx context.Context, p Provider, model string, msgs []ChatMessage, tools []ToolDef) (ChatTurnResult, error) {
+	return ChatWithToolsCached(ctx, p, model, msgs, tools, "")
+}
+
+// ChatWithToolsCached calls /chat/completions with optional tools and an optional
+// prompt_cache_key to maximize upstream relay prompt-cache hits (#61).
+// If the relay rejects prompt_cache_key or tools with HTTP 400/422, it gracefully degrades.
+func ChatWithToolsCached(ctx context.Context, p Provider, model string, msgs []ChatMessage, tools []ToolDef, cacheKey string) (ChatTurnResult, error) {
 	body := map[string]any{"model": model, "messages": msgs, "temperature": 0.7}
 	if len(tools) > 0 {
 		body["tools"] = tools
 		body["tool_choice"] = "auto"
+	}
+	if strings.TrimSpace(cacheKey) != "" {
+		body["prompt_cache_key"] = strings.TrimSpace(cacheKey)
 	}
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint(p, "/chat/completions"), bytes.NewReader(b))
@@ -408,8 +426,13 @@ func ChatWithTools(ctx context.Context, p Provider, model string, msgs []ChatMes
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if resp.StatusCode >= 400 {
-		if len(tools) > 0 && (resp.StatusCode == 400 || resp.StatusCode == 422) {
-			return ChatWithTools(ctx, p, model, msgs, nil)
+		if resp.StatusCode == 400 || resp.StatusCode == 422 {
+			if strings.TrimSpace(cacheKey) != "" {
+				return ChatWithToolsCached(ctx, p, model, msgs, tools, "")
+			}
+			if len(tools) > 0 {
+				return ChatWithToolsCached(ctx, p, model, msgs, nil, "")
+			}
 		}
 		return ChatTurnResult{}, apiErr(resp.StatusCode, data)
 	}
@@ -421,6 +444,7 @@ func ChatWithTools(ctx context.Context, p Provider, model string, msgs []ChatMes
 				ToolCalls []ToolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage map[string]any `json:"usage"`
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
@@ -439,7 +463,68 @@ func ChatWithTools(ctx context.Context, p Provider, model string, msgs []ChatMes
 		Content:      extractContentText(ch.Message.Content),
 		ToolCalls:    ch.Message.ToolCalls,
 		FinishReason: ch.FinishReason,
+		Usage:        ExtractTokenUsage(out.Usage),
 	}, nil
+}
+
+// ExtractTokenUsage normalizes OpenAI / DeepSeek / Anthropic-relay usage maps.
+func ExtractTokenUsage(usage map[string]any) *TokenUsage {
+	if len(usage) == 0 {
+		return nil
+	}
+	intVal := func(m map[string]any, keys ...string) (int, bool) {
+		for _, k := range keys {
+			if raw, ok := m[k]; ok && raw != nil {
+				switch v := raw.(type) {
+				case float64:
+					return int(v), true
+				case int:
+					return v, true
+				case int64:
+					return int(v), true
+				}
+			}
+		}
+		return 0, false
+	}
+	details, _ := usage["prompt_tokens_details"].(map[string]any)
+	if len(details) == 0 {
+		details, _ = usage["input_tokens_details"].(map[string]any)
+	}
+	cacheRead, _ := intVal(usage, "prompt_cache_hit_tokens", "cache_read_input_tokens", "cache_read_tokens")
+	if cacheRead == 0 && len(details) > 0 {
+		cacheRead, _ = intVal(details, "cached_tokens", "cache_read_tokens")
+	}
+	cacheWrite, _ := intVal(usage, "cache_creation_input_tokens", "cache_write_tokens")
+	if cacheWrite == 0 && len(details) > 0 {
+		cacheWrite, _ = intVal(details, "cache_creation_tokens")
+	}
+	var uncached int
+	if miss, ok := intVal(usage, "prompt_cache_miss_tokens"); ok {
+		uncached = miss
+	} else if pt, ok := intVal(usage, "prompt_tokens"); ok {
+		uncached = pt - cacheRead - cacheWrite
+		if uncached < 0 {
+			uncached = 0
+		}
+	} else if it, ok := intVal(usage, "input_tokens"); ok {
+		uncached = it
+	}
+	outTok, _ := intVal(usage, "completion_tokens", "output_tokens")
+	tot, _ := intVal(usage, "total_tokens")
+	if tot == 0 {
+		tot = uncached + cacheRead + cacheWrite + outTok
+	}
+	if tot == 0 && cacheRead == 0 && outTok == 0 {
+		return nil
+	}
+	return &TokenUsage{
+		InputTokens:      uncached,
+		OutputTokens:     outTok,
+		CacheReadTokens:  cacheRead,
+		CacheWriteTokens: cacheWrite,
+		TotalTokens:      tot,
+	}
 }
 
 // Chat calls /chat/completions and returns the text reply.

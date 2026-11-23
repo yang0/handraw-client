@@ -3,6 +3,7 @@ package server
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
@@ -320,6 +321,113 @@ func normalizeSiteModels(raw json.RawMessage) []map[string]any {
 	return out
 }
 
+type siteSpecEntry struct {
+	ID         string `json:"id"`
+	Model      string `json:"model"`
+	Resolution string `json:"resolution"`
+	Quality    string `json:"quality"`
+	Enabled    *bool  `json:"enabled"`
+	Verified   *bool  `json:"verified"`
+}
+
+func parseSiteSpecs(raw json.RawMessage) []siteSpecEntry {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj struct {
+		Specifications []siteSpecEntry `json:"specifications"`
+		Models         []siteSpecEntry `json:"models"`
+		Items          []siteSpecEntry `json:"items"`
+	}
+	var arr []siteSpecEntry
+	if json.Unmarshal(raw, &arr) != nil {
+		if json.Unmarshal(raw, &obj) != nil {
+			return nil
+		}
+		switch {
+		case len(obj.Specifications) > 0:
+			arr = obj.Specifications
+		case len(obj.Models) > 0:
+			arr = obj.Models
+		default:
+			arr = obj.Items
+		}
+	}
+	out := make([]siteSpecEntry, 0, len(arr))
+	for _, sp := range arr {
+		if sp.Enabled != nil && !*sp.Enabled {
+			continue
+		}
+		if sp.Verified != nil && !*sp.Verified {
+			continue
+		}
+		if strings.TrimSpace(sp.ID) == "" && strings.TrimSpace(sp.Model) == "" {
+			continue
+		}
+		out = append(out, sp)
+	}
+	return out
+}
+
+func matchSiteSpec(specs []siteSpecEntry, modelOrID, wantRes, wantQual string) (siteSpecEntry, bool) {
+	m := strings.ToLower(strings.TrimSpace(modelOrID))
+	res := strings.ToLower(strings.TrimSpace(wantRes))
+	qual := strings.ToLower(strings.TrimSpace(wantQual))
+	if m == "" || len(specs) == 0 {
+		return siteSpecEntry{}, false
+	}
+	for _, sp := range specs {
+		if strings.ToLower(strings.TrimSpace(sp.ID)) == m {
+			return sp, true
+		}
+	}
+	if res != "" && qual != "" {
+		for _, sp := range specs {
+			if strings.EqualFold(sp.Model, m) && strings.EqualFold(sp.Resolution, res) && strings.EqualFold(sp.Quality, qual) {
+				return sp, true
+			}
+		}
+	}
+	if res != "" {
+		for _, sp := range specs {
+			if strings.EqualFold(sp.Model, m) && strings.EqualFold(sp.Resolution, res) {
+				return sp, true
+			}
+		}
+	}
+	for _, sp := range specs {
+		if strings.EqualFold(sp.Model, m) {
+			return sp, true
+		}
+	}
+	return siteSpecEntry{}, false
+}
+
+// resolveSiteSpec maps a website model + desired resolution/quality to a verified
+// specification ID from /api/economy/public-models (#61).
+func (s *Server) resolveSiteSpec(ctx context.Context, modelOrID, wantRes, wantQual string) (specID, effRes, effQual string) {
+	effRes = firstStr(strings.TrimSpace(wantRes), "1k")
+	effQual = firstStr(strings.TrimSpace(wantQual), "standard")
+
+	var cached json.RawMessage
+	if s.DB != nil && s.DB.GetKV("site_models_cache", &cached) == nil && len(cached) > 0 {
+		if sp, ok := matchSiteSpec(parseSiteSpecs(cached), modelOrID, wantRes, wantQual); ok {
+			return sp.ID, firstStr(sp.Resolution, effRes), firstStr(sp.Quality, effQual)
+		}
+	}
+	if s.Site != nil {
+		if raw, err := s.Site.PublicModels(ctx); err == nil && len(raw) > 0 {
+			if s.DB != nil {
+				_ = s.DB.SetKV("site_models_cache", raw)
+			}
+			if sp, ok := matchSiteSpec(parseSiteSpecs(raw), modelOrID, wantRes, wantQual); ok {
+				return sp.ID, firstStr(sp.Resolution, effRes), firstStr(sp.Quality, effQual)
+			}
+		}
+	}
+	return "", effRes, effQual
+}
+
 func (s *Server) quote(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
 		ModelRef   string `json:"modelRef"`
@@ -333,20 +441,22 @@ func (s *Server) quote(w http.ResponseWriter, r *http.Request) (any, error) {
 	if body.Count <= 0 {
 		body.Count = 1
 	}
-	if body.Resolution == "" {
-		body.Resolution = "1k"
-	}
 	if strings.HasPrefix(body.ModelRef, "site:") {
 		if !s.Site.LoggedIn() {
 			return nil, site.ErrNotLoggedIn
 		}
 		modelID := strings.TrimPrefix(body.ModelRef, "site:")
-		raw, err := s.Site.Quote(r.Context(), []map[string]any{{
+		specID, effRes, effQual := s.resolveSiteSpec(r.Context(), modelID, body.Resolution, body.Quality)
+		qItem := map[string]any{
 			"model":      modelID,
-			"resolution": body.Resolution,
-			"quality":    firstStr(body.Quality, "standard"),
+			"resolution": effRes,
+			"quality":    effQual,
 			"count":      body.Count,
-		}})
+		}
+		if specID != "" {
+			qItem["specId"] = specID
+		}
+		raw, err := s.Site.Quote(r.Context(), []map[string]any{qItem})
 		if err != nil {
 			return nil, err
 		}
@@ -530,15 +640,24 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 
 	var quoteID string
 	var estCents, freeCnt int
+	var siteSpecID string
+	effResolution := firstStr(body.Resolution, "1k")
+	effQuality := firstStr(body.Quality, "standard")
 	if isSite {
+		siteSpecID, effResolution, effQuality = s.resolveSiteSpec(r.Context(), rawModel, body.Resolution, body.Quality)
 		qItems := make([]map[string]any, 0, len(body.Items))
-		for range body.Items {
-			qItems = append(qItems, map[string]any{
+		for i := range body.Items {
+			qi := map[string]any{
 				"model":      rawModel,
-				"resolution": firstStr(body.Resolution, "1k"),
-				"quality":    firstStr(body.Quality, "standard"),
+				"resolution": effResolution,
+				"quality":    effQuality,
+				"ratio":      itemRatios[i],
 				"count":      1,
-			})
+			}
+			if siteSpecID != "" {
+				qi["specId"] = siteSpecID
+			}
+			qItems = append(qItems, qi)
 		}
 		rawQ, err := s.Site.Quote(r.Context(), qItems)
 		if err != nil {
@@ -618,8 +737,8 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			ModelRef:   body.ModelRef,
 			Prompt:     itemPrompts[i],
 			Ratio:      itemRatios[i],
-			Resolution: firstStr(body.Resolution, "1k"),
-			Quality:    firstStr(body.Quality, "standard"),
+			Resolution: effResolution,
+			Quality:    effQuality,
 			Refs:       refs,
 			Mask:       maskPath,
 			RequestID:  jobs.NewID("req"),
@@ -627,7 +746,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			QuoteIndex: i,
 		}
 		if isSite {
-			spec.SiteBody = map[string]any{
+			sb := map[string]any{
 				"model":          rawModel,
 				"resolution":     spec.Resolution,
 				"quality":        spec.Quality,
@@ -644,6 +763,10 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 				"creationSource": body.Mode,
 				"autoPublish":    false,
 			}
+			if siteSpecID != "" {
+				sb["specId"] = siteSpecID
+			}
+			spec.SiteBody = sb
 		}
 		meta, _ := json.Marshal(spec)
 		imgs = append(imgs, store.Image{
