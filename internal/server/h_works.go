@@ -140,6 +140,7 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 	var body struct {
 		Title    string   `json:"title"`
 		Notes    string   `json:"notes"`
+		Price    int      `json:"price"`
 		ImageIDs []string `json:"imageIds"`
 		// WebP data URLs encoded by the UI (long edge <= 2048, q85), keyed by image id.
 		Encoded map[string]string `json:"encoded"`
@@ -152,6 +153,14 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 	}
 	if len([]rune(body.Notes)) > 2000 {
 		return nil, bad("创作说明最多 2000 字")
+	}
+	if body.Price < 1 {
+		return nil, bad("作品配方与提示词不支持免费查看，请选择 1 / 2 / 3 / 5 / 10 / 20 积分")
+	}
+	switch body.Price {
+	case 1, 2, 3, 5, 10, 20:
+	default:
+		return nil, bad("作品解锁积分须为允许档位（1 / 2 / 3 / 5 / 10 / 20）")
 	}
 
 	want := map[string]bool{}
@@ -204,6 +213,7 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 		"originalRequest": buildPublishRequestText(run, "", ""),
 		"images":          imagesPayload,
 		"title":           string(title),
+		"price":           body.Price,
 		"recipe":          s.publishRecipe(run),
 	}
 	if body.Notes != "" {
@@ -234,8 +244,8 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 	}
 	_ = s.DB.UpdateRun(run.ID, fields)
 	_ = jobs.WriteRunJSON(s.DB, run.ID)
-	s.Emit("work_published", map[string]any{"runId": run.ID, "workId": wid, "url": workURL})
-	return map[string]any{"ok": true, "workId": wid, "url": workURL}, nil
+	s.Emit("work_published", map[string]any{"runId": run.ID, "workId": wid, "url": workURL, "price": body.Price})
+	return map[string]any{"ok": true, "workId": wid, "url": workURL, "price": body.Price}, nil
 }
 
 // shareMaxEdge follows docs/sharing-v2.md (WebP, long edge <= 2048, q85).

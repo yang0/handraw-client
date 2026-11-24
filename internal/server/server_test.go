@@ -335,7 +335,7 @@ func TestProviderGenerateAndIdempotentPublish(t *testing.T) {
 	}
 
 	// 4. Explicit publish creates one work idempotently and strips private MY-* tags.
-	rrPub := doReq(t, h, srv.Token, "POST", "/api/works/"+finished.ID+"/publish", map[string]any{"title": "小猫测试"})
+	rrPub := doReq(t, h, srv.Token, "POST", "/api/works/"+finished.ID+"/publish", map[string]any{"title": "小猫测试", "price": 2})
 	if rrPub.Code != 200 {
 		t.Fatalf("publish failed: %d %s", rrPub.Code, rrPub.Body.String())
 	}

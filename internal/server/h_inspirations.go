@@ -712,6 +712,7 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 		Price   int      `json:"price"`
 		Tags    []string `json:"tags"`
 		Encoded string   `json:"encoded"`
+		Images  []string `json:"images"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -771,6 +772,9 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 		"price":          body.Price,
 		"imageUrl":       imageDataOrURL,
 		"imageSha256":    imageSHA,
+	}
+	if len(body.Images) > 0 {
+		payload["images"] = body.Images
 	}
 	rawResp, err := s.Site.Send(r.Context(), http.MethodPost, "/api/inspirations", payload)
 	if err != nil {
@@ -836,6 +840,31 @@ func (s *Server) siteWorkDetail(w http.ResponseWriter, r *http.Request) (any, er
 	return out, nil
 }
 
+func (s *Server) siteWorkUnlock(w http.ResponseWriter, r *http.Request) (any, error) {
+	if s.Site == nil || !s.Site.LoggedIn() {
+		return nil, site.ErrNotLoggedIn
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		return nil, bad("缺少作品 ID")
+	}
+	raw, err := s.Site.Send(r.Context(), http.MethodPost, "/api/unlocks", map[string]any{
+		"targetType": "work",
+		"targetId":   id,
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.Emit("balance", map[string]any{"refresh": true})
+	var out map[string]any
+	_ = json.Unmarshal(raw, &out)
+	if out == nil {
+		out = map[string]any{}
+	}
+	out["siteBase"] = s.Site.Base()
+	return out, nil
+}
+
 func (s *Server) siteInspirationsFeed(w http.ResponseWriter, r *http.Request) (any, error) {
 	qs := r.URL.Query().Encode()
 	ep := "/api/inspirations/feed"
@@ -880,6 +909,62 @@ func (s *Server) siteInspirationUnlock(w http.ResponseWriter, r *http.Request) (
 		return nil, err
 	}
 	s.Emit("balance", map[string]any{"refresh": true})
+	var out map[string]any
+	_ = json.Unmarshal(raw, &out)
+	if out == nil {
+		out = map[string]any{}
+	}
+	out["siteBase"] = s.Site.Base()
+	return out, nil
+}
+
+func (s *Server) siteInspirationCommentsList(w http.ResponseWriter, r *http.Request) (any, error) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		return nil, bad("缺少灵感 ID")
+	}
+	qs := r.URL.Query().Encode()
+	ep := "/api/inspirations/" + url.PathEscape(id) + "/comments"
+	if qs != "" {
+		ep += "?" + qs
+	}
+	raw, err := s.siteGetOptionalAuth(r.Context(), ep)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	_ = json.Unmarshal(raw, &out)
+	if out == nil {
+		out = map[string]any{}
+	}
+	out["siteBase"] = s.Site.Base()
+	return out, nil
+}
+
+func (s *Server) siteInspirationCommentCreate(w http.ResponseWriter, r *http.Request) (any, error) {
+	if s.Site == nil || !s.Site.LoggedIn() {
+		return nil, site.ErrNotLoggedIn
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		return nil, bad("缺少灵感 ID")
+	}
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	body.Text = strings.TrimSpace(body.Text)
+	if body.Text == "" {
+		return nil, bad("请输入评论内容")
+	}
+	raw, err := s.Site.Send(r.Context(), http.MethodPost, "/api/inspirations/"+url.PathEscape(id)+"/comments", map[string]any{
+		"text": body.Text,
+	})
+	if err != nil {
+		return nil, err
+	}
 	var out map[string]any
 	_ = json.Unmarshal(raw, &out)
 	if out == nil {
