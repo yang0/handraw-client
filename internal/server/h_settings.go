@@ -277,9 +277,10 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) (any, erro
 		return nil, notFound("找不到接口 " + id)
 	}
 	var body struct {
-		Model  string `json:"model"`
-		Kind   string `json:"kind"`
-		Vision bool   `json:"vision"`
+		Model           string `json:"model"`
+		Kind            string `json:"kind"`
+		Vision          bool   `json:"vision"`
+		AutoProbeVision bool   `json:"autoProbeVision"`
 	}
 	_ = decode(r, &body)
 	t0 := time.Now()
@@ -335,26 +336,59 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) (any, erro
 		if modelID == "" {
 			return map[string]any{"ok": false, "latencyMs": 0, "error": "请先添加或选择要测试的模型"}, nil
 		}
-		var msgs []providers.ChatMessage
-		if body.Vision {
-			// Minimal 1x1 PNG for multimodal vision endpoint verification.
-			const tinyPNGDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-			msgs = []providers.ChatMessage{{
-				Role: "user",
-				Content: []any{
-					map[string]any{"type": "text", "text": "Reply OK"},
-					map[string]any{"type": "image_url", "image_url": map[string]any{"url": tinyPNGDataURL}},
-				},
-			}}
-		} else {
-			msgs = []providers.ChatMessage{{Role: "user", Content: "ping"}}
+
+		// Minimal 1x1 PNG for empirical multimodal vision verification.
+		const tinyPNGDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+		visionMsgs := []providers.ChatMessage{{
+			Role: "user",
+			Content: []any{
+				map[string]any{"type": "text", "text": "Reply OK"},
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": tinyPNGDataURL}},
+			},
+		}}
+		textMsgs := []providers.ChatMessage{{Role: "user", Content: "ping"}}
+
+		if body.Vision || body.AutoProbeVision {
+			reply, visErr := providers.Chat(r.Context(), p, modelID, visionMsgs, false)
+			if visErr == nil {
+				ms := time.Since(t0).Milliseconds()
+				return map[string]any{
+					"ok":             true,
+					"latencyMs":      ms,
+					"reply":          reply,
+					"model":          modelID,
+					"vision":         true,
+					"visionDetected": true,
+				}, nil
+			}
+			// Vision probe failed: fall back to plain text so we can distinguish
+			// "text-only model" from "broken model/key".
+			textReply, txtErr := providers.Chat(r.Context(), p, modelID, textMsgs, false)
+			ms := time.Since(t0).Milliseconds()
+			if txtErr == nil {
+				return map[string]any{
+					"ok":             true,
+					"latencyMs":      ms,
+					"reply":          textReply,
+					"model":          modelID,
+					"vision":         false,
+					"visionDetected": false,
+					"visionError":    visErr.Error(),
+				}, nil
+			}
+			errMsg := txtErr.Error()
+			if body.Vision {
+				errMsg = visErr.Error()
+			}
+			return map[string]any{"ok": false, "latencyMs": ms, "error": errMsg}, nil
 		}
-		reply, err := providers.Chat(r.Context(), p, modelID, msgs, false)
+
+		reply, err := providers.Chat(r.Context(), p, modelID, textMsgs, false)
 		ms := time.Since(t0).Milliseconds()
 		if err != nil {
 			return map[string]any{"ok": false, "latencyMs": ms, "error": err.Error()}, nil
 		}
-		return map[string]any{"ok": true, "latencyMs": ms, "reply": reply, "model": modelID, "vision": body.Vision}, nil
+		return map[string]any{"ok": true, "latencyMs": ms, "reply": reply, "model": modelID, "vision": false}, nil
 	}
 	imgs, err := providers.GenerateImage(r.Context(), p, providers.ImageRequest{
 		Model:  body.Model,

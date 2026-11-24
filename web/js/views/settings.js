@@ -1142,16 +1142,20 @@ export async function renderSettings(root, ctx, params = {}) {
 }
 
 function looksImageModelId(id) {
-  const s = String(id || "").toLowerCase();
+  const s = String(id || "").toLowerCase().trim();
   if (!s) return false;
-  return /(image|dall-e|dalle|flux|seedream|jimeng|kolors|imagen|midjourney|ideogram|recraft|nano-banana|sdxl|sd3|stable-diffusion|wanx|cogview)/.test(s);
+  if (s.includes("image-to-text") || s.includes("image-caption")) return false;
+  return /(image|dall-e|dalle|flux|stable-diffusion|sdxl|sd3|sd-xl|sd_xl|sd-1\.|sd-2\.|seedream|jimeng|kolors|imagen|midjourney|mj-|mj_|ideogram|recraft|nano-banana|gpt-image|wanx|cogview|playground-v|kandinsky|z-image)/.test(s);
 }
 
 function looksVisionModelId(id) {
-  const s = String(id || "").toLowerCase();
+  const s = String(id || "").toLowerCase().trim();
   if (!s) return false;
   if (looksImageModelId(s)) return false;
-  return /(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-4-turbo|gpt-4-vision|gpt-5|claude-3|claude-4|claude-sonnet-4|claude-opus-4|claude-haiku-4|gemini-1\.5|gemini-2|gemini-3|qwen.*vl|qvq|glm-4.*v|doubao.*vision|kimi-vl|internvl|minicpm-v|pixtral|llama-4|grok-2-vision|grok-4|vision|-vl|_vl|multimodal)/.test(s);
+  if (/(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-4-turbo|gpt-4-vision|gpt-5|claude-3|claude-4|claude-sonnet-4|claude-opus-4|claude-haiku-4|gemini-1\.5|gemini-2|gemini-3|gemma-3|deepseek-vl|deepseek-v4|deepseek-flash-4|deepseek-4|qwen.*vl|qwen3\.5|qwen-omni|qvq|glm-4.*v|glm-4\.5|glm-4\.6|glm-5|doubao.*vision|doubao-seed|kimi-vl|kimi-k2\.5|step-1v|step-1o|minimax-01|minimax-vl|internvl|minicpm-v|pixtral|mistral-small-3\.1|llama-3\.2-.*vision|llama-4|grok-2-vision|grok-3|grok-4|vision|-vl|_vl|multimodal|omni)/.test(s)) {
+    return true;
+  }
+  return /(^|[/:._-])(o1|o3|o4)($|[/:._-])/.test(s);
 }
 
 function resolveModelKind(prov, model) {
@@ -1322,7 +1326,7 @@ function openProviderModal(existing, onSaved) {
     if (hasRunningTest()) return;
     const isText = model.kind !== "image";
     const vision = isText && Boolean(model.canVision);
-    const mode = vision ? "视觉识图" : isText ? "文字模型" : "生图模型";
+    const mode = isText ? (vision ? "视觉识图" : "文字/视觉探测") : "生图模型";
     const test = { running: true, startedAt: performance.now(), message: "正在准备测试…", detail: "" };
     testStates.set(model.id, test);
     updateTestViews();
@@ -1335,20 +1339,52 @@ function openProviderModal(existing, onSaved) {
     }, 1000);
     try {
       await saveProviderPayload();
-      test.message = `正在测试${mode}，等待接口返回…`;
+      test.message = isText ? "正在实测文字与视觉识图能力，等待接口返回…" : "正在测试生图模型，等待接口返回…";
       updateTestViews();
       const result = await api("POST", `/api/providers/${encodeURIComponent(prov.id)}/test`, {
         model: model.id,
         kind: isText ? "text" : "image",
         vision,
+        autoProbeVision: isText,
       });
       test.ok = Boolean(result.ok);
       const latency = Number.isFinite(result.latencyMs) ? result.latencyMs : performance.now() - test.startedAt;
-      test.message = `${mode}测试${test.ok ? "成功" : "失败"} · 用时 ${elapsedLabel(latency)}`;
-      if (!test.ok) test.detail = result.error || "接口未返回具体失败原因";
-      else if (result.reply) test.detail = `模型回复：\n${typeof result.reply === "string" ? result.reply : JSON.stringify(result.reply, null, 2)}`;
-      else if (result.imagesCount !== undefined) test.detail = `接口返回 ${result.imagesCount} 张测试图片`;
-      else test.detail = "接口已正常响应";
+      if (!test.ok) {
+        test.message = `${mode}测试失败 · 用时 ${elapsedLabel(latency)}`;
+        test.detail = result.error || "接口未返回具体失败原因";
+      } else if (isText && typeof result.visionDetected === "boolean") {
+        let capabilityChanged = false;
+        if (result.visionDetected && !model.canVision) {
+          model.canVision = true;
+          capabilityChanged = true;
+          test.message = `文字 + 视觉识图测试成功（已自动勾选视觉识图）· 用时 ${elapsedLabel(latency)}`;
+        } else if (!result.visionDetected && model.canVision) {
+          model.canVision = false;
+          capabilityChanged = true;
+          test.message = `纯文字可用，但不支持视觉识图（已自动取消勾选）· 用时 ${elapsedLabel(latency)}`;
+        } else if (result.visionDetected) {
+          test.message = `视觉识图测试成功 · 用时 ${elapsedLabel(latency)}`;
+        } else {
+          test.message = `纯文字模型测试成功（不支持视觉识图）· 用时 ${elapsedLabel(latency)}`;
+        }
+        const detailLines = [];
+        if (result.reply) {
+          detailLines.push(`模型回复：\n${typeof result.reply === "string" ? result.reply : JSON.stringify(result.reply, null, 2)}`);
+        }
+        if (!result.visionDetected && result.visionError) {
+          detailLines.push(`视觉探测反馈：${result.visionError}`);
+        }
+        test.detail = detailLines.join("\n\n") || "接口已正常响应";
+        if (capabilityChanged) {
+          await saveProviderPayload().catch(() => {});
+          syncModelSelectionUI();
+        }
+      } else {
+        test.message = `${mode}测试成功 · 用时 ${elapsedLabel(latency)}`;
+        if (result.reply) test.detail = `模型回复：\n${typeof result.reply === "string" ? result.reply : JSON.stringify(result.reply, null, 2)}`;
+        else if (result.imagesCount !== undefined) test.detail = `接口返回 ${result.imagesCount} 张测试图片`;
+        else test.detail = "接口已正常响应";
+      }
     } catch (error) {
       test.ok = false;
       test.message = `${mode}测试失败 · 用时 ${elapsedLabel(performance.now() - test.startedAt)}`;
@@ -1502,11 +1538,14 @@ function openProviderModal(existing, onSaved) {
         const picked = selectedById.get(m.id);
         const checked = Boolean(picked);
         const effImg = picked ? picked.kind === "image" : m.isImage;
-        const kindLabel = effImg ? "生图" : (m.isVision ? "识图" : "文字");
+        const effVis = picked ? (!effImg && Boolean(picked.canVision)) : (!effImg && Boolean(m.isVision));
+        const kindLabel = effImg ? "生图" : (effVis ? "识图" : "文字");
+        const srcHint = m.capabilitySource === "metadata" ? "接口元数据声明" : "按模型名预估（勾选后点「测试」可自动实测校正识图能力）";
         tagGrid.appendChild(el("button", {
           type: "button",
           class: "model-tag-chip" + (checked ? " is-checked" : ""),
           "aria-pressed": String(checked),
+          title: `${m.id} · ${kindLabel}（${srcHint}）`,
           dataset: { modelId: m.id },
           onClick: () => toggleModelEntry(m),
         },
@@ -1647,10 +1686,19 @@ function openProviderModal(existing, onSaved) {
           baseUrl,
           apiKey: keyIn.value.trim(),
         });
-        fetchedModels = (r.models || []).map((item) => (typeof item === "string"
-          ? { id: item, isImage: looksImageModelId(item), isVision: looksVisionModelId(item) }
-          : { id: item.id, owned_by: item.owned_by || "", isImage: Boolean(item.isImage) || looksImageModelId(item.id), isVision: Boolean(item.isVision) || looksVisionModelId(item.id) }
-        )).filter((m) => m.id);
+        fetchedModels = (r.models || []).map((item) => {
+          if (typeof item === "string") {
+            return { id: item, isImage: looksImageModelId(item), isVision: looksVisionModelId(item), capabilitySource: "heuristic" };
+          }
+          const fromMeta = item.capabilitySource === "metadata";
+          return {
+            id: item.id,
+            owned_by: item.owned_by || "",
+            isImage: fromMeta ? Boolean(item.isImage) : (Boolean(item.isImage) || looksImageModelId(item.id)),
+            isVision: fromMeta ? Boolean(item.isVision) : (Boolean(item.isVision) || looksVisionModelId(item.id)),
+            capabilitySource: item.capabilitySource || "heuristic",
+          };
+        }).filter((m) => m.id);
         activeFilter = "all";
         syncModelSelectionUI();
         if (fetchedModels.length) {

@@ -41,29 +41,73 @@ func endpoint(p Provider, path string) string {
 }
 
 type ModelInfo struct {
-	ID       string `json:"id"`
-	OwnedBy  string `json:"owned_by,omitempty"`
-	IsImage  bool   `json:"isImage"`
-	IsVision bool   `json:"isVision"`
+	ID               string `json:"id"`
+	OwnedBy          string `json:"owned_by,omitempty"`
+	IsImage          bool   `json:"isImage"`
+	IsVision         bool   `json:"isVision"`
+	CapabilitySource string `json:"capabilitySource,omitempty"` // "metadata" | "heuristic"
 }
 
-var imageHints = []string{"image", "dall-e", "dalle", "flux", "sd", "stable-diffusion", "seedream", "jimeng", "kolors", "imagen", "midjourney", "mj", "ideogram", "recraft", "qwen-image", "hunyuan-image", "cogview", "wanx", "gemini-2.5-flash-image", "nano-banana"}
+var imageHints = []string{
+	"image", "dall-e", "dalle", "flux", "stable-diffusion",
+	"sdxl", "sd3", "sd-xl", "sd_xl", "sd-1.", "sd-2.",
+	"seedream", "jimeng", "kolors", "imagen",
+	"midjourney", "mj-", "mj_",
+	"ideogram", "recraft", "qwen-image", "hunyuan-image",
+	"cogview", "wanx", "nano-banana", "gpt-image",
+	"playground-v", "kandinsky", "z-image",
+}
 
 var visionHints = []string{
+	// OpenAI
 	"gpt-4o", "gpt-4.1", "gpt-4.5", "gpt-4-turbo", "gpt-4-vision", "gpt-5",
+	// Anthropic
 	"claude-3", "claude-4", "claude-sonnet-4", "claude-opus-4", "claude-haiku-4",
-	"gemini-1.5", "gemini-2", "gemini-2.5", "gemini-3", "gemini-pro-vision",
-	"qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qvq",
-	"glm-4v", "glm-4.1v", "glm-4.5v", "glm-4.6v",
-	"doubao-vision", "doubao-1.5-vision", "kimi-vl", "moonshot-v1-vision",
-	"step-1v", "step-1o", "internvl", "minicpm-v", "pixtral",
+	// Google
+	"gemini-1.5", "gemini-2", "gemini-2.5", "gemini-3", "gemini-pro-vision", "gemma-3",
+	// DeepSeek (v4 / flash-4.x / vl)
+	"deepseek-vl", "deepseek-v4", "deepseek-flash-4", "deepseek-4",
+	// Qwen
+	"qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qwen3.5", "qwen-omni", "qvq",
+	// GLM
+	"glm-4v", "glm-4.1v", "glm-4.5", "glm-4.6", "glm-5",
+	// Doubao / Seed / Kimi / Moonshot / Step / MiniMax
+	"doubao-vision", "doubao-1.5-vision", "doubao-seed",
+	"kimi-vl", "kimi-k2.5", "moonshot-v1-vision",
+	"step-1v", "step-1o", "minimax-01", "minimax-vl",
+	// Open multimodal families & generic markers
+	"internvl", "minicpm-v", "pixtral", "mistral-small-3.1",
 	"llama-3.2-11b-vision", "llama-3.2-90b-vision", "llama-4",
-	"grok-2-vision", "grok-4", "vision", "-vl", "_vl", "multimodal",
+	"grok-2-vision", "grok-3", "grok-4",
+	"vision", "-vl", "_vl", "multimodal", "omni",
+}
+
+func hasModelToken(lowerID, tok string) bool {
+	if lowerID == tok {
+		return true
+	}
+	for _, sep := range []string{"/", ":", "-", "_", "."} {
+		if strings.HasPrefix(lowerID, tok+sep) || strings.HasSuffix(lowerID, sep+tok) {
+			return true
+		}
+		for _, sep2 := range []string{"-", "_", ".", ":"} {
+			if strings.Contains(lowerID, sep+tok+sep2) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // LooksImage reports whether a model ID looks like an image generation model.
 func LooksImage(id string) bool {
-	l := strings.ToLower(id)
+	l := strings.ToLower(strings.TrimSpace(id))
+	if l == "" {
+		return false
+	}
+	if strings.Contains(l, "image-to-text") || strings.Contains(l, "image-caption") {
+		return false
+	}
 	for _, h := range imageHints {
 		if strings.Contains(l, h) {
 			return true
@@ -77,13 +121,178 @@ func LooksVision(id string) bool {
 	if LooksImage(id) {
 		return false
 	}
-	l := strings.ToLower(id)
+	l := strings.ToLower(strings.TrimSpace(id))
+	if l == "" {
+		return false
+	}
 	for _, h := range visionHints {
 		if strings.Contains(l, h) {
 			return true
 		}
 	}
+	for _, tok := range []string{"o1", "o3", "o4"} {
+		if hasModelToken(l, tok) {
+			return true
+		}
+	}
 	return false
+}
+
+func strSliceLower(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, it := range arr {
+		if s, ok := it.(string); ok && strings.TrimSpace(s) != "" {
+			out = append(out, strings.ToLower(strings.TrimSpace(s)))
+		}
+	}
+	return out
+}
+
+func sliceHasAny(list []string, targets ...string) bool {
+	for _, s := range list {
+		for _, t := range targets {
+			if s == t || strings.Contains(s, t) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// detectModelCapabilities prefers authoritative metadata returned by /v1/models
+// (OpenRouter architecture.input_modalities/output_modalities, NewAPI/OneAPI
+// capabilities/supported_endpoint_types/type, etc.) and falls back to heuristics.
+func detectModelCapabilities(raw map[string]any, id string) (isImage bool, isVision bool, source string) {
+	var hasImgMeta, metaImg bool
+	var hasVisMeta, metaVis bool
+
+	// 1. OpenRouter / standard multimodal architecture object
+	if arch, ok := raw["architecture"].(map[string]any); ok {
+		if outs := strSliceLower(arch["output_modalities"]); len(outs) > 0 {
+			hasImgMeta = true
+			metaImg = sliceHasAny(outs, "image")
+		}
+		if ins := strSliceLower(arch["input_modalities"]); len(ins) > 0 {
+			hasVisMeta = true
+			metaVis = sliceHasAny(ins, "image", "vision")
+		}
+		if modStr, ok := arch["modality"].(string); ok && strings.Contains(modStr, "->") {
+			parts := strings.SplitN(strings.ToLower(modStr), "->", 2)
+			if !hasVisMeta {
+				hasVisMeta = true
+				metaVis = strings.Contains(parts[0], "image") || strings.Contains(parts[0], "vision")
+			}
+			if !hasImgMeta {
+				hasImgMeta = true
+				metaImg = strings.Contains(parts[1], "image")
+			}
+		}
+	}
+
+	// 2. Top-level input_modalities / output_modalities / modalities
+	if !hasImgMeta {
+		if outs := strSliceLower(raw["output_modalities"]); len(outs) > 0 {
+			hasImgMeta = true
+			metaImg = sliceHasAny(outs, "image")
+		}
+	}
+	if !hasVisMeta {
+		if ins := strSliceLower(raw["input_modalities"]); len(ins) > 0 {
+			hasVisMeta = true
+			metaVis = sliceHasAny(ins, "image", "vision")
+		} else if mods := strSliceLower(raw["modalities"]); len(mods) > 0 {
+			hasVisMeta = true
+			metaVis = sliceHasAny(mods, "image", "vision")
+		}
+	}
+
+	// 3. capabilities map or array (OneAPI / NewAPI / Ollama / Azure / Ark)
+	if capsMap, ok := raw["capabilities"].(map[string]any); ok {
+		for _, k := range []string{"vision", "image_input", "multimodal"} {
+			if b, ok := capsMap[k].(bool); ok {
+				hasVisMeta = true
+				if b {
+					metaVis = true
+				}
+			}
+		}
+		for _, k := range []string{"image", "image_generation", "images"} {
+			if b, ok := capsMap[k].(bool); ok {
+				hasImgMeta = true
+				if b {
+					metaImg = true
+				}
+			}
+		}
+	} else if capsArr := strSliceLower(raw["capabilities"]); len(capsArr) > 0 {
+		hasVisMeta = true
+		metaVis = sliceHasAny(capsArr, "vision", "image_input", "multimodal")
+		if sliceHasAny(capsArr, "image_generation", "text2img", "t2i") {
+			hasImgMeta = true
+			metaImg = true
+		}
+	}
+
+	// 4. Top-level explicit vision / supports_vision boolean
+	for _, k := range []string{"supports_vision", "vision"} {
+		if b, ok := raw[k].(bool); ok {
+			hasVisMeta = true
+			metaVis = b
+		}
+	}
+
+	// 5. supported_endpoint_types / endpoint_types (NewAPI / OneAPI)
+	eps := strSliceLower(raw["supported_endpoint_types"])
+	if len(eps) == 0 {
+		eps = strSliceLower(raw["endpoint_types"])
+	}
+	if len(eps) > 0 && !hasImgMeta {
+		hasImgEp := sliceHasAny(eps, "image-generation", "image_generation", "images", "midjourney", "dall-e")
+		hasChatEp := sliceHasAny(eps, "openai", "chat", "anthropic", "gemini")
+		if hasImgEp && !hasChatEp {
+			hasImgMeta = true
+			metaImg = true
+		}
+	}
+
+	// 6. type / model_type / category strings
+	for _, k := range []string{"type", "model_type", "category"} {
+		if s, ok := raw[k].(string); ok {
+			ls := strings.ToLower(strings.TrimSpace(s))
+			switch ls {
+			case "image", "image_generation", "text2img", "t2i", "img2img":
+				hasImgMeta = true
+				metaImg = true
+			case "vision", "vlm", "multimodal":
+				hasVisMeta = true
+				metaVis = true
+			}
+		}
+	}
+
+	if hasImgMeta {
+		isImage = metaImg
+	} else {
+		isImage = LooksImage(id)
+	}
+	if isImage {
+		isVision = false
+	} else if hasVisMeta {
+		isVision = metaVis
+	} else {
+		isVision = LooksVision(id)
+	}
+
+	if hasImgMeta || hasVisMeta {
+		source = "metadata"
+	} else {
+		source = "heuristic"
+	}
+	return isImage, isVision, source
 }
 
 var httpClient = &http.Client{Timeout: 6 * time.Minute}
@@ -114,21 +323,26 @@ func ListModelsWithKey(ctx context.Context, p Provider, apiKey string) ([]ModelI
 		return nil, apiErr(resp.StatusCode, body)
 	}
 	var out struct {
-		Data []struct {
-			ID      string `json:"id"`
-			OwnedBy string `json:"owned_by"`
-		} `json:"data"`
+		Data []map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("模型列表格式无法识别：%w", err)
 	}
 	var models []ModelInfo
 	for _, m := range out.Data {
+		id, _ := m["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		ownedBy, _ := m["owned_by"].(string)
+		isImg, isVis, capSrc := detectModelCapabilities(m, id)
 		models = append(models, ModelInfo{
-			ID:       m.ID,
-			OwnedBy:  m.OwnedBy,
-			IsImage:  LooksImage(m.ID),
-			IsVision: LooksVision(m.ID),
+			ID:               id,
+			OwnedBy:          ownedBy,
+			IsImage:          isImg,
+			IsVision:         isVis,
+			CapabilitySource: capSrc,
 		})
 	}
 	sort.SliceStable(models, func(i, j int) bool {

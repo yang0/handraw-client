@@ -148,3 +148,71 @@ func TestUnifiedMixedCapabilityProvider(t *testing.T) {
 		t.Fatalf("unexpected upstream calls: models=%d images=%d chat=%d lastChatHadImage=%v", hitModels, hitImages, hitChat, lastChatHadImage)
 	}
 }
+
+func TestAutoProbeVisionDuringProviderTest(t *testing.T) {
+	mockOAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		model, _ := body["model"].(string)
+		raw, _ := json.Marshal(body)
+		hasImg := strings.Contains(string(raw), "image_url")
+
+		// text-only-llm rejects image_url with 400, succeeds on plain text
+		if model == "text-only-llm" && hasImg {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"message": "image_url is not supported by this model"},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"role": "assistant", "content": "OK"}},
+			},
+		})
+	}))
+	defer mockOAI.Close()
+
+	srv, _ := setupTestServer(t, "")
+	h := srv.Handler()
+	_ = doReq(t, h, srv.Token, http.MethodPost, "/api/providers", map[string]any{
+		"id":      "probe1",
+		"name":    "探测中转站",
+		"kind":    "openai",
+		"purpose": "all",
+		"baseUrl": mockOAI.URL + "/v1",
+		"apiKey":  "sk-probe",
+		"enabled": true,
+		"models": []map[string]any{
+			{"id": "mystery-multimodal", "label": "mystery-multimodal", "kind": "text", "canVision": false},
+			{"id": "text-only-llm", "label": "text-only-llm", "kind": "text", "canVision": true},
+		},
+	})
+
+	// 1. mystery-multimodal has canVision=false, autoProbeVision discovers it DOES support vision!
+	rr1 := doReq(t, h, srv.Token, http.MethodPost, "/api/providers/probe1/test", map[string]any{
+		"model":           "mystery-multimodal",
+		"kind":            "text",
+		"vision":          false,
+		"autoProbeVision": true,
+	})
+	if rr1.Code != http.StatusOK || !strings.Contains(rr1.Body.String(), `"visionDetected":true`) {
+		t.Fatalf("expected visionDetected=true for mystery-multimodal, got %d %s", rr1.Code, rr1.Body.String())
+	}
+
+	// 2. text-only-llm had canVision=true, probe detects image_url fails while plain text works -> visionDetected=false!
+	rr2 := doReq(t, h, srv.Token, http.MethodPost, "/api/providers/probe1/test", map[string]any{
+		"model":           "text-only-llm",
+		"kind":            "text",
+		"vision":          true,
+		"autoProbeVision": true,
+	})
+	if rr2.Code != http.StatusOK || !strings.Contains(rr2.Body.String(), `"visionDetected":false`) || !strings.Contains(rr2.Body.String(), `"ok":true`) {
+		t.Fatalf("expected ok=true visionDetected=false for text-only-llm, got %d %s", rr2.Code, rr2.Body.String())
+	}
+}
