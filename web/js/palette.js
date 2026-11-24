@@ -42,6 +42,8 @@ export function initPalette(ctx) {
   const baseActions = () => [
     { label: "去首页", hint: "视图", run: () => ctx.go("home") },
     { label: "打开生图工作台", hint: "生图", run: () => ctx.go("create") },
+    { label: "管理生图配方", hint: "生图", run: () => ctx.go("create", { openRecipes: true }) },
+    { label: "打开灵感库", hint: "灵感", run: () => ctx.go("inspirations") },
     { label: "打开 AI 会话工作台", hint: "会话", run: () => ctx.go("chat") },
     { label: "打开文章到图文", hint: "创作", run: () => ctx.go("article") },
     { label: "打开自由画布", hint: "创作", run: () => ctx.go("canvas") },

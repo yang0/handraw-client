@@ -1,5 +1,5 @@
 import { api, clear, closeModal, el, galleryImg, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
-import { openRecipeEditor } from "./recipes.js";
+import { openRecipeEditor, openRecipeManagerModal } from "./recipes.js";
 import { mountSlotPanels } from "../plugins-host.js";
 import {
   RATIOS,
@@ -317,20 +317,22 @@ export async function renderCreate(root, ctx, params = {}) {
   ));
 
   // ---------- Left Pane: Shared Properties + Selected Item Inspector ----------
-  const recSel = el("select", { class: "select select-sm", style: { flex: "1" }, "aria-label": "快速套用配方" });
+  const recSel = el("select", { class: "select select-sm", style: { flex: "1", minWidth: "0" }, "aria-label": "快速套用配方" });
   function renderRecipeOptions() {
     clear(recSel);
     recSel.appendChild(el("option", { value: "" }, "— 套用常用配方 —"));
     recipes.forEach((r) => {
       recSel.appendChild(el("option", { value: r.id }, `${r.name} (${(r.styleIds || []).join("+")})`));
     });
-    if (state.recipeId) recSel.value = state.recipeId;
+    if (state.recipeId && recipes.some((x) => x.id === state.recipeId)) {
+      recSel.value = state.recipeId;
+    } else {
+      recSel.value = "";
+    }
   }
-  renderRecipeOptions();
-  recSel.addEventListener("change", () => {
-    const r = recipes.find((x) => x.id === recSel.value);
+  function applyRecipeObj(r) {
     if (!r) return;
-    state.recipeId = r.id;
+    state.recipeId = r.id || "";
     state.style = r.styleIds?.[0] || "";
     state.style2 = r.styleIds?.[1] || "";
     state.fusion = Boolean(state.style2);
@@ -340,11 +342,33 @@ export async function renderCreate(root, ctx, params = {}) {
     state.mood = r.mood || "";
     state.ratio = r.ratio || state.ratio;
     state.mode = r.mode || state.mode;
+    recSel.value = state.recipeId;
     syncLeftControls();
     renderSelectedSlot();
     renderOutput();
     refreshQuote();
     session.persist();
+  }
+  async function reloadRecipes() {
+    const r = await api("GET", "/api/mine/recipes").catch(() => ({ items: [] }));
+    recipes = r.items || [];
+    renderRecipeOptions();
+  }
+  function openRecipesManager() {
+    openRecipeManagerModal({
+      activeRecipeId: state.recipeId,
+      onApply: (rec) => {
+        applyRecipeObj(rec);
+        toast(`已套用配方：${rec.name}`);
+      },
+      onChanged: reloadRecipes,
+    });
+  }
+  renderRecipeOptions();
+  recSel.addEventListener("change", () => {
+    const r = recipes.find((x) => x.id === recSel.value);
+    if (!r) return;
+    applyRecipeObj(r);
   });
 
   const controls = recipeControls(state, { styles, layouts, colors, tones }, () => {
@@ -510,7 +534,14 @@ export async function renderCreate(root, ctx, params = {}) {
   const leftPane = el("section", { class: "make-image-properties", "aria-label": "画面属性" },
     el("div", { class: "studio-more-row" },
       el("span", { class: "studio-row-label" }, "配方"),
-      recSel
+      recSel,
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        id: "btn-manage-recipes",
+        title: "查看、新建、编辑或导入导出配方",
+        onClick: openRecipesManager,
+      }, "管理")
     ),
     controls.node,
     resChoices,
@@ -1224,13 +1255,6 @@ export async function renderCreate(root, ctx, params = {}) {
               } catch (e) { toast(e.message); }
             },
           }, "📋 复制"),
-          item.runId
-            ? el("button", {
-                type: "button",
-                class: "btn btn-sm",
-                onClick: () => ctx.go("annotate", { runId: item.runId }),
-              }, "📌 批注")
-            : null,
           el("button", {
             type: "button",
             class: "btn btn-sm",
@@ -1917,5 +1941,8 @@ export async function renderCreate(root, ctx, params = {}) {
     for (const rid of cur.runIds || []) {
       syncRunFromServer(rid);
     }
+  }
+  if (params.openRecipes) {
+    openRecipesManager();
   }
 }

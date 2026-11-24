@@ -5,7 +5,6 @@ import { fallbackPluginIcon } from "./plugin-icons.js";
 import { mountPluginFrame } from "./plugins-host.js";
 import { renderHome } from "./views/home.js";
 import { renderAtlas } from "./views/atlas.js";
-import { renderRecipes } from "./views/recipes.js";
 import { renderStudio } from "./views/studio.js";
 import { renderChat } from "./views/chat.js";
 import { renderArticle } from "./views/article.js";
@@ -19,7 +18,6 @@ import { renderSettings } from "./views/settings.js";
 const VIEWS = {
   home: renderHome,
   atlas: renderAtlas,
-  recipes: renderRecipes,
   create: renderStudio,
   chat: renderChat,
   article: renderArticle,
@@ -34,7 +32,6 @@ const VIEWS = {
 const CORE_NAV = [
   { id: "home", ico: "🏠", label: "首页" },
   { id: "atlas", ico: "🎨", label: "画册" },
-  { id: "recipes", ico: "⚗", label: "配方" },
   { id: "create", ico: "✨", label: "生图" },
   { id: "chat", ico: "💬", label: "会话" },
   { id: "article", ico: "📰", label: "文章", plugin: "article" },
@@ -200,11 +197,15 @@ async function start() {
     });
   }
 
-  const PADDED_VIEWS = new Set(["home", "atlas", "recipes", "annotate", "works", "inspirations", "plugins", "settings"]);
+  const PADDED_VIEWS = new Set(["home", "atlas", "annotate", "works", "inspirations", "plugins", "settings"]);
 
   async function go(view, params = {}) {
     if (view === "series") {
       view = "create";
+    }
+    if (view === "recipes") {
+      view = "create";
+      params = { ...(params || {}), openRecipes: true };
     }
     if (view === "settings" && params?.anchor === "settings-plugins") {
       view = "plugins";
