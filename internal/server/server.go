@@ -179,6 +179,17 @@ func (s *Server) Listen(ctx context.Context, port int) (string, error) {
 	if s.DSH != nil && s.Plugins != nil {
 		go func() { _ = s.SyncDSH(ctx) }()
 	}
+	// Background non-blocking default install of lightweight local-only RuiC-PoseAtlas
+	// gallery indices (~1 MB total from Gitee mirror, images cached strictly on demand).
+	if s.Galleries != nil {
+		go func() {
+			gctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			if n := galleries.EnsureDefaultExternalPacks(gctx, appdir.Galleries()); n > 0 {
+				s.Galleries.InvalidateFileCache()
+			}
+		}()
+	}
 	// Background non-blocking check for built-in Handraw Skill updates.
 	if s.Skills != nil {
 		go func() {

@@ -216,6 +216,7 @@ func InstallExternalPack(ctx context.Context, galleriesDir, packID, mirror strin
 		_ = os.Remove(tmp)
 		return ExternalPackStatus{}, err
 	}
+	_ = setPackOptedOut(galleriesDir, spec.ID, false)
 
 	st := spec
 	st.Installed = true
@@ -226,12 +227,14 @@ func InstallExternalPack(ctx context.Context, galleriesDir, packID, mirror strin
 }
 
 // UninstallExternalPack removes the installed gallery index JSON and optionally
-// purges its local disk image cache.
+// purges its local disk image cache. Also records an opt-out marker so auto-install
+// on startup does not re-install a pack the user explicitly removed.
 func UninstallExternalPack(galleriesDir, packID string, purgeCache bool) error {
 	if _, ok := findExternalPack(packID); !ok {
 		return fmt.Errorf("未知的扩展图库 %q", packID)
 	}
 	_ = os.Remove(filepath.Join(galleriesDir, packID+".json"))
+	_ = setPackOptedOut(galleriesDir, packID, true)
 	if purgeCache {
 		base := filepath.Join(galleriesDir, RuiCCacheSubdir)
 		switch packID {
@@ -245,6 +248,93 @@ func UninstallExternalPack(galleriesDir, packID string, purgeCache bool) error {
 		}
 	}
 	return nil
+}
+
+const optOutFilename = ".packs-opted-out.json"
+
+var optOutMu sync.Mutex
+
+func loadOptedOutPacks(galleriesDir string) map[string]bool {
+	out := map[string]bool{}
+	raw, err := os.ReadFile(filepath.Join(galleriesDir, optOutFilename))
+	if err != nil {
+		return out
+	}
+	var ids []string
+	if json.Unmarshal(raw, &ids) == nil {
+		for _, id := range ids {
+			if k := strings.ToLower(strings.TrimSpace(id)); k != "" {
+				out[k] = true
+			}
+		}
+	}
+	return out
+}
+
+func setPackOptedOut(galleriesDir, packID string, optedOut bool) error {
+	optOutMu.Lock()
+	defer optOutMu.Unlock()
+	if err := os.MkdirAll(galleriesDir, 0o755); err != nil {
+		return err
+	}
+	m := loadOptedOutPacks(galleriesDir)
+	k := strings.ToLower(strings.TrimSpace(packID))
+	if optedOut {
+		m[k] = true
+	} else {
+		delete(m, k)
+	}
+	ids := make([]string, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(galleriesDir, optOutFilename), b, 0o644)
+}
+
+// EnsureDefaultExternalPacks installs all built-in third-party local libraries
+// that are not yet installed and have not been explicitly uninstalled by the user.
+// Only downloads lightweight ~1 MB JSON indices from Gitee (with GitHub fallback);
+// images remain strictly on-demand and local-only.
+func EnsureDefaultExternalPacks(ctx context.Context, galleriesDir string) int {
+	if galleriesDir == "" {
+		return 0
+	}
+	optedOut := loadOptedOutPacks(galleriesDir)
+	var todo []string
+	for _, spec := range ruicPackCatalog {
+		if optedOut[spec.ID] {
+			continue
+		}
+		if st, err := os.Stat(filepath.Join(galleriesDir, spec.ID+".json")); err == nil && !st.IsDir() && st.Size() > 0 {
+			continue
+		}
+		todo = append(todo, spec.ID)
+	}
+	if len(todo) == 0 {
+		return 0
+	}
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		installed int
+	)
+	for _, id := range todo {
+		wg.Add(1)
+		go func(packID string) {
+			defer wg.Done()
+			if _, err := InstallExternalPack(ctx, galleriesDir, packID, RuiCMirrorGitee); err == nil {
+				mu.Lock()
+				installed++
+				mu.Unlock()
+			}
+		}(id)
+	}
+	wg.Wait()
+	return installed
 }
 
 // InvalidateFileCache clears cached directory JSON snapshots (call after install/uninstall).

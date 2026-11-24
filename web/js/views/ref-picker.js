@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, galleryImg, localImg, showModal, toast } from "../api.js";
+import { api, clear, closeModal, el, galleryImg, localImg, onEvent, showModal, toast } from "../api.js";
 
 const BUILTIN_EXT_IGNORE = new Set(["styles", "layouts", "colors", "tones", "characters", "props", "scenes"]);
 
@@ -160,13 +160,20 @@ export async function saveReferenceToAssetLibrary(file, { kind = "character", na
   return asset;
 }
 
+function galleryIcon(g) {
+  const id = String(g?.id || "").toLowerCase();
+  if (g?.multiVariant || id.includes("pose")) return "🧍";
+  if (id.includes("costume") || id.includes("outfit")) return "👗";
+  if (id.includes("face") || id.includes("portrait")) return "👩";
+  return "🗂️";
+}
+
 /**
- * Unified Reference Image Picker Modal aligned with handraw-web:
- * - Pick from 自建图库 (/api/mine/assets, including ~/.handraw-style)
- * - Dynamic custom asset categories (/api/mine/asset-categories) with inline creation
- * - Pick from 官方图库 (/api/resources/assets built-in pack assets, if present)
- * - Local upload (single or multi-file) with optional save-to-library + category pills
- * - Direct clipboard paste (Ctrl/⌘ + V anywhere in modal, clipboard button, or drag-and-drop)
+ * Studio 3-Zone Reference Image Picker Modal (#110):
+ * - Left Rail: Sources (自建图库, 官方图库, 本地上传/粘贴, 扩展视觉参考库) + nested series/categories
+ * - Center Canvas: Single compact toolbar + generous image-first card grid
+ * - Right Dock: Live high-res preview & 5-angle visual picker + readable 已选参考图 list
+ * - Global drag-and-drop overlay & Ctrl/⌘ + V clipboard paste anywhere in modal
  */
 export function openReferencePickerModal({
   currentRefs = [],
@@ -184,18 +191,24 @@ export function openReferencePickerModal({
   let categories = BUILTIN_ASSET_CATEGORIES.map((c) => ({ ...c }));
   let mineItems = [];
   let officialItems = [];
-  let extGalleries = [];
+  let extGalleries = []; // merged installed galleries + catalog packs
   const extItemsCache = new Map();
   const extLoadingSet = new Set();
+  const extInstallingSet = new Set();
   const extKeyToPath = new Map();
   const itemByPath = new Map();
+
   let loading = true;
   let activeTab = "mine"; // "mine" | "official" | "ext:<kind>" | "upload"
   let activeCategory = "ALL";
   let extSeries = "";
   let extAngle = "front";
   let extPageLimit = 48;
-  let focusedPoseItem = null;
+
+  // Right inspector state: { mode: "ext"|"asset", gal?, item, angleKey? }
+  let inspected = null;
+  let inspectStageSeq = 0;
+
   let materializingKey = "";
   let uploadCategory = "character";
   let showNewCatForm = false;
@@ -204,29 +217,57 @@ export function openReferencePickerModal({
   let searchQuery = "";
   let newlyAddedPath = "";
 
-  const topTabsWrap = el("div", { class: "ref-picker-tabs", role: "tablist", "aria-label": "参考图来源" });
-  const quickPasteBtn = el("button", {
-    type: "button",
-    class: "btn btn-sm",
-    title: "读取剪贴板图片并直接添加（也可直接按 Ctrl/⌘ + V）",
-  }, "📋 粘贴剪贴板图片");
-  const topBar = el("div", { class: "ref-picker-topbar" }, topTabsWrap, quickPasteBtn);
+  // DOM shells
+  const localFileInput = el("input", {
+    type: "file",
+    accept: "image/*",
+    multiple: true,
+    class: "hidden",
+  });
 
+  const leftRail = el("aside", { class: "rp-rail", "aria-label": "参考图来源与分类" });
+  const toolbarEl = el("div", { class: "rp-toolbar" });
   const searchInput = el("input", {
     type: "search",
-    class: "input",
-    placeholder: "搜索图库编号、名称、角度或分类…",
+    class: "input rp-search-input",
+    placeholder: "搜索编号、名称、角度或分类…",
     "aria-label": "搜索参考图",
   });
-  const countEl = el("span", { class: "muted ref-picker-count", role: "status" }, "正在加载自建图库…");
-  const searchRow = el("div", { class: "ref-picker-search-row" }, searchInput, countEl);
+  const quickPasteBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm rp-paste-btn",
+    title: "读取剪贴板图片并直接添加（也可随时按 Ctrl/⌘ + V）",
+  }, "📋 粘贴");
+  const toolbarExtras = el("div", { class: "rp-toolbar-extras" });
+  const statusStrip = el("div", { class: "rp-status-strip muted", role: "status" }, "正在加载图库…");
 
-  const catWrap = el("div", { class: "col", style: { gap: "6px", flex: "0 0 auto" } });
-  const poseDrawerEl = el("div", { class: "pose-picker-drawer hidden", "aria-label": "姿态 5 视角选择区" });
-  const uploadHost = el("div", { class: "ref-picker-upload-host hidden" });
-  const grid = el("div", { class: "studio-resource-grid ref-picker-grid" });
+  const grid = el("div", { class: "rp-grid" });
+  const uploadHost = el("div", { class: "rp-upload-host hidden" });
+  const centerPane = el("section", { class: "rp-center", "aria-label": "参考图画布" },
+    toolbarEl,
+    statusStrip,
+    uploadHost,
+    grid
+  );
 
-  const selectedBar = el("div", { class: "ref-picker-selected-bar hidden", "aria-label": "当前已选参考图" });
+  const inspectorHost = el("div", { class: "rp-inspector hidden", "aria-label": "实时预览与角度选择" });
+  const selectedDock = el("div", { class: "rp-selected-dock", "aria-label": "当前已选参考图" });
+  const rightDock = el("aside", { class: "rp-dock" }, inspectorHost, selectedDock);
+
+  const dropOverlay = el("div", { class: "rp-drop-overlay hidden", "aria-hidden": "true" },
+    el("div", { class: "rp-drop-overlay-box" },
+      el("span", { style: { fontSize: "26px" } }, "📥"),
+      el("strong", null, "松开鼠标即可添加为本次参考图"),
+      el("span", { class: "muted", style: { fontSize: "12px" } }, "支持单张或多张本地图片直接拖入")
+    )
+  );
+
+  const workspace = el("div", { class: "rp-workspace" },
+    leftRail,
+    centerPane,
+    rightDock,
+    dropOverlay
+  );
 
   const clearBtn = el("button", {
     type: "button",
@@ -259,79 +300,20 @@ export function openReferencePickerModal({
     placeholder: "图参名称（选填，留空默认使用文件名或时间戳）",
     "aria-label": "图参名称",
   });
-
-  const saveToLibChk = el("input", {
-    type: "checkbox",
-    checked: saveToLibrary,
-  });
+  const saveToLibChk = el("input", { type: "checkbox", checked: saveToLibrary });
   saveToLibChk.addEventListener("change", () => {
     saveToLibrary = Boolean(saveToLibChk.checked);
     syncUploadMetaVisibility();
   });
 
-  const localFileInput = el("input", {
-    type: "file",
-    accept: "image/*",
-    multiple: true,
-    class: "hidden",
-  });
-
   function indexItems() {
-    itemByPath.clear();
     for (const it of [...mineItems, ...officialItems]) {
       if (it?.image) itemByPath.set(it.image, it);
     }
   }
 
   function currentPool() {
-    if (activeTab === "official") return officialItems;
-    return mineItems;
-  }
-
-  function createInlineCategoryForm({ onCreated, onCancel }) {
-    const nameIn = el("input", {
-      type: "text",
-      class: "input",
-      placeholder: "输入新分类名（如：角色IP、电商场景）",
-      maxlength: "24",
-      style: { width: "220px", padding: "5px 10px", fontSize: "12.5px" },
-    });
-    const createBtn = el("button", { type: "button", class: "btn btn-sm btn-primary" }, "创建");
-    const submit = async () => {
-      const label = nameIn.value.trim();
-      if (!label) return toast("请输入分类名称");
-      createBtn.disabled = true;
-      try {
-        const res = await saveAssetCategory({ label });
-        if (Array.isArray(res?.items) && res.items.length) {
-          categories = res.items;
-        }
-        const created = res?.category;
-        toast(`已创建分类「${label}」`);
-        onCreated?.(created);
-      } catch (e) {
-        createBtn.disabled = false;
-        toast(e?.message || "创建分类失败");
-      }
-    };
-    createBtn.addEventListener("click", submit);
-    nameIn.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) {
-        e.preventDefault();
-        submit();
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel?.();
-      }
-    });
-    const row = el("div", { class: "ref-picker-new-cat-bar" },
-      el("span", { class: "ref-picker-field-label" }, "新建分类："),
-      nameIn,
-      createBtn,
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => onCancel?.() }, "取消")
-    );
-    queueMicrotask(() => nameIn.focus());
-    return row;
+    return activeTab === "official" ? officialItems : mineItems;
   }
 
   function activeExtGallery() {
@@ -340,20 +322,87 @@ export function openReferencePickerModal({
     return extGalleries.find((g) => g.id === id) || null;
   }
 
-  function ensureExtItemsLoaded(gal) {
-    if (!gal || extItemsCache.has(gal.id) || extLoadingSet.has(gal.id)) return;
+  function mergeExtGalleries(galList, packList) {
+    const byId = new Map();
+    for (const g of (galList || [])) {
+      if (!g || !g.id || BUILTIN_EXT_IGNORE.has(g.id)) continue;
+      if (!g.supportsRefImage) continue;
+      byId.set(g.id, {
+        ...g,
+        installed: true,
+        count: Number(g.count || 0),
+      });
+    }
+    for (const p of (packList || [])) {
+      if (!p || !p.id) continue;
+      const existing = byId.get(p.id);
+      if (existing) {
+        existing.badge = p.badge || existing.badge;
+        existing.description = p.description || existing.description;
+        existing.multiVariant = Boolean(existing.multiVariant || p.multiVariant);
+        existing.localOnly = true;
+      } else {
+        byId.set(p.id, {
+          id: p.id,
+          name: p.name || p.id,
+          nameEn: p.nameEn || "",
+          description: p.description || "",
+          badge: p.badge || "",
+          multiVariant: Boolean(p.multiVariant),
+          localOnly: true,
+          supportsRefImage: true,
+          installed: Boolean(p.installed),
+          count: Number(p.itemCount || 0),
+        });
+      }
+    }
+    // Keep RuiC packs in a stable intuitive order: poses -> costumes -> faces -> others
+    const order = ["ruic-poses", "ruic-costumes", "ruic-faces"];
+    return Array.from(byId.values()).sort((a, b) => {
+      const ia = order.indexOf(a.id);
+      const ib = order.indexOf(b.id);
+      if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-CN");
+    });
+  }
+
+  function ensureExtItemsLoaded(gal, force = false) {
+    if (!gal || !gal.installed) return;
+    if (!force && (extItemsCache.has(gal.id) || extLoadingSet.has(gal.id))) return;
     extLoadingSet.add(gal.id);
     api("GET", `/api/galleries/${encodeURIComponent(gal.id)}/items`)
       .then((res) => {
-        extItemsCache.set(gal.id, Array.isArray(res?.items) ? res.items : []);
+        const list = Array.isArray(res?.items) ? res.items : [];
+        extItemsCache.set(gal.id, list);
+        if (activeTab === `ext:${gal.id}` && gal.multiVariant && list.length && (!inspected || inspected.gal?.id !== gal.id)) {
+          inspected = { mode: "ext", gal, item: list[0], angleKey: extAngle };
+        }
       })
       .catch(() => {
         extItemsCache.set(gal.id, []);
       })
       .finally(() => {
         extLoadingSet.delete(gal.id);
-        if (activeTab === `ext:${gal.id}`) renderView();
+        if (activeTab === `ext:${gal.id}`) renderAll();
       });
+  }
+
+  async function installPackInline(gal) {
+    if (!gal || extInstallingSet.has(gal.id)) return;
+    extInstallingSet.add(gal.id);
+    renderCenter();
+    try {
+      await api("POST", "/api/galleries/packs/install", { id: gal.id, mirror: "gitee" });
+      toast(`已安装「${gal.name}」到本地`);
+      await refreshGalleryMetadata(true);
+      const updated = extGalleries.find((g) => g.id === gal.id);
+      if (updated) ensureExtItemsLoaded(updated, true);
+    } catch (e) {
+      toast(e?.message || `安装「${gal.name}」失败`);
+    } finally {
+      extInstallingSet.delete(gal.id);
+      renderAll();
+    }
   }
 
   async function toggleExtGalleryItem(gal, item, variantObj = null) {
@@ -362,7 +411,6 @@ export function openReferencePickerModal({
     const knownPath = extKeyToPath.get(compKey);
     if (knownPath && selectedRefs.includes(knownPath)) {
       toggleSelectPath(knownPath);
-      renderPoseDrawer();
       return;
     }
     if (selectedRefs.length >= limit) {
@@ -371,7 +419,8 @@ export function openReferencePickerModal({
     }
     if (materializingKey) return;
     materializingKey = compKey;
-    renderPoseDrawer();
+    renderInspector();
+    if (activeTab === `ext:${gal.id}`) renderExtGrid();
     try {
       const res = await api("POST", `/api/galleries/${encodeURIComponent(gal.id)}/items/${encodeURIComponent(item.id)}/materialize`, {
         variant: vKey,
@@ -381,150 +430,20 @@ export function openReferencePickerModal({
       itemByPath.set(res.path, {
         name: res.name || (variantObj ? `${item.name} · ${variantObj.label}` : item.name),
         image: res.path,
-        thumbUrl: variantObj?.thumbUrl || item.thumbUrl || "",
+        sourceLabel: gal.name || gal.id,
+        angleLabel: variantObj?.label || "",
+        localOnly: Boolean(gal.localOnly),
       });
       if (!selectedRefs.includes(res.path)) {
         selectedRefs.push(res.path);
       }
       syncSelectionUI();
-      renderPoseDrawer();
     } catch (e) {
       toast(e?.message || "加载参考图失败");
     } finally {
       materializingKey = "";
-      renderPoseDrawer();
-      if (activeTab.startsWith("ext:")) renderExtGrid();
-    }
-  }
-
-  function renderPoseDrawer() {
-    const gal = activeExtGallery();
-    const vars = Array.isArray(focusedPoseItem?.variants) ? focusedPoseItem.variants : [];
-    if (!gal || !gal.multiVariant || !focusedPoseItem || vars.length < 2) {
-      poseDrawerEl.classList.add("hidden");
-      clear(poseDrawerEl);
-      return;
-    }
-    poseDrawerEl.classList.remove("hidden");
-    clear(poseDrawerEl);
-    const item = focusedPoseItem;
-    const head = el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
-      el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
-        el("strong", { style: { fontSize: "13px" } }, `🧍 ${item.name || item.id}`),
-        el("span", { class: "muted", style: { fontSize: "12px" } }, "点选下方任意角度（可多选，直接作为本次本地参考图，不同步至网站）")
-      ),
-      el("button", {
-        type: "button",
-        class: "btn btn-sm",
-        onClick: () => { focusedPoseItem = null; renderPoseDrawer(); },
-      }, "收起")
-    );
-    const strip = el("div", { class: "pose-filmstrip is-compact" });
-    vars.forEach((v) => {
-      const compKey = `${gal.id}:${item.id}:${v.key}`;
-      const p = extKeyToPath.get(compKey);
-      const isSel = Boolean(p && selectedRefs.includes(p));
-      const isBusy = materializingKey === compKey;
-      strip.appendChild(el("button", {
-        type: "button",
-        class: "pose-film-item" + (isSel ? " is-selected" : ""),
-        dataset: { poseAnglePick: v.key },
-        disabled: Boolean(materializingKey && !isBusy),
-        onClick: () => toggleExtGalleryItem(gal, item, v),
-      },
-        el("img", { src: galleryImg(v.thumbUrl || v.imageUrl || ""), alt: v.label, loading: "eager" }),
-        el("div", { class: "pose-film-foot" },
-          el("span", null, isBusy ? "缓存中…" : v.label),
-          isSel ? el("span", { class: "badge badge-accent", style: { padding: "1px 5px", fontSize: "10.5px" } }, "✓") : null
-        )
-      ));
-    });
-    poseDrawerEl.append(head, strip);
-  }
-
-  function renderTabs() {
-    clear(topTabsWrap);
-    const tabs = [
-      { id: "mine", label: `自建图库 (${mineItems.length})` },
-    ];
-    if (officialItems.length > 0) {
-      tabs.push({ id: "official", label: `官方图库 (${officialItems.length})` });
-    }
-    extGalleries.forEach((g) => {
-      tabs.push({ id: `ext:${g.id}`, label: `${g.name || g.id} (${g.count || 0})` });
-    });
-    tabs.push({ id: "upload", label: "本地上传 / 粘贴" });
-    if (!tabs.some((t) => t.id === activeTab)) activeTab = "mine";
-
-    tabs.forEach((t) => {
-      const active = activeTab === t.id;
-      topTabsWrap.appendChild(el("button", {
-        type: "button",
-        role: "tab",
-        class: "btn btn-sm" + (active ? " btn-primary is-active" : ""),
-        "aria-selected": String(active),
-        "data-ref-tab": t.id,
-        onClick: () => {
-          if (activeTab === t.id) return;
-          activeTab = t.id;
-          activeCategory = "ALL";
-          extSeries = "";
-          extPageLimit = 48;
-          focusedPoseItem = null;
-          showNewCatForm = false;
-          if (activeTab === "upload" && activeCategory !== "ALL" && categories.some((c) => c.key === activeCategory)) {
-            uploadCategory = activeCategory;
-          }
-          const gal = activeExtGallery();
-          if (gal) ensureExtItemsLoaded(gal);
-          renderTabs();
-          renderView();
-        },
-      }, t.label));
-    });
-  }
-
-  function renderSelectedBar() {
-    clear(selectedBar);
-    selectedBar.classList.toggle("hidden", selectedRefs.length === 0);
-    if (!selectedRefs.length) return;
-    selectedBar.appendChild(el("span", { class: "ref-picker-selected-label" }, `已选 (${selectedRefs.length}/${limit})`));
-    const strip = el("div", { class: "ref-picker-selected-thumbs" });
-    selectedRefs.forEach((rp, idx) => {
-      const meta = itemByPath.get(rp);
-      const label = meta?.name || `参考图 ${idx + 1}`;
-      strip.appendChild(el("div", { class: "make-image-ref-thumb", title: label },
-        el("img", { src: localImg(rp), alt: label }),
-        el("button", {
-          type: "button",
-          "aria-label": `移除参考图 ${label}`,
-          title: `移除 ${label}`,
-          onClick: () => {
-            selectedRefs.splice(idx, 1);
-            syncSelectionUI();
-          },
-        }, "×")
-      ));
-    });
-    selectedBar.appendChild(strip);
-  }
-
-  function syncSelectionUI() {
-    confirmBtn.textContent = `✓ 确认选用 (${selectedRefs.length}/${limit})`;
-    clearBtn.disabled = selectedRefs.length === 0;
-    renderSelectedBar();
-    if (activeExtGallery()) {
-      renderPoseDrawer();
-      renderExtGrid();
-    } else if (activeTab !== "upload") {
-      grid.querySelectorAll(".ref-picker-card").forEach((card) => {
-        const p = card.dataset.refPath || "";
-        const isSel = selectedRefs.includes(p);
-        card.classList.toggle("is-selected", isSel);
-        card.setAttribute("aria-pressed", String(isSel));
-        const badge = card.querySelector(".ref-picker-check");
-        if (badge) badge.textContent = isSel ? "✓ 已选" : "";
-      });
+      renderInspector();
+      if (activeTab === `ext:${gal.id}`) renderExtGrid();
     }
   }
 
@@ -544,77 +463,302 @@ export function openReferencePickerModal({
     syncSelectionUI();
   }
 
-  function renderCategoryPills() {
-    const pool = currentPool();
-    clear(catWrap);
-    const knownKeys = new Set(categories.map((c) => c.key));
-    const groups = [
-      { key: "ALL", label: `全部 (${pool.length})` },
-      ...categories.map((c) => ({
-        key: c.key,
-        label: `${c.label} (${pool.filter((x) => (x.kind || "other") === c.key).length})`,
-      })),
-    ];
-    for (const it of pool) {
-      const k = it.kind || "other";
-      if (!knownKeys.has(k)) {
-        knownKeys.add(k);
-        groups.push({ key: k, label: `${k} (${pool.filter((x) => (x.kind || "other") === k).length})` });
-      }
-    }
-    if (!groups.some((g) => g.key === activeCategory)) activeCategory = "ALL";
-
-    const pillsRow = el("div", { class: "studio-cat-tabs", role: "group", "aria-label": "图库分类筛选" });
-    groups.forEach((g) => {
-      const active = activeCategory === g.key;
-      pillsRow.appendChild(el("button", {
-        type: "button",
-        class: "btn btn-sm" + (active ? " btn-primary" : ""),
-        "aria-pressed": String(active),
-        onClick: () => {
-          activeCategory = g.key;
-          renderCategoryPills();
-          renderGrid();
-        },
-      }, g.label));
+  function createInlineCategoryForm({ onCreated, onCancel }) {
+    const nameIn = el("input", {
+      type: "text",
+      class: "input",
+      placeholder: "输入新分类名…",
+      maxlength: "24",
+      style: { width: "100%", padding: "5px 8px", fontSize: "12px" },
     });
+    const createBtn = el("button", { type: "button", class: "btn btn-sm btn-primary" }, "创建");
+    const submit = async () => {
+      const label = nameIn.value.trim();
+      if (!label) return toast("请输入分类名称");
+      createBtn.disabled = true;
+      try {
+        const res = await saveAssetCategory({ label });
+        if (Array.isArray(res?.items) && res.items.length) categories = res.items;
+        toast(`已创建分类「${label}」`);
+        onCreated?.(res?.category);
+      } catch (e) {
+        createBtn.disabled = false;
+        toast(e?.message || "创建分类失败");
+      }
+    };
+    createBtn.addEventListener("click", submit);
+    nameIn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); submit(); }
+      else if (e.key === "Escape") { e.preventDefault(); onCancel?.(); }
+    });
+    queueMicrotask(() => nameIn.focus());
+    return el("div", { class: "rp-rail-newcat" },
+      nameIn,
+      el("div", { class: "row", style: { gap: "4px", justifyContent: "flex-end" } },
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => onCancel?.() }, "取消"),
+        createBtn
+      )
+    );
+  }
 
-    if (activeTab === "mine") {
-      pillsRow.appendChild(el("button", {
+  function switchTab(nextTab) {
+    if (activeTab === nextTab) return;
+    activeTab = nextTab;
+    activeCategory = "ALL";
+    extSeries = "";
+    extPageLimit = 48;
+    showNewCatForm = false;
+    const gal = activeExtGallery();
+    if (gal) {
+      ensureExtItemsLoaded(gal);
+      const cached = extItemsCache.get(gal.id);
+      if (gal.multiVariant && cached?.length) {
+        inspected = { mode: "ext", gal, item: cached[0], angleKey: extAngle };
+      } else {
+        inspected = null;
+      }
+    } else {
+      inspected = null;
+    }
+    renderAll();
+  }
+
+  // ---------- Left Navigation Rail ----------
+
+  function renderRail() {
+    clear(leftRail);
+
+    const makeSourceBtn = (id, ico, label, countText, extraBadge = "") => {
+      const active = activeTab === id;
+      return el("button", {
         type: "button",
-        class: "btn btn-sm ref-picker-add-cat-btn",
-        onClick: () => {
-          showNewCatForm = !showNewCatForm;
-          renderCategoryPills();
-        },
-      }, "＋ 新建分类"));
+        role: "tab",
+        class: "rp-rail-item" + (active ? " is-active" : ""),
+        "aria-selected": String(active),
+        "data-ref-tab": id,
+        onClick: () => switchTab(id),
+      },
+        el("span", { class: "rp-rail-ico", "aria-hidden": "true" }, ico),
+        el("span", { class: "rp-rail-label" }, label),
+        extraBadge ? el("span", { class: "rp-rail-tag" }, extraBadge) : null,
+        countText !== "" ? el("span", { class: "rp-rail-count" }, String(countText)) : null
+      );
+    };
+
+    // Group 1: 我的素材
+    const myGroup = el("div", { class: "rp-rail-group" },
+      el("div", { class: "rp-rail-heading" }, "我的素材"),
+      makeSourceBtn("mine", "🖼️", "自建图库", mineItems.length)
+    );
+
+    // Nested categories when 自建图库 is active
+    if (activeTab === "mine") {
+      const subList = el("div", { class: "rp-rail-sublist", role: "group", "aria-label": "自建图库分类" });
+      const known = new Set(categories.map((c) => c.key));
+      const catEntries = [
+        { key: "ALL", label: "全部", count: mineItems.length },
+        ...categories.map((c) => ({
+          key: c.key,
+          label: c.label,
+          count: mineItems.filter((x) => (x.kind || "other") === c.key).length,
+        })),
+      ];
+      for (const it of mineItems) {
+        const k = it.kind || "other";
+        if (!known.has(k)) {
+          known.add(k);
+          catEntries.push({ key: k, label: k, count: mineItems.filter((x) => (x.kind || "other") === k).length });
+        }
+      }
+      if (!catEntries.some((c) => c.key === activeCategory)) activeCategory = "ALL";
+      catEntries.forEach((c) => {
+        subList.appendChild(el("button", {
+          type: "button",
+          class: "rp-rail-sub" + (activeCategory === c.key ? " is-active" : ""),
+          onClick: () => { activeCategory = c.key; renderRail(); renderGrid(); },
+        }, el("span", null, c.label), el("span", { class: "rp-rail-count" }, String(c.count))));
+      });
+      if (showNewCatForm) {
+        subList.appendChild(createInlineCategoryForm({
+          onCreated: (created) => {
+            showNewCatForm = false;
+            if (created?.key) { activeCategory = created.key; uploadCategory = created.key; }
+            renderRail();
+            renderGrid();
+          },
+          onCancel: () => { showNewCatForm = false; renderRail(); },
+        }));
+      } else {
+        subList.appendChild(el("button", {
+          type: "button",
+          class: "rp-rail-sub rp-rail-sub-add",
+          onClick: () => { showNewCatForm = true; renderRail(); },
+        }, "＋ 新建分类"));
+      }
+      myGroup.appendChild(subList);
     }
 
-    catWrap.appendChild(pillsRow);
-    if (showNewCatForm && activeTab === "mine") {
-      catWrap.appendChild(createInlineCategoryForm({
-        onCreated: (created) => {
-          showNewCatForm = false;
-          if (created?.key) {
-            activeCategory = created.key;
-            uploadCategory = created.key;
+    if (officialItems.length > 0) {
+      myGroup.appendChild(makeSourceBtn("official", "✨", "官方图库", officialItems.length));
+    }
+    myGroup.appendChild(makeSourceBtn("upload", "📤", "本地上传 / 粘贴", ""));
+    leftRail.appendChild(myGroup);
+
+    // Group 2: 视觉参考库 (RuiC-PoseAtlas & any installed extension galleries)
+    if (extGalleries.length > 0) {
+      const extGroup = el("div", { class: "rp-rail-group" },
+        el("div", { class: "rp-rail-heading" },
+          el("span", null, "视觉参考库"),
+          el("span", { class: "rp-rail-lock", title: "仅存本机，不同步至网站" }, "🔒 仅本机")
+        )
+      );
+      extGalleries.forEach((g) => {
+        const tabId = `ext:${g.id}`;
+        const countDisplay = g.installed ? (g.count || "") : "未装";
+        extGroup.appendChild(makeSourceBtn(tabId, galleryIcon(g), g.name || g.id, countDisplay, g.multiVariant ? "5视角" : ""));
+
+        // Nested series or categories right underneath the active extension library!
+        if (activeTab === tabId && g.installed && extItemsCache.has(g.id)) {
+          const items = extItemsCache.get(g.id) || [];
+          const seriesMap = new Map();
+          items.forEach((it) => {
+            const sk = it.meta?.series;
+            if (!sk) return;
+            if (!seriesMap.has(sk)) seriesMap.set(sk, { key: sk, label: it.meta?.seriesShort || sk, count: 0 });
+            seriesMap.get(sk).count++;
+          });
+
+          const subList = el("div", { class: "rp-rail-sublist", role: "group", "aria-label": `${g.name} 筛选` });
+          if (seriesMap.size > 1) {
+            [{ key: "", label: "全部系列", count: items.length }, ...seriesMap.values()].forEach((s) => {
+              subList.appendChild(el("button", {
+                type: "button",
+                class: "rp-rail-sub" + (extSeries === s.key ? " is-active" : ""),
+                onClick: () => {
+                  extSeries = s.key;
+                  activeCategory = "ALL";
+                  extPageLimit = 48;
+                  renderRail();
+                  renderToolbar();
+                  renderExtGrid();
+                },
+              }, el("span", null, s.label), el("span", { class: "rp-rail-count" }, String(s.count))));
+            });
+            extGroup.appendChild(subList);
+          } else {
+            const cMap = new Map();
+            items.forEach((it) => {
+              const ck = it.category || "other";
+              if (!cMap.has(ck)) cMap.set(ck, { key: ck, label: it.categoryName || ck, count: 0 });
+              cMap.get(ck).count++;
+            });
+            if (cMap.size > 1 && cMap.size <= 12) {
+              [{ key: "ALL", label: "全部", count: items.length }, ...cMap.values()].forEach((c) => {
+                subList.appendChild(el("button", {
+                  type: "button",
+                  class: "rp-rail-sub" + (activeCategory === c.key ? " is-active" : ""),
+                  onClick: () => {
+                    activeCategory = c.key;
+                    extPageLimit = 48;
+                    renderRail();
+                    renderExtGrid();
+                  },
+                }, el("span", null, c.label), el("span", { class: "rp-rail-count" }, String(c.count))));
+              });
+              extGroup.appendChild(subList);
+            }
           }
-          renderCategoryPills();
-          renderGrid();
-        },
-        onCancel: () => {
-          showNewCatForm = false;
-          renderCategoryPills();
-        },
-      }));
+        }
+      });
+      leftRail.appendChild(extGroup);
     }
   }
 
+  // ---------- Center Top Toolbar (Single Clean Row!) ----------
+
+  function renderToolbar() {
+    clear(toolbarEl);
+    clear(toolbarExtras);
+    const isUpload = activeTab === "upload";
+    toolbarEl.classList.toggle("hidden", isUpload);
+    statusStrip.classList.toggle("hidden", isUpload);
+    if (isUpload) return;
+
+    const gal = activeExtGallery();
+    if (gal && gal.installed && extItemsCache.has(gal.id)) {
+      const items = extItemsCache.get(gal.id) || [];
+      if (gal.multiVariant) {
+        const angles = [];
+        const seen = new Set();
+        for (const it of items) {
+          for (const v of (it.variants || [])) {
+            if (!v?.key || seen.has(v.key)) continue;
+            seen.add(v.key);
+            angles.push({ key: v.key, label: v.label || v.key });
+          }
+          if (angles.length >= 5) break;
+        }
+        if (angles.length) {
+          if (!angles.some((a) => a.key === extAngle)) extAngle = angles[0].key;
+          const seg = el("div", { class: "rp-angle-seg", role: "group", "aria-label": "列表预览视角" },
+            ...angles.map((a) => el("button", {
+              type: "button",
+              class: "rp-angle-btn" + (extAngle === a.key ? " is-active" : ""),
+              onClick: () => {
+                extAngle = a.key;
+                if (inspected?.mode === "ext" && inspected.gal?.id === gal.id) {
+                  inspected.angleKey = a.key;
+                }
+                renderToolbar();
+                renderExtGrid();
+                renderInspector();
+              },
+            }, a.label))
+          );
+          toolbarExtras.appendChild(seg);
+        }
+      }
+
+      // Sub-category compact select when series exist in sidebar (e.g. poses 21 sub-categories) or > 12 categories
+      const basePool = extSeries ? items.filter((it) => (it.meta?.series || "") === extSeries) : items;
+      const hasSeriesInRail = new Set(items.map((it) => it.meta?.series).filter(Boolean)).size > 1;
+      const cMap = new Map();
+      basePool.forEach((it) => {
+        const ck = it.category || "other";
+        if (!cMap.has(ck)) cMap.set(ck, { key: ck, label: it.categoryName || ck, count: 0 });
+        cMap.get(ck).count++;
+      });
+      if (activeCategory !== "ALL" && !cMap.has(activeCategory)) activeCategory = "ALL";
+      if ((hasSeriesInRail && cMap.size > 1) || cMap.size > 12) {
+        const sel = el("select", {
+          class: "select rp-subcat-select",
+          "aria-label": "按细分分类筛选",
+          onChange: () => {
+            activeCategory = sel.value;
+            extPageLimit = 48;
+            renderExtGrid();
+          },
+        },
+          el("option", { value: "ALL", selected: activeCategory === "ALL" }, `全部分类 (${basePool.length})`),
+          ...Array.from(cMap.values()).map((c) =>
+            el("option", { value: c.key, selected: activeCategory === c.key }, `${c.label} (${c.count})`)
+          )
+        );
+        toolbarExtras.appendChild(sel);
+      }
+    }
+
+    toolbarEl.append(searchInput, toolbarExtras, quickPasteBtn);
+  }
+
+  // ---------- Center Grid (自建图库 / 官方图库) ----------
+
   function renderGrid() {
     clear(grid);
+    grid.classList.remove("is-ext-grid");
     if (loading) {
-      countEl.textContent = "正在加载图库…";
-      grid.appendChild(el("p", { class: "muted", style: { gridColumn: "1 / -1", textAlign: "center", padding: "28px 0" } }, "正在加载自建图库…"));
+      statusStrip.textContent = "正在加载图库…";
+      grid.appendChild(el("p", { class: "muted rp-grid-msg" }, "正在加载自建图库…"));
       return;
     }
     const pool = currentPool();
@@ -627,32 +771,24 @@ export function openReferencePickerModal({
       return hay.includes(q);
     });
 
-    countEl.textContent = `共 ${visible.length} 项 · 已选 ${selectedRefs.length}/${limit} · 支持直接 Ctrl/⌘ + V 粘贴`;
+    statusStrip.textContent = `共 ${visible.length} 项 · 单击图片直接选用/取消，也可拖入文件或按 Ctrl/⌘ + V 粘贴`;
 
     if (!pool.length && activeTab === "mine") {
       grid.appendChild(el("div", { class: "ref-picker-empty" },
         el("strong", null, "自建图库还没有参考图"),
-        el("p", { class: "muted" }, "可在「画廊 → 自建图库」维护长期复用的角色、道具与场景；如果只需要本次一次性垫图，可直接切换到「本地上传 / 粘贴」或按 Ctrl/⌘ + V 粘贴。"),
+        el("p", { class: "muted" }, "可在左侧直接切换「姿态图鉴 / 衣装图鉴 / 人像图鉴」选用参考图，或点下方上传/粘贴本地图片。"),
         el("div", { class: "row", style: { gap: "8px", justifyContent: "center", flexWrap: "wrap" } },
           el("button", {
             type: "button",
             class: "btn btn-primary btn-sm",
-            onClick: () => {
-              activeTab = "upload";
-              renderTabs();
-              renderView();
-            },
+            onClick: () => switchTab("upload"),
           }, "＋ 本地上传 / 粘贴图片"),
-          officialItems.length > 0
+          extGalleries.length > 0
             ? el("button", {
                 type: "button",
                 class: "btn btn-sm",
-                onClick: () => {
-                  activeTab = "official";
-                  renderTabs();
-                  renderView();
-                },
-              }, `查看官方图库 (${officialItems.length})`)
+                onClick: () => switchTab(`ext:${extGalleries[0].id}`),
+              }, `${galleryIcon(extGalleries[0])} 浏览${extGalleries[0].name}`)
             : null
         )
       ));
@@ -660,58 +796,498 @@ export function openReferencePickerModal({
     }
 
     if (!visible.length) {
-      grid.appendChild(el("p", { class: "muted", style: { gridColumn: "1 / -1", textAlign: "center", padding: "28px 0" } }, "当前筛选条件下没有匹配的参考图"));
+      grid.appendChild(el("p", { class: "muted rp-grid-msg" }, "当前筛选条件下没有匹配的参考图"));
       return;
     }
 
     visible.forEach((it, idx) => {
       const isSel = selectedRefs.includes(it.image);
-      const wrap = el("div", { class: "studio-resource-thumb-wrap", dataset: { fallback: it.id || "图" } });
+      const wrap = el("div", { class: "rp-thumb-wrap", dataset: { fallback: it.id || "图" } });
       const img = el("img", {
         src: localImg(it.image),
         alt: it.name || it.id || "参考图",
         decoding: "async",
         loading: idx < 18 ? "eager" : "lazy",
       });
-      img.addEventListener("load", () => {
-        img.classList.remove("is-error");
-        img.classList.add("is-loaded");
-        wrap.classList.remove("is-error");
-      });
-      img.addEventListener("error", () => {
-        img.classList.remove("is-loaded", "is-instant");
-        img.classList.add("is-error");
-        wrap.classList.add("is-error");
-      });
-      if (img.complete && img.naturalWidth > 0) {
-        img.classList.add("is-loaded", "is-instant");
-      }
-      const checkBadge = el("span", { class: "ref-picker-check", "aria-hidden": "true" }, isSel ? "✓ 已选" : "");
-      wrap.append(img, checkBadge);
+      img.addEventListener("load", () => { img.classList.add("is-loaded"); wrap.classList.remove("is-error"); });
+      img.addEventListener("error", () => { img.classList.add("is-error"); wrap.classList.add("is-error"); });
+      if (img.complete && img.naturalWidth > 0) img.classList.add("is-loaded", "is-instant");
 
-      const card = el("button", {
+      const checkBadge = el("span", { class: "rp-check-badge", "aria-hidden": "true" }, isSel ? "✓ 已选" : "");
+      const previewBtn = el("button", {
         type: "button",
-        class: "studio-resource-option ref-picker-card" + (isSel ? " is-selected" : ""),
+        class: "rp-card-quick-btn",
+        title: "在右侧大图预览",
+        onClick: (e) => {
+          e.stopPropagation();
+          inspected = { mode: "asset", item: it };
+          renderInspector();
+        },
+      }, "预览");
+      wrap.append(img, checkBadge, previewBtn);
+
+      const card = el("div", {
+        role: "button",
+        tabindex: "0",
+        class: "rp-card" + (isSel ? " is-selected" : "") + (newlyAddedPath && it.image === newlyAddedPath ? " is-just-added" : ""),
         "aria-pressed": String(isSel),
         dataset: { refPath: it.image, assetId: it.id || "" },
-        onClick: () => toggleSelectPath(it.image),
+        onClick: () => {
+          toggleSelectPath(it.image);
+          inspected = { mode: "asset", item: it };
+          renderInspector();
+        },
+        onKeydown: (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggleSelectPath(it.image);
+          }
+        },
       },
         wrap,
-        el("small", { class: "mono" }, `${it.id || "本地"} · ${assetCategoryLabel(it.kind, categories)}`),
-        el("strong", null, it.name || it.id || "未命名参考图")
+        el("div", { class: "rp-card-meta" },
+          el("small", { class: "mono" }, `${it.id || ""} · ${assetCategoryLabel(it.kind, categories)}`),
+          el("strong", null, it.name || it.id || "参考图")
+        )
       );
       grid.appendChild(card);
+    });
+    if (newlyAddedPath) {
+      const target = newlyAddedPath;
+      newlyAddedPath = "";
+      setTimeout(() => {
+        grid.querySelectorAll(".rp-card.is-just-added").forEach((c) => {
+          if (c.dataset.refPath === target) c.classList.remove("is-just-added");
+        });
+      }, 1500);
+    }
+  }
 
-      if (newlyAddedPath && it.image === newlyAddedPath) {
-        newlyAddedPath = "";
-        requestAnimationFrame(() => {
-          card.scrollIntoView({ block: "nearest", behavior: "smooth" });
-          card.classList.add("is-just-added");
-          setTimeout(() => card.classList.remove("is-just-added"), 1400);
+  // ---------- Center Grid (Extension Visual Libraries: 姿态 / 衣装 / 人像) ----------
+
+  function renderExtGrid() {
+    const gal = activeExtGallery();
+    if (!gal) return;
+    clear(grid);
+    grid.classList.add("is-ext-grid");
+
+    if (!gal.installed) {
+      const installing = extInstallingSet.has(gal.id);
+      statusStrip.textContent = `${gal.name} · 🔒 仅存本机，不同步至网站`;
+      grid.appendChild(el("div", { class: "ref-picker-empty" },
+        el("div", { style: { fontSize: "28px" } }, galleryIcon(gal)),
+        el("strong", null, installing ? `正在安装「${gal.name}」索引…` : `「${gal.name}」尚未安装到本地`),
+        el("p", { class: "muted" }, gal.description || "由客户端直接从 Gitee 国内镜像安装轻量索引（约 1 秒完成），图片按需缓存在本机，绝不上传或同步到网站。"),
+        el("button", {
+          type: "button",
+          class: "btn btn-primary btn-sm",
+          disabled: installing,
+          onClick: () => installPackInline(gal),
+        }, installing ? "正在从 Gitee 安装…" : `⚡ 一键安装「${gal.name}」`)
+      ));
+      return;
+    }
+
+    if (extLoadingSet.has(gal.id) || !extItemsCache.has(gal.id)) {
+      statusStrip.textContent = `正在加载 ${gal.name || gal.id}…`;
+      grid.appendChild(el("p", { class: "muted rp-grid-msg" }, `正在加载 ${gal.name || gal.id}…`));
+      return;
+    }
+
+    const items = extItemsCache.get(gal.id) || [];
+    const q = searchQuery.trim().toLowerCase();
+    const visible = items.filter((it) => {
+      if (extSeries && (it.meta?.series || "") !== extSeries) return false;
+      if (activeCategory !== "ALL" && (it.category || "other") !== activeCategory) return false;
+      if (!q) return true;
+      const hay = `${it.id || ""} ${it.name || ""} ${it.nameEn || ""} ${it.categoryName || ""} ${it.traits || ""} ${(it.tags || []).join(" ")}`.toLowerCase();
+      return hay.includes(q);
+    });
+
+    statusStrip.textContent = gal.multiVariant
+      ? `共 ${visible.length} 组姿态 · 点击卡片在右侧对比 5 视角，或直接点卡片右下「＋ 选视角」快速添加 · 🔒 仅本机`
+      : `共 ${visible.length} 项 · 单击卡片直接选用/取消 · 🔒 仅本机参考，不同步至网站`;
+
+    if (!visible.length) {
+      grid.appendChild(el("p", { class: "muted rp-grid-msg" }, "当前筛选条件下没有匹配条目"));
+      return;
+    }
+
+    // Auto-focus first visible pose in Right Inspector if nothing in this gallery is inspected yet
+    if (gal.multiVariant && (!inspected || inspected.gal?.id !== gal.id)) {
+      inspected = { mode: "ext", gal, item: visible[0], angleKey: extAngle };
+      renderInspector();
+    }
+
+    const slice = visible.slice(0, extPageLimit);
+    slice.forEach((it, idx) => {
+      const vars = Array.isArray(it.variants) ? it.variants : [];
+      const activeVar = vars.length ? (vars.find((v) => v.key === extAngle) || vars[0]) : null;
+      const thumbSrc = activeVar
+        ? galleryImg(activeVar.thumbUrl || activeVar.imageUrl || "")
+        : galleryImg(it.thumbUrl || it.imageUrl || "");
+
+      const pickedAngles = vars.length
+        ? vars.filter((v) => {
+            const p = extKeyToPath.get(`${gal.id}:${it.id}:${v.key}`);
+            return Boolean(p && selectedRefs.includes(p));
+          })
+        : [];
+      const singlePath = !vars.length ? extKeyToPath.get(`${gal.id}:${it.id}:`) : "";
+      const isSel = vars.length ? pickedAngles.length > 0 : Boolean(singlePath && selectedRefs.includes(singlePath));
+      const isFocused = inspected?.mode === "ext" && inspected.gal?.id === gal.id && inspected.item?.id === it.id;
+
+      const curAngleKey = activeVar?.key || "";
+      const curAnglePath = extKeyToPath.get(`${gal.id}:${it.id}:${curAngleKey}`);
+      const isCurAngleSel = Boolean(curAnglePath && selectedRefs.includes(curAnglePath));
+      const isBusy = materializingKey === `${gal.id}:${it.id}:${curAngleKey}`;
+
+      const wrap = el("div", { class: "rp-thumb-wrap is-ext-thumb", dataset: { fallback: it.id || "图" } });
+      const img = el("img", {
+        src: thumbSrc,
+        alt: it.name || it.id,
+        decoding: "async",
+        loading: idx < 18 ? "eager" : "lazy",
+      });
+      img.addEventListener("load", () => { img.classList.add("is-loaded"); wrap.classList.remove("is-error"); });
+      img.addEventListener("error", () => { img.classList.add("is-error"); wrap.classList.add("is-error"); });
+      if (img.complete && img.naturalWidth > 0) img.classList.add("is-loaded", "is-instant");
+
+      const badgeText = isSel
+        ? (pickedAngles.length ? `✓ ${pickedAngles.map((v) => v.label).join("/")}` : "✓ 已选")
+        : "";
+      const checkBadge = el("span", { class: "rp-check-badge", "aria-hidden": "true" }, badgeText);
+      const anglePill = (!isSel && vars.length > 1)
+        ? el("span", { class: "rp-angle-pill", "aria-hidden": "true" }, `${vars.length}视角`)
+        : null;
+
+      // Hover quick action button
+      const quickAction = vars.length > 1
+        ? el("button", {
+            type: "button",
+            class: "rp-card-quick-btn" + (isCurAngleSel ? " is-picked" : ""),
+            dataset: { quickPickPose: it.id },
+            title: isCurAngleSel ? `取消已选「${activeVar.label}」` : `一键选用当前「${activeVar.label}」视角`,
+            onClick: (e) => {
+              e.stopPropagation();
+              inspected = { mode: "ext", gal, item: it, angleKey: activeVar.key };
+              toggleExtGalleryItem(gal, it, activeVar);
+            },
+          }, isBusy ? "缓存中…" : (isCurAngleSel ? `✓ ${activeVar.label}` : `＋ 选${activeVar.label}`))
+        : el("button", {
+            type: "button",
+            class: "rp-card-quick-btn",
+            title: "在右侧查看大图",
+            onClick: (e) => {
+              e.stopPropagation();
+              inspected = { mode: "ext", gal, item: it, angleKey: "" };
+              renderInspector();
+            },
+          }, "大图");
+
+      wrap.append(img, anglePill, checkBadge, quickAction);
+
+      const card = el("div", {
+        role: "button",
+        tabindex: "0",
+        class: "rp-card is-ext-card" + (isSel ? " is-selected" : "") + (isFocused ? " is-focused" : ""),
+        "aria-pressed": String(isSel),
+        dataset: { extKind: gal.id, assetId: it.id || "" },
+        onClick: () => {
+          if (vars.length > 1) {
+            inspected = { mode: "ext", gal, item: it, angleKey: activeVar?.key || vars[0].key };
+            renderInspector();
+            // Highlight active card without resetting grid scroll
+            grid.querySelectorAll(".rp-card.is-focused").forEach((c) => c.classList.remove("is-focused"));
+            card.classList.add("is-focused");
+          } else {
+            inspected = { mode: "ext", gal, item: it, angleKey: "" };
+            toggleExtGalleryItem(gal, it, null);
+          }
+        },
+        onKeydown: (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            card.click();
+          }
+        },
+      },
+        wrap,
+        el("div", { class: "rp-card-meta" },
+          el("small", { class: "mono" }, vars.length > 1
+            ? `${it.meta?.no || it.id} · ${it.categoryName || ""}`
+            : `${it.id} · ${it.categoryName || ""}`),
+          el("strong", null, isBusy ? "正在缓存…" : (it.name || it.id))
+        )
+      );
+      grid.appendChild(card);
+    });
+
+    if (visible.length > extPageLimit) {
+      grid.appendChild(el("div", { style: { gridColumn: "1 / -1", textAlign: "center", padding: "12px 0 4px" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => { extPageLimit += 48; renderExtGrid(); },
+        }, `加载更多（已显示 ${slice.length} / ${visible.length}）`)
+      ));
+    }
+  }
+
+  // ---------- Right Inspector (5-Angle Pose Picker / Large Preview) ----------
+
+  function renderInspector() {
+    clear(inspectorHost);
+    if (!inspected || !inspected.item) {
+      inspectorHost.classList.add("hidden");
+      return;
+    }
+    inspectorHost.classList.remove("hidden");
+
+    // Case A: Extension gallery item (5-angle pose OR costume/face preview)
+    if (inspected.mode === "ext") {
+      const { gal, item } = inspected;
+      const vars = Array.isArray(item.variants) ? item.variants : [];
+      const isPose = vars.length > 1;
+      let activeVar = isPose
+        ? (vars.find((v) => v.key === inspected.angleKey) || vars.find((v) => v.key === extAngle) || vars[0])
+        : null;
+      if (activeVar) inspected.angleKey = activeVar.key;
+
+      const compKey = `${gal.id}:${item.id}:${activeVar?.key || ""}`;
+      const curPath = extKeyToPath.get(compKey);
+      const isCurSel = Boolean(curPath && selectedRefs.includes(curPath));
+      const isBusy = materializingKey === compKey;
+
+      const thumbSrc = activeVar
+        ? galleryImg(activeVar.thumbUrl || activeVar.imageUrl || "")
+        : galleryImg(item.thumbUrl || item.imageUrl || "");
+      const fullSrc = activeVar
+        ? galleryImg(activeVar.imageUrl || activeVar.thumbUrl || "")
+        : galleryImg(item.imageUrl || item.thumbUrl || "");
+
+      const stageImg = el("img", { src: thumbSrc, alt: item.name || item.id });
+      const seq = ++inspectStageSeq;
+      if (fullSrc && fullSrc !== thumbSrc) {
+        const pre = new Image();
+        pre.onload = () => { if (seq === inspectStageSeq) stageImg.src = fullSrc; };
+        pre.src = fullSrc;
+      }
+
+      const stepAngle = (delta) => {
+        if (!isPose) return;
+        const idx = vars.findIndex((v) => v.key === activeVar?.key);
+        const nextIdx = (idx + delta + vars.length) % vars.length;
+        inspected.angleKey = vars[nextIdx].key;
+        renderInspector();
+      };
+
+      const stageBox = el("div", { class: "rp-inspect-stage" },
+        stageImg,
+        isPose
+          ? el("button", {
+              type: "button",
+              class: "rp-stage-nav is-prev",
+              title: "上一个视角 (←)",
+              "aria-label": "上一个视角",
+              onClick: () => stepAngle(-1),
+            }, "‹")
+          : null,
+        isPose
+          ? el("button", {
+              type: "button",
+              class: "rp-stage-nav is-next",
+              title: "下一个视角 (→)",
+              "aria-label": "下一个视角",
+              onClick: () => stepAngle(1),
+            }, "›")
+          : null,
+        activeVar
+          ? el("span", { class: "rp-stage-angle-tag" }, activeVar.label)
+          : null
+      );
+
+      let strip = null;
+      if (isPose) {
+        strip = el("div", { class: "rp-angle-strip", role: "listbox", "aria-label": "选择姿态视角" });
+        vars.forEach((v) => {
+          const vk = `${gal.id}:${item.id}:${v.key}`;
+          const vp = extKeyToPath.get(vk);
+          const vSel = Boolean(vp && selectedRefs.includes(vp));
+          const vActive = activeVar && activeVar.key === v.key;
+          const vBusy = materializingKey === vk;
+          strip.appendChild(el("div", {
+            role: "option",
+            tabindex: "0",
+            "aria-selected": String(vActive),
+            class: "rp-angle-tile" + (vActive ? " is-active" : "") + (vSel ? " is-picked" : ""),
+            dataset: { poseAnglePick: v.key },
+            onClick: () => {
+              inspected.angleKey = v.key;
+              renderInspector();
+            },
+            onKeydown: (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                toggleExtGalleryItem(gal, item, v);
+              }
+            },
+          },
+            el("img", { src: galleryImg(v.thumbUrl || v.imageUrl || ""), alt: v.label, loading: "eager" }),
+            el("button", {
+              type: "button",
+              class: "rp-angle-tile-pick" + (vSel ? " is-picked" : ""),
+              title: vSel ? `取消已选「${v.label}」` : `直接选用「${v.label}」`,
+              dataset: { poseAngleToggle: v.key },
+              onClick: (e) => {
+                e.stopPropagation();
+                inspected.angleKey = v.key;
+                toggleExtGalleryItem(gal, item, v);
+              },
+            }, vBusy ? "…" : (vSel ? "✓" : "＋")),
+            el("span", { class: "rp-angle-tile-label" }, v.label)
+          ));
         });
       }
-    });
+
+      const ctaBtn = el("button", {
+        type: "button",
+        class: "btn btn-sm rp-inspect-cta" + (isCurSel ? "" : " btn-primary"),
+        dataset: { role: "rp-inspect-toggle" },
+        disabled: Boolean(materializingKey && !isBusy),
+        onClick: () => toggleExtGalleryItem(gal, item, activeVar),
+      }, isBusy
+        ? "正在缓存到本地…"
+        : isPose
+          ? (isCurSel ? `✓ 已选「${activeVar.label}」（点击取消）` : `＋ 选用「${activeVar.label}」视角`)
+          : (isCurSel ? "✓ 已选用（点击取消）" : "＋ 选用为参考图")
+      );
+
+      inspectorHost.append(
+        el("div", { class: "rp-inspect-head" },
+          el("div", { class: "col", style: { gap: "2px", minWidth: 0 } },
+            el("strong", { class: "rp-inspect-title", title: item.name || item.id }, item.name || item.id),
+            el("span", { class: "muted", style: { fontSize: "11.5px" } },
+              `${item.meta?.no || item.id} · ${item.categoryName || gal.name}`
+            )
+          ),
+          !isPose
+            ? el("button", {
+                type: "button",
+                class: "icon-btn rp-inspect-close",
+                title: "收起预览",
+                "aria-label": "收起预览",
+                onClick: () => { inspected = null; renderInspector(); },
+              }, "✕")
+            : el("span", { class: "badge", style: { fontSize: "10.5px", flexShrink: 0 } }, "🔒 仅本机")
+        ),
+        stageBox,
+        strip,
+        ctaBtn
+      );
+      return;
+    }
+
+    // Case B: Personal / official asset preview
+    const item = inspected.item;
+    const isSel = selectedRefs.includes(item.image);
+    inspectorHost.append(
+      el("div", { class: "rp-inspect-head" },
+        el("div", { class: "col", style: { gap: "2px", minWidth: 0 } },
+          el("strong", { class: "rp-inspect-title" }, item.name || item.id || "参考图"),
+          el("span", { class: "muted", style: { fontSize: "11.5px" } }, assetCategoryLabel(item.kind, categories))
+        ),
+        el("button", {
+          type: "button",
+          class: "icon-btn rp-inspect-close",
+          title: "收起预览",
+          "aria-label": "收起预览",
+          onClick: () => { inspected = null; renderInspector(); },
+        }, "✕")
+      ),
+      el("div", { class: "rp-inspect-stage" },
+        el("img", { src: localImg(item.image), alt: item.name || "参考图" })
+      ),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm rp-inspect-cta" + (isSel ? "" : " btn-primary"),
+        onClick: () => toggleSelectPath(item.image),
+      }, isSel ? "✓ 已选用（点击取消）" : "＋ 选用为参考图")
+    );
   }
+
+  // ---------- Right Selected References Dock ----------
+
+  function renderSelectedDock() {
+    clear(selectedDock);
+    selectedDock.appendChild(
+      el("div", { class: "rp-selected-head" },
+        el("strong", { style: { fontSize: "12.5px" } }, `已选参考图 (${selectedRefs.length}/${limit})`),
+        selectedRefs.length > 0
+          ? el("button", {
+              type: "button",
+              class: "rp-link-btn",
+              onClick: () => { selectedRefs = []; syncSelectionUI(); },
+            }, "清空")
+          : null
+      )
+    );
+
+    if (!selectedRefs.length) {
+      selectedDock.appendChild(
+        el("div", { class: "rp-selected-empty muted" },
+          "暂未选择参考图。点选左侧图片、直接拖入本地图片，或按 Ctrl/⌘ + V 粘贴。"
+        )
+      );
+      return;
+    }
+
+    const list = el("div", { class: "rp-selected-list" });
+    selectedRefs.forEach((rp, idx) => {
+      const meta = itemByPath.get(rp);
+      const label = meta?.name || `参考图 ${idx + 1}`;
+      const sub = meta?.sourceLabel || (meta?.kind ? assetCategoryLabel(meta.kind, categories) : "本次临时参考图");
+      list.appendChild(el("div", { class: "rp-selected-row" },
+        el("img", { class: "rp-selected-thumb", src: localImg(rp), alt: label }),
+        el("div", { class: "rp-selected-meta" },
+          el("strong", { title: label }, label),
+          el("span", { class: "muted" }, sub)
+        ),
+        el("button", {
+          type: "button",
+          class: "rp-selected-rm",
+          title: `移除 ${label}`,
+          "aria-label": `移除参考图 ${label}`,
+          onClick: () => {
+            selectedRefs.splice(idx, 1);
+            syncSelectionUI();
+          },
+        }, "×")
+      ));
+    });
+    selectedDock.appendChild(list);
+  }
+
+  function syncSelectionUI() {
+    confirmBtn.textContent = `✓ 确认选用 (${selectedRefs.length}/${limit})`;
+    clearBtn.disabled = selectedRefs.length === 0;
+    renderSelectedDock();
+    renderInspector();
+    if (activeExtGallery()) {
+      renderExtGrid();
+    } else if (activeTab !== "upload") {
+      grid.querySelectorAll(".rp-card").forEach((card) => {
+        const p = card.dataset.refPath || "";
+        const isSel = selectedRefs.includes(p);
+        card.classList.toggle("is-selected", isSel);
+        card.setAttribute("aria-pressed", String(isSel));
+        const badge = card.querySelector(".rp-check-badge");
+        if (badge) badge.textContent = isSel ? "✓ 已选" : "";
+      });
+    }
+  }
+
+  // ---------- Local Upload / Clipboard Panel ----------
 
   let uploadMetaRow = null;
   let uploadCatFieldset = null;
@@ -785,6 +1361,7 @@ export function openReferencePickerModal({
             continue;
           }
           const path = await importTempReferenceFile(f);
+          itemByPath.set(path, { name: fileDisplayName(f, customName, i, imgFiles.length), image: path, sourceLabel: `${sourceLabel}临时参考图` });
           if (!selectedRefs.includes(path)) {
             selectedRefs.push(path);
             addedToSelection++;
@@ -796,10 +1373,10 @@ export function openReferencePickerModal({
       if (savedToLibCount > 0) {
         activeTab = "mine";
         activeCategory = uploadCategory;
-        renderTabs();
-        renderView();
+        renderAll();
+      } else {
+        syncSelectionUI();
       }
-      syncSelectionUI();
 
       if (savedToLibCount > 0) {
         toast(skippedByLimit > 0
@@ -831,7 +1408,7 @@ export function openReferencePickerModal({
         return;
       }
       if (!res.files.length) {
-        toast("剪贴板里暂无图片，请先截图或复制图片后再试");
+        toast("剪贴板里当前没有图片，请先截图或复制图片后再试");
         return;
       }
       await processIncomingFiles(res.files, "粘贴");
@@ -843,40 +1420,34 @@ export function openReferencePickerModal({
   function renderUploadPanel() {
     clear(uploadHost);
     if (!categories.some((c) => c.key === uploadCategory)) {
-      uploadCategory = "other";
+      uploadCategory = categories[0]?.key || "character";
     }
-    const catName = `ref-upload-cat-${Date.now()}`;
     const catPillsWrap = el("div", { class: "ref-picker-cat-pills" });
     categories.forEach((c) => {
+      const active = uploadCategory === c.key;
       const radio = el("input", {
         type: "radio",
-        name: catName,
+        name: "ref-picker-upload-cat",
         value: c.key,
-        checked: uploadCategory === c.key,
+        checked: active,
         class: "sr-only",
       });
-      const pill = el("label", {
-        class: "btn btn-sm ref-picker-cat-pill" + (uploadCategory === c.key ? " btn-primary is-active" : ""),
-      }, radio, el("span", null, c.label));
       radio.addEventListener("change", () => {
         if (!radio.checked) return;
         uploadCategory = c.key;
-        catPillsWrap.querySelectorAll(".ref-picker-cat-pill").forEach((p) => {
-          const inp = p.querySelector("input");
-          const on = Boolean(inp && inp.value === uploadCategory);
-          p.classList.toggle("btn-primary", on);
-          p.classList.toggle("is-active", on);
+        catPillsWrap.querySelectorAll(".ref-picker-cat-pill").forEach((lbl) => {
+          lbl.classList.toggle("btn-primary", lbl.dataset.catKey === c.key);
         });
       });
-      catPillsWrap.appendChild(pill);
+      catPillsWrap.appendChild(el("label", {
+        class: "btn btn-sm ref-picker-cat-pill" + (active ? " btn-primary" : ""),
+        dataset: { catKey: c.key },
+      }, radio, el("span", null, c.label)));
     });
     catPillsWrap.appendChild(el("button", {
       type: "button",
       class: "btn btn-sm ref-picker-add-cat-btn",
-      onClick: () => {
-        showUploadNewCatForm = !showUploadNewCatForm;
-        renderUploadPanel();
-      },
+      onClick: () => { showUploadNewCatForm = !showUploadNewCatForm; renderUploadPanel(); },
     }, "＋ 新建分类"));
 
     uploadCatFieldset = el("fieldset", { class: "ref-picker-cat-fieldset" },
@@ -889,10 +1460,7 @@ export function openReferencePickerModal({
               if (created?.key) uploadCategory = created.key;
               renderUploadPanel();
             },
-            onCancel: () => {
-              showUploadNewCatForm = false;
-              renderUploadPanel();
-            },
+            onCancel: () => { showUploadNewCatForm = false; renderUploadPanel(); },
           })
         : null
     );
@@ -924,21 +1492,6 @@ export function openReferencePickerModal({
       ),
       uploadStatusText
     );
-    dropzone.addEventListener("dragover", (e) => {
-      if (e.dataTransfer?.types?.includes("Files")) {
-        e.preventDefault();
-        dropzone.classList.add("is-dragover");
-      }
-    });
-    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("is-dragover"));
-    dropzone.addEventListener("drop", async (e) => {
-      dropzone.classList.remove("is-dragover");
-      const files = Array.from(e.dataTransfer?.files || []);
-      if (files.length) {
-        e.preventDefault();
-        await processIncomingFiles(files, "拖入");
-      }
-    });
 
     const saveToggleRow = el("label", { class: "ref-picker-save-toggle" },
       saveToLibChk,
@@ -955,227 +1508,57 @@ export function openReferencePickerModal({
     setUploadingState(isUploading);
   }
 
-  function renderExtCategoriesAndAngles(gal) {
-    clear(catWrap);
-    const items = extItemsCache.get(gal.id) || [];
-    const seriesMap = new Map();
-    items.forEach((it) => {
-      const sk = it.meta?.series;
-      if (!sk) return;
-      if (!seriesMap.has(sk)) seriesMap.set(sk, { key: sk, label: it.meta?.seriesShort || sk, count: 0 });
-      seriesMap.get(sk).count++;
-    });
-
-    const basePool = extSeries ? items.filter((it) => (it.meta?.series || "") === extSeries) : items;
-    const cMap = new Map();
-    basePool.forEach((it) => {
-      const ck = it.category || "other";
-      if (!cMap.has(ck)) cMap.set(ck, { key: ck, label: it.categoryName || ck, count: 0 });
-      cMap.get(ck).count++;
-    });
-    if (activeCategory !== "ALL" && !cMap.has(activeCategory)) activeCategory = "ALL";
-
-    const useCatSelect = cMap.size > 6;
-    let catSelectWrap = null;
-    if (useCatSelect) {
-      const sel = el("select", {
-        class: "select ref-picker-cat-select",
-        "aria-label": "按分类筛选",
-        onChange: () => {
-          activeCategory = sel.value;
-          extPageLimit = 48;
-          renderExtGrid();
-        },
-      },
-        el("option", { value: "ALL", selected: activeCategory === "ALL" }, `全部分类 (${basePool.length})`),
-        ...Array.from(cMap.values()).map((c) =>
-          el("option", { value: c.key, selected: activeCategory === c.key }, `${c.label} (${c.count})`)
-        )
-      );
-      catSelectWrap = el("label", { class: "ref-picker-cat-select-wrap" },
-        el("span", { class: "muted", style: { fontSize: "11.5px" } }, "细分："),
-        sel
-      );
-    }
-
-    if (gal.multiVariant) {
-      const angles = [];
-      const seen = new Set();
-      for (const it of items) {
-        for (const v of (it.variants || [])) {
-          if (!v?.key || seen.has(v.key)) continue;
-          seen.add(v.key);
-          angles.push({ key: v.key, label: v.label || v.key });
-        }
-        if (angles.length >= 5) break;
-      }
-      if (angles.length) {
-        if (!angles.some((a) => a.key === extAngle)) extAngle = angles[0].key;
-        catWrap.appendChild(el("div", { class: "studio-cat-tabs ref-picker-ext-toprow", role: "group", "aria-label": "默认预览视角与分类" },
-          el("span", { class: "muted", style: { fontSize: "11.5px", alignSelf: "center", marginRight: "2px" } }, "默认视角："),
-          ...angles.map((a) => el("button", {
-            type: "button",
-            class: "btn btn-sm" + (extAngle === a.key ? " btn-primary" : ""),
-            onClick: () => { extAngle = a.key; renderExtCategoriesAndAngles(gal); renderExtGrid(); },
-          }, a.label)),
-          catSelectWrap
-        ));
-        catSelectWrap = null;
-      }
-    }
-
-    if (seriesMap.size > 1) {
-      catWrap.appendChild(el("div", { class: "studio-cat-tabs", role: "group", "aria-label": "系列筛选" },
-        ...[{ key: "", label: `全部系列 (${items.length})` }, ...Array.from(seriesMap.values()).map((s) => ({ key: s.key, label: `${s.label} (${s.count})` }))].map((s) =>
-          el("button", {
-            type: "button",
-            class: "btn btn-sm" + (extSeries === s.key ? " btn-primary" : ""),
-            onClick: () => { extSeries = s.key; activeCategory = "ALL"; extPageLimit = 48; renderExtCategoriesAndAngles(gal); renderExtGrid(); },
-          }, s.label)
-        ),
-        catSelectWrap
-      ));
-      catSelectWrap = null;
-    }
-
-    if (catSelectWrap) {
-      catWrap.appendChild(el("div", { class: "studio-cat-tabs" }, catSelectWrap));
-    } else if (!useCatSelect && cMap.size > 1) {
-      const pills = el("div", { class: "studio-cat-tabs", role: "group", "aria-label": "分类筛选" });
-      [{ key: "ALL", label: `全部 (${basePool.length})` }, ...Array.from(cMap.values()).map((c) => ({ key: c.key, label: `${c.label} (${c.count})` }))].forEach((g) => {
-        pills.appendChild(el("button", {
-          type: "button",
-          class: "btn btn-sm" + (activeCategory === g.key ? " btn-primary" : ""),
-          onClick: () => { activeCategory = g.key; extPageLimit = 48; renderExtCategoriesAndAngles(gal); renderExtGrid(); },
-        }, g.label));
-      });
-      catWrap.appendChild(pills);
-    }
-  }
-
-  function renderExtGrid() {
-    const gal = activeExtGallery();
-    if (!gal) return;
-    clear(grid);
-    if (extLoadingSet.has(gal.id) || !extItemsCache.has(gal.id)) {
-      countEl.textContent = `正在加载 ${gal.name || gal.id}…`;
-      grid.appendChild(el("p", { class: "muted", style: { gridColumn: "1 / -1", textAlign: "center", padding: "28px 0" } }, `正在加载 ${gal.name || gal.id}…`));
-      return;
-    }
-    const items = extItemsCache.get(gal.id) || [];
-    const q = searchQuery.trim().toLowerCase();
-    const visible = items.filter((it) => {
-      if (extSeries && (it.meta?.series || "") !== extSeries) return false;
-      if (activeCategory !== "ALL" && (it.category || "other") !== activeCategory) return false;
-      if (!q) return true;
-      const hay = `${it.id || ""} ${it.name || ""} ${it.nameEn || ""} ${it.categoryName || ""} ${it.traits || ""} ${(it.tags || []).join(" ")}`.toLowerCase();
-      return hay.includes(q);
-    });
-
-    const localHint = gal.localOnly ? " · 🔒 仅本机参考，不同步至网站" : "";
-    countEl.textContent = `共 ${visible.length} 项 · 已选 ${selectedRefs.length}/${limit}${localHint}`;
-    if (!visible.length) {
-      grid.appendChild(el("p", { class: "muted", style: { gridColumn: "1 / -1", textAlign: "center", padding: "28px 0" } }, "当前筛选条件下没有匹配条目"));
-      return;
-    }
-
-    const slice = visible.slice(0, extPageLimit);
-    slice.forEach((it, idx) => {
-      const vars = Array.isArray(it.variants) ? it.variants : [];
-      const activeVar = vars.length ? (vars.find((v) => v.key === extAngle) || vars[0]) : null;
-      const thumbSrc = activeVar
-        ? galleryImg(activeVar.thumbUrl || activeVar.imageUrl || "")
-        : galleryImg(it.thumbUrl || it.imageUrl || "");
-
-      // Check whether any angle of this pose (or this single item) is currently selected
-      const pickedAngles = vars.length
-        ? vars.filter((v) => {
-            const p = extKeyToPath.get(`${gal.id}:${it.id}:${v.key}`);
-            return Boolean(p && selectedRefs.includes(p));
-          })
-        : [];
-      const singlePath = !vars.length ? extKeyToPath.get(`${gal.id}:${it.id}:`) : "";
-      const isSel = vars.length ? pickedAngles.length > 0 : Boolean(singlePath && selectedRefs.includes(singlePath));
-
-      const wrap = el("div", { class: "studio-resource-thumb-wrap", dataset: { fallback: it.id || "图" } });
-      const img = el("img", {
-        src: thumbSrc,
-        alt: it.name || it.id,
-        decoding: "async",
-        loading: idx < 18 ? "eager" : "lazy",
-      });
-      img.addEventListener("load", () => { img.classList.add("is-loaded"); wrap.classList.remove("is-error"); });
-      img.addEventListener("error", () => { img.classList.add("is-error"); wrap.classList.add("is-error"); });
-      if (img.complete && img.naturalWidth > 0) img.classList.add("is-loaded", "is-instant");
-
-      const badgeText = isSel
-        ? (pickedAngles.length ? `✓ ${pickedAngles.map((v) => v.label).join("/")}` : "✓ 已选")
-        : "";
-      const checkBadge = el("span", { class: "ref-picker-check", "aria-hidden": "true" }, badgeText);
-      const anglePill = (!isSel && vars.length > 1)
-        ? el("span", { class: "ref-picker-angle-pill", "aria-hidden": "true" }, `${vars.length}视角`)
-        : null;
-      wrap.append(img, anglePill, checkBadge);
-
-      const isBusy = materializingKey === `${gal.id}:${it.id}:${activeVar?.key || ""}`;
-      const card = el("button", {
-        type: "button",
-        class: "studio-resource-option ref-picker-card is-ext-card" + (isSel ? " is-selected" : "") + (focusedPoseItem?.id === it.id ? " is-focused-pose" : ""),
-        "aria-pressed": String(isSel),
-        dataset: { extKind: gal.id, assetId: it.id || "" },
-        onClick: () => {
-          if (vars.length > 1) {
-            focusedPoseItem = focusedPoseItem?.id === it.id ? null : it;
-            renderPoseDrawer();
-            renderExtGrid();
-            if (focusedPoseItem) poseDrawerEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
-          } else {
-            toggleExtGalleryItem(gal, it, null);
-          }
-        },
-      },
-        wrap,
-        el("small", { class: "mono" }, vars.length > 1
-          ? `${it.meta?.no || it.id} · 点开选5视角`
-          : `${it.id} · ${it.categoryName || ""}`),
-        el("strong", null, isBusy ? "正在缓存…" : (it.name || it.id))
-      );
-      grid.appendChild(card);
-    });
-
-    if (visible.length > extPageLimit) {
-      grid.appendChild(el("div", { style: { gridColumn: "1 / -1", textAlign: "center", padding: "10px 0 4px" } },
-        el("button", {
-          type: "button",
-          class: "btn btn-sm",
-          onClick: () => { extPageLimit += 48; renderExtGrid(); },
-        }, `加载更多（已显示 ${slice.length} / ${visible.length}）`)
-      ));
-    }
-  }
-
-  function renderView() {
+  function renderCenter() {
     const isUpload = activeTab === "upload";
     const extGal = activeExtGallery();
-    searchRow.classList.toggle("hidden", isUpload);
-    catWrap.classList.toggle("hidden", isUpload);
+    renderToolbar();
     grid.classList.toggle("hidden", isUpload);
     uploadHost.classList.toggle("hidden", !isUpload);
 
     if (isUpload) {
-      poseDrawerEl.classList.add("hidden");
       renderUploadPanel();
     } else if (extGal) {
-      renderExtCategoriesAndAngles(extGal);
-      renderPoseDrawer();
       renderExtGrid();
     } else {
-      poseDrawerEl.classList.add("hidden");
-      renderCategoryPills();
       renderGrid();
     }
-    syncSelectionUI();
   }
+
+  function renderAll() {
+    renderRail();
+    renderCenter();
+    renderInspector();
+    renderSelectedDock();
+    confirmBtn.textContent = `✓ 确认选用 (${selectedRefs.length}/${limit})`;
+    clearBtn.disabled = selectedRefs.length === 0;
+  }
+
+  // Global drag-and-drop across the entire modal workspace
+  let dragDepth = 0;
+  workspace.addEventListener("dragenter", (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+    dragDepth++;
+    dropOverlay.classList.remove("hidden");
+  });
+  workspace.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+  });
+  workspace.addEventListener("dragleave", (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) dropOverlay.classList.add("hidden");
+  });
+  workspace.addEventListener("drop", async (e) => {
+    dragDepth = 0;
+    dropOverlay.classList.add("hidden");
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (files.length) {
+      e.preventDefault();
+      await processIncomingFiles(files, "拖入");
+    }
+  });
 
   let searchTimer = null;
   searchInput.addEventListener("input", () => {
@@ -1188,17 +1571,6 @@ export function openReferencePickerModal({
     }, 60);
   });
 
-  const body = el("div", { class: "studio-picker-dialog-body ref-picker-body" },
-    localFileInput,
-    topBar,
-    searchRow,
-    catWrap,
-    poseDrawerEl,
-    uploadHost,
-    grid,
-    selectedBar
-  );
-
   const onDialogPaste = async (e) => {
     if (!dlg?.open) return;
     const files = extractClipboardImageFiles(e);
@@ -1207,25 +1579,66 @@ export function openReferencePickerModal({
     await processIncomingFiles(files, "粘贴");
   };
 
-  const dlg = showModal(title, body, [clearBtn, cancelBtn, confirmBtn], {
-    className: "modal-picker modal-ref-picker",
+  const onDialogKeydown = (e) => {
+    if (!dlg?.open) return;
+    if (e.target instanceof HTMLElement && e.target.closest("input, textarea, select")) return;
+    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && inspected?.mode === "ext") {
+      const vars = Array.isArray(inspected.item?.variants) ? inspected.item.variants : [];
+      if (vars.length > 1) {
+        e.preventDefault();
+        const idx = vars.findIndex((v) => v.key === inspected.angleKey);
+        const delta = e.key === "ArrowRight" ? 1 : -1;
+        inspected.angleKey = vars[(idx + delta + vars.length) % vars.length].key;
+        renderInspector();
+      }
+    }
+  };
+
+  const body = el("div", { class: "ref-picker-studio-body" }, localFileInput, workspace);
+
+  const unsubEvents = onEvent((ev) => {
+    if (ev?.kind === "galleries" && dlg?.open) {
+      refreshGalleryMetadata(true);
+    }
+  });
+
+  const dlg = showModal(title, body, [cancelBtn, confirmBtn], {
+    className: "modal-picker modal-ref-picker modal-ref-picker-studio",
+    flush: true,
     onClose: () => {
       clearTimeout(searchTimer);
+      unsubEvents?.();
       document.removeEventListener("paste", onDialogPaste);
+      document.removeEventListener("keydown", onDialogKeydown);
     },
   });
   document.addEventListener("paste", onDialogPaste);
+  document.addEventListener("keydown", onDialogKeydown);
 
-  renderTabs();
-  renderView();
+  async function refreshGalleryMetadata(reloadActiveExt = false) {
+    const [galRes, packsRes] = await Promise.all([
+      api("GET", "/api/galleries").catch(() => ({ galleries: [] })),
+      api("GET", "/api/galleries/packs").catch(() => ({ packs: [] })),
+    ]);
+    extGalleries = mergeExtGalleries(galRes?.galleries || [], packsRes?.packs || []);
+    if (reloadActiveExt) {
+      const curGal = activeExtGallery();
+      if (curGal && curGal.installed) ensureExtItemsLoaded(curGal, true);
+    }
+    renderRail();
+    renderCenter();
+  }
 
-  // Hydrate categories, 自建图库, 官方图库 & installed extension galleries asynchronously.
+  renderAll();
+
+  // Initial hydration
   Promise.all([
     fetchAssetCategories(),
     api("GET", "/api/mine/assets").catch(() => ({ items: [] })),
     api("GET", "/api/resources/assets").catch(() => ({ items: [] })),
     api("GET", "/api/galleries").catch(() => ({ galleries: [] })),
-  ]).then(([cats, mineRes, packRes, galRes]) => {
+    api("GET", "/api/galleries/packs").catch(() => ({ packs: [] })),
+  ]).then(([cats, mineRes, packRes, galRes, packsRes]) => {
     if (Array.isArray(cats) && cats.length) categories = cats;
     const mMap = new Map();
     for (const a of (mineRes?.items || [])) {
@@ -1245,12 +1658,10 @@ export function openReferencePickerModal({
       if (!oMap.has(key)) oMap.set(key, a);
     }
     officialItems = Array.from(oMap.values());
-
-    extGalleries = (galRes?.galleries || []).filter((g) => g && g.id && !BUILTIN_EXT_IGNORE.has(g.id) && g.supportsRefImage && Number(g.count || 0) > 0);
+    extGalleries = mergeExtGalleries(galRes?.galleries || [], packsRes?.packs || []);
 
     loading = false;
     indexItems();
-    renderTabs();
-    renderView();
+    renderAll();
   });
 }

@@ -436,7 +436,7 @@ export async function renderChat(root, ctx, params = {}) {
     onClick: () => openReferencePickerModal({
       currentRefs: draftRefs || [],
       maxCount: MAX_REF_IMAGES,
-      title: "选择参考图（自建图库 / 本地上传 / 粘贴）",
+      title: "选择参考图",
       onConfirm: (nextRefs) => {
         draftRefs = nextRefs;
         renderDraftRefs();

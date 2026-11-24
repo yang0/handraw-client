@@ -135,4 +135,13 @@ func TestRuiCPoseAtlasInstallCacheAndUninstall(t *testing.T) {
 	if _, err := os.Stat(p1); !os.IsNotExist(err) {
 		t.Fatalf("expected cached pose image %s purged", p1)
 	}
+
+	// 5. EnsureDefaultExternalPacks respects explicit uninstall opt-out, while auto-installing all 3 on a fresh dir.
+	if n := EnsureDefaultExternalPacks(ctx, dir); n != 0 {
+		t.Fatalf("expected EnsureDefaultExternalPacks to respect uninstall opt-out, got %d", n)
+	}
+	freshDir := t.TempDir()
+	if n := EnsureDefaultExternalPacks(ctx, freshDir); n != 3 {
+		t.Fatalf("expected EnsureDefaultExternalPacks to auto-install all 3 packs on fresh dir, got %d", n)
+	}
 }

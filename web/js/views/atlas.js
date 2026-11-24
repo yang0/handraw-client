@@ -128,20 +128,9 @@ export async function renderAtlas(root, ctx, params = {}) {
     timer = setTimeout(() => { state.q = searchInput.value; drawContent(); }, 180);
   });
 
-  const managePacksBtn = el("button", {
-    type: "button",
-    class: "btn btn-sm",
-    dataset: { role: "open-ext-packs" },
-    title: "一键安装或管理第三方扩展图库（如 RuiC-PoseAtlas 姿态/衣装/人像，仅存本机不同步）",
-    onClick: () => openExternalPacksModal(() => renderAtlas(root, ctx), (installedId) => {
-      if (installedId) state.tab = installedId;
-      renderAtlas(root, ctx);
-    }),
-  }, extraGalleries.some((g) => g.localOnly) ? "📦 扩展图库" : "📦 安装扩展图库");
-
   root.appendChild(el("div", { class: "page-head atlas-head" },
     el("h1", { class: "page-title" }, "风格画廊"),
-    el("div", { class: "row atlas-toolbar" }, tabBar, managePacksBtn, searchInput)
+    el("div", { class: "row atlas-toolbar" }, tabBar, searchInput)
   ));
 
   const stage = el("div");
