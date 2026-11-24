@@ -4,6 +4,7 @@ import { openInspirationRemixModal, openShareInspirationModal } from "./work-rem
 
 const SOURCE_LABELS = {
   x: "X 采集",
+  xiaohongshu: "小红书",
   chrome: "浏览器剪藏",
   web: "网页采集",
   local: "我的生图",
@@ -163,7 +164,7 @@ export async function renderInspirations(root, ctx, params = {}) {
           drawTabs();
         }
         drawBody();
-      }),
+      }, latestVaultMeta),
     }, "＋ 收集新灵感")
   );
 
@@ -209,9 +210,26 @@ export async function renderInspirations(root, ctx, params = {}) {
   await drawBody();
 }
 
-function openCreateInspirationModal(ctx, onCreated) {
+function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
   let imageDataUrl = "";
-  const previewImg = el("img", { class: "insp-drop-preview hidden", alt: "预览图" });
+  let extractedAuthor = "";
+  let extractedPlatform = "";
+  let fetchedImages = [];
+  let selectedFetchedIdx = 0;
+
+  const isBareHttpUrl = (s) => /^https?:\/\/\S+$/i.test(String(s || "").trim());
+
+  const fetchUrlIn = el("input", {
+    class: "input",
+    type: "url",
+    placeholder: "粘贴 X 推文链接 (x.com/.../status/...) 或网页链接，自动抓取正文与原图",
+    style: { flex: "1", minWidth: "0" },
+  });
+  const fetchBtn = el("button", { type: "button", class: "btn btn-sm btn-primary", style: { flexShrink: "0" } }, "⚡ 解析链接");
+  const fetchStatusEl = el("div", { class: "insp-fetch-status hidden" });
+  const fetchedThumbsEl = el("div", { class: "insp-fetch-thumbs hidden" });
+
+  const previewImg = el("img", { class: "insp-drop-preview hidden", alt: "预览图", referrerpolicy: "no-referrer" });
   const dropHint = el("span", { class: "muted" }, "点击选图、拖拽图片到这里，或直接按 Ctrl+V 粘贴剪贴板图片");
   const fileIn = el("input", { type: "file", accept: "image/*", class: "hidden" });
 
@@ -247,11 +265,144 @@ function openCreateInspirationModal(ctx, onCreated) {
   const rawTextIn = el("textarea", {
     class: "input",
     rows: 5,
-    placeholder: "直接粘贴 X (Twitter) 推文全文、小红书文案或任意杂乱提示词…\n勾选下方「AI 自动整理」后，会自动去掉废话、翻译中文并提炼可替换变量！",
+    placeholder: "粘贴推文原文 / 提示词（若直接粘贴 X 或网页链接，将自动触发上方链接解析抓取）…",
   });
   const titleIn = el("input", { class: "input", placeholder: "标题（留空可由 AI 自动起名）" });
   const sourceUrlIn = el("input", { class: "input", placeholder: "来源链接（如推文链接，可选）" });
   const autoOrgChk = el("input", { type: "checkbox", checked: true });
+
+  const renderFetchedThumbs = () => {
+    clear(fetchedThumbsEl);
+    if (!fetchedImages.length) {
+      fetchedThumbsEl.classList.add("hidden");
+      return;
+    }
+    fetchedThumbsEl.classList.remove("hidden");
+    const applySelectedImage = (idx) => {
+      selectedFetchedIdx = idx;
+      const u = fetchedImages[idx] || "";
+      imgUrlIn.value = u;
+      imageDataUrl = "";
+      if (u) {
+        previewImg.src = u;
+        previewImg.classList.remove("hidden");
+        dropHint.textContent = fetchedImages.length > 1
+          ? `已选第 ${idx + 1}/${fetchedImages.length} 张原图作为封面（点上方缩略图可切换）`
+          : "已自动获取原图封面（点击此处可替换为本地图片）";
+      }
+      fetchedThumbsEl.querySelectorAll(".insp-fetch-thumb").forEach((btn, bi) => {
+        btn.classList.toggle("is-active", bi === idx);
+      });
+    };
+    if (fetchedImages.length > 1) {
+      fetchedThumbsEl.appendChild(el("span", { class: "muted", style: { fontSize: "11.5px", width: "100%" } }, `抓取到 ${fetchedImages.length} 张原图（点击选择封面图）：`));
+      fetchedImages.forEach((u, idx) => {
+        fetchedThumbsEl.appendChild(el("button", {
+          type: "button",
+          class: "insp-fetch-thumb" + (idx === selectedFetchedIdx ? " is-active" : ""),
+          title: `选用第 ${idx + 1} 张原图`,
+          onClick: () => applySelectedImage(idx),
+        }, el("img", { src: u, alt: `图 ${idx + 1}`, referrerpolicy: "no-referrer" })));
+      });
+    }
+    applySelectedImage(selectedFetchedIdx);
+  };
+
+  let isFetching = false;
+  const runFetchUrl = async (explicitUrl) => {
+    const target = String(explicitUrl ?? fetchUrlIn.value).trim();
+    if (!target) {
+      toast("请先粘贴要解析的链接");
+      fetchUrlIn.focus();
+      return;
+    }
+    if (!isBareHttpUrl(target)) {
+      toast("请输入完整的 http:// 或 https:// 链接");
+      return;
+    }
+    if (isFetching) return;
+    isFetching = true;
+    fetchBtn.disabled = true;
+    fetchBtn.textContent = "解析中…";
+    fetchUrlIn.value = target;
+    clear(fetchStatusEl);
+    fetchStatusEl.className = "insp-fetch-status";
+    fetchStatusEl.appendChild(el("span", { class: "muted" }, "正在按平台规则抓取原文与高清原图…"));
+
+    try {
+      const res = await api("POST", "/api/inspirations/fetch-url", { url: target });
+      const ext = res.extracted || {};
+      extractedPlatform = ext.platform || "";
+      extractedAuthor = ext.author || "";
+      if (ext.sourceUrl) sourceUrlIn.value = ext.sourceUrl;
+      else sourceUrlIn.value = target;
+
+      if (ext.text) rawTextIn.value = ext.text;
+      if (ext.title && !titleIn.value.trim()) titleIn.value = ext.title;
+
+      fetchedImages = Array.isArray(ext.images) ? ext.images.filter(Boolean) : [];
+      selectedFetchedIdx = 0;
+      renderFetchedThumbs();
+
+      clear(fetchStatusEl);
+      if (ext.needClipper) {
+        fetchStatusEl.className = "insp-fetch-status is-warn";
+        fetchStatusEl.append(
+          el("span", null, ext.warning || "该平台受登录态或防爬限制，建议在浏览器中用「Chrome 灵感捕手」一键剪藏。"),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm",
+            style: { alignSelf: "flex-start" },
+            onClick: () => {
+              cleanupAndClose();
+              openClipperSetupModal(clipMeta);
+            },
+          }, "🧩 配置 Chrome 灵感捕手")
+        );
+      } else {
+        fetchStatusEl.className = "insp-fetch-status is-ok";
+        const platformName = SOURCE_LABELS[ext.platform] || ext.platform || "网页";
+        const parts = [`✓ 已通过 ${ext.adapter || platformName} 解析`];
+        if (ext.author) parts.push(`作者 ${ext.author}`);
+        if (fetchedImages.length) parts.push(`获取到 ${fetchedImages.length} 张原图`);
+        fetchStatusEl.appendChild(el("span", null, parts.join(" · ")));
+        if (ext.warning) {
+          fetchStatusEl.appendChild(el("span", { class: "muted", style: { fontSize: "11.5px" } }, ext.warning));
+        }
+      }
+    } catch (e) {
+      clear(fetchStatusEl);
+      fetchStatusEl.className = "insp-fetch-status is-warn";
+      fetchStatusEl.appendChild(el("span", null, e?.message || "解析链接失败，请改用「Chrome 灵感捕手」或手动粘贴内容"));
+    } finally {
+      isFetching = false;
+      fetchBtn.disabled = false;
+      fetchBtn.textContent = "⚡ 解析链接";
+    }
+  };
+
+  fetchBtn.addEventListener("click", () => runFetchUrl());
+  fetchUrlIn.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      runFetchUrl();
+    }
+  });
+  fetchUrlIn.addEventListener("paste", (e) => {
+    const pasted = (e.clipboardData?.getData("text") || "").trim();
+    if (isBareHttpUrl(pasted)) {
+      setTimeout(() => runFetchUrl(pasted), 40);
+    }
+  });
+  rawTextIn.addEventListener("paste", (e) => {
+    const pasted = (e.clipboardData?.getData("text") || "").trim();
+    const curVal = rawTextIn.value.trim();
+    if (isBareHttpUrl(pasted) && (!curVal || rawTextIn.selectionStart === 0 && rawTextIn.selectionEnd === rawTextIn.value.length)) {
+      e.preventDefault();
+      fetchUrlIn.value = pasted;
+      runFetchUrl(pasted);
+    }
+  });
 
   const onPaste = (e) => {
     const items = e.clipboardData?.items || [];
@@ -272,7 +423,18 @@ function openCreateInspirationModal(ctx, onCreated) {
     closeModal();
   };
 
+  const urlFetchBox = el("div", { class: "insp-url-fetch-box col" },
+    el("div", { class: "row", style: { justifyContent: "space-between", gap: "6px" } },
+      el("strong", { style: { fontSize: "12.5px" } }, "🔗 粘贴链接一键解析（支持 X 推文 / 网页 / 小红书引导）"),
+      el("span", { class: "muted", style: { fontSize: "11px" } }, "按平台自动提取正文与高清原图")
+    ),
+    el("div", { class: "row", style: { gap: "8px" } }, fetchUrlIn, fetchBtn),
+    fetchStatusEl,
+    fetchedThumbsEl
+  );
+
   const body = el("div", { class: "col", style: { gap: "10px" } },
+    urlFetchBox,
     dropZone,
     el("div", { class: "field" }, el("label", null, "推文原文 / 提示词"), rawTextIn),
     el("div", { class: "row", style: { gap: "10px" } },
@@ -292,15 +454,16 @@ function openCreateInspirationModal(ctx, onCreated) {
     onClick: async () => {
       const rawTxt = rawTextIn.value.trim();
       const urlVal = imgUrlIn.value.trim();
-      if (!imageDataUrl && !urlVal && !rawTxt) {
-        toast("请至少上传/粘贴一张图片，或输入一段提示词/推文");
+      const srcUrl = sourceUrlIn.value.trim() || fetchUrlIn.value.trim();
+      if (!imageDataUrl && !urlVal && !rawTxt && !isBareHttpUrl(srcUrl)) {
+        toast("请粘贴链接解析，或上传图片 / 输入一段提示词");
         return;
       }
       saveBtn.disabled = true;
       saveBtn.textContent = autoOrgChk.checked ? "正在保存并 AI 整理…" : "正在保存…";
       try {
-        const srcUrl = sourceUrlIn.value.trim();
-        const inferredSource = /x\.com|twitter\.com/i.test(srcUrl) ? "x" : "import";
+        const inferredSource = extractedPlatform
+          || (/x\.com|twitter\.com/i.test(srcUrl) ? "x" : (/xiaohongshu\.com|xhslink\.com/i.test(srcUrl) ? "xiaohongshu" : "import"));
         const res = await api("POST", "/api/inspirations", {
           title: titleIn.value.trim(),
           imageDataUrl,
@@ -309,6 +472,7 @@ function openCreateInspirationModal(ctx, onCreated) {
           prompt: rawTxt,
           source: inferredSource,
           sourceUrl: srcUrl,
+          sourceAuthor: extractedAuthor,
           autoOrganize: autoOrgChk.checked,
         });
         cleanupAndClose();
@@ -597,7 +761,7 @@ async function renderVaultTab(stage, ctx, onMeta) {
           el("button", {
             type: "button",
             class: "btn btn-primary",
-            onClick: () => openCreateInspirationModal(ctx, loadVault),
+            onClick: () => openCreateInspirationModal(ctx, loadVault, { clipToken: res.clipToken, clipEndpoint: res.clipEndpoint }),
           }, "＋ 粘贴第一条灵感 / 推文"),
           el("button", {
             type: "button",

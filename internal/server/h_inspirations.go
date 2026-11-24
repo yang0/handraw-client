@@ -100,7 +100,14 @@ func fetchRemoteImageBytes(ctx context.Context, rawURL string) ([]byte, error) {
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("下载图片失败 (HTTP %d)", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 12<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 12<<20))
+	if err != nil {
+		return nil, err
+	}
+	if !isValidImageBytes(resp.Header.Get("Content-Type"), raw) {
+		return nil, fmt.Errorf("该链接返回的不是有效图片（可能是网页地址，请使用上方「解析链接」抓取）")
+	}
+	return raw, nil
 }
 
 func (s *Server) readInspiration(id string) (inspirationItem, error) {
@@ -322,6 +329,20 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 	}, nil
 }
 
+func (s *Server) inspirationsFetchURL(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	ext, err := s.extractInspirationFromURL(r.Context(), body.URL)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "extracted": ext}, nil
+}
+
 func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
 		Title          string            `json:"title"`
@@ -348,6 +369,44 @@ func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any
 	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
+
+	// If the caller pasted a bare URL instead of actual text, fetch real content via
+	// the platform URL adapter registry so AI organize never hallucinates from a URL (#88).
+	bareCandidate := ""
+	if u, ok := isBareURL(body.RawText); ok && (strings.TrimSpace(body.Prompt) == "" || strings.TrimSpace(body.Prompt) == strings.TrimSpace(body.RawText)) {
+		bareCandidate = u
+	} else if u, ok := isBareURL(body.Prompt); ok && strings.TrimSpace(body.RawText) == "" {
+		bareCandidate = u
+	} else if strings.TrimSpace(body.RawText) == "" && strings.TrimSpace(body.Prompt) == "" && strings.TrimSpace(body.ImageDataURL) == "" && strings.TrimSpace(body.ImagePath) == "" {
+		if u, ok := isBareURL(body.SourceURL); ok {
+			bareCandidate = u
+		}
+	}
+	if bareCandidate != "" {
+		ext, err := s.extractInspirationFromURL(r.Context(), bareCandidate)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(ext.Text) == "" && len(ext.Images) == 0 {
+			return nil, bad(firstStr(ext.Warning, "未能从该链接抓取到正文或配图，请改用「Chrome 灵感捕手」剪藏或手动粘贴内容"))
+		}
+		body.RawText = ext.Text
+		body.Prompt = ext.Text
+		body.SourceURL = firstStr(ext.SourceURL, bareCandidate)
+		if strings.TrimSpace(body.SourceAuthor) == "" {
+			body.SourceAuthor = ext.Author
+		}
+		if strings.TrimSpace(body.Title) == "" {
+			body.Title = ext.Title
+		}
+		if ext.Platform != "" {
+			body.Source = ext.Platform
+		}
+		if strings.TrimSpace(body.ImageURL) == "" && len(ext.Images) > 0 {
+			body.ImageURL = ext.Images[0]
+		}
+	}
+
 	id := jobs.NewID("insp")
 	imgPath := strings.TrimSpace(body.ImagePath)
 	if imgPath != "" {
@@ -573,6 +632,43 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
 		return item, bad("没有可供 AI 整理的原文或提示词")
 	}
 
+	// Anti-hallucination guard: never send a bare URL to the LLM; resolve real content first (#88).
+	if bareURL, ok := isBareURL(sourceText); ok {
+		ext, err := s.extractInspirationFromURL(ctx, bareURL)
+		if err != nil {
+			return item, bad("原始内容仅为链接且抓取失败（" + err.Error() + "），已中止 AI 整理以避免编造内容")
+		}
+		if ext == nil || strings.TrimSpace(ext.Text) == "" {
+			msg := "原始内容仅为链接且未能抓取到正文，已中止 AI 整理以避免编造内容；请改用「Chrome 灵感捕手」剪藏或手动粘贴正文"
+			if ext != nil && strings.TrimSpace(ext.Warning) != "" {
+				msg = ext.Warning
+			}
+			return item, bad(msg)
+		}
+		d := item.inspirationData
+		d.RawText = ext.Text
+		d.Prompt = ext.Text
+		d.SourceURL = firstStr(ext.SourceURL, bareURL)
+		if d.SourceAuthor == "" {
+			d.SourceAuthor = ext.Author
+		}
+		if ext.Platform != "" {
+			d.Source = ext.Platform
+		}
+		if d.ImagePath == "" && len(ext.Images) > 0 {
+			d.ImageURL = ext.Images[0]
+			if rawImg, dErr := fetchRemoteImageBytes(ctx, ext.Images[0]); dErr == nil && len(rawImg) > 0 {
+				if saved, _, sErr := saveInspirationImageBytes(item.ID, rawImg); sErr == nil {
+					d.ImagePath = saved
+				}
+			}
+		}
+		if updated, sErr := s.saveInspiration(item.ID, d); sErr == nil {
+			item = updated
+		}
+		sourceText = strings.TrimSpace(ext.Text)
+	}
+
 	styleHint := ""
 	if p := s.Pack(); p != nil && len(p.Styles) > 0 {
 		var sample []string
@@ -586,18 +682,18 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
 	}
 
 	sysPrompt := `你是手绘风「灵感库」的 AI 提示词整理专家。
-用户会粘贴一段从 X (Twitter)、小红书或网页抓取的杂乱内容（可能含英文推文、emoji、话题标签、求赞废话、中英混杂的生图提示词）。
-请严格输出合法 JSON（不要 markdown 代码块，不要解释文字），包含以下字段：
+用户会粘贴一段从 X (Twitter)、小红书或网页抓取的真实内容（可能含英文推文、emoji、话题标签、求赞废话、中英混杂的生图提示词）。
+请严格忠实于原始内容（严禁凭空编造原文中不存在的场景或主体），输出合法 JSON（不要 markdown 代码块，不要解释文字），包含以下字段：
 {
   "title": "不超过22字的精准中文灵感标题",
-  "prompt": "剥离推文废话/emoji/hashtag后的纯净可执行生图提示词（若是英文提示词保留高质量英文；若本为中文保留高质量中文）",
+  "prompt": "剥离推文废话/emoji/hashtag后的纯净可执行生图提示词（若是英文提示词保留高质量英文；若本为中文保留高质量中文；尽量保留原文的 [变量] 或核心指令）",
   "promptZh": "自然易读的中文完整提示词版本（方便中文用户阅读与改写）",
   "slots": [
     {"key": "subject", "label": "主体", "defaultValue": "原提示词中的主体"},
     {"key": "scene", "label": "场景/氛围", "defaultValue": "原场景"}
   ],
   "tags": ["标签1", "标签2", "标签3"],
-  "suggestedStyle": "如果与手绘风库中某个编号相近则填编号如 FA-013，否则留空"
+  "suggestedStyle": "仅当原提示词明确属于手绘/水彩/插画且高度匹配下方编号时才填写如 FA-013；若原提示词为 3D/写实摄影/电影/通用外部风格，请务必留空字符串 \"\""
 }
 要求：slots 提炼 1~4 个最值得用户「做同款」时替换的关键变量；tags 给 3~5 个简洁中文标签（不带#）。` + styleHint
 

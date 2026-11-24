@@ -120,9 +120,10 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/images/{id}/copy", s.h(s.imageCopy))
 	m.HandleFunc("GET /api/queue", s.h(s.queue))
 
-	// inspirations vault, AI organize, prompt unlock & Chrome clipper (#73)
+	// inspirations vault, AI organize, prompt unlock & Chrome clipper (#73, #88)
 	m.HandleFunc("GET /api/inspirations", s.h(s.inspirationsList))
 	m.HandleFunc("POST /api/inspirations", s.h(s.inspirationsCreate))
+	m.HandleFunc("POST /api/inspirations/fetch-url", s.h(s.inspirationsFetchURL))
 	m.HandleFunc("PATCH /api/inspirations/{id}", s.h(s.inspirationsPatch))
 	m.HandleFunc("DELETE /api/inspirations/{id}", s.h(s.inspirationsDelete))
 	m.HandleFunc("GET /api/inspirations/clip/ping", s.h(s.inspirationsClipPing))
