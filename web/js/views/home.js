@@ -1,6 +1,6 @@
 import { api, clear, el, localImg, openURL, remoteThumb, toast } from "../api.js";
 import { mountSlotPanels } from "../plugins-host.js";
-import { masonry } from "../masonry.js";
+import { createCardSizeSwitcher, masonry } from "../masonry.js";
 import { openWorkRemixModal } from "./work-remix-modal.js";
 
 const discoveryLabels = { work: "作品", style: "画风", layout: "图型", topic: "论坛" };
@@ -179,10 +179,18 @@ export async function renderHome(container, ctx) {
     if (e.key === "Enter") submitQuick();
   });
 
+  const sizeSwitcher = createCardSizeSwitcher({
+    storageKey: "handraw_home_size",
+    host: root,
+  });
+
   const hero = el("section", { class: "card", style: { marginBottom: "18px", padding: "18px 20px" } },
-    el("div", { class: "row", style: { justifyContent: "space-between", marginBottom: "10px" } },
+    el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "10px", marginBottom: "10px" } },
       el("h1", { class: "page-title" }, "今天想画什么？"),
-      el("span", { class: "muted" }, `本地画风 ${sumRes.counts?.styles || 0} · 图型 ${sumRes.counts?.layouts || 0} · 主题色 ${sumRes.counts?.colors || 0} · 影调 ${sumRes.counts?.tones || 0}`)
+      el("div", { class: "row", style: { gap: "10px", alignItems: "center", flexWrap: "wrap" } },
+        el("span", { class: "muted" }, `本地画风 ${sumRes.counts?.styles || 0} · 图型 ${sumRes.counts?.layouts || 0} · 主题色 ${sumRes.counts?.colors || 0} · 影调 ${sumRes.counts?.tones || 0}`),
+        sizeSwitcher.el
+      )
     ),
     el("div", { class: "row" },
       el("div", { style: { flex: "1", minWidth: "240px" } }, themeInput),
