@@ -200,6 +200,8 @@ async function start() {
     });
   }
 
+  const PADDED_VIEWS = new Set(["home", "atlas", "recipes", "annotate", "works", "inspirations", "plugins", "settings"]);
+
   async function go(view, params = {}) {
     if (view === "series") {
       view = "create";
@@ -214,6 +216,9 @@ async function start() {
       history.replaceState(null, "", "#" + currentView);
     }
     updateActiveNav();
+    const viewKind = currentView.startsWith("dsh:") ? "dsh" : (currentView.startsWith("plugin:") ? "plugin" : currentView);
+    main.dataset.view = viewKind;
+    main.classList.toggle("is-padded-view", PADDED_VIEWS.has(viewKind));
     clear(main);
 
     if (currentView.startsWith("dsh:")) {
@@ -221,7 +226,7 @@ async function start() {
       const plugRes = await api("GET", "/api/plugins").catch(() => ({ community: [] }));
       const comm = (plugRes.community || []).find((x) => x.id === pid && x.enabled && x.kind === "dsh");
       if (!comm) {
-        main.appendChild(el("div", { class: "card muted" }, "该 DSH 插件未启用或不存在。请先在侧栏「插件」中启用。"));
+        main.appendChild(el("div", { class: "card muted", style: { margin: "14px" } }, "该 DSH 插件未启用或不存在。请先在侧栏「插件」中启用。"));
         return;
       }
       const titleEl = el("h1", { class: "page-title" }, comm.name || comm.id);
@@ -236,14 +241,14 @@ async function start() {
         "data-dsh-plugin": comm.id,
         style: {
           width: "100%",
-          height: "calc(100vh - 132px)",
-          border: "1px solid var(--line)",
-          borderRadius: "12px",
+          flex: "1 1 auto",
+          minHeight: "0",
+          border: "0",
           background: "var(--surface)",
           display: "block",
         },
       });
-      main.appendChild(el("div", { class: "page-head", style: { marginBottom: "10px" } },
+      main.appendChild(el("div", { class: "page-head plugin-host-head" },
         titleEl,
         el("div", { class: "row" },
           el("span", { class: "badge badge-accent" }, "DSH 兼容插件"),
@@ -261,14 +266,14 @@ async function start() {
       const comm = (plugRes.community || []).find((x) => x.id === pid && x.enabled);
       const panel = idxStr === "page" ? comm?.page : comm?.panels?.[Number(idxStr || 0)];
       if (!comm || !panel) {
-        main.appendChild(el("div", { class: "card muted" }, "该社区插件未启用或面板不存在。"));
+        main.appendChild(el("div", { class: "card muted", style: { margin: "14px" } }, "该社区插件未启用或面板不存在。"));
         return;
       }
-      main.appendChild(el("div", { class: "page-head" },
+      main.appendChild(el("div", { class: "page-head plugin-host-head" },
         el("h1", { class: "page-title" }, `${comm.name} · ${panel.title || "扩展页面"}`),
         el("span", { class: "badge" }, "沙箱插件")
       ));
-      const frameWrap = el("div", { style: { height: "calc(100vh - 150px)" } }, mountPluginFrame(comm.id, panel.file, { view: currentView }));
+      const frameWrap = el("div", { style: { flex: "1 1 auto", minHeight: "0", display: "flex", flexDirection: "column" } }, mountPluginFrame(comm.id, panel.file, { view: currentView }));
       main.appendChild(frameWrap);
       return;
     }

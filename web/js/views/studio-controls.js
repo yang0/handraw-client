@@ -1,4 +1,4 @@
-import { clear, closeModal, el, packImg, showModal } from "../api.js";
+import { clear, closeModal, el, packImg, showModal, toast } from "../api.js";
 
 const css = el("link", { rel: "stylesheet", href: new URL("../../css/studio.css", import.meta.url).href });
 document.head.appendChild(css);
@@ -183,13 +183,14 @@ export function warmResourceThumbs(items, limit = 24) {
   }
 }
 
-export function openResourceDialog(title, items, selected, onSelect, { empty = "不指定" } = {}) {
+export function openResourceDialog(title, items, selected, onSelect, { empty = "不指定", allowRandom = true } = {}) {
   const search = el("input", { class: "input", type: "search", placeholder: "搜索编号、名称或关键词…", autofocus: true });
   const catBar = el("div", { class: "studio-cat-tabs", role: "group", "aria-label": `${title}分类` });
   const grid = el("div", { class: "studio-resource-grid" });
   const count = el("p", { class: "muted", role: "status", style: { margin: "0" } });
 
   let activeCat = "";
+  let currentVisible = items.slice();
   const catCounts = new Map();
   const searchIndex = items.map((item) => {
     const c = resourceCategory(item);
@@ -280,7 +281,9 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
       if (q && !searchIndex[i].includes(q)) continue;
       visible.push(x);
     }
+    currentVisible = visible;
     count.textContent = `共 ${visible.length} 项`;
+    if (randomBtn) randomBtn.disabled = visible.length === 0;
     if (!visible.length) {
       grid.appendChild(el("p", { class: "muted", style: { gridColumn: "1 / -1", textAlign: "center", padding: "24px 0" } }, "没有匹配的条目"));
       return;
@@ -334,12 +337,38 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
     }
   };
 
+  const pickRandom = () => {
+    const src = currentVisible.length ? currentVisible : items;
+    if (!src.length) {
+      toast("当前没有可随机选择的条目");
+      return;
+    }
+    const candidates = src.length > 1 ? src.filter((x) => resourceId(x) !== selected) : src;
+    const pool = candidates.length ? candidates : src;
+    const picked = pool[Math.floor(Math.random() * pool.length)];
+    const id = resourceId(picked);
+    choose(id);
+    toast(`🎲 已随机选择${title}：${id} ${resourceName(picked)}`);
+  };
+
+  const randomBtn = allowRandom && items.length > 1
+    ? el("button", {
+        type: "button",
+        class: "btn btn-sm studio-picker-random-btn",
+        title: `从当前筛选结果中随机选择一个${title}`,
+        onClick: pickRandom,
+      }, "🎲 随机选择")
+    : null;
+
   search.addEventListener("input", () => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(renderGrid, 60);
   });
   const body = el("div", { class: "studio-picker-dialog-body" },
-    el("search", null, field("筛选", search)),
+    el("search", { class: "studio-picker-search-row" },
+      el("div", { style: { flex: "1 1 auto", minWidth: 0 } }, field("筛选", search)),
+      randomBtn
+    ),
     catBar,
     count,
     grid

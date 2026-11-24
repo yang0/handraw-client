@@ -810,7 +810,7 @@ export async function renderCreate(root, ctx, params = {}) {
   );
 
   const workspace = el("div", { class: "make-image-chat-workspace" }, leftPane, conversation);
-  const slotContainer = el("div", { style: { marginTop: "4px" } });
+  const slotContainer = el("div", { class: "studio-slot-container" });
   root.append(workspace, slotContainer);
 
   mountSlotPanels(slotContainer, "create-footer", {
