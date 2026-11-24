@@ -278,10 +278,84 @@ func matchToneInPack(p *resources.Pack, q string) (string, string) {
 	return "", stripParenEn(q)
 }
 
+// parseRunMeta extracts run.Meta JSON into a map safely.
+func parseRunMeta(raw json.RawMessage) map[string]any {
+	out := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &out)
+	}
+	return out
+}
+
+func runHasExplicitDirectMeta(run store.Run) bool {
+	m := parseRunMeta(run.Meta)
+	if v, ok := m["directPrompt"].(bool); ok && v {
+		return true
+	}
+	return false
+}
+
+// isDirectPromptRun reports whether a run was generated directly from a raw
+// prompt without Handraw Skill (no Skill style/layout/color/tone/mood recipe).
+func isDirectPromptRun(run store.Run, resolved map[string]any) bool {
+	if runHasExplicitDirectMeta(run) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(run.Mode), "edit") {
+		return false
+	}
+	if resolved == nil {
+		return false
+	}
+	if sids, ok := resolved["styleIds"].([]string); ok && len(sids) > 0 {
+		return false
+	}
+	if lid, _ := resolved["layoutId"].(string); strings.TrimSpace(lid) != "" {
+		return false
+	}
+	if lay, ok := resolved["layout"].(map[string]string); ok && (strings.TrimSpace(lay["id"]) != "" || strings.TrimSpace(lay["name"]) != "") {
+		return false
+	}
+	if cols, ok := resolved["colors"].([]string); ok && len(cols) > 0 {
+		return false
+	}
+	if tns, ok := resolved["tones"].([]string); ok && len(tns) > 0 {
+		return false
+	}
+	if mood, _ := resolved["mood"].(string); strings.TrimSpace(mood) != "" {
+		return false
+	}
+	return true
+}
+
 // resolveRunRecipe returns a complete, human-readable recipe map for a run,
 // inheriting from ancestor versions and recovering missing layout/color/tone/
 // style fields from prompt markers for historical runs (#85).
 func (s *Server) resolveRunRecipe(run store.Run, versions []store.Run) map[string]any {
+	if runHasExplicitDirectMeta(run) {
+		meta := parseRunMeta(run.Meta)
+		strField := func(k string) string {
+			v, _ := meta[k].(string)
+			return strings.TrimSpace(v)
+		}
+		rec := parseRawRecipe(run.Recipe)
+		return map[string]any{
+			"directPrompt": true,
+			"styleIds":     []string{},
+			"styles":       []map[string]string{},
+			"layoutId":     "",
+			"colors":       []string{},
+			"colorItems":   []map[string]string{},
+			"tones":        []string{},
+			"toneItems":    []map[string]string{},
+			"mood":         "",
+			"ratio":        firstStr(strField("ratio"), rec.Ratio),
+			"mode":         firstStr(rec.Mode, run.Mode),
+			"resolution":   firstStr(strField("resolution"), rec.Resolution),
+			"quality":      firstStr(strField("quality"), rec.Quality),
+		}
+	}
+
 	var p *resources.Pack
 	if s != nil {
 		p = s.Pack()

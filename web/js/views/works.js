@@ -95,11 +95,16 @@ async function drawLocal(stage, ctx, root) {
       const doneImgs = (run.images || []).filter((i) => i.status === "done" && i.path);
       const im = doneImgs[0];
       const src = im.thumb ? localImg(im.thumb) : localImg(im.path);
+      let runMeta = {};
+      try { runMeta = typeof run.meta === "string" ? JSON.parse(run.meta) : (run.meta || {}); } catch {}
+      const isDirectCard = Boolean(runMeta.directPrompt);
       grid.appendChild(el("div", { class: "style-card", onClick: () => openRunDetail(run.id, ctx, loadGrid) },
         el("img", { class: "style-thumb", src, alt: run.title || "", loading: "lazy" }),
         el("div", { class: "style-body" },
           el("div", { class: "row", style: { justifyContent: "space-between" } },
-            el("span", { class: "badge" }, run.mode || "single"),
+            isDirectCard
+              ? el("span", { class: "badge badge-direct" }, "⚡ 直出")
+              : el("span", { class: "badge" }, run.mode || "single"),
             run.publishedWorkId ? el("span", { class: "badge badge-ok" }, "已发布") : el("span", { class: "muted" }, "仅本地")
           ),
           el("div", { class: "style-name" }, (run.starred ? "★ " : "") + (run.title || "未命名作品")),
@@ -248,12 +253,13 @@ async function openRunDetail(runId, ctx, onChanged) {
   };
   const expandedInfo = extractExpandedPrompts(run, doneImages);
   const originalReqText = String(run.originalRequest || "").trim();
+  const isDirectPrompt = Boolean(detail.isDirectPrompt);
 
   // Shared modal state
   let activeIdx = 0;
   let zoomed = false;
   let activeTab = "details"; // "details" | "publish"
-  let publishMode = "work";  // "work" | "inspiration"
+  let publishMode = isDirectPrompt ? "inspiration" : "work";  // "work" | "inspiration"
   let workPrice = 2;
   let inspPrice = 5;
   let publishedInspReceipt = null;
@@ -306,13 +312,24 @@ async function openRunDetail(runId, ctx, onChanged) {
     type: "button",
     class: "btn btn-sm btn-accent-soft",
     onClick: () => {
+      const curImg = doneImages[activeIdx] || doneImages[0];
+      const activePrompt = String(curImg?.prompt || expandedInfo.defaultPrompt || originalReqText || run.title || "").trim();
       closeModal();
-      ctx.go("create", {
-        recipe: parsedRec.raw,
-        theme: originalReqText || run.title || "",
-      });
+      if (isDirectPrompt) {
+        ctx.go("create", {
+          directPrompt: true,
+          ratio: parsedRec.ratio || "",
+          theme: activePrompt,
+        });
+      } else {
+        ctx.go("create", {
+          directPrompt: false,
+          recipe: parsedRec.raw,
+          theme: originalReqText || run.title || "",
+        });
+      }
     },
-  }, "✨ 同配方再画");
+  }, isDirectPrompt ? "⚡ 同提示词再画" : "✨ 同配方再画");
   const exportBanner = el("div", { class: "wd-export-banner", hidden: true });
   const showExportBanner = (info) => {
     clear(exportBanner);
@@ -358,7 +375,9 @@ async function openRunDetail(runId, ctx, onChanged) {
   const exportBtn = el("button", {
     type: "button",
     class: "btn btn-sm",
-    title: "打包本作品所有图片与配方记录为 ZIP，并在文件管理器中定位",
+    title: isDirectPrompt
+      ? "打包本作品所有图片与提示词记录为 ZIP，并在文件管理器中定位"
+      : "打包本作品所有图片与配方记录为 ZIP，并在文件管理器中定位",
     onClick: async () => {
       exportBtn.disabled = true;
       exportBtn.textContent = "打包中…";
@@ -384,7 +403,11 @@ async function openRunDetail(runId, ctx, onChanged) {
     const im = doneImages[activeIdx];
     if (!im) return;
     closeModal();
-    ctx.go("create", { editImage: im.path, theme: originalReqText || run.title });
+    ctx.go("create", {
+      directPrompt: isDirectPrompt,
+      editImage: im.path,
+      theme: (isDirectPrompt ? (im.prompt || expandedInfo.defaultPrompt) : originalReqText) || run.title,
+    });
   });
 
   const stageDock = el("div", { class: "wd-dock" },
@@ -464,11 +487,11 @@ async function openRunDetail(runId, ctx, onChanged) {
           title: titleIn.value.trim() || run.title || "我的创作灵感",
           imagePath: activeImg?.path || "",
           prompt: activePrompt,
-          promptZh: expandedInfo.zh || "",
+          promptZh: isDirectPrompt ? "" : (expandedInfo.zh || ""),
           source: "local",
           runId: run.id,
-          recipe: parsedRec.raw,
-          suggestedStyle: parsedRec.styleIds[0] || "",
+          recipe: isDirectPrompt ? {} : parsedRec.raw,
+          suggestedStyle: isDirectPrompt ? "" : (parsedRec.styleIds[0] || ""),
         });
         toast("已暂存到本地灵感库，可随时 AI 整理或定价分享");
       } catch (e) { toast(e.message); }
@@ -522,7 +545,40 @@ async function openRunDetail(runId, ctx, onChanged) {
   const pane = el("div", { class: "wd-pane" });
   const inspectorFoot = el("div", { class: "wd-inspector-foot", hidden: true });
 
-  // ---------- Details Tab Components (pre-skill & post-skill synced with active image) ----------
+  // ---------- Details Tab Components ----------
+  const directSpecsChips = [];
+  const pushDirectChip = (k, v) => {
+    if (!v) return;
+    directSpecsChips.push(el("span", { class: "work-recipe-chip" }, el("span", { class: "k" }, k), el("strong", null, v)));
+  };
+  if (parsedRec.ratio) pushDirectChip("比例", parsedRec.ratio);
+  if (parsedRec.resolution) pushDirectChip("分辨率", parsedRec.resolution);
+  if (parsedRec.quality) pushDirectChip("规格", parsedRec.quality);
+  if (run.modelLabel || run.model) pushDirectChip("生图模型", run.modelLabel || run.model);
+
+  let activeDirectText = expandedInfo.defaultPrompt || originalReqText || "";
+  const directPromptPre = el("pre", { class: "work-prompt-viewer mono", style: { fontSize: "12.5px" } }, activeDirectText || "（未记录生图提示词）");
+  const copyDirectBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    onClick: async () => toast((await copyText(activeDirectText)) ? "已复制提示词" : "复制失败"),
+  }, "📋 复制提示词");
+
+  const directPromptCard = el("div", { class: "work-info-card", "data-work-section": "direct-prompt" },
+    el("div", { class: "work-info-head" },
+      el("div", { class: "work-info-title" },
+        el("span", { class: "work-info-step is-direct" }, "⚡ 提示词直出"),
+        "未调用手绘 Skill"
+      ),
+      copyDirectBtn
+    ),
+    directSpecsChips.length ? el("div", { class: "work-recipe-grid" }, ...directSpecsChips) : null,
+    el("div", { class: "col", style: { gap: "4px" } },
+      el("span", { class: "muted", style: { fontSize: "11.5px", fontWeight: "600" } }, "生图提示词（原样直出）"),
+      directPromptPre
+    )
+  );
+
   const recipeChips = [];
   const pushChip = (k, v) => {
     if (!v) return;
@@ -576,6 +632,12 @@ async function openRunDetail(runId, ctx, onChanged) {
 
   const syncPostSkillCard = () => {
     const curImg = doneImages[activeIdx];
+    if (isDirectPrompt) {
+      activeDirectText = String(curImg?.prompt || expandedInfo.defaultPrompt || originalReqText || "").trim();
+      directPromptPre.textContent = activeDirectText || "（未记录生图提示词）";
+      copyDirectBtn.hidden = !activeDirectText;
+      return;
+    }
     const variants = [];
     const pushVariant = (label, txt) => {
       const clean = String(txt || "").trim();
@@ -626,13 +688,17 @@ async function openRunDetail(runId, ctx, onChanged) {
     class: "input",
     rows: 2,
     maxlength: 2000,
-    placeholder: "可选：创作说明、心得或使用建议（社区用户可见，不泄露收费配方/提示词）",
+    placeholder: isDirectPrompt
+      ? "可选：创作说明、心得或使用建议（社区用户可见，不泄露收费提示词）"
+      : "可选：创作说明、心得或使用建议（社区用户可见，不泄露收费配方/提示词）",
   });
   let inspPromptDirty = false;
   const inspPromptIn = el("textarea", {
     class: "input mono",
     rows: 4,
-    placeholder: "将分享到灵感库的完整生图提示词（默认取经过 Skill 解析后发给生图模型的提示词）",
+    placeholder: isDirectPrompt
+      ? "将分享到灵感库的完整生图提示词"
+      : "将分享到灵感库的完整生图提示词（默认取经过 Skill 解析后发给生图模型的提示词）",
   }, expandedInfo.defaultPrompt || originalReqText || "");
   inspPromptIn.addEventListener("input", () => { inspPromptDirty = true; });
   const inspTagsIn = el("input", {
@@ -733,16 +799,22 @@ async function openRunDetail(runId, ctx, onChanged) {
 
     if (activeTab === "details") {
       inspectorFoot.hidden = false;
-      pane.appendChild(preSkillCard);
-      pane.appendChild(postSkillCard);
+      if (isDirectPrompt) {
+        pane.appendChild(directPromptCard);
+      } else {
+        pane.appendChild(preSkillCard);
+        pane.appendChild(postSkillCard);
+      }
       inspectorFoot.appendChild(el("span", { class: "muted", style: { fontSize: "12px" } },
-        run.publishedWorkId ? "✓ 已发布到社区" : "作品仅存于本地，主动发布才公开"
+        run.publishedWorkId || publishedInspReceipt ? "✓ 已分享到社区" : "图片仅存于本地，主动发布才公开"
       ));
       inspectorFoot.appendChild(el("button", {
         type: "button",
         class: "btn btn-sm btn-primary",
         onClick: () => { activeTab = "publish"; renderPane(); },
-      }, run.publishedWorkId ? "查看发布 / 分享灵感 →" : "☁ 定价发布赚积分 →"));
+      }, isDirectPrompt
+        ? (publishedInspReceipt ? "查看灵感库分享 →" : "💡 发布到灵感库赚积分 →")
+        : (run.publishedWorkId ? "查看发布 / 分享灵感 →" : "☁ 定价发布赚积分 →")));
       return;
     }
 
@@ -771,25 +843,36 @@ async function openRunDetail(runId, ctx, onChanged) {
       ));
     }
 
-    const choiceWorkBtn = el("button", {
-      type: "button",
-      class: "work-publish-choice" + (publishMode === "work" ? " is-active" : ""),
-      "data-publish-choice": "work",
-      onClick: () => { publishMode = "work"; renderPane(); },
-    },
-      el("strong", null, "🎨 发布为「作品」"),
-      el("span", null, "手绘 Skill 配方 + 原始输入；他人查看配方需积分解锁。")
-    );
-    const choiceInspBtn = el("button", {
-      type: "button",
-      class: "work-publish-choice" + (publishMode === "inspiration" ? " is-active" : ""),
-      "data-publish-choice": "inspiration",
-      onClick: () => { publishMode = "inspiration"; renderPane(); },
-    },
-      el("strong", null, "💡 发布为「灵感库」"),
-      el("span", null, "解析后提示词 + 图片；评论后自动进论坛「贴图与提示词」。")
-    );
-    pubWrap.appendChild(el("div", { class: "wd-publish-choices-compact" }, choiceWorkBtn, choiceInspBtn));
+    if (isDirectPrompt) {
+      publishMode = "inspiration";
+      pubWrap.appendChild(el("div", { class: "direct-mode-callout", "data-work-section": "direct-publish-note" },
+        el("strong", null, "💡 分享到社区「灵感库」（图片 + 提示词）"),
+        el("span", null, "该图片为提示词直出（未调用手绘 Skill），将直接以「图片 + 提示词」形式上架社区灵感库，支持 1~20 积分解锁（作者享 80% 分成），被评论后自动同步至论坛「贴图与提示词」板块。")
+      ));
+      if (run.publishedWorkId && run.publishedUrl) {
+        pubWrap.appendChild(renderPublishedReceipt("网站作品栏作品", run.publishedUrl, 0));
+      }
+    } else {
+      const choiceWorkBtn = el("button", {
+        type: "button",
+        class: "work-publish-choice" + (publishMode === "work" ? " is-active" : ""),
+        "data-publish-choice": "work",
+        onClick: () => { publishMode = "work"; renderPane(); },
+      },
+        el("strong", null, "🎨 发布为「作品」"),
+        el("span", null, "手绘 Skill 配方 + 原始输入；他人查看配方需积分解锁。")
+      );
+      const choiceInspBtn = el("button", {
+        type: "button",
+        class: "work-publish-choice" + (publishMode === "inspiration" ? " is-active" : ""),
+        "data-publish-choice": "inspiration",
+        onClick: () => { publishMode = "inspiration"; renderPane(); },
+      },
+        el("strong", null, "💡 发布为「灵感库」"),
+        el("span", null, "解析后提示词 + 图片；评论后自动进论坛「贴图与提示词」。")
+      );
+      pubWrap.appendChild(el("div", { class: "wd-publish-choices-compact" }, choiceWorkBtn, choiceInspBtn));
+    }
 
     if (publishMode === "work") {
       if (run.publishedWorkId) {
@@ -895,7 +978,10 @@ async function openRunDetail(runId, ctx, onChanged) {
       });
       syncInspPrice(inspPrice);
 
-      pubWrap.appendChild(el("div", { class: "field" }, el("label", null, "将分享的解析后提示词（可微调）"), inspPromptIn));
+      pubWrap.appendChild(el("div", { class: "field" },
+        el("label", null, isDirectPrompt ? "将分享的生图提示词（可微调）" : "将分享的解析后提示词（可微调）"),
+        inspPromptIn
+      ));
       pubWrap.appendChild(el("div", { class: "work-pricing-panel" },
         el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "6px" } },
           el("strong", { style: { fontSize: "12.5px" } }, "🔒 提示词解锁积分（1~20 · 不支持免费）"),
@@ -926,13 +1012,13 @@ async function openRunDetail(runId, ctx, onChanged) {
             title: titleIn.value.trim() || run.title || "我的创作灵感",
             imagePath: firstSelectedImg?.path || "",
             prompt: promptTxt,
-            promptZh: expandedInfo.zh || "",
+            promptZh: isDirectPrompt ? "" : (expandedInfo.zh || ""),
             tags,
             notes: notesIn.value.trim(),
             source: "local",
             runId: run.id,
-            recipe: parsedRec.raw,
-            suggestedStyle: parsedRec.styleIds[0] || "",
+            recipe: isDirectPrompt ? {} : parsedRec.raw,
+            suggestedStyle: isDirectPrompt ? "" : (parsedRec.styleIds[0] || ""),
           });
           const inspId = created?.item?.id || created?.id;
           if (!inspId) throw new Error("本地灵感记录创建失败");

@@ -28,6 +28,7 @@ type chatTurnRequest struct {
 	TextModelRef  string               `json:"textModelRef"`
 	ImageModelRef string               `json:"imageModelRef"`
 	SkillIDs      []string             `json:"skillIds"`
+	DirectPrompt  bool                 `json:"directPrompt"`
 	Refs          []string             `json:"refs"`
 	Resolution    string               `json:"resolution"`
 	Ratio         string               `json:"ratio"`
@@ -102,6 +103,19 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 
 	allSkills, _ := s.skillsManager().List()
 	activeSkills, invokedSkillID, cleanedUserText := resolveActiveSkills(allSkills, req.SkillIDs, lastUserText)
+	if req.DirectPrompt {
+		filtered := make([]skills.Skill, 0, len(activeSkills))
+		for _, sk := range activeSkills {
+			if sk.Builtin || sk.ID == skills.BuiltinHandrawSkillID {
+				continue
+			}
+			filtered = append(filtered, sk)
+		}
+		activeSkills = filtered
+		if invokedSkillID == skills.BuiltinHandrawSkillID {
+			invokedSkillID = ""
+		}
+	}
 
 	usedSkills := make([]map[string]string, 0, len(activeSkills))
 	for _, sk := range activeSkills {
@@ -155,6 +169,7 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 		imageModelRef: imageModelRef,
 		resolution:    resolution,
 		defaultRatio:  defaultRatio,
+		directPrompt:  req.DirectPrompt,
 		refs:          req.Refs,
 		confirmed:     req.Confirmed,
 		resp:          resp,
@@ -169,7 +184,7 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 			resp.TextModel = tp.ID + ":" + textModel
 		}
 		p, _ := s.pack()
-		sysPrompt := buildChatSystemPrompt(p, activeSkills, invokedSkillID)
+		sysPrompt := buildChatSystemPrompt(p, activeSkills, invokedSkillID, req.DirectPrompt)
 		msgs := make([]providers.ChatMessage, 0, len(req.Messages)+2)
 		msgs = append(msgs, providers.ChatMessage{Role: "system", Content: sysPrompt})
 
@@ -204,8 +219,11 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 			msgs = append(msgs, providers.ChatMessage{Role: role, Content: content})
 		}
 
-		tools := chatAgentToolDefs()
+		tools := chatAgentToolDefs(req.DirectPrompt)
 		cacheKey := "handraw-chat:" + firstStr(strings.TrimSpace(req.SessionID), "default")
+		if req.DirectPrompt {
+			cacheKey += ":direct"
+		}
 		addUsage := func(u *providers.TokenUsage) {
 			if u == nil {
 				return
@@ -282,7 +300,7 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 			// a redundant 2nd text LLM round-trip and extra AI billing (#64).
 			if allGenOK && (len(resp.Runs) > 0 || resp.PendingConfirm != nil) {
 				p, _ := s.pack()
-				resp.Reply = buildChatGenerateSummary(p, turnRes.Content, execCtx.lastGenTitle, execCtx.lastGenItems, imageModelRef, resp.PendingConfirm)
+				resp.Reply = buildChatGenerateSummary(p, turnRes.Content, execCtx.lastGenTitle, execCtx.lastGenItems, imageModelRef, resp.PendingConfirm, execCtx.directPrompt)
 				s.refreshChatRuns(resp)
 				return resp, nil
 			}
@@ -325,7 +343,7 @@ func (s *Server) refreshChatRuns(resp *chatTurnResponse) {
 	}
 }
 
-func buildChatGenerateSummary(p *resources.Pack, modelContent, title string, items []map[string]any, modelRef string, pendingConfirm map[string]any) string {
+func buildChatGenerateSummary(p *resources.Pack, modelContent, title string, items []map[string]any, modelRef string, pendingConfirm map[string]any, directPrompt bool) string {
 	if pendingConfirm != nil {
 		return "本次生图预计费用超过了你设置的确认阈值，请点击下方「确认继续生成」。"
 	}
@@ -334,6 +352,29 @@ func buildChatGenerateSummary(p *resources.Pack, modelContent, title string, ite
 	}
 	if len(items) == 0 {
 		return "已提交生图任务，图像完成后会在下方实时显影。"
+	}
+	if directPrompt {
+		var sb strings.Builder
+		if len(items) == 1 {
+			it := items[0]
+			sb.WriteString("已开启 **⚡ 提示词直出模式**（未调用手绘 Skill），生图任务已提交，图像正在下方实时绘制。\n\n")
+			if ratio := strings.TrimSpace(fmt.Sprint(it["ratio"])); ratio != "" && ratio != "<nil>" {
+				sb.WriteString("- **比例**：" + ratio + "\n")
+			}
+			if pr := firstStr(strings.TrimSpace(fmt.Sprint(it["prompt"])), strings.TrimSpace(fmt.Sprint(it["theme"]))); pr != "" && pr != "<nil>" {
+				sb.WriteString("- **直出提示词**：" + firstNRunes(strings.ReplaceAll(pr, "\n", " "), 120) + "\n")
+			}
+			return strings.TrimSpace(sb.String())
+		}
+		sb.WriteString(fmt.Sprintf("已按 **⚡ 提示词直出模式**（未调用手绘 Skill）提交 **%d 张**生图任务，图像正在下方实时绘制。\n\n", len(items)))
+		for i, it := range items {
+			pr := firstStr(strings.TrimSpace(fmt.Sprint(it["prompt"])), strings.TrimSpace(fmt.Sprint(it["theme"])))
+			if pr == "<nil>" {
+				pr = ""
+			}
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, firstNRunes(strings.ReplaceAll(pr, "\n", " "), 80)))
+		}
+		return strings.TrimSpace(sb.String())
 	}
 	styleLabel := func(id string) string {
 		id = strings.TrimSpace(id)
@@ -542,9 +583,24 @@ func buildCompactCatalogBlock(p *resources.Pack) string {
 // buildChatSystemPrompt keeps the static rules and sorted Handraw resource catalog
 // byte-identical at the start of the system message to maximize upstream relay
 // Prompt Cache hit rates across turns and tool-call steps (#61).
-func buildChatSystemPrompt(p *resources.Pack, activeSkills []skills.Skill, invokedID string) string {
+func buildChatSystemPrompt(p *resources.Pack, activeSkills []skills.Skill, invokedID string, directPrompt bool) string {
 	var sb strings.Builder
-	sb.WriteString(`你是「手绘风」桌面工作台的 AI 会话助手，类似 Codex / DSH 的对话式智能工作台。
+	if directPrompt {
+		sb.WriteString(`你是「手绘风」桌面工作台的 AI 会话助手。
+当前会话已开启「⚡ 提示词直出模式（未调用手绘 Skill）」。
+你可以：
+1. 与用户自然聊天、讨论提示词、润色/翻译外部提示词或回答问题。
+2. 当用户贴入外部提示词并要求生图、或明确想画图时，直接调用 generate_images 提交生图任务（支持单图和最多 12 张多图）。
+3. 当用户想安装、创建、查看或卸载 Skill / 插件时，主动调用对应工具完成。
+
+重要约定（提示词直出模式）：
+- 不要套用、不要擅自附加任何手绘风画风编号（如 FA-xxx）、图型编号（如 SC-xxx）或主题色配方。
+- 调用 generate_images 时，请把将直接发给生图模型的完整提示词填入 items[].prompt（若用户直接给出了完整外部提示词且未要求大幅改写，请尽量原样保留）。
+- 默认比例为 3:4（除非用户在消息中另有要求）。
+- 如果用户只是普通聊天、问问题或探讨方案，直接文字回复，不要误调用生图工具。
+- 回复简洁清晰，使用中文 Markdown 排版。`)
+	} else {
+		sb.WriteString(`你是「手绘风」桌面工作台的 AI 会话助手，类似 Codex / DSH 的对话式智能工作台。
 你可以：
 1. 与用户自然聊天、讨论选题、润色文案、编写提示词或回答问题。
 2. 当用户明确想画图、生图、出系列图/海报/配图时，直接从下方内置的手绘风目录挑选合适编号，一步调用 generate_images 提交生图任务（支持单图和最多 12 张多图），无需让用户手动切换页面。
@@ -558,9 +614,10 @@ func buildChatSystemPrompt(p *resources.Pack, activeSkills []skills.Skill, invok
 - 用户以中文提出需求且未明确要求英文或双语时，海报/图文模式的 items[].text 必须全部使用简体中文文案（不要擅自在主标题前加英文大字）；海报/社媒卡模式务必把需要呈现在画面中的中文文案完整填入 items[].text。
 - 回复简洁清晰，使用中文 Markdown 排版。`)
 
-	if catalog := buildCompactCatalogBlock(p); catalog != "" {
-		sb.WriteString("\n\n## Handraw 本地视觉资源目录（直接选编号即可）\n\n")
-		sb.WriteString(catalog)
+		if catalog := buildCompactCatalogBlock(p); catalog != "" {
+			sb.WriteString("\n\n## Handraw 本地视觉资源目录（直接选编号即可）\n\n")
+			sb.WriteString(catalog)
+		}
 	}
 
 	if len(activeSkills) > 0 {
@@ -590,34 +647,18 @@ func buildChatSystemPrompt(p *resources.Pack, activeSkills []skills.Skill, invok
 	return sb.String()
 }
 
-func chatAgentToolDefs() []providers.ToolDef {
-	return []providers.ToolDef{
-		{
-			Type: "function",
-			Function: providers.ToolFunctionDef{
-				Name:        "search_resources",
-				Description: "搜索本地手绘风资源包中的画风(styles)、图型(layouts)、主题色(colors)或影调(tones)，返回编号和中文名称。",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"kind":  map[string]any{"type": "string", "enum": []string{"styles", "layouts", "colors", "tones"}},
-						"query": map[string]any{"type": "string", "description": "搜索关键词，可留空返回热门示例"},
-						"limit": map[string]any{"type": "integer", "description": "返回条数，默认 10"},
-					},
-					"required": []string{"kind"},
-				},
-			},
-		},
-		{
+func chatAgentToolDefs(directPrompt bool) []providers.ToolDef {
+	var defs []providers.ToolDef
+	if directPrompt {
+		defs = append(defs, providers.ToolDef{
 			Type: "function",
 			Function: providers.ToolFunctionDef{
 				Name:        "generate_images",
-				Description: "使用用户当前选择的生图模型提交单张或多张（最多12张）手绘风生图任务。图像会在聊天界面实时显影。",
+				Description: "使用用户当前选择的生图模型按「提示词直出」方式提交单张或多张（最多12张）生图任务，不调用手绘 Skill，将 prompt 原样传给生图模型。",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"title": map[string]any{"type": "string", "description": "本次创作简短标题"},
-						"mode":  map[string]any{"type": "string", "enum": []string{"graphic-text", "pure-image", "poster"}},
 						"ratio": map[string]any{"type": "string", "description": "默认画面比例，如 3:4、1:1、4:3、16:9、9:16"},
 						"items": map[string]any{
 							"type":        "array",
@@ -625,23 +666,73 @@ func chatAgentToolDefs() []providers.ToolDef {
 							"items": map[string]any{
 								"type": "object",
 								"properties": map[string]any{
-									"theme":  map[string]any{"type": "string", "description": "具体生动的画面主体与场景描述"},
-									"style":  map[string]any{"type": "string", "description": "画风编号，如 FA-013"},
-									"style2": map[string]any{"type": "string", "description": "可选第二画风编号"},
-									"layout": map[string]any{"type": "string", "description": "可选图型编号，如 SC-001"},
-									"color":  map[string]any{"type": "string", "description": "可选主题色编号"},
+									"prompt": map[string]any{"type": "string", "description": "直接发送给生图模型的完整提示词（原样透传，不加手绘风画风编号）"},
+									"theme":  map[string]any{"type": "string", "description": "可选：简短标题或摘要"},
 									"ratio":  map[string]any{"type": "string", "description": "单张比例，可省略继承默认"},
-									"text":   map[string]any{"type": "string", "description": "图文/海报模式下画面内必现文字；中文需求下默认全部使用简体中文文案，不要擅自添加英文主标题"},
-									"mode":   map[string]any{"type": "string", "enum": []string{"graphic-text", "pure-image", "poster"}},
 								},
-								"required": []string{"theme"},
+								"required": []string{"prompt"},
 							},
 						},
 					},
 					"required": []string{"items"},
 				},
 			},
-		},
+		})
+	} else {
+		defs = append(defs,
+			providers.ToolDef{
+				Type: "function",
+				Function: providers.ToolFunctionDef{
+					Name:        "search_resources",
+					Description: "搜索本地手绘风资源包中的画风(styles)、图型(layouts)、主题色(colors)或影调(tones)，返回编号和中文名称。",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"kind":  map[string]any{"type": "string", "enum": []string{"styles", "layouts", "colors", "tones"}},
+							"query": map[string]any{"type": "string", "description": "搜索关键词，可留空返回热门示例"},
+							"limit": map[string]any{"type": "integer", "description": "返回条数，默认 10"},
+						},
+						"required": []string{"kind"},
+					},
+				},
+			},
+			providers.ToolDef{
+				Type: "function",
+				Function: providers.ToolFunctionDef{
+					Name:        "generate_images",
+					Description: "使用用户当前选择的生图模型提交单张或多张（最多12张）手绘风生图任务。图像会在聊天界面实时显影。",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"title": map[string]any{"type": "string", "description": "本次创作简短标题"},
+							"mode":  map[string]any{"type": "string", "enum": []string{"graphic-text", "pure-image", "poster"}},
+							"ratio": map[string]any{"type": "string", "description": "默认画面比例，如 3:4、1:1、4:3、16:9、9:16"},
+							"items": map[string]any{
+								"type":        "array",
+								"description": "要生成的画面列表（1~12 张）",
+								"items": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"theme":  map[string]any{"type": "string", "description": "具体生动的画面主体与场景描述"},
+										"style":  map[string]any{"type": "string", "description": "画风编号，如 FA-013"},
+										"style2": map[string]any{"type": "string", "description": "可选第二画风编号"},
+										"layout": map[string]any{"type": "string", "description": "可选图型编号，如 SC-001"},
+										"color":  map[string]any{"type": "string", "description": "可选主题色编号"},
+										"ratio":  map[string]any{"type": "string", "description": "单张比例，可省略继承默认"},
+										"text":   map[string]any{"type": "string", "description": "图文/海报模式下画面内必现文字；中文需求下默认全部使用简体中文文案，不要擅自添加英文主标题"},
+										"mode":   map[string]any{"type": "string", "enum": []string{"graphic-text", "pure-image", "poster"}},
+									},
+									"required": []string{"theme"},
+								},
+							},
+						},
+						"required": []string{"items"},
+					},
+				},
+			},
+		)
+	}
+	return append(defs, []providers.ToolDef{
 		{
 			Type: "function",
 			Function: providers.ToolFunctionDef{
@@ -731,7 +822,7 @@ func chatAgentToolDefs() []providers.ToolDef {
 				},
 			},
 		},
-	}
+	}...)
 }
 
 type chatExecContext struct {
@@ -739,6 +830,7 @@ type chatExecContext struct {
 	imageModelRef string
 	resolution    string
 	defaultRatio  string
+	directPrompt  bool
 	refs          []string
 	confirmed     bool
 	resp          *chatTurnResponse
@@ -862,6 +954,7 @@ func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (st
 			Mode  string `json:"mode"`
 			Ratio string `json:"ratio"`
 			Items []struct {
+				Prompt string `json:"prompt"`
 				Theme  string `json:"theme"`
 				Style  string `json:"style"`
 				Style2 string `json:"style2"`
@@ -878,69 +971,105 @@ func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (st
 		if len(args.Items) > 12 {
 			args.Items = args.Items[:12]
 		}
-		p, _ := c.srv.pack()
-		defStyle := "FA-013"
-		if p != nil {
-			defStyle = defaultPackStyle(p).Number
-		}
-		baseMode := normalizeChatMode(args.Mode)
 		baseRatio := normalizeChatRatio(args.Ratio, c.defaultRatio)
 		genItems := make([]map[string]any, 0, len(args.Items))
-		for _, it := range args.Items {
-			m := baseMode
-			if strings.TrimSpace(it.Mode) != "" {
-				m = normalizeChatMode(it.Mode)
+		var payload map[string]any
+		if c.directPrompt {
+			for _, it := range args.Items {
+				rawP := firstStr(strings.TrimSpace(it.Prompt), strings.TrimSpace(it.Theme))
+				if rawP == "" {
+					continue
+				}
+				genItems = append(genItems, map[string]any{
+					"prompt": rawP,
+					"theme":  firstStr(strings.TrimSpace(it.Theme), rawP),
+					"ratio":  normalizeChatRatio(it.Ratio, baseRatio),
+					"mode":   "pure-image",
+				})
 			}
-			stID := strings.TrimSpace(it.Style)
-			if p != nil && stID != "" {
-				if found, ok := p.Style(stID); ok {
-					stID = found.Number
-				} else {
+			if len(genItems) == 0 {
+				return fail("缺少要直出的提示词内容")
+			}
+			runMode := "single"
+			if len(genItems) > 1 {
+				runMode = "series"
+			}
+			firstText := firstStr(fmt.Sprint(genItems[0]["theme"]), fmt.Sprint(genItems[0]["prompt"]))
+			payload = map[string]any{
+				"mode":         runMode,
+				"title":        firstStr(strings.TrimSpace(args.Title), firstNRunes(firstText, 24), "直出创作"),
+				"modelRef":     c.imageModelRef,
+				"resolution":   c.resolution,
+				"quality":      "standard",
+				"confirmed":    c.confirmed,
+				"directPrompt": true,
+				"refs":         c.refs,
+				"items":        genItems,
+				"recipe":       map[string]any{},
+			}
+		} else {
+			p, _ := c.srv.pack()
+			defStyle := "FA-013"
+			if p != nil {
+				defStyle = defaultPackStyle(p).Number
+			}
+			baseMode := normalizeChatMode(args.Mode)
+			for _, it := range args.Items {
+				m := baseMode
+				if strings.TrimSpace(it.Mode) != "" {
+					m = normalizeChatMode(it.Mode)
+				}
+				stID := strings.TrimSpace(it.Style)
+				if p != nil && stID != "" {
+					if found, ok := p.Style(stID); ok {
+						stID = found.Number
+					} else {
+						stID = defStyle
+					}
+				}
+				if stID == "" {
 					stID = defStyle
 				}
-			}
-			if stID == "" {
-				stID = defStyle
-			}
-			layID := strings.TrimSpace(it.Layout)
-			if m == "pure-image" {
-				layID = ""
-			} else if p != nil && layID != "" {
-				if found, ok := p.Layout(layID); ok {
-					layID = found.ID
-				} else {
+				layID := strings.TrimSpace(it.Layout)
+				if m == "pure-image" {
 					layID = ""
+				} else if p != nil && layID != "" {
+					if found, ok := p.Layout(layID); ok {
+						layID = found.ID
+					} else {
+						layID = ""
+					}
 				}
+				genItems = append(genItems, map[string]any{
+					"theme":  firstStr(strings.TrimSpace(it.Theme), strings.TrimSpace(it.Prompt)),
+					"style":  stID,
+					"style2": strings.TrimSpace(it.Style2),
+					"layout": layID,
+					"color":  strings.TrimSpace(it.Color),
+					"ratio":  normalizeChatRatio(it.Ratio, baseRatio),
+					"text":   strings.TrimSpace(it.Text),
+					"mode":   m,
+				})
 			}
-			genItems = append(genItems, map[string]any{
-				"theme":  strings.TrimSpace(it.Theme),
-				"style":  stID,
-				"style2": strings.TrimSpace(it.Style2),
-				"layout": layID,
-				"color":  strings.TrimSpace(it.Color),
-				"ratio":  normalizeChatRatio(it.Ratio, baseRatio),
-				"text":   strings.TrimSpace(it.Text),
-				"mode":   m,
-			})
-		}
-		runMode := "single"
-		if len(genItems) > 1 {
-			runMode = "series"
-		}
-		payload := map[string]any{
-			"mode":       runMode,
-			"title":      firstStr(strings.TrimSpace(args.Title), firstNRunes(args.Items[0].Theme, 24), "会话生图"),
-			"modelRef":   c.imageModelRef,
-			"resolution": c.resolution,
-			"quality":    "standard",
-			"confirmed":  c.confirmed,
-			"refs":       c.refs,
-			"items":      genItems,
-			"recipe": map[string]any{
-				"styleIds": []string{fmt.Sprint(genItems[0]["style"])},
-				"ratio":    baseRatio,
-				"mode":     baseMode,
-			},
+			runMode := "single"
+			if len(genItems) > 1 {
+				runMode = "series"
+			}
+			payload = map[string]any{
+				"mode":       runMode,
+				"title":      firstStr(strings.TrimSpace(args.Title), firstNRunes(args.Items[0].Theme, 24), "会话生图"),
+				"modelRef":   c.imageModelRef,
+				"resolution": c.resolution,
+				"quality":    "standard",
+				"confirmed":  c.confirmed,
+				"refs":       c.refs,
+				"items":      genItems,
+				"recipe": map[string]any{
+					"styleIds": []string{fmt.Sprint(genItems[0]["style"])},
+					"ratio":    baseRatio,
+					"mode":     baseMode,
+				},
+			}
 		}
 		res, err := c.srv.invokeLocalJSON(ctx, c.srv.generate, payload)
 		if err != nil {
@@ -1291,7 +1420,28 @@ func (s *Server) handleChatWithoutTextProvider(ctx context.Context, text string,
 		return execCtx.resp, nil
 	}
 
-	// 3. Chat-to-draw intent (single or multi!)
+	// 3. Direct-prompt mode without text model: send user text verbatim to generate_images (#87)
+	if execCtx.directPrompt && strings.TrimSpace(text) != "" {
+		argBytes, _ := json.Marshal(map[string]any{
+			"title": firstNRunes(text, 24),
+			"ratio": execCtx.defaultRatio,
+			"items": []map[string]any{
+				{"prompt": text, "theme": text, "ratio": execCtx.defaultRatio},
+			},
+		})
+		_, trace := execCtx.runTool(ctx, "generate_images", string(argBytes))
+		execCtx.resp.ToolCalls = append(execCtx.resp.ToolCalls, trace)
+		if !trace.OK {
+			execCtx.resp.Reply = "提交直出生图任务失败：" + trace.Summary
+		} else if execCtx.resp.PendingConfirm != nil {
+			execCtx.resp.Reply = "本次生图预计费用超过了你设置的确认阈值，请点击下方「确认继续生成」。"
+		} else {
+			execCtx.resp.Reply = fmt.Sprintf("已按 **⚡ 提示词直出模式**（未调用手绘 Skill）使用模型 `%s` 提交生图任务，图像完成后会在下方自动显影。", firstStr(execCtx.imageModelRef, "默认模型"))
+		}
+		return execCtx.resp, nil
+	}
+
+	// 4. Chat-to-draw intent (single or multi!)
 	if reDrawIntent.MatchString(text) {
 		rawPlan, err := s.invokeLocalJSON(ctx, s.studioChatPlan, map[string]any{
 			"message": text,

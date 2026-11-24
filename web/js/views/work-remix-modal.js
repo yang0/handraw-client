@@ -365,6 +365,7 @@ export async function openWorkRemixModal(workId, ctx, opts = {}) {
             onClick: () => {
               closeModal();
               ctx.go("create", {
+                directPrompt: false,
                 forkOf: workId,
                 forkTitle: title,
                 recipe,
@@ -378,6 +379,7 @@ export async function openWorkRemixModal(workId, ctx, opts = {}) {
             onClick: () => {
               closeModal();
               ctx.go("create", {
+                directPrompt: false,
                 forkOf: workId,
                 forkTitle: title,
                 recipe,
@@ -626,12 +628,14 @@ export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
             class: "btn btn-primary",
             onClick: () => {
               const finalPrompt = promptDisplay.textContent;
+              const hasSkill = Boolean(suggestedStyle || item.recipe?.styleIds?.length || item.recipe?.layoutId);
               closeModal();
               ctx.go("create", {
-                forkOf: item.workId || "",
+                directPrompt: !hasSkill,
+                forkOf: hasSkill ? (item.workId || "") : "",
                 forkTitle: title,
-                style: suggestedStyle || "",
-                recipe: item.recipe || (suggestedStyle ? { styleIds: [suggestedStyle] } : {}),
+                style: hasSkill ? (suggestedStyle || "") : "",
+                recipe: hasSkill ? (item.recipe || (suggestedStyle ? { styleIds: [suggestedStyle] } : {})) : undefined,
                 theme: finalPrompt,
               });
             },
@@ -643,8 +647,14 @@ export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
               style: { flex: "1" },
               onClick: () => {
                 const finalPrompt = promptDisplay.textContent;
+                const hasSkill = Boolean(suggestedStyle || item.recipe?.styleIds?.length || item.recipe?.layoutId);
                 closeModal();
-                ctx.go("chat", { prompt: `帮我按这个灵感提示词生成同款，并微调成更适合中文读者的画面：\n${finalPrompt}` });
+                ctx.go("chat", {
+                  directPrompt: !hasSkill,
+                  prompt: hasSkill
+                    ? `帮我按这个灵感提示词生成同款，并微调成更适合中文读者的画面：\n${finalPrompt}`
+                    : finalPrompt,
+                });
               },
             }, "💬 带入会话改写"),
             saveBtn

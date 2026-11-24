@@ -627,6 +627,22 @@ export function recipeControls(state, catalog, onChange = () => {}, { article = 
     topRow, pickersRow, note, sc021Wrap, sc022Wrap, article ? null : ratio, more
   );
 
+  let directMode = false;
+
+  function applyDirectVisibility() {
+    topRow.classList.toggle("hidden", directMode);
+    pickersRow.classList.toggle("hidden", directMode);
+    more.classList.toggle("hidden", directMode);
+    if (directMode) {
+      note.classList.add("hidden");
+      sc021Wrap.classList.add("hidden");
+      sc022Wrap.classList.add("hidden");
+    } else {
+      note.classList.toggle("hidden", !state.fusion);
+      syncSpecialLayoutFields();
+    }
+  }
+
   function sync() {
     modes.sync(state.mode);
     fusion.sync(state.fusion ? "fusion" : "single");
@@ -648,13 +664,20 @@ export function recipeControls(state, catalog, onChange = () => {}, { article = 
     business.value = state.businessScene || "";
     extra.value = state.extra || "";
     whitespace.sync(state.whitespace || "");
+    applyDirectVisibility();
+  }
+
+  function setDirectMode(on) {
+    directMode = Boolean(on);
+    applyDirectVisibility();
   }
 
   sync();
   return {
     node,
     sync,
-    validate: () => (article || ratio.validate()) && (!state.fusion || Boolean(state.style && state.style2)),
+    setDirectMode,
+    validate: () => (article || ratio.validate()) && (directMode || !state.fusion || Boolean(state.style && state.style2)),
     layoutPicker,
     pickersRow,
   };

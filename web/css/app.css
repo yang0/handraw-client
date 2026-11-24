@@ -3542,7 +3542,94 @@ dialog::backdrop {
 }
 @media (prefers-reduced-motion: reduce) {
   .wd-hero-img,
-  .wd-title-input {
+  .wd-title-input,
+  .mode-seg-btn {
     transition: none;
   }
+}
+
+/* Segmented Skill vs Direct-Prompt mode toggle (#87) */
+.mode-seg-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.mode-seg-switch.is-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+.mode-seg-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: background-color 0.14s ease, color 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
+}
+.mode-seg-switch.is-compact .mode-seg-btn {
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.mode-seg-btn:hover {
+  color: var(--ink);
+}
+.mode-seg-btn.is-active {
+  background: var(--surface);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
+  box-shadow: 0 1px 3px rgba(28, 25, 23, 0.07);
+}
+.direct-mode-callout {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--paper));
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+}
+.direct-mode-callout strong {
+  color: var(--ink);
+  font-size: 12.5px;
+}
+.badge-direct {
+  background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
+  font-weight: 600;
+}
+.work-info-step.is-direct {
+  background: color-mix(in srgb, var(--accent) 14%, var(--paper));
+  color: var(--accent);
+}
+.chat-skill-chip.is-direct-chip {
+  background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  color: var(--accent);
+}
+.sc-example-btn .badge {
+  white-space: nowrap;
+  flex-shrink: 0;
 }

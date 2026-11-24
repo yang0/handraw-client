@@ -156,6 +156,7 @@ export async function renderChat(root, ctx, params = {}) {
       data: {
         messages: Array.isArray(data.messages) ? data.messages : [],
         skillIds: Array.isArray(data.skillIds) ? data.skillIds : [],
+        directPrompt: Boolean(data.directPrompt),
         textModelRef: data.textModelRef || modRes.defaultTextModel || "site:auto",
         imageModelRef: data.imageModelRef || modRes.defaultModel || "site:seedream-4.5",
         ratio: data.ratio || "3:4",
@@ -171,6 +172,7 @@ export async function renderChat(root, ctx, params = {}) {
     data: {
       messages: [],
       skillIds: skillsList.filter((sk) => sk.builtin && sk.enabled !== false).map((sk) => sk.id),
+      directPrompt: false,
       textModelRef: modRes.defaultTextModel || "site:auto",
       imageModelRef: modRes.defaultModel || "site:seedream-4.5",
       ratio: "3:4",
@@ -270,15 +272,29 @@ export async function renderChat(root, ctx, params = {}) {
 
   function renderSelectedSkills() {
     const sess = activeSession();
+    const isDirect = Boolean(sess.data.directPrompt);
     const byID = new Map(skillsList.map((sk) => [sk.id, sk]));
     const validIds = (sess.data.skillIds || []).filter((id) => byID.has(id));
     if (validIds.length !== (sess.data.skillIds || []).length) {
       sess.data.skillIds = validIds;
     }
 
+    const visibleIds = isDirect
+      ? validIds.filter((id) => {
+          const sk = byID.get(id);
+          return sk && !sk.builtin && sk.id !== "handraw-skill";
+        })
+      : validIds;
+
     clear(selectedSkillsBar);
-    selectedSkillsBar.classList.toggle("hidden", validIds.length === 0);
-    validIds.forEach((id) => {
+    selectedSkillsBar.classList.toggle("hidden", !isDirect && visibleIds.length === 0);
+    if (isDirect) {
+      selectedSkillsBar.appendChild(el("span", {
+        class: "chat-skill-chip is-direct-chip",
+        title: "已关闭手绘 Skill，发图时将直接透传你的原始提示词",
+      }, el("span", { class: "chat-skill-chip-label" }, "⚡ 提示词直出 · 未调用手绘 Skill")));
+    }
+    visibleIds.forEach((id) => {
       const sk = byID.get(id);
       if (!sk) return;
       selectedSkillsBar.appendChild(el("span", {
@@ -300,8 +316,16 @@ export async function renderChat(root, ctx, params = {}) {
       ));
     });
 
+    chatModeSkillBtn.classList.toggle("is-active", !isDirect);
+    chatModeDirectBtn.classList.toggle("is-active", isDirect);
+    chatModeSkillBtn.setAttribute("aria-pressed", String(!isDirect));
+    chatModeDirectBtn.setAttribute("aria-pressed", String(isDirect));
+    pickSkillBtn.classList.toggle("hidden", isDirect);
     pickSkillBtn.textContent = validIds.length > 0 ? `选择 Skill (${validIds.length})` : "选择 Skill";
     pickSkillBtn.classList.toggle("is-has-skills", validIds.length > 0);
+    inputEl.placeholder = isDirect
+      ? "已开启提示词直出（不调用手绘 Skill）：直接粘贴外部提示词或发消息生图，将原样传给生图模型…（Ctrl/⌘ + Enter 发送）"
+      : "发消息聊天、描述想画的图，或输入 / 调用已安装 Skill、安装新 Skill / 插件…（Ctrl/⌘ + Enter 发送）";
   }
 
   const inputEl = el("textarea", {
@@ -416,6 +440,37 @@ export async function renderChat(root, ctx, params = {}) {
     onClick: () => fileInput.click(),
   }, "+");
 
+  const chatModeSkillBtn = el("button", {
+    type: "button",
+    class: "mode-seg-btn",
+    "data-chat-mode": "skill",
+    title: "调用手绘 Skill 画风与图型规范生图",
+    onClick: () => setChatDirectMode(false),
+  }, "🎨 手绘 Skill");
+
+  const chatModeDirectBtn = el("button", {
+    type: "button",
+    class: "mode-seg-btn",
+    "data-chat-mode": "direct",
+    title: "不调用手绘 Skill，直接将提示词原样传给生图模型",
+    onClick: () => setChatDirectMode(true),
+  }, "⚡ 直出");
+
+  const chatModeSwitch = el("div", {
+    class: "mode-seg-switch is-compact",
+    role: "group",
+    "aria-label": "会话生图模式",
+  }, chatModeSkillBtn, chatModeDirectBtn);
+
+  function setChatDirectMode(on) {
+    const s = activeSession();
+    const next = Boolean(on);
+    if (Boolean(s.data.directPrompt) === next) return;
+    s.data.directPrompt = next;
+    renderSelectedSkills();
+    if (s.persisted) persistSession(s);
+  }
+
   const pickSkillBtn = el("button", {
     type: "button",
     class: "btn btn-sm chat-pick-skill-btn",
@@ -431,6 +486,7 @@ export async function renderChat(root, ctx, params = {}) {
     inputEl,
     el("div", { class: "chat-composer-bar" },
       addRefBtn,
+      chatModeSwitch,
       el("label", { class: "chat-model-chip" }, el("span", null, "文本"), textModelSel),
       el("label", { class: "chat-model-chip" }, el("span", null, "生图"), imageModelSel),
       ratioSel,
@@ -1008,7 +1064,13 @@ export async function renderChat(root, ctx, params = {}) {
     renderAll();
     const apiMessages = sess.data.messages.map((m) => ({ role: m.role, content: m.content || "" }));
     const lastUser = [...sess.data.messages].reverse().find((m) => m.role === "user");
-    const activeIds = [...(sess.data.skillIds || [])];
+    const isDirect = Boolean(sess.data.directPrompt);
+    const byID = new Map(skillsList.map((sk) => [sk.id, sk]));
+    const activeIds = (sess.data.skillIds || []).filter((id) => {
+      if (!isDirect) return true;
+      const sk = byID.get(id);
+      return sk && !sk.builtin && sk.id !== "handraw-skill";
+    });
     try {
       const res = await api("POST", "/api/chat/turn", {
         sessionId: sess.id,
@@ -1016,6 +1078,7 @@ export async function renderChat(root, ctx, params = {}) {
         textModelRef: textModelSel.value,
         imageModelRef: imageModelSel.value,
         skillIds: activeIds,
+        directPrompt: isDirect,
         ratio: ratioSel.value,
         refs: lastUser?.refs || [],
         confirmed,
@@ -1063,8 +1126,11 @@ export async function renderChat(root, ctx, params = {}) {
     if (sess.data.messages.length === 0) {
       sess.name = text.replace(/^\/\S+\s*/, "").slice(0, 22) || "新会话";
     }
-    const byID = new Map(skillsList.map((sk) => [sk.id, sk.name]));
-    const skillNames = (sess.data.skillIds || []).map((id) => byID.get(id)).filter(Boolean);
+    const isDirect = Boolean(sess.data.directPrompt);
+    const byID = new Map(skillsList.map((sk) => [sk.id, sk]));
+    const skillNames = isDirect
+      ? ["⚡ 提示词直出"]
+      : (sess.data.skillIds || []).map((id) => byID.get(id)?.name).filter(Boolean);
     sess.data.messages.push({
       id: uid("msg"),
       role: "user",
@@ -1134,6 +1200,9 @@ export async function renderChat(root, ctx, params = {}) {
     }, 150));
   });
 
+  if (params.directPrompt !== undefined) {
+    activeSession().data.directPrompt = Boolean(params.directPrompt);
+  }
   if (params.prompt) {
     inputEl.value = params.prompt;
     autoResize();

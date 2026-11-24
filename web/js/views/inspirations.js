@@ -441,12 +441,14 @@ function openLocalInspirationDetail(item, ctx, onChanged) {
             class: "btn btn-primary",
             onClick: () => {
               const finalPrompt = promptDisplay.textContent;
+              const hasSkill = Boolean(cur.suggestedStyle || cur.recipe?.styleIds?.length || cur.recipe?.layoutId);
               closeModal();
               ctx.go("create", {
-                forkOf: cur.workId || "",
+                directPrompt: !hasSkill,
+                forkOf: hasSkill ? (cur.workId || "") : "",
                 forkTitle: cur.title || "",
-                style: cur.suggestedStyle || cur.recipe?.styleIds?.[0] || "",
-                recipe: cur.recipe || (cur.suggestedStyle ? { styleIds: [cur.suggestedStyle] } : {}),
+                style: hasSkill ? (cur.suggestedStyle || cur.recipe?.styleIds?.[0] || "") : "",
+                recipe: hasSkill ? (cur.recipe || (cur.suggestedStyle ? { styleIds: [cur.suggestedStyle] } : {})) : undefined,
                 theme: finalPrompt,
               });
             },
@@ -458,8 +460,14 @@ function openLocalInspirationDetail(item, ctx, onChanged) {
               style: { flex: "1" },
               onClick: () => {
                 const finalPrompt = promptDisplay.textContent;
+                const hasSkill = Boolean(cur.suggestedStyle || cur.recipe?.styleIds?.length || cur.recipe?.layoutId);
                 closeModal();
-                ctx.go("chat", { prompt: `请参考这份灵感提示词帮我画一张同款：\n${finalPrompt}` });
+                ctx.go("chat", {
+                  directPrompt: !hasSkill,
+                  prompt: hasSkill
+                    ? `请参考这份灵感提示词帮我画一张同款：\n${finalPrompt}`
+                    : finalPrompt,
+                });
               },
             }, "💬 带入会话改写"),
             el("button", {
@@ -637,13 +645,17 @@ async function renderVaultTab(stage, ctx, onMeta) {
           el("button", {
             type: "button",
             class: "btn btn-sm",
-            onClick: () => ctx.go("create", {
-              forkOf: item.workId || "",
-              forkTitle: item.title || "",
-              style: item.suggestedStyle || item.recipe?.styleIds?.[0] || "",
-              recipe: item.recipe || (item.suggestedStyle ? { styleIds: [item.suggestedStyle] } : {}),
-              theme: item.prompt || item.promptZh || item.rawText || item.title,
-            }),
+            onClick: () => {
+              const hasSkill = Boolean(item.suggestedStyle || item.recipe?.styleIds?.length || item.recipe?.layoutId);
+              ctx.go("create", {
+                directPrompt: !hasSkill,
+                forkOf: hasSkill ? (item.workId || "") : "",
+                forkTitle: item.title || "",
+                style: hasSkill ? (item.suggestedStyle || item.recipe?.styleIds?.[0] || "") : "",
+                recipe: hasSkill ? (item.recipe || (item.suggestedStyle ? { styleIds: [item.suggestedStyle] } : {})) : undefined,
+                theme: item.prompt || item.promptZh || item.rawText || item.title,
+              });
+            },
           }, "✨ 做同款"),
           el("button", {
             type: "button",

@@ -107,6 +107,7 @@ const SOURCE_LABELS = {
   site: "网站规划",
   provider: "文本模型规划",
   local: "本地规划",
+  direct: "提示词直出",
   work: "历史作品",
 };
 
@@ -114,6 +115,12 @@ const EXAMPLE_PROMPTS = [
   { tag: "单图", text: "清晨阳光洒进窗台的手冲咖啡桌，温暖治愈的手绘风插画" },
   { tag: "多图", text: "画 4 张周末去菜市场买菜做饭的治愈日常手账，温暖生活气息" },
   { tag: "海报", text: "做一张春日手作市集竖版海报，暖纸手绘插画质感" },
+];
+
+const DIRECT_EXAMPLE_PROMPTS = [
+  { tag: "英文直出", text: "Cinematic editorial photograph of a sunlit Japanese kissaten coffee counter in Tokyo, pour-over glass carafe, warm morning rays, 35mm Kodak Portra 400 grain, shallow depth of field" },
+  { tag: "写实光影", text: "雨后黄昏的京都小巷，湿润石板路倒映着暖黄色灯笼微光，胶片摄影质感，高细节，电影级构图" },
+  { tag: "创意设计", text: "Minimalist isometric 3D diorama of a cozy rooftop greenhouse studio, soft clay materials, pastel warm daylight, clean studio background, octane render" },
 ];
 
 function uid(prefix) {
@@ -130,23 +137,28 @@ function splitTokens(raw) {
 function runToTurn(run, fallbackRatio = "3:4", fallbackMode = "graphic-text") {
   const imgs = Array.isArray(run?.images) ? run.images : [];
   let rec = {};
+  let meta = {};
   try {
     rec = typeof run.recipe === "string" ? JSON.parse(run.recipe) : (run.recipe || {});
   } catch {}
-  const style1 = rec.styleIds?.[0] || rec.style || "";
-  const style2 = rec.styleIds?.[1] || rec.style2 || "";
-  const ratio = rec.ratio || fallbackRatio || "3:4";
-  const mode = rec.mode || fallbackMode || "graphic-text";
+  try {
+    meta = typeof run.meta === "string" ? JSON.parse(run.meta) : (run.meta || {});
+  } catch {}
+  const isDirect = Boolean(meta.directPrompt);
+  const style1 = isDirect ? "" : (rec.styleIds?.[0] || rec.style || "");
+  const style2 = isDirect ? "" : (rec.styleIds?.[1] || rec.style2 || "");
+  const ratio = meta.ratio || rec.ratio || fallbackRatio || "3:4";
+  const mode = isDirect ? "pure-image" : (rec.mode || fallbackMode || "graphic-text");
   const items = imgs.map((im, idx) => ({
     id: uid("it"),
     index: idx + 1,
     title: imgs.length > 1 ? `第 ${idx + 1} 张` : (run.title || "当前画面"),
-    subject: im.theme || run.originalRequest || run.title || "",
+    subject: (isDirect ? (im.prompt || run.promptZh || run.originalRequest) : (im.theme || run.originalRequest)) || run.title || "",
     displayCopy: "",
-    layout: rec.layoutId || "",
+    layout: isDirect ? "" : (rec.layoutId || ""),
     layoutName: "",
     ratio,
-    mood: rec.mood || "",
+    mood: isDirect ? "" : (rec.mood || ""),
     status: im.status || "done",
     runId: run.id,
     imageId: im.id,
@@ -159,8 +171,11 @@ function runToTurn(run, fallbackRatio = "3:4", fallbackMode = "graphic-text") {
   return {
     id: uid("turn"),
     userMessage: run.originalRequest || run.title || "历史创作",
-    reply: `已载入历史作品「${run.title || "未命名"}」（共 ${items.length} 张），可继续对话迭代或单独重绘任意一张。`,
-    source: "work",
+    reply: isDirect
+      ? `已载入历史直出作品「${run.title || "未命名"}」（未调用手绘 Skill，共 ${items.length} 张）。`
+      : `已载入历史作品「${run.title || "未命名"}」（共 ${items.length} 张），可继续对话迭代或单独重绘任意一张。`,
+    source: isDirect ? "direct" : "work",
+    directPrompt: isDirect,
     kind: items.length > 1 ? "multi" : "single",
     common: {
       style1,
@@ -206,6 +221,8 @@ export async function renderCreate(root, ctx, params = {}) {
 
   const p = params.preset || params.recipe || {};
   const session = studioSession(host, "studio", {
+    directPrompt: false,
+    directCount: 1,
     recipeId: params.recipe?.id || "",
     style: "",
     style2: "",
@@ -245,6 +262,11 @@ export async function renderCreate(root, ctx, params = {}) {
 
   // Apply incoming route handoff params (from Home, Atlas, Works, Plugins, etc.)
   if (Object.keys(params).length) {
+    if (params.directPrompt !== undefined) {
+      state.directPrompt = Boolean(params.directPrompt);
+    } else if (params.recipe || params.style || params.preset) {
+      state.directPrompt = false;
+    }
     for (const key of ["style", "style2", "layout", "color", "tone", "mood", "mode", "ratio", "resolution", "modelRef", "parentId", "groupId", "forkOf", "forkTitle"]) {
       const value = params[key] ?? p[key];
       if (value !== undefined) state[key] = value;
@@ -304,14 +326,17 @@ export async function renderCreate(root, ctx, params = {}) {
   const turnHasRunning = (turn) => Boolean(turn?.items?.some((it) => it.status === "queued" || it.status === "running"));
 
   // ---------- Header ----------
+  const headerSubtitle = el("span", { class: "muted" }, "一个工作台同时支持单图与多图规划，左侧随时调配画风、图型与单张属性");
+  const rollDiceBtn = el("button", { type: "button", class: "btn btn-sm", onClick: rollDice }, "🎲 摇灵感");
+  const saveRecipeBtn = el("button", { type: "button", class: "btn btn-sm", onClick: saveCurrentRecipe }, "💾 存为配方");
   root.appendChild(el("div", { class: "page-head" },
     el("div", { class: "row", style: { gap: "10px", flexWrap: "wrap" } },
       el("h1", { class: "page-title" }, "生图"),
-      el("span", { class: "muted" }, "一个工作台同时支持单图与多图规划，左侧随时调配画风、图型与单张属性")
+      headerSubtitle
     ),
     el("div", { class: "row" },
-      el("button", { type: "button", class: "btn btn-sm", onClick: rollDice }, "🎲 摇灵感"),
-      el("button", { type: "button", class: "btn btn-sm", onClick: saveCurrentRecipe }, "💾 存为配方"),
+      rollDiceBtn,
+      saveRecipeBtn,
       el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("atlas") }, "📖 逛画册")
     )
   ));
@@ -432,7 +457,8 @@ export async function renderCreate(root, ctx, params = {}) {
     );
     selectedSlotBox.appendChild(head);
 
-    if (state.mode !== "pure-image") {
+    const isDirectSlot = Boolean(turn.directPrompt || state.directPrompt);
+    if (!isDirectSlot && state.mode !== "pure-image") {
       const itemLayoutPicker = resourcePicker(
         "本图图型",
         layouts,
@@ -471,7 +497,7 @@ export async function renderCreate(root, ctx, params = {}) {
       ratioSel
     ));
 
-    if (state.mode !== "pure-image") {
+    if (!isDirectSlot && state.mode !== "pure-image") {
       const copyIn = el("input", {
         class: "input",
         type: "text",
@@ -531,22 +557,72 @@ export async function renderCreate(root, ctx, params = {}) {
     });
   }
 
+  const modeSkillBtn = el("button", {
+    type: "button",
+    class: "mode-seg-btn",
+    "data-studio-mode": "skill",
+    onClick: () => setStudioDirectMode(false),
+  }, "🎨 手绘 Skill");
+
+  const modeDirectBtn = el("button", {
+    type: "button",
+    class: "mode-seg-btn",
+    "data-studio-mode": "direct",
+    onClick: () => setStudioDirectMode(true),
+  }, "⚡ 直出（不用 Skill）");
+
+  const studioModeSwitch = el("div", {
+    class: "mode-seg-switch",
+    role: "group",
+    "aria-label": "生图引擎模式",
+  }, modeSkillBtn, modeDirectBtn);
+
+  const directHintCard = el("div", { class: "direct-mode-callout hidden" },
+    el("strong", null, "⚡ 提示词直出模式"),
+    el("span", null, "跳过手绘 Skill 与 AI 规划，将你的完整提示词原样发给生图模型，适合外部采集、Midjourney / GPT 等通用提示词直接出图。")
+  );
+
+  const directCountChoices = choices("生成张数", [["1", "1 张"], ["2", "2 张"], ["4", "4 张"]], String(state.directCount || 1), (v) => {
+    state.directCount = Math.max(1, Math.min(4, Number(v) || 1));
+    refreshQuote();
+    session.persist();
+  }, { inline: true });
+
+  const recipeRow = el("div", { class: "studio-more-row" },
+    el("span", { class: "studio-row-label" }, "配方"),
+    recSel,
+    el("button", {
+      type: "button",
+      class: "btn btn-sm",
+      id: "btn-manage-recipes",
+      title: "查看、新建、编辑或导入导出配方",
+      onClick: openRecipesManager,
+    }, "管理")
+  );
+
+  const redrawRow = el("label", { class: "row", style: { cursor: "pointer", fontSize: "12.5px" } }, redrawChk, el("span", null, "照片重绘（参考原图结构重绘）"));
+
+  function setStudioDirectMode(on) {
+    const next = Boolean(on);
+    if (Boolean(state.directPrompt) === next) return;
+    state.directPrompt = next;
+    syncLeftControls();
+    syncComposerState();
+    renderSelectedSlot();
+    if (!currentTurn()) renderOutput();
+    refreshQuote();
+    session.persist();
+  }
+
   const leftPane = el("section", { class: "make-image-properties", "aria-label": "画面属性" },
-    el("div", { class: "studio-more-row" },
-      el("span", { class: "studio-row-label" }, "配方"),
-      recSel,
-      el("button", {
-        type: "button",
-        class: "btn btn-sm",
-        id: "btn-manage-recipes",
-        title: "查看、新建、编辑或导入导出配方",
-        onClick: openRecipesManager,
-      }, "管理")
-    ),
+    studioModeSwitch,
+    directHintCard,
+    recipeRow,
     controls.node,
+    directCountChoices,
     resChoices,
     qualChoices,
-    el("label", { class: "row", style: { cursor: "pointer", fontSize: "12.5px" } }, redrawChk, el("span", null, "照片重绘（参考原图结构重绘）")),
+    redrawRow,
     selectedSlotBox,
     el("details", { class: "studio-more-card" },
       el("summary", { class: "studio-more-summary" },
@@ -865,7 +941,23 @@ export async function renderCreate(root, ctx, params = {}) {
 
   // ---------- Rendering & Sync helpers ----------
   function syncLeftControls() {
+    const isDirect = Boolean(state.directPrompt);
+    modeSkillBtn.classList.toggle("is-active", !isDirect);
+    modeDirectBtn.classList.toggle("is-active", isDirect);
+    modeSkillBtn.setAttribute("aria-pressed", String(!isDirect));
+    modeDirectBtn.setAttribute("aria-pressed", String(isDirect));
+    directHintCard.classList.toggle("hidden", !isDirect);
+    directCountChoices.classList.toggle("hidden", !isDirect);
+    recipeRow.classList.toggle("hidden", isDirect);
+    redrawRow.classList.toggle("hidden", isDirect);
+    rollDiceBtn.classList.toggle("hidden", isDirect);
+    saveRecipeBtn.classList.toggle("hidden", isDirect);
+    headerSubtitle.textContent = isDirect
+      ? "提示词直出模式：跳过手绘 Skill，将你的完整提示词原样发给生图模型"
+      : "一个工作台同时支持单图与多图规划，左侧随时调配画风、图型与单张属性";
+    controls.setDirectMode(isDirect);
     controls.sync();
+    directCountChoices.sync(String(state.directCount || 1));
     resChoices.sync(state.resolution);
     qualChoices.sync(state.quality);
     redrawChk.checked = Boolean(state.redraw);
@@ -896,10 +988,17 @@ export async function renderCreate(root, ctx, params = {}) {
       modeImageBtn.classList.toggle("is-active", state.composerMode === "image");
     }
 
+    const isDirect = Boolean(state.directPrompt);
     if (state.composerMode === "image" && item) {
       subjectInput.value = item.subject || "";
-      subjectInput.placeholder = "直接修改当前画面的描述词，点击右侧按钮只重绘这一张…（Ctrl/⌘ + Enter）";
+      subjectInput.placeholder = isDirect
+        ? "直接修改当前画面的直出提示词，点击右侧按钮只重绘这一张…（Ctrl/⌘ + Enter）"
+        : "直接修改当前画面的描述词，点击右侧按钮只重绘这一张…（Ctrl/⌘ + Enter）";
       submitBtn.textContent = item.status === "done" ? "重绘此图" : "生成这张";
+    } else if (isDirect) {
+      subjectInput.value = state.draftInput || "";
+      subjectInput.placeholder = "直接粘贴或输入完整生图提示词（中英文均可），将跳过手绘 Skill 原样发给生图模型…（Ctrl/⌘ + Enter 直出）";
+      submitBtn.textContent = "⚡ 直接生图";
     } else {
       subjectInput.value = state.draftInput || "";
       subjectInput.placeholder = turn
@@ -1037,18 +1136,25 @@ export async function renderCreate(root, ctx, params = {}) {
     }
 
     const common = turn.common || {};
-    const styleObj = styles.find((s) => s.number === (common.style1 || state.style));
-    const styleLabel = common.style1
+    const isDirectTurn = Boolean(turn.directPrompt);
+    const styleObj = !isDirectTurn ? styles.find((s) => s.number === (common.style1 || state.style)) : null;
+    const styleLabel = !isDirectTurn && common.style1
       ? `${common.style1} ${common.style1Name || (styleObj ? resourceName(styleObj) : "")}`.trim()
       : "";
-    const meta = el("div", { class: "sc-meta-chips" },
-      el("span", { class: "badge badge-accent" }, isMulti ? `多图 · ${doneItems.length}/${total} 张` : "单图方案"),
-      styleLabel ? el("span", { class: "badge" }, styleLabel + (common.style2 ? ` + ${common.style2}` : "")) : null,
-      el("span", { class: "badge" }, MODE_LABELS[common.mode || state.mode] || "图文"),
-      el("span", { class: "badge" }, common.ratio || state.ratio || "3:4"),
-      common.colors?.length ? el("span", { class: "badge" }, (common.colorNames?.length ? common.colorNames : common.colors).join(" + ")) : null,
-      turn.source ? el("span", { class: "badge" }, SOURCE_LABELS[turn.source] || turn.source) : null
-    );
+    const meta = isDirectTurn
+      ? el("div", { class: "sc-meta-chips" },
+          el("span", { class: "badge badge-accent" }, isMulti ? `⚡ 提示词直出 · ${doneItems.length}/${total} 张` : "⚡ 提示词直出"),
+          el("span", { class: "badge" }, common.ratio || state.ratio || "3:4"),
+          el("span", { class: "badge" }, "未调用手绘 Skill")
+        )
+      : el("div", { class: "sc-meta-chips" },
+          el("span", { class: "badge badge-accent" }, isMulti ? `多图 · ${doneItems.length}/${total} 张` : "单图方案"),
+          styleLabel ? el("span", { class: "badge" }, styleLabel + (common.style2 ? ` + ${common.style2}` : "")) : null,
+          el("span", { class: "badge" }, MODE_LABELS[common.mode || state.mode] || "图文"),
+          el("span", { class: "badge" }, common.ratio || state.ratio || "3:4"),
+          common.colors?.length ? el("span", { class: "badge" }, (common.colorNames?.length ? common.colorNames : common.colors).join(" + ")) : null,
+          turn.source ? el("span", { class: "badge" }, SOURCE_LABELS[turn.source] || turn.source) : null
+        );
 
     planStrip.append(
       el("div", { class: "sc-plan-top" },
@@ -1087,8 +1193,10 @@ export async function renderCreate(root, ctx, params = {}) {
       colorObj && { img: colorObj.image ? packImg(colorObj.image) : "", label: `${colorObj.id} ${resourceName(colorObj)}` },
     ].filter(Boolean);
 
+    const isDirect = Boolean(state.directPrompt);
+    const activeExamples = isDirect ? DIRECT_EXAMPLE_PROMPTS : EXAMPLE_PROMPTS;
     const exampleRow = el("div", { class: "sc-example-prompts" },
-      ...EXAMPLE_PROMPTS.map((ex) => el("button", {
+      ...activeExamples.map((ex) => el("button", {
         type: "button",
         class: "sc-example-btn",
         onClick: () => {
@@ -1102,6 +1210,22 @@ export async function renderCreate(root, ctx, params = {}) {
         el("span", null, ex.text)
       ))
     );
+
+    if (isDirect) {
+      stageBox.appendChild(el("div", { class: "sc-empty-state" },
+        el("div", { class: "sc-empty-icon", "aria-hidden": "true" }, "⚡"),
+        el("h2", { class: "sc-empty-title" }, "提示词直出 · 原样生图"),
+        el("p", { class: "muted sc-empty-desc" },
+          "已关闭手绘 Skill 与 AI 改写，直接粘贴外部采集或自写的完整提示词（中英文均可），将按原样直达生图模型。"
+        ),
+        el("div", { class: "row", style: { justifyContent: "center", gap: "6px", flexWrap: "wrap" } },
+          el("span", { class: "badge badge-accent" }, "⚡ 跳过手绘 Skill"),
+          el("span", { class: "badge" }, `${state.ratio} · ${state.resolution.toUpperCase()} · ${state.directCount || 1} 张`)
+        ),
+        exampleRow
+      ));
+      return;
+    }
 
     stageBox.appendChild(el("div", { class: "sc-empty-state" },
       el("div", { class: "sc-empty-icon", "aria-hidden": "true" }, "✦"),
@@ -1627,7 +1751,62 @@ export async function renderCreate(root, ctx, params = {}) {
       return;
     }
 
-    // Mode 2: Chat / unified single+multi planning -> POST /api/studio/chat-plan -> auto generate
+    // Mode 2A: Direct-prompt mode (skip handraw-skill & chat-plan, send verbatim prompt!) (#87)
+    if (state.directPrompt) {
+      const message = subjectInput.value.trim();
+      if (!message) {
+        toast("请先输入或粘贴完整提示词");
+        subjectInput.focus();
+        return;
+      }
+      const cnt = Math.max(1, Math.min(4, Number(state.directCount) || 1));
+      const directItems = Array.from({ length: cnt }, (_, idx) => ({
+        id: uid("it"),
+        index: idx + 1,
+        title: cnt > 1 ? `直出第 ${idx + 1} 张` : message.slice(0, 20),
+        subject: message,
+        displayCopy: "",
+        layout: "",
+        layoutName: "",
+        ratio: state.ratio || "3:4",
+        mood: "",
+        status: "idle",
+        runId: "",
+        imageId: "",
+        path: "",
+        thumb: "",
+        width: 0,
+        height: 0,
+        error: "",
+      }));
+      const turn = {
+        id: uid("turn"),
+        userMessage: message,
+        reply: cnt > 1
+          ? `提示词直出（共 ${cnt} 张，未调用手绘 Skill）：${message.slice(0, 72)}${message.length > 72 ? "…" : ""}`
+          : `提示词直出（未调用手绘 Skill）：${message.slice(0, 80)}${message.length > 80 ? "…" : ""}`,
+        source: "direct",
+        directPrompt: true,
+        kind: cnt > 1 ? "multi" : "single",
+        common: { ratio: state.ratio || "3:4", mode: "pure-image" },
+        runIds: [],
+        items: directItems,
+      };
+      state.draftInput = "";
+      subjectInput.value = "";
+      state.turns = [...(state.turns || []), turn];
+      state.activeTurnIndex = state.turns.length - 1;
+      state.selectedItemIndex = 0;
+      state.viewMode = "focused";
+      state.composerMode = "chat";
+      lastStageRenderKey = "";
+      renderAll();
+      session.persist();
+      await generateTurnItems(turn, turn.items, false);
+      return;
+    }
+
+    // Mode 2B: Chat / unified single+multi planning -> POST /api/studio/chat-plan -> auto generate
     const message = subjectInput.value.trim();
     if (!message) {
       toast("请先描述想画的内容");
@@ -1730,59 +1909,79 @@ export async function renderCreate(root, ctx, params = {}) {
     isSubmitting = true;
     syncComposerState();
 
+    const isDirect = Boolean(turn.directPrompt || state.directPrompt);
     const common = turn.common || {};
-    const effectiveStyle = state.style || common.style1 || "FA-013";
-    const effectiveStyle2 = state.fusion ? (state.style2 || "") : "";
-    const effectiveMode = state.mode || common.mode || "graphic-text";
-    const effectiveColor = state.color || (common.colors?.[0] || "");
-    const effectiveTone = state.tone || (common.tones?.[0] || "");
-    const baseExtra = extraInstructions(state);
     const isSeriesBatch = targetItems.length > 1;
 
-    const payloadItems = targetItems.map((it) => {
-      const mergedMood = [state.mood, it.mood].filter(Boolean).join("，");
-      return {
-        theme: it.subject || turn.userMessage || "手绘插画",
-        style: effectiveStyle,
-        style2: effectiveStyle2,
-        layout: effectiveMode === "pure-image" ? "" : (it.layout || state.layout || ""),
-        color: effectiveColor,
-        tone: effectiveTone,
-        mood: mergedMood,
-        ratio: it.ratio || state.ratio || "3:4",
-        text: effectiveMode === "pure-image" ? "" : (it.displayCopy || ""),
-        mode: effectiveMode,
-        redraw: Boolean(state.redraw),
-        extra: baseExtra,
+    let payloadItems;
+    let payloadRecipe;
+    let payloadGalleryRefs = [];
+    if (isDirect) {
+      payloadItems = targetItems.map((it) => {
+        const rawP = String(it.subject || turn.userMessage || "").trim();
+        return {
+          theme: rawP,
+          prompt: rawP,
+          ratio: it.ratio || state.ratio || "3:4",
+          mode: "pure-image",
+        };
+      });
+      payloadRecipe = {};
+    } else {
+      const effectiveStyle = state.style || common.style1 || "FA-013";
+      const effectiveStyle2 = state.fusion ? (state.style2 || "") : "";
+      const effectiveMode = state.mode || common.mode || "graphic-text";
+      const effectiveColor = state.color || (common.colors?.[0] || "");
+      const effectiveTone = state.tone || (common.tones?.[0] || "");
+      const baseExtra = extraInstructions(state);
+      payloadGalleryRefs = (state.galleryRefs || []).map((g) => ({ kind: g.kind, id: g.id }));
+      payloadItems = targetItems.map((it) => {
+        const mergedMood = [state.mood, it.mood].filter(Boolean).join("，");
+        return {
+          theme: it.subject || turn.userMessage || "手绘插画",
+          style: effectiveStyle,
+          style2: effectiveStyle2,
+          layout: effectiveMode === "pure-image" ? "" : (it.layout || state.layout || ""),
+          color: effectiveColor,
+          tone: effectiveTone,
+          mood: mergedMood,
+          ratio: it.ratio || state.ratio || "3:4",
+          text: effectiveMode === "pure-image" ? "" : (it.displayCopy || ""),
+          mode: effectiveMode,
+          redraw: Boolean(state.redraw),
+          extra: baseExtra,
+        };
+      });
+      payloadRecipe = {
+        id: state.recipeId,
+        styleIds: [effectiveStyle, effectiveStyle2].filter(Boolean),
+        layoutId: state.layout || payloadItems[0]?.layout || "",
+        color: effectiveColor || payloadItems[0]?.color || "",
+        tone: effectiveTone || payloadItems[0]?.tone || "",
+        mood: state.mood || payloadItems[0]?.mood || "",
+        ratio: state.ratio || payloadItems[0]?.ratio || "",
+        mode: effectiveMode || payloadItems[0]?.mode || "",
+        resolution: state.resolution || "",
+        quality: state.quality || "",
       };
-    });
+    }
 
     try {
       const res = await api("POST", "/api/generate", {
         mode: isSeriesBatch ? "series" : "single",
-        title: (targetItems.length === 1 ? (targetItems[0].title || targetItems[0].subject) : (turn.userMessage || "系列创作")).slice(0, 28),
+        title: (targetItems.length === 1 ? (targetItems[0].title || targetItems[0].subject) : (turn.userMessage || (isDirect ? "直出创作" : "系列创作"))).slice(0, 28),
         modelRef: state.modelRef,
         resolution: state.resolution,
         quality: state.quality,
         confirmed,
+        directPrompt: isDirect,
         groupId: state.groupId,
         parentId: state.parentId,
-        forkOf: state.forkOf || "",
+        forkOf: isDirect ? "" : (state.forkOf || ""),
         refs: state.refs,
-        galleryRefs: (state.galleryRefs || []).map((g) => ({ kind: g.kind, id: g.id })),
+        galleryRefs: payloadGalleryRefs,
         items: payloadItems,
-        recipe: {
-          id: state.recipeId,
-          styleIds: [effectiveStyle, effectiveStyle2].filter(Boolean),
-          layoutId: state.layout || payloadItems[0]?.layout || "",
-          color: effectiveColor || payloadItems[0]?.color || "",
-          tone: effectiveTone || payloadItems[0]?.tone || "",
-          mood: state.mood || payloadItems[0]?.mood || "",
-          ratio: state.ratio || payloadItems[0]?.ratio || "",
-          mode: effectiveMode || payloadItems[0]?.mode || "",
-          resolution: state.resolution || "",
-          quality: state.quality || "",
-        },
+        recipe: payloadRecipe,
       });
 
       if (res.needConfirm) {

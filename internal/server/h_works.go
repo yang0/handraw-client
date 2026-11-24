@@ -77,7 +77,8 @@ func (s *Server) work(w http.ResponseWriter, r *http.Request) (any, error) {
 	}
 	s.reconcileSitePublishedWork(r.Context(), &run)
 	resolved := s.resolveRunRecipe(run, versions)
-	return map[string]any{"run": run, "versions": versions, "resolvedRecipe": resolved}, nil
+	isDirect := isDirectPromptRun(run, resolved)
+	return map[string]any{"run": run, "versions": versions, "resolvedRecipe": resolved, "isDirectPrompt": isDirect}, nil
 }
 
 // collectRunSiteRefs returns task/request/generation IDs linking a local run
@@ -228,6 +229,9 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 			"deduped":          true,
 			"alreadyPublished": true,
 		}, nil
+	}
+	if isDirectPromptRun(run, s.resolveRunRecipe(run, nil)) {
+		return nil, bad("该图片为提示词直出（未调用手绘 Skill，无画风配方），请改用「发布到灵感库」分享提示词与图片")
 	}
 	var body struct {
 		Title    string   `json:"title"`

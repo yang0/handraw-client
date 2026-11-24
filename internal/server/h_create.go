@@ -526,7 +526,8 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		GroupID          string           `json:"groupId"`
 		ParentID         string           `json:"parentId"`
 		ForkOf           string           `json:"forkOf"`
-		Recipe           json.RawMessage  `json:"recipe"`
+		Recipe                json.RawMessage  `json:"recipe"`
+		DirectPrompt          bool             `json:"directPrompt"`
 		PromptCustomized      bool             `json:"promptCustomized"`
 		CustomPrompt          string           `json:"customPrompt"`
 		Annotations           []map[string]any `json:"annotations"`
@@ -600,9 +601,12 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	}
 
 	// Resolve extensible gallery references (e.g. hairstyles, poses) into prompt cues and reference images (#48).
-	galCtx := s.resolveGalleryRefs(body.GalleryRefs)
-	if len(galCtx.RefImages) > 0 {
-		body.Refs = append(body.Refs, galCtx.RefImages...)
+	var galCtx resolvedGalleryContext
+	if !body.DirectPrompt {
+		galCtx = s.resolveGalleryRefs(body.GalleryRefs)
+		if len(galCtx.RefImages) > 0 {
+			body.Refs = append(body.Refs, galCtx.RefImages...)
+		}
 	}
 
 	// Build prompts for each item.
@@ -612,6 +616,18 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	var itemRatios []string
 	var itemThemes []string
 	for _, it := range body.Items {
+		if body.DirectPrompt {
+			rawPrompt := firstStr(strings.TrimSpace(it.Prompt), strings.TrimSpace(body.CustomPrompt), strings.TrimSpace(it.Theme), strings.TrimSpace(body.Input.Theme))
+			if rawPrompt == "" {
+				return nil, bad("请输入要直出的完整提示词")
+			}
+			pr := prompt.Result{Primary: rawPrompt, Zh: rawPrompt}
+			built = append(built, pr)
+			itemPrompts = append(itemPrompts, rawPrompt)
+			itemRatios = append(itemRatios, firstStr(it.Ratio, body.Input.Ratio, "3:4"))
+			itemThemes = append(itemThemes, firstStr(strings.TrimSpace(it.Theme), rawPrompt))
+			continue
+		}
 		in := prompt.Input{
 			Style: firstStr(it.Style, galCtx.Style), Style2: it.Style2,
 			Layout: firstStr(it.Layout, galCtx.Layout), Color: firstStr(it.Color, galCtx.Color),
@@ -743,36 +759,50 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		src = "site"
 	}
 	firstRes := built[0]
-	var parentRecipe json.RawMessage
-	if body.ParentID != "" {
-		if parentRun, pErr := s.DB.GetRun(body.ParentID); pErr == nil {
-			parentRecipe = parentRun.Recipe
+	var persistedRecipe json.RawMessage
+	var runMeta json.RawMessage
+	defaultRunTitle := "手绘风创作"
+	if body.DirectPrompt {
+		persistedRecipe = json.RawMessage("{}")
+		runMeta, _ = json.Marshal(map[string]any{
+			"directPrompt": true,
+			"ratio":        itemRatios[0],
+			"resolution":   effResolution,
+			"quality":      effQuality,
+		})
+		defaultRunTitle = "直出创作"
+	} else {
+		var parentRecipe json.RawMessage
+		if body.ParentID != "" {
+			if parentRun, pErr := s.DB.GetRun(body.ParentID); pErr == nil {
+				parentRecipe = parentRun.Recipe
+			}
 		}
+		firstIt := body.Items[0]
+		persistedRecipe = mergePersistedRecipe(
+			body.Recipe,
+			parentRecipe,
+			prompt.Input{
+				Style:  firstStr(firstIt.Style, firstRes.StyleID, galCtx.Style),
+				Style2: firstIt.Style2,
+				Layout: firstStr(firstIt.Layout, firstRes.LayoutID, galCtx.Layout),
+				Color:  firstStr(firstIt.Color, firstRes.ColorID, galCtx.Color),
+				Tone:   firstStr(firstIt.Tone, galCtx.Tone),
+				Mood:   firstIt.Mood,
+				Ratio:  firstIt.Ratio,
+				Mode:   firstIt.Mode,
+				Text:   firstIt.Text,
+				Redraw: firstIt.Redraw,
+				Extra:  firstIt.Extra,
+			},
+			body.Resolution,
+			body.Quality,
+		)
 	}
-	firstIt := body.Items[0]
-	persistedRecipe := mergePersistedRecipe(
-		body.Recipe,
-		parentRecipe,
-		prompt.Input{
-			Style:  firstStr(firstIt.Style, firstRes.StyleID, galCtx.Style),
-			Style2: firstIt.Style2,
-			Layout: firstStr(firstIt.Layout, firstRes.LayoutID, galCtx.Layout),
-			Color:  firstStr(firstIt.Color, firstRes.ColorID, galCtx.Color),
-			Tone:   firstStr(firstIt.Tone, galCtx.Tone),
-			Mood:   firstIt.Mood,
-			Ratio:  firstIt.Ratio,
-			Mode:   firstIt.Mode,
-			Text:   firstIt.Text,
-			Redraw: firstIt.Redraw,
-			Extra:  firstIt.Extra,
-		},
-		body.Resolution,
-		body.Quality,
-	)
 	run := &store.Run{
 		ID:              runID,
 		Mode:            body.Mode,
-		Title:           firstStr(body.Title, itemThemes[0], "手绘风创作"),
+		Title:           firstStr(body.Title, firstNRunes(itemThemes[0], 28), defaultRunTitle),
 		OriginalRequest: firstStr(itemThemes[0], body.Input.Theme),
 		PromptZh:        firstStr(firstRes.Zh, itemPrompts[0]),
 		PromptEn:        firstRes.En,
@@ -786,6 +816,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		Dir:             dir,
 		ParentID:        body.ParentID,
 		GroupID:         body.GroupID,
+		Meta:            runMeta,
 	}
 
 	imgs := make([]store.Image, 0, len(body.Items))
@@ -801,7 +832,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	}
 	for i, it := range body.Items {
 		refs := append([]string{}, baseRefs...)
-		if !isSite && canRef && built[i].UseReference && built[i].ReferenceImage != "" {
+		if !body.DirectPrompt && !isSite && canRef && built[i].UseReference && built[i].ReferenceImage != "" {
 			if resolved := jobs.ResolveRef(built[i].ReferenceImage); resolved != "" {
 				refs = append(refs, resolved)
 			}
@@ -835,26 +866,49 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 					siteCreationSource = "single"
 				}
 			}
-			sb := map[string]any{
-				"model":          rawModel,
-				"resolution":     spec.Resolution,
-				"quality":        spec.Quality,
-				"ratio":          spec.Ratio,
-				"prompt":         itemPrompts[i],
-				"style1":         it.Style,
-				"style2":         it.Style2,
-				"layout":         it.Layout,
-				"colors":         splitParamList(it.Color),
-				"tones":          splitParamList(it.Tone),
-				"moods":          splitParamList(it.Mood),
-				"theme":          siteTheme,
-				"displayCopy":    strings.TrimSpace(it.Text),
-				"mode":           siteMode,
-				"creationSource": siteCreationSource,
-				"autoPublish":    false,
-			}
-			if body.Mode == "edit" || body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" {
-				sb["promptFromSkill"] = true
+			var sb map[string]any
+			if body.DirectPrompt {
+				sb = map[string]any{
+					"model":           rawModel,
+					"resolution":      spec.Resolution,
+					"quality":         spec.Quality,
+					"ratio":           spec.Ratio,
+					"prompt":          itemPrompts[i],
+					"style1":          "",
+					"style2":          "",
+					"layout":          "",
+					"colors":          []string{},
+					"tones":           []string{},
+					"moods":           []string{},
+					"theme":           itemThemes[i],
+					"displayCopy":     "",
+					"mode":            "pure-image",
+					"creationSource":  siteCreationSource,
+					"autoPublish":     false,
+					"promptFromSkill": true,
+				}
+			} else {
+				sb = map[string]any{
+					"model":          rawModel,
+					"resolution":     spec.Resolution,
+					"quality":        spec.Quality,
+					"ratio":          spec.Ratio,
+					"prompt":         itemPrompts[i],
+					"style1":         it.Style,
+					"style2":         it.Style2,
+					"layout":         it.Layout,
+					"colors":         splitParamList(it.Color),
+					"tones":          splitParamList(it.Tone),
+					"moods":          splitParamList(it.Mood),
+					"theme":          siteTheme,
+					"displayCopy":    strings.TrimSpace(it.Text),
+					"mode":           siteMode,
+					"creationSource": siteCreationSource,
+					"autoPublish":    false,
+				}
+				if body.Mode == "edit" || body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" {
+					sb["promptFromSkill"] = true
+				}
 			}
 			if siteSpecID != "" {
 				sb["specId"] = siteSpecID
