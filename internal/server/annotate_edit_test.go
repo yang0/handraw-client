@@ -93,4 +93,30 @@ func TestAnnotateEditBuildsLocatedPromptAndSavesGuideRef(t *testing.T) {
 			t.Fatalf("expected edit prompt to contain %q, got:\n%s", want, spec.Prompt)
 		}
 	}
+
+	// Also verify global extra instruction merges with annotations and works standalone (#75).
+	rrGlobal := doReq(t, srv.Handler(), srv.Token, "POST", "/api/generate", map[string]any{
+		"mode":      "edit",
+		"title":     "整体暖光调整",
+		"modelRef":  "site:gpt-image-2.5",
+		"confirmed": true,
+		"refs":      []string{origPath},
+		"input":     map[string]any{"theme": "极光海报", "ratio": "3:4", "mode": "edit", "extra": "整体色调改成温暖黄昏金色光感"},
+	})
+	if rrGlobal.Code != 200 {
+		t.Fatalf("global edit generate failed: %d %s", rrGlobal.Code, rrGlobal.Body.String())
+	}
+	var respG struct {
+		Images []struct {
+			Meta json.RawMessage `json:"meta"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(rrGlobal.Body.Bytes(), &respG); err != nil || len(respG.Images) != 1 {
+		t.Fatalf("decode global edit response: %v %s", err, rrGlobal.Body.String())
+	}
+	var specG jobs.Spec
+	_ = json.Unmarshal(respG.Images[0].Meta, &specG)
+	if !strings.Contains(specG.Prompt, "温暖黄昏金色光感") || len(specG.Refs) != 1 {
+		t.Fatalf("expected standalone global edit prompt with 1 ref, got refs=%v prompt=%q", specG.Refs, specG.Prompt)
+	}
 }

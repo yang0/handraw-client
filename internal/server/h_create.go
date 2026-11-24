@@ -625,9 +625,13 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		if len(galCtx.PromptCues) > 0 {
 			finalPrompt += "\n" + strings.Join(galCtx.PromptCues, "\n")
 		}
+		globalEditExtra := strings.TrimSpace(firstStr(it.Extra, body.Input.Extra))
 		if len(body.Annotations) > 0 {
 			if body.Mode == "edit" {
 				if editPrompt := buildAnnotateEditPrompt(body.Annotations, strings.TrimSpace(body.AnnotatedGuideDataURL) != ""); editPrompt != "" {
+					if globalEditExtra != "" {
+						editPrompt += "\n- 整体补充要求：" + globalEditExtra
+					}
 					finalPrompt = editPrompt
 					pr.Primary, pr.Zh = editPrompt, editPrompt
 				}
@@ -643,6 +647,13 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 					finalPrompt += "\n局部修改要求：" + strings.Join(notes, "；")
 				}
 			}
+		} else if body.Mode == "edit" && globalEditExtra != "" {
+			editPrompt := "请严格基于所附参考图 1 进行编辑修改：\n" +
+				"- 保留原图主体构图、画风笔触、材质肌理与未要求改动的元素。\n" +
+				"- 按以下要求调整画面：" + globalEditExtra + "\n" +
+				"- 新增或修改的内容必须自然融入原图的画风、透视与光影中。"
+			finalPrompt = editPrompt
+			pr.Primary, pr.Zh = editPrompt, editPrompt
 		}
 		built = append(built, pr)
 		itemPrompts = append(itemPrompts, finalPrompt)
