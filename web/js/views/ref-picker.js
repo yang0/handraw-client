@@ -1,6 +1,6 @@
 import { api, clear, closeModal, el, galleryImg, localImg, onEvent, showModal, toast } from "../api.js";
 
-const BUILTIN_EXT_IGNORE = new Set(["styles", "layouts", "colors", "tones", "characters", "props", "scenes"]);
+const BUILTIN_EXT_IGNORE = new Set(["styles", "layouts", "colors", "tones", "assets", "characters", "props", "scenes"]);
 
 export const MAX_REF_IMAGES = 6;
 

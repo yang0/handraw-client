@@ -149,8 +149,12 @@ func ValidKind(kind string) bool {
 	return validKindRe.MatchString(kind)
 }
 
-func itemImageURL(kind, id string) string {
+func ItemImageURL(kind, id string) string {
 	return "/api/galleries/" + url.PathEscape(kind) + "/items/" + url.PathEscape(id) + "/image"
+}
+
+func itemImageURL(kind, id string) string {
+	return ItemImageURL(kind, id)
 }
 
 func itemVariantImageURL(kind, id, variant string, thumb bool) string {
@@ -244,7 +248,7 @@ func (r *Registry) UnregisterByOwner(owner string) int {
 
 func isCoreBuiltinKind(kind string) bool {
 	switch kind {
-	case "styles", "layouts", "colors", "tones", "characters", "props", "scenes":
+	case "styles", "layouts", "colors", "tones", "assets", "characters", "props", "scenes":
 		return true
 	}
 	return false
@@ -261,20 +265,15 @@ func (r *Registry) List(pack *resources.Pack, extraDirs ...string) []Meta {
 	return out
 }
 
-// Items queries items from a gallery kind with optional text search, category,
-// source filter, and pagination.
-func (r *Registry) Items(pack *resources.Pack, kind string, q Query, extraDirs ...string) ([]Item, int, bool) {
-	entry, ok := r.findEntry(pack, kind, extraDirs...)
-	if !ok {
-		return nil, 0, false
-	}
+// FilterItems filters and paginates a slice of gallery items using Query.
+func FilterItems(items []Item, q Query) ([]Item, int) {
 	qStr := strings.ToLower(strings.TrimSpace(q.Q))
 	cat := strings.TrimSpace(q.Category)
 	src := strings.TrimSpace(q.Source)
 	series := strings.TrimSpace(q.Series)
 
-	matched := make([]Item, 0, len(entry.items))
-	for _, it := range entry.items {
+	matched := make([]Item, 0, len(items))
+	for _, it := range items {
 		if cat != "" && !strings.EqualFold(it.Category, cat) {
 			continue
 		}
@@ -298,13 +297,24 @@ func (r *Registry) Items(pack *resources.Pack, kind string, q Query, extraDirs .
 		offset = 0
 	}
 	if offset >= total {
-		return []Item{}, total, true
+		return []Item{}, total
 	}
 	end := total
 	if q.Limit > 0 && offset+q.Limit < end {
 		end = offset + q.Limit
 	}
-	return matched[offset:end], total, true
+	return matched[offset:end], total
+}
+
+// Items queries items from a gallery kind with optional text search, category,
+// source filter, and pagination.
+func (r *Registry) Items(pack *resources.Pack, kind string, q Query, extraDirs ...string) ([]Item, int, bool) {
+	entry, ok := r.findEntry(pack, kind, extraDirs...)
+	if !ok {
+		return nil, 0, false
+	}
+	items, total := FilterItems(entry.items, q)
+	return items, total, true
 }
 
 // Item looks up a single item by gallery kind and ID.
@@ -966,7 +976,7 @@ func isWithin(root, target string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func computeCategories(items []Item) []Category {
+func ComputeCategories(items []Item) []Category {
 	order := []string{}
 	byID := map[string]*Category{}
 	for _, it := range items {
@@ -987,6 +997,10 @@ func computeCategories(items []Item) []Category {
 		out = append(out, *byID[id])
 	}
 	return out
+}
+
+func computeCategories(items []Item) []Category {
+	return ComputeCategories(items)
 }
 
 func itemMatches(it Item, q string) bool {

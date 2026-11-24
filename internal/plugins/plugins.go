@@ -336,7 +336,7 @@ func (r *Runtime) ValidateConfig(id string, cfg map[string]any) (map[string]any,
 // Permission names a host capability a community plugin may use.
 var KnownPermissions = map[string]string{
 	"resources:read":     "读取画风、图型、主题色等资源",
-	"galleries:read":     "读取宿主全部画廊（画风、图型、主题色、影调及发型/姿势等扩展画廊）",
+	"galleries:read":     "读取宿主全部画廊（画风、图型、主题色、影调、自建图库及发型/姿势等扩展画廊）与图片",
 	"galleries:register": "向宿主注册新的扩展画廊供画册和其他插件调用",
 	"models:text":        "调用宿主配置的文字模型",
 	"models:vision":      "调用宿主配置的视觉理解模型",

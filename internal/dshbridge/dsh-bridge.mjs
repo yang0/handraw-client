@@ -262,13 +262,27 @@ function createHandrawService(pluginId, pluginDir) {
         const res = await hostJSON('GET', `/api/galleries/${encodeURIComponent(kind)}/items/${encodeURIComponent(id)}`);
         return res?.item || null;
       },
-      async imageBytes(kind, id) {
-        const res = await hostFetch(`/api/galleries/${encodeURIComponent(kind)}/items/${encodeURIComponent(id)}/image`);
+      async imageBytes(kind, id, opts = {}) {
+        const qs = new URLSearchParams();
+        if (opts && opts.variant) qs.set('variant', String(opts.variant));
+        if (opts && opts.size) qs.set('size', String(opts.size));
+        const suffix = qs.toString() ? '?' + qs.toString() : '';
+        const res = await hostFetch(`/api/galleries/${encodeURIComponent(kind)}/items/${encodeURIComponent(id)}/image${suffix}`);
         if (!res.ok) throw new Error(`读取画廊图片失败 (${res.status})`);
         return {
           bytes: new Uint8Array(await res.arrayBuffer()),
           contentType: res.headers.get('content-type') || 'application/octet-stream',
         };
+      },
+      async image(kind, id, opts = {}) {
+        return this.imageBytes(kind, id, opts);
+      },
+      async materialize(kind, id, variant = '') {
+        return hostJSON(
+          'POST',
+          `/api/galleries/${encodeURIComponent(kind)}/items/${encodeURIComponent(id)}/materialize`,
+          variant ? { variant: String(variant) } : {}
+        );
       },
       async register(reg) {
         return hostJSON('POST', '/api/host/galleries/register', {
@@ -278,7 +292,7 @@ function createHandrawService(pluginId, pluginDir) {
         });
       },
       async unregister(kind) {
-        return hostJSON('DELETE', `/api/host/galleries/${encodeURIComponent(kind)}`);
+        return hostJSON('DELETE', `/api/host/galleries/${encodeURIComponent(kind)}?owner=${encodeURIComponent(pluginId)}`);
       },
     },
     models: {

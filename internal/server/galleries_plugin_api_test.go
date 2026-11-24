@@ -406,3 +406,182 @@ func TestExternalPacksAndFiveAnglePoseMaterialize(t *testing.T) {
 		t.Fatalf("expected materialized cache file to be purged on uninstall")
 	}
 }
+
+func TestPluginPersonalAssetsGalleryImageSeriesAndUnregister(t *testing.T) {
+	srv, _ := setupTestServer(t, "")
+	h := srv.Handler()
+	pngBytes := tinyPNG(t)
+	pngDataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngBytes)
+
+	// 1. Seed a custom asset category and a personal asset ("自建图库").
+	rrCat := doReq(t, h, srv.Token, "POST", "/api/mine/asset-categories", map[string]any{
+		"key":   "cat_pets",
+		"label": "萌宠",
+	})
+	if rrCat.Code != 200 {
+		t.Fatalf("save custom asset category failed: %d %s", rrCat.Code, rrCat.Body.String())
+	}
+	rrAsset := doReq(t, h, srv.Token, "POST", "/api/mine/assets", map[string]any{
+		"id":      "MY-AS-001",
+		"kind":    "cat_pets",
+		"name":    "橘猫团子",
+		"dataUrl": pngDataURL,
+		"tags":    []string{"橘猫", "书店"},
+	})
+	if rrAsset.Code != 200 {
+		t.Fatalf("save custom asset failed: %d %s", rrAsset.Code, rrAsset.Body.String())
+	}
+
+	// 2. Seed an external gallery with series metadata to test L1 series filtering.
+	galDir := appdir.Galleries()
+	imgDir := filepath.Join(galDir, "series-imgs")
+	_ = os.MkdirAll(imgDir, 0o755)
+	_ = os.WriteFile(filepath.Join(imgDir, "s1.png"), pngBytes, 0o644)
+	seriesGal := `{
+		"id": "demo-series",
+		"name": "分镜系列",
+		"items": [
+			{"id":"S-1","name":"雨夜街头","category":"outdoor","meta":{"series":"rainy"},"image":"series-imgs/s1.png"},
+			{"id":"S-2","name":"晴天公园","category":"outdoor","meta":{"series":"sunny"},"image":"series-imgs/s1.png"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(galDir, "demo-series.json"), []byte(seriesGal), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Install three plugins with distinct permission scopes.
+	installTestPlugin(t, srv, "no-perm", []string{"clipboard"})
+	installTestPlugin(t, srv, "gal-reader", []string{"galleries:read"})
+	installTestPlugin(t, srv, "gal-owner", []string{"galleries:read", "galleries:register"})
+	installTestPlugin(t, srv, "gal-other", []string{"galleries:read", "galleries:register"})
+
+	// 3. Permission enforcement: no-perm gets 403 on galleries.image and galleries.materialize.
+	if rr := doReq(t, h, srv.Token, "POST", "/api/plugins/no-perm/call", map[string]any{
+		"action": "galleries.image",
+		"args":   map[string]any{"kind": "assets", "id": "MY-AS-001"},
+	}); rr.Code != 403 {
+		t.Fatalf("expected 403 for galleries.image without permission, got %d", rr.Code)
+	}
+	if rr := doReq(t, h, srv.Token, "POST", "/api/plugins/no-perm/call", map[string]any{
+		"action": "galleries.materialize",
+		"args":   map[string]any{"kind": "assets", "id": "MY-AS-001"},
+	}); rr.Code != 403 {
+		t.Fatalf("expected 403 for galleries.materialize without permission, got %d", rr.Code)
+	}
+
+	// 4. galleries.list includes personal "assets" gallery with custom category label "萌宠".
+	rrList := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-reader/call", map[string]any{
+		"action": "galleries.list",
+	})
+	if rrList.Code != 200 || !strings.Contains(rrList.Body.String(), `"id":"assets"`) || !strings.Contains(rrList.Body.String(), `"萌宠"`) {
+		t.Fatalf("galleries.list missing personal assets gallery or custom category: %d %s", rrList.Code, rrList.Body.String())
+	}
+
+	// 5. galleries.items & galleries.item & HTTP /api/galleries/assets/items/{id}/image work cleanly.
+	rrItems := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-reader/call", map[string]any{
+		"action": "galleries.items",
+		"args":   map[string]any{"kind": "assets", "category": "cat_pets", "q": "橘猫"},
+	})
+	if rrItems.Code != 200 || !strings.Contains(rrItems.Body.String(), `"MY-AS-001"`) || !strings.Contains(rrItems.Body.String(), `"萌宠"`) {
+		t.Fatalf("galleries.items(assets) failed: %d %s", rrItems.Code, rrItems.Body.String())
+	}
+	rrItem := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-reader/call", map[string]any{
+		"action": "galleries.item",
+		"args":   map[string]any{"kind": "assets", "id": "MY-AS-001"},
+	})
+	if rrItem.Code != 200 || !strings.Contains(rrItem.Body.String(), `/api/galleries/assets/items/MY-AS-001/image`) {
+		t.Fatalf("galleries.item(assets) failed: %d %s", rrItem.Code, rrItem.Body.String())
+	}
+	rrHTTPImg := doReq(t, h, srv.Token, "GET", "/api/galleries/assets/items/MY-AS-001/image", nil)
+	if rrHTTPImg.Code != 200 || rrHTTPImg.Body.Len() != len(pngBytes) {
+		t.Fatalf("HTTP GET assets image failed: %d len=%d", rrHTTPImg.Code, rrHTTPImg.Body.Len())
+	}
+
+	// 6. L1 galleries.image returns base64 dataUrl usable directly in sandboxed <img>.
+	rrImgCall := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-reader/call", map[string]any{
+		"action": "galleries.image",
+		"args":   map[string]any{"kind": "assets", "id": "MY-AS-001", "size": "thumb"},
+	})
+	if rrImgCall.Code != 200 {
+		t.Fatalf("galleries.image failed: %d %s", rrImgCall.Code, rrImgCall.Body.String())
+	}
+	var imgOut struct {
+		MimeType   string `json:"mimeType"`
+		DataURL    string `json:"dataUrl"`
+		Size       string `json:"size"`
+		ByteLength int    `json:"byteLength"`
+	}
+	if err := json.Unmarshal(rrImgCall.Body.Bytes(), &imgOut); err != nil {
+		t.Fatal(err)
+	}
+	if imgOut.MimeType != "image/png" || !strings.HasPrefix(imgOut.DataURL, "data:image/png;base64,") || imgOut.Size != "thumb" || imgOut.ByteLength != len(pngBytes) {
+		t.Fatalf("unexpected galleries.image response: %+v", imgOut)
+	}
+
+	// 7. L1 galleries.materialize succeeds and NEVER leaks host absolute path.
+	rrMatCall := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-reader/call", map[string]any{
+		"action": "galleries.materialize",
+		"args":   map[string]any{"kind": "assets", "id": "MY-AS-001"},
+	})
+	if rrMatCall.Code != 200 {
+		t.Fatalf("galleries.materialize failed: %d %s", rrMatCall.Code, rrMatCall.Body.String())
+	}
+	var matMap map[string]any
+	if err := json.Unmarshal(rrMatCall.Body.Bytes(), &matMap); err != nil {
+		t.Fatal(err)
+	}
+	if _, leaked := matMap["path"]; leaked {
+		t.Fatalf("L1 galleries.materialize must not expose host filesystem path: %+v", matMap)
+	}
+
+	// 8. galleryRefs resolves personal "assets" item in prompt compilation.
+	rrPrompt := doReq(t, h, srv.Token, "POST", "/api/prompt", map[string]any{
+		"style":       "FA-001",
+		"theme":       "窗边小书店",
+		"galleryRefs": []map[string]any{{"kind": "assets", "id": "MY-AS-001"}},
+	})
+	if rrPrompt.Code != 200 || !strings.Contains(rrPrompt.Body.String(), "橘猫团子") {
+		t.Fatalf("POST /api/prompt with personal asset galleryRef failed: %d %s", rrPrompt.Code, rrPrompt.Body.String())
+	}
+
+	// 9. L1 galleries.items forwards series filter cleanly.
+	rrSeries := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-reader/call", map[string]any{
+		"action": "galleries.items",
+		"args":   map[string]any{"kind": "demo-series", "series": "rainy"},
+	})
+	if rrSeries.Code != 200 || !strings.Contains(rrSeries.Body.String(), `"S-1"`) || strings.Contains(rrSeries.Body.String(), `"S-2"`) {
+		t.Fatalf("galleries.items series filter failed: %d %s", rrSeries.Code, rrSeries.Body.String())
+	}
+
+	// 10. L1 galleries.unregister enforces owner isolation (cannot unregister another plugin's gallery, nor overwrite built-in "assets").
+	if rrBadReg := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-owner/call", map[string]any{
+		"action": "galleries.register",
+		"args":   map[string]any{"id": "assets", "name": "伪造自建图库", "items": []any{}},
+	}); rrBadReg.Code != 400 {
+		t.Fatalf("expected 400 when attempting to overwrite built-in assets gallery, got %d", rrBadReg.Code)
+	}
+	if rrReg := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-owner/call", map[string]any{
+		"action": "galleries.register",
+		"args":   map[string]any{"id": "custom-stickers", "name": "贴纸", "items": []any{}},
+	}); rrReg.Code != 200 {
+		t.Fatalf("gal-owner register failed: %d %s", rrReg.Code, rrReg.Body.String())
+	}
+	if rrSteal := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-other/call", map[string]any{
+		"action": "galleries.unregister",
+		"args":   map[string]any{"kind": "custom-stickers"},
+	}); rrSteal.Code != 404 {
+		t.Fatalf("expected 404 when non-owner tries to unregister gallery, got %d", rrSteal.Code)
+	}
+	if rrDel := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-owner/call", map[string]any{
+		"action": "galleries.unregister",
+		"args":   map[string]any{"kind": "custom-stickers"},
+	}); rrDel.Code != 200 {
+		t.Fatalf("gal-owner unregister failed: %d %s", rrDel.Code, rrDel.Body.String())
+	}
+	if rrGone := doReq(t, h, srv.Token, "POST", "/api/plugins/gal-reader/call", map[string]any{
+		"action": "galleries.items",
+		"args":   map[string]any{"kind": "custom-stickers"},
+	}); rrGone.Code != 404 {
+		t.Fatalf("expected 404 after unregister, got %d", rrGone.Code)
+	}
+}

@@ -583,15 +583,16 @@ func (s *Server) pluginCall(w http.ResponseWriter, r *http.Request) (any, error)
 			Q        string `json:"q"`
 			Category string `json:"category"`
 			Source   string `json:"source"`
+			Series   string `json:"series"`
 			Limit    int    `json:"limit"`
 			Offset   int    `json:"offset"`
 		}
 		if err := json.Unmarshal(body.Args, &a); err != nil {
 			return nil, bad("参数无效")
 		}
-		items, total, ok := s.Galleries.Items(s.Pack(), a.Kind, galleries.Query{
-			Q: a.Q, Category: a.Category, Source: a.Source, Limit: a.Limit, Offset: a.Offset,
-		}, s.galleryExtraDirs()...)
+		items, total, ok := s.queryGalleryItems(a.Kind, galleries.Query{
+			Q: a.Q, Category: a.Category, Source: a.Source, Series: a.Series, Limit: a.Limit, Offset: a.Offset,
+		})
 		if !ok {
 			return nil, notFound("找不到画廊 " + a.Kind)
 		}
@@ -607,11 +608,44 @@ func (s *Server) pluginCall(w http.ResponseWriter, r *http.Request) (any, error)
 		if err := json.Unmarshal(body.Args, &a); err != nil {
 			return nil, bad("参数无效")
 		}
-		it, ok := s.Galleries.Item(s.Pack(), a.Kind, a.ID, s.galleryExtraDirs()...)
+		it, ok := s.lookupGalleryItem(a.Kind, a.ID)
 		if !ok {
 			return nil, notFound(fmt.Sprintf("找不到画廊资源 %s/%s", a.Kind, a.ID))
 		}
 		return map[string]any{"item": it}, nil
+	case "galleries.image":
+		if err := needAny("galleries:read", "resources:read"); err != nil {
+			return nil, err
+		}
+		var a struct {
+			Kind    string `json:"kind"`
+			ID      string `json:"id"`
+			Variant string `json:"variant"`
+			Size    string `json:"size"` // thumb | full
+		}
+		if err := json.Unmarshal(body.Args, &a); err != nil {
+			return nil, bad("参数无效")
+		}
+		return s.readGalleryImageDataURL(r.Context(), a.Kind, a.ID, a.Variant, a.Size)
+	case "galleries.materialize":
+		if err := needAny("galleries:read", "resources:read"); err != nil {
+			return nil, err
+		}
+		var a struct {
+			Kind    string `json:"kind"`
+			ID      string `json:"id"`
+			Variant string `json:"variant"`
+		}
+		if err := json.Unmarshal(body.Args, &a); err != nil {
+			return nil, bad("参数无效")
+		}
+		res, err := s.materializeGalleryItem(r.Context(), a.Kind, a.ID, a.Variant)
+		if err != nil {
+			return nil, err
+		}
+		// Never expose raw host filesystem paths to L1 sandboxed plugins.
+		delete(res, "path")
+		return res, nil
 	case "galleries.register":
 		if err := need("galleries:register"); err != nil {
 			return nil, err
@@ -624,6 +658,25 @@ func (s *Server) pluginCall(w http.ResponseWriter, r *http.Request) (any, error)
 		reg.ImageRoot = c.Dir
 		if err := s.Galleries.Register(reg); err != nil {
 			return nil, bad(err.Error())
+		}
+		return okv, nil
+	case "galleries.unregister":
+		if err := need("galleries:register"); err != nil {
+			return nil, err
+		}
+		var a struct {
+			Kind string `json:"kind"`
+			ID   string `json:"id"`
+		}
+		if err := json.Unmarshal(body.Args, &a); err != nil {
+			return nil, bad("参数无效")
+		}
+		kind := firstStr(strings.TrimSpace(a.Kind), strings.TrimSpace(a.ID))
+		if kind == "" {
+			return nil, bad("缺少画廊标识")
+		}
+		if !s.Galleries.Unregister(kind, c.ID) {
+			return nil, notFound("未找到当前插件注册的画廊 " + kind)
 		}
 		return okv, nil
 	case "models.list":

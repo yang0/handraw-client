@@ -94,16 +94,50 @@
         return data;
       }
 
+      function buildGalleryImageURL(kind, id, opts) {
+        const sp = new URLSearchParams();
+        if (opts && opts.variant) sp.set('variant', String(opts.variant));
+        if (opts && opts.size) sp.set('size', String(opts.size));
+        const tok = readCookie('hw');
+        if (tok) sp.set('t', tok);
+        const qs = sp.toString() ? '?' + sp.toString() : '';
+        return '/api/galleries/' + encodeURIComponent(kind) + '/items/' + encodeURIComponent(id) + '/image' + qs;
+      }
+
       // Expose Handraw gallery & model client API to DSH plugin UIs too.
       window.handraw = {
         galleries: {
           list: () => hostAPI('GET', '/api/galleries').then((r) => r.galleries || []),
           items: (kind, q) => {
-            const sp = new URLSearchParams(q || {});
+            const sp = new URLSearchParams();
+            for (const [k, v] of Object.entries(q || {})) {
+              if (v !== undefined && v !== null && v !== '') sp.set(k, String(v));
+            }
             const qs = sp.toString() ? '?' + sp.toString() : '';
             return hostAPI('GET', '/api/galleries/' + encodeURIComponent(kind) + '/items' + qs);
           },
           item: (kind, id) => hostAPI('GET', '/api/galleries/' + encodeURIComponent(kind) + '/items/' + encodeURIComponent(id)).then((r) => r.item),
+          imageUrl: (kind, id, opts) => buildGalleryImageURL(kind, id, opts),
+          imageDataUrl: async (kind, id, opts) => {
+            const res = await fetch(buildGalleryImageURL(kind, id, opts), {
+              headers: { 'X-Handraw-Token': readCookie('hw') },
+            });
+            if (!res.ok) throw new Error('读取画廊图片失败 (' + res.status + ')');
+            const blob = await res.blob();
+            return new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result || ''));
+              reader.onerror = () => reject(reader.error || new Error('图片转换失败'));
+              reader.readAsDataURL(blob);
+            });
+          },
+          materialize: (kind, id, variant) => hostAPI(
+            'POST',
+            '/api/galleries/' + encodeURIComponent(kind) + '/items/' + encodeURIComponent(id) + '/materialize',
+            variant ? { variant: String(variant) } : {}
+          ),
+          register: (reg) => hostAPI('POST', '/api/host/galleries/register', Object.assign({ owner: pluginId }, reg || {})),
+          unregister: (kind) => hostAPI('DELETE', '/api/host/galleries/' + encodeURIComponent(kind) + '?owner=' + encodeURIComponent(pluginId)),
         },
         models: {
           list: (purpose) => hostAPI('GET', '/api/host/models' + (purpose ? '?purpose=' + encodeURIComponent(purpose) : '')),

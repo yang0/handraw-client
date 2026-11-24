@@ -13,7 +13,7 @@ import {
 } from "./ref-picker.js";
 import { masonry } from "../masonry.js";
 
-const BUILTIN_GALLERY_IDS = new Set(["styles", "layouts", "colors", "tones", "characters", "props", "scenes"]);
+const BUILTIN_GALLERY_IDS = new Set(["styles", "layouts", "colors", "tones", "assets", "characters", "props", "scenes"]);
 
 const state = {
   tab: "styles", // styles | layouts | colors | tones | assets | <ext-gallery> | dice
