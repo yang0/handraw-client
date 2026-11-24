@@ -194,7 +194,29 @@ async function openRunDetail(runId, ctx, onChanged) {
         type: "button",
         class: "btn btn-sm",
         onClick: async () => { await api("PATCH", `/api/works/${encodeURIComponent(run.id)}`, { starred: !run.starred }); toast(run.starred ? "已取消星标" : "已标星收藏"); closeModal(); openRunDetail(run.id, ctx, onChanged); onChanged?.(); },
-      }, run.starred ? "★ 已标星" : "☆ 标星")
+      }, run.starred ? "★ 已标星" : "☆ 标星"),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: async () => {
+          const firstImg = (run.images || []).find((i) => i.status === "done" && i.path);
+          let rec = {};
+          try { rec = typeof run.recipe === "string" ? JSON.parse(run.recipe) : (run.recipe || {}); } catch {}
+          try {
+            await api("POST", "/api/inspirations", {
+              title: titleIn.value.trim() || run.title || "我的创作灵感",
+              imagePath: firstImg?.path || "",
+              prompt: run.promptZh || run.promptEn || run.originalRequest || run.title || "",
+              promptZh: run.promptZh || "",
+              source: "local",
+              runId: run.id,
+              recipe: rec,
+              suggestedStyle: rec.styleIds?.[0] || "",
+            });
+            toast("已收进灵感库，可随时 AI 整理或分享赚积分");
+          } catch (e) { toast(e.message); }
+        },
+      }, "💡 收进灵感库")
     )
   ));
 

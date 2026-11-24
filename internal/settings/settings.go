@@ -3,10 +3,13 @@
 package settings
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/yang0/handraw-client/internal/appdir"
@@ -80,6 +83,8 @@ type Settings struct {
 	// KeepSiteGenerationsPrivate stops website-model images from being
 	// published to the community automatically (the website default is public).
 	KeepSiteGenerationsPrivate bool `json:"keepSiteGenerationsPrivate"`
+	// ClipToken authenticates the local Chrome Inspiration Clipper extension (#73).
+	ClipToken string `json:"clipToken,omitempty"`
 }
 
 func Defaults() Settings {
@@ -136,6 +141,41 @@ func Update(fn func(*Settings) error) (Settings, error) {
 
 // Reset drops the cache (tests).
 func Reset() { mu.Lock(); cur = nil; mu.Unlock() }
+
+func newClipToken() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return "hwc_" + hex.EncodeToString(b)
+}
+
+// EnsureClipToken returns the persisted Chrome clipper pairing token, creating
+// one on first use (#73).
+func EnsureClipToken() string {
+	st := Get()
+	if tok := strings.TrimSpace(st.ClipToken); tok != "" {
+		return tok
+	}
+	tok := newClipToken()
+	_, _ = Update(func(s *Settings) error {
+		if strings.TrimSpace(s.ClipToken) == "" {
+			s.ClipToken = tok
+		} else {
+			tok = strings.TrimSpace(s.ClipToken)
+		}
+		return nil
+	})
+	return tok
+}
+
+// RotateClipToken replaces the pairing token for the Chrome clipper extension.
+func RotateClipToken() (string, error) {
+	tok := newClipToken()
+	_, err := Update(func(s *Settings) error {
+		s.ClipToken = tok
+		return nil
+	})
+	return tok, err
+}
 
 func clone(s Settings) Settings {
 	b, _ := json.Marshal(s)

@@ -1,0 +1,51 @@
+.handraw-x-clip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(183, 66, 39, 0.42);
+  background: rgba(246, 243, 236, 0.94);
+  color: #B74227;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+  align-self: center;
+}
+.handraw-x-clip-btn:hover {
+  background: #B74227;
+  color: #FFFDF9;
+  border-color: #B74227;
+}
+.handraw-x-clip-btn.is-saved {
+  background: #286E49;
+  color: #FFFDF9;
+  border-color: #286E49;
+}
+.handraw-x-clip-btn:disabled {
+  opacity: 0.72;
+  cursor: default;
+}
+
+.handraw-x-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2147483647;
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: #1E1B18;
+  color: #FFFDF9;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 253, 249, 0.16);
+}
+.handraw-x-toast.is-error {
+  background: #B8332A;
+}

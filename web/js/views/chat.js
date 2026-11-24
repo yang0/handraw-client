@@ -2,6 +2,7 @@ import { api, clear, closeModal, el, localImg, money, onEvent, showModal, toast 
 import { openHarnessSkillImportModal } from "../skills-ui.js";
 import { buildGroupedAIModelSelect, buildGroupedModelSelect } from "./create.js";
 import { RATIOS } from "./studio-controls.js";
+import { openShareInspirationModal } from "./work-remix-modal.js";
 
 const chatCss = el("link", { rel: "stylesheet", href: new URL("../../css/chat.css", import.meta.url).href });
 document.head.appendChild(chatCss);
@@ -567,6 +568,58 @@ export async function renderChat(root, ctx, params = {}) {
                 class: "btn btn-sm",
                 onClick: () => ctx.go("annotate", { runId: run.id }),
               }, "📌 批注"),
+              el("button", {
+                type: "button",
+                class: "btn btn-sm",
+                onClick: async (ev) => {
+                  const btn = ev.currentTarget;
+                  btn.disabled = true;
+                  let rec = {};
+                  try { rec = typeof run.recipe === "string" ? JSON.parse(run.recipe) : (run.recipe || {}); } catch {}
+                  try {
+                    await api("POST", "/api/inspirations", {
+                      title: run.title || im.theme || "会话生图灵感",
+                      imagePath: im.path,
+                      prompt: im.prompt || run.promptZh || run.promptEn || im.theme || run.originalRequest || "",
+                      promptZh: run.promptZh || "",
+                      source: "local",
+                      runId: run.id,
+                      recipe: rec,
+                      suggestedStyle: rec.styleIds?.[0] || "",
+                    });
+                    btn.textContent = "★ 已收藏";
+                    toast("已收进灵感库");
+                  } catch (e) {
+                    btn.disabled = false;
+                    toast(e?.message || "收藏失败");
+                  }
+                },
+              }, "★ 收藏"),
+              el("button", {
+                type: "button",
+                class: "btn btn-sm",
+                onClick: async () => {
+                  let rec = {};
+                  try { rec = typeof run.recipe === "string" ? JSON.parse(run.recipe) : (run.recipe || {}); } catch {}
+                  try {
+                    const saved = await api("POST", "/api/inspirations", {
+                      title: run.title || im.theme || "会话生图灵感",
+                      imagePath: im.path,
+                      prompt: im.prompt || run.promptZh || run.promptEn || im.theme || run.originalRequest || "",
+                      promptZh: run.promptZh || "",
+                      source: "local",
+                      runId: run.id,
+                      recipe: rec,
+                      suggestedStyle: rec.styleIds?.[0] || "",
+                    });
+                    if (saved.item) {
+                      openShareInspirationModal(saved.item, ctx);
+                    }
+                  } catch (e) {
+                    toast(e?.message || "准备分享失败");
+                  }
+                },
+              }, "💎 赚积分"),
               el("button", {
                 type: "button",
                 class: "btn btn-sm",

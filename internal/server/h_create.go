@@ -511,6 +511,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		Confirmed        bool             `json:"confirmed"`
 		GroupID          string           `json:"groupId"`
 		ParentID         string           `json:"parentId"`
+		ForkOf           string           `json:"forkOf"`
 		Recipe           json.RawMessage  `json:"recipe"`
 		PromptCustomized      bool             `json:"promptCustomized"`
 		CustomPrompt          string           `json:"customPrompt"`
@@ -806,6 +807,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			}
 			if siteSpecID != "" {
 				sb["specId"] = siteSpecID
+			}
+			if fo := strings.TrimSpace(body.ForkOf); fo != "" {
+				sb["forkOf"] = fo
 			}
 			spec.SiteBody = sb
 		}

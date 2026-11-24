@@ -212,6 +212,26 @@ func (s *Server) Handler() http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		// Allow paired Chrome extension ("手绘风灵感捕手") to call ONLY the
+		// dedicated local clip endpoints with X-Handraw-Clip-Token (#73).
+		if isClipBridgePath(r.URL.Path) {
+			if o := r.Header.Get("Origin"); strings.HasPrefix(o, "chrome-extension://") || strings.HasPrefix(o, "http://127.0.0.1") || strings.HasPrefix(o, "http://localhost") {
+				w.Header().Set("Access-Control-Allow-Origin", o)
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Handraw-Clip-Token, X-Handraw-Token")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				w.Header().Set("Vary", "Origin")
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			if !s.authorizedClip(r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			s.mux.ServeHTTP(w, r)
+			return
+		}
 		if s.DSH != nil && s.DSH.MatchRoute(r.URL.Path) {
 			if !s.authorized(r) {
 				http.Error(w, "forbidden", http.StatusForbidden)
@@ -254,6 +274,31 @@ func (s *Server) authorized(r *http.Request) bool {
 		}
 	}
 	return tok == s.Token
+}
+
+func isClipBridgePath(p string) bool {
+	return p == "/api/inspirations/clip" || p == "/api/inspirations/clip/ping"
+}
+
+func (s *Server) authorizedClip(r *http.Request) bool {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host != "127.0.0.1" && host != "localhost" && host != "" {
+		return false
+	}
+	if s.authorized(r) {
+		return true
+	}
+	if o := r.Header.Get("Origin"); o != "" && o != "null" {
+		if !strings.HasPrefix(o, "chrome-extension://") && !strings.HasPrefix(o, "http://127.0.0.1") && !strings.HasPrefix(o, "http://localhost") {
+			return false
+		}
+	}
+	clipTok := strings.TrimSpace(r.Header.Get("X-Handraw-Clip-Token"))
+	expected := settings.EnsureClipToken()
+	return clipTok != "" && expected != "" && clipTok == expected
 }
 
 // ---------- helpers ----------

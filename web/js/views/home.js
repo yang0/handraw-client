@@ -1,6 +1,7 @@
 import { api, clear, el, localImg, openURL, remoteThumb, toast } from "../api.js";
 import { mountSlotPanels } from "../plugins-host.js";
 import { masonry } from "../masonry.js";
+import { openWorkRemixModal } from "./work-remix-modal.js";
 
 const discoveryLabels = { work: "作品", style: "画风", layout: "图型", topic: "论坛" };
 
@@ -8,11 +9,13 @@ function openWebsite(url) {
   void openURL(url).catch((error) => toast(error.message));
 }
 
-function discoveryCard(item, siteBase) {
+function discoveryCard(item, siteBase, ctx) {
   let image;
+  let absImageUrl = "";
   if (item.image) {
     const src = new URL(item.image, `${siteBase.replace(/\/+$/, "")}/`);
     if (src.protocol === "https:" || src.protocol === "http:") {
+      absImageUrl = src.href;
       const ratio = Math.min(3, Math.max(0.5, Number(item.aspectRatio) || (item.kind === "topic" ? 4 / 3 : 3 / 4)));
       image = el("img", {
         class: "discover-image", src: remoteThumb(src.href, 480), alt: "", loading: "lazy", decoding: "async",
@@ -23,33 +26,91 @@ function discoveryCard(item, siteBase) {
   }
   const resource = item.kind === "style" || item.kind === "layout";
   const summary = item.summary?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 110);
+  const openCard = (event) => {
+    event.preventDefault();
+    if (item.kind === "work" && item.id) {
+      openWorkRemixModal(item.id, ctx, {
+        title: item.title,
+        author: item.author,
+        href: item.href,
+        image: absImageUrl,
+        siteBase,
+      });
+      return;
+    }
+    openWebsite(item.href);
+  };
   const primary = el("a", {
     class: "discover-primary", href: item.href,
-    onClick: (event) => { event.preventDefault(); openWebsite(item.href); },
+    onClick: openCard,
   }, image, el("div", { class: "style-body" },
     el("span", { class: "style-code" }, discoveryLabels[item.kind] + (resource ? ` · ${item.id}` : "")),
     el("h3", { class: "style-name", title: item.title }, item.title),
     summary ? el("p", { class: "style-traits discover-excerpt" }, summary) : null,
     item.author ? el("div", { class: "muted discover-author" }, item.author) : null
   ));
-  return el("article", { class: "style-card discover-card discover-" + item.kind }, primary,
-    item.kind === "work" && item.extraWorkCount > 0 && item.moreHref
-      ? el("footer", { class: "discover-footer" }, el("a", {
-        class: "discover-more", href: item.moreHref,
-        "aria-label": `更多 +${item.extraWorkCount}，查看 ${item.author || item.authorKey} 的全部作品`,
-        onClick: (event) => { event.preventDefault(); openWebsite(item.moreHref); },
-      }, `更多 +${item.extraWorkCount}`))
-      : null
-  );
+
+  let footer = null;
+  if (item.kind === "work" && item.id) {
+    footer = el("footer", { class: "discover-footer discover-work-actions" },
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: async (e) => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          try {
+            await api("POST", "/api/inspirations", {
+              title: item.title || "社区作品",
+              imageUrl: absImageUrl,
+              prompt: summary || item.title || "",
+              source: "community",
+              sourceUrl: item.href || "",
+              sourceAuthor: item.author || "",
+              workId: item.id,
+              syncCollection: true,
+            });
+            btn.textContent = "★ 已收藏";
+            toast("已收进灵感库");
+          } catch (err) {
+            btn.disabled = false;
+            toast(err?.message || "收藏失败");
+          }
+        },
+      }, "★ 收藏"),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        onClick: () => openWorkRemixModal(item.id, ctx, {
+          title: item.title,
+          author: item.author,
+          href: item.href,
+          image: absImageUrl,
+          siteBase,
+        }),
+      }, "✨ 做同款"),
+      item.extraWorkCount > 0 && item.moreHref
+        ? el("a", {
+          class: "discover-more", href: item.moreHref,
+          "aria-label": `更多 +${item.extraWorkCount}，查看 ${item.author || item.authorKey} 的全部作品`,
+          onClick: (event) => { event.preventDefault(); openWebsite(item.moreHref); },
+        }, `+${item.extraWorkCount}`)
+        : null
+    );
+  }
+  return el("article", { class: "style-card discover-card discover-" + item.kind }, primary, footer);
 }
 
-function mountDiscovery(root, initialBase) {
+function mountDiscovery(root, initialBase, ctx) {
   let siteBase = initialBase || "https://handraw-style.com";
   const stage = el("div", { "aria-live": "polite" });
   root.appendChild(el("section", { class: "discover-section", "aria-labelledby": "discover-title" },
     el("div", { class: "page-head" },
       el("h2", { id: "discover-title" }, "发现"),
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => openWebsite(`${siteBase.replace(/\/+$/, "")}/`) }, "浏览全部 ↗")
+      el("div", { class: "row", style: { gap: "6px" } },
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("inspirations", { tab: "plaza" }) }, "💡 社区灵感广场"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => openWebsite(`${siteBase.replace(/\/+$/, "")}/`) }, "浏览全部 ↗")
+      )
     ), stage
   ));
 
@@ -70,7 +131,7 @@ function mountDiscovery(root, initialBase) {
         return;
       }
       if (feed.offline) stage.appendChild(el("p", { class: "muted" }, "暂时无法连接网站，正在显示本地缓存。"));
-      stage.appendChild(masonry({ class: "discover-grid" }, feed.items.map((item) => discoveryCard(item, siteBase))));
+      stage.appendChild(masonry({ class: "discover-grid" }, feed.items.map((item) => discoveryCard(item, siteBase, ctx))));
     } catch {
       clear(stage);
       unavailable();
@@ -181,6 +242,6 @@ export async function renderHome(container, ctx) {
   root.appendChild(secRecent);
 
   if (!root.isConnected) return;
-  mountDiscovery(root, settRes.settings?.siteBase);
+  mountDiscovery(root, settRes.settings?.siteBase, ctx);
   await mountSlotPanels(root, "home", { view: "home" });
 }

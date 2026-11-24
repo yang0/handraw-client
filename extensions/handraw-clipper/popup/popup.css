@@ -1,0 +1,226 @@
+:root {
+  --paper: #F6F3EC;
+  --surface: #FFFDF9;
+  --surface-2: #EFEAE0;
+  --ink: #1E1B18;
+  --muted: #766D62;
+  --line: rgba(30, 27, 24, 0.12);
+  --accent: #B74227;
+  --accent-hover: #99331B;
+  --ok: #286E49;
+  --warn: #9A6412;
+  --err: #B8332A;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  width: 360px;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  display: block;
+}
+h1 {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 700;
+}
+.sub {
+  margin: 1px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.pill {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--surface-2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.pill.is-ok {
+  background: rgba(40, 110, 73, 0.14);
+  color: var(--ok);
+}
+.pill.is-warn {
+  background: rgba(154, 100, 18, 0.14);
+  color: var(--warn);
+}
+.pill.is-err {
+  background: rgba(184, 51, 42, 0.14);
+  color: var(--err);
+}
+
+.body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.field input {
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+}
+.field input:focus {
+  outline: 2px solid rgba(183, 66, 39, 0.25);
+  border-color: var(--accent);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cloud-box {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.cloud-box summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.cloud-box .field + .field {
+  margin-top: 6px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+.btn {
+  flex: 1;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn:hover {
+  border-color: var(--accent);
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #FFFDF9;
+}
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+.btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.msg {
+  font-size: 12px;
+  min-height: 16px;
+  color: var(--muted);
+}
+.msg.is-ok { color: var(--ok); }
+.msg.is-err { color: var(--err); }
+
+.sec-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.muted {
+  color: var(--muted);
+  font-size: 11.5px;
+  margin: 0;
+}
+
+.recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.recent-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+}
+.recent-title {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.recent-tag {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.recent-tag.local { color: var(--ok); }
+.recent-tag.cloud { color: var(--warn); }
+.recent-tag.failed { color: var(--err); }

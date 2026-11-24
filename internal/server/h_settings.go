@@ -21,6 +21,7 @@ import (
 )
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) (any, error) {
+	clipTok := settings.EnsureClipToken()
 	st := settings.Get()
 	type provView struct {
 		settings.Provider
@@ -30,10 +31,16 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) (any, error
 	for _, p := range st.Providers {
 		provs = append(provs, provView{Provider: p, HasKey: secrets.Has(secrets.ProviderKey(p.ID))})
 	}
+	clipEp := ""
+	if s.Addr() != "" {
+		clipEp = strings.TrimRight(s.Addr(), "/") + "/api/inspirations/clip"
+	}
 	return map[string]any{
-		"settings":  st,
-		"providers": provs,
-		"dataDir":   appdir.Root(),
+		"settings":     st,
+		"providers":    provs,
+		"dataDir":      appdir.Root(),
+		"clipToken":    clipTok,
+		"clipEndpoint": clipEp,
 	}, nil
 }
 

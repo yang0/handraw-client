@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "手绘风灵感捕手",
+  "version": "1.0.0",
+  "description": "一键将 X (Twitter) 与任意网页中的图片和提示词收进手绘风客户端灵感库，支持 AI 自动整理与云端暂存。",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "手绘风灵感捕手",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "permissions": [
+    "contextMenus",
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://handraw-style.com/*",
+    "https://x.com/*",
+    "https://twitter.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "content/x-clipper.js"
+      ],
+      "css": [
+        "content/x-clipper.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

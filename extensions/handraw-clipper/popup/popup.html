@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>手绘风灵感捕手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="head">
+    <div class="brand">
+      <img src="../icons/icon-48.png" alt="" class="logo">
+      <div>
+        <h1>手绘风灵感捕手</h1>
+        <p class="sub">一键把 X 与网页好图/提示词收进灵感库</p>
+      </div>
+    </div>
+    <span id="status-pill" class="pill">检测中…</span>
+  </header>
+
+  <main class="body">
+    <section class="card">
+      <label class="field">
+        <span>本机客户端地址（从客户端「灵感库 → Chrome 灵感捕手」复制）</span>
+        <input id="in-client-url" type="text" placeholder="http://127.0.0.1:18520" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>本机配对 Token</span>
+        <input id="in-clip-token" type="password" placeholder="粘贴客户端生成的 clipToken" autocomplete="off">
+      </label>
+      <label class="check">
+        <input id="in-auto-org" type="checkbox" checked>
+        <span>收进后自动用 AI 整理提示词与标签</span>
+      </label>
+
+      <details class="cloud-box">
+        <summary>可选：离线云端暂存箱（桌面端未开时先存官网）</summary>
+        <label class="field">
+          <span>官网地址</span>
+          <input id="in-site-base" type="text" placeholder="https://handraw-style.com" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>官网令牌（可选，hwt_ 开头）</span>
+          <input id="in-site-token" type="password" placeholder="留空则仅直连本机客户端" autocomplete="off">
+        </label>
+      </details>
+
+      <div class="actions">
+        <button id="btn-save" type="button" class="btn btn-primary">测试并保存连接</button>
+        <button id="btn-clip-now" type="button" class="btn">📌 采集当前页</button>
+      </div>
+      <div id="msg" class="msg" role="status" aria-live="polite"></div>
+    </section>
+
+    <section class="card">
+      <div class="sec-head">
+        <strong>最近收集</strong>
+        <span id="recent-count" class="muted">0 条</span>
+      </div>
+      <div id="recent-list" class="recent-list">
+        <p class="muted">还没有收集记录。在 X 推文下方点「📌 收进手绘风」或在任意图片上右键即可开始。</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

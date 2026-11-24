@@ -12,6 +12,7 @@ import { renderArticle } from "./views/article.js";
 import { renderCanvas } from "./views/canvas.js";
 import { renderAnnotate } from "./views/annotate.js";
 import { renderWorks } from "./views/works.js";
+import { renderInspirations } from "./views/inspirations.js";
 import { renderPlugins } from "./views/plugins.js";
 import { renderSettings } from "./views/settings.js";
 
@@ -25,6 +26,7 @@ const VIEWS = {
   canvas: renderCanvas,
   annotate: renderAnnotate,
   works: renderWorks,
+  inspirations: renderInspirations,
   plugins: renderPlugins,
   settings: renderSettings,
 };
@@ -39,6 +41,7 @@ const CORE_NAV = [
   { id: "canvas", ico: "🧩", label: "画布", plugin: "canvas" },
   { id: "annotate", ico: "📌", label: "批注", plugin: "annotate" },
   { id: "works", ico: "🖼", label: "作品" },
+  { id: "inspirations", ico: "💡", label: "灵感库" },
   { id: "plugins", ico: "🔌", label: "插件" },
 ];
 

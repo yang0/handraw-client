@@ -120,6 +120,17 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/images/{id}/copy", s.h(s.imageCopy))
 	m.HandleFunc("GET /api/queue", s.h(s.queue))
 
+	// inspirations vault, AI organize, prompt unlock & Chrome clipper (#73)
+	m.HandleFunc("GET /api/inspirations", s.h(s.inspirationsList))
+	m.HandleFunc("POST /api/inspirations", s.h(s.inspirationsCreate))
+	m.HandleFunc("PATCH /api/inspirations/{id}", s.h(s.inspirationsPatch))
+	m.HandleFunc("DELETE /api/inspirations/{id}", s.h(s.inspirationsDelete))
+	m.HandleFunc("GET /api/inspirations/clip/ping", s.h(s.inspirationsClipPing))
+	m.HandleFunc("POST /api/inspirations/clip", s.h(s.inspirationsClip))
+	m.HandleFunc("POST /api/inspirations/{id}/organize", s.h(s.inspirationsOrganize))
+	m.HandleFunc("POST /api/inspirations/{id}/publish", s.h(s.inspirationsPublish))
+	m.HandleFunc("POST /api/settings/clip-token/rotate", s.h(s.clipTokenRotate))
+
 	// account + site
 	m.HandleFunc("GET /api/account", s.h(s.account))
 	m.HandleFunc("POST /api/account/login", s.h(s.loginStart))
@@ -129,8 +140,14 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/account/balance", s.h(s.balance))
 	m.HandleFunc("GET /api/account/level", s.h(s.accountLevel))
 	m.HandleFunc("GET /api/site/collections", s.h(s.siteCollections))
+	m.HandleFunc("POST /api/site/collections/toggle", s.h(s.siteCollectionsToggle))
 	m.HandleFunc("GET /api/site/history", s.h(s.siteHistory))
 	m.HandleFunc("GET /api/site/discover", s.h(s.siteDiscover))
+	m.HandleFunc("GET /api/site/works/{id}", s.h(s.siteWorkDetail))
+	m.HandleFunc("GET /api/site/inspirations", s.h(s.siteInspirationsFeed))
+	m.HandleFunc("GET /api/site/inspirations/{id}", s.h(s.siteInspirationDetail))
+	m.HandleFunc("POST /api/site/inspirations/{id}/unlock", s.h(s.siteInspirationUnlock))
+	m.HandleFunc("GET /api/site/creator-earnings", s.h(s.siteCreatorEarnings))
 	m.HandleFunc("POST /api/site/history/{id}/download", s.h(s.siteHistoryDownload))
 	m.HandleFunc("POST /api/open", s.h(s.open))
 

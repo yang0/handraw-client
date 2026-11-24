@@ -228,6 +228,8 @@ export async function renderCreate(root, ctx, params = {}) {
     galleryRefs: [],
     parentId: "",
     groupId: "",
+    forkOf: "",
+    forkTitle: "",
     draftInput: "",
     turns: [],
     activeTurnIndex: -1,
@@ -243,7 +245,7 @@ export async function renderCreate(root, ctx, params = {}) {
 
   // Apply incoming route handoff params (from Home, Atlas, Works, Plugins, etc.)
   if (Object.keys(params).length) {
-    for (const key of ["style", "style2", "layout", "color", "tone", "mood", "mode", "ratio", "resolution", "modelRef", "parentId", "groupId"]) {
+    for (const key of ["style", "style2", "layout", "color", "tone", "mood", "mode", "ratio", "resolution", "modelRef", "parentId", "groupId", "forkOf", "forkTitle"]) {
       const value = params[key] ?? p[key];
       if (value !== undefined) state[key] = value;
     }
@@ -525,6 +527,30 @@ export async function renderCreate(root, ctx, params = {}) {
   );
 
   // ---------- Right Pane: Output Scroll + Unified Composer ----------
+  const forkBanner = el("div", { class: "insp-fork-banner hidden" });
+  function renderForkBanner() {
+    clear(forkBanner);
+    if (!state.forkOf && !state.forkTitle) {
+      forkBanner.classList.add("hidden");
+      return;
+    }
+    forkBanner.classList.remove("hidden");
+    forkBanner.append(
+      el("span", null, `✨ 正在做《${state.forkTitle || state.forkOf}》的同款${state.forkOf ? "（生成后原作者将获 +2 积分激励）" : ""}`),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: () => {
+          state.forkOf = "";
+          state.forkTitle = "";
+          renderForkBanner();
+          session.persist();
+        },
+      }, "✕ 清除")
+    );
+  }
+  renderForkBanner();
+
   const turnBar = el("div", { class: "sc-turn-bar hidden", role: "tablist", "aria-label": "对话轮次" });
   const planStrip = el("div", { class: "sc-plan-strip hidden" });
   const stageBox = el("div", { class: "sc-stage-wrap" });
@@ -532,6 +558,7 @@ export async function renderCreate(root, ctx, params = {}) {
   const thumbRail = el("div", { class: "sc-thumb-rail hidden", role: "group", "aria-label": "画面缩略图列表" });
 
   const outputScroll = el("div", { class: "make-image-output-scroll" },
+    forkBanner,
     turnBar,
     planStrip,
     stageBox,
@@ -1716,6 +1743,7 @@ export async function renderCreate(root, ctx, params = {}) {
         confirmed,
         groupId: state.groupId,
         parentId: state.parentId,
+        forkOf: state.forkOf || "",
         refs: state.refs,
         galleryRefs: (state.galleryRefs || []).map((g) => ({ kind: g.kind, id: g.id })),
         items: payloadItems,

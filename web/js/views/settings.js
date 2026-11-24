@@ -1,5 +1,6 @@
 import { api, clear, closeModal, copyText, el, money, onEvent, openURL, setColorScheme, showModal, toast } from "../api.js";
 import { economySyncHint, formatQuotaSummary, parseEconomy } from "../economy.js";
+import { openClipperSetupModal } from "./inspirations.js";
 
 const VALID_SETTINGS_TABS = new Set([
   "settings-account",
@@ -734,6 +735,51 @@ export async function renderSettings(root, ctx, params = {}) {
     )
   );
 
+  let curClipToken = settRes.clipToken || settings.clipToken || "";
+  const curClipEndpoint = settRes.clipEndpoint || `${location.origin}/api/inspirations/clip`;
+  const clipTokenDisplay = el("code", { class: "mono muted", style: { fontSize: "12px", wordBreak: "break-all" } }, curClipToken || "尚未生成");
+
+  const clipperCard = el("div", { class: "card col", style: { gap: "8px", marginTop: "6px", background: "var(--paper)" } },
+    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+      el("div", { class: "col", style: { gap: "2px" } },
+        el("strong", null, "🧩 Chrome 灵感捕手扩展配对"),
+        el("span", { class: "muted" }, "配合浏览器扩展从 X (Twitter) 与任意网页一键收藏图片和提示词到本机灵感库")
+      ),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: () => openClipperSetupModal({ clipToken: curClipToken, clipEndpoint: curClipEndpoint }),
+      }, "查看安装指引")
+    ),
+    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+      el("div", { class: "col", style: { gap: "2px", minWidth: 0, flex: "1" } },
+        el("span", { class: "muted", style: { fontSize: "11.5px" } }, `接口：${curClipEndpoint}`),
+        clipTokenDisplay
+      ),
+      el("div", { class: "row", style: { gap: "6px" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: async () => toast((await copyText(curClipToken)) ? "已复制配对 Token" : "复制失败"),
+        }, "复制 Token"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: async () => {
+            try {
+              const r = await api("POST", "/api/settings/clip-token/rotate", {});
+              if (r.clipToken) {
+                curClipToken = r.clipToken;
+                clipTokenDisplay.textContent = curClipToken;
+                toast("已重置配对 Token");
+              }
+            } catch (e) { toast(e.message); }
+          },
+        }, "重置")
+      )
+    )
+  );
+
   const prefSection = el("section", {
     id: "settings-preferences",
     class: "card settings-section",
@@ -744,10 +790,11 @@ export async function renderSettings(root, ctx, params = {}) {
     el("div", { class: "settings-section-head" },
       el("div", { class: "col", style: { gap: "2px" } },
         el("h2", { class: "settings-section-title" }, "通用偏好与本地存储"),
-        el("p", { class: "muted", style: { margin: 0 } }, "外观配色、本地作品目录、费用保护阈值与托盘快捷键")
+        el("p", { class: "muted", style: { margin: 0 } }, "外观配色、本地作品目录、费用保护阈值、托盘快捷键与浏览器扩展配对")
       )
     ),
-    prefForm
+    prefForm,
+    clipperCard
   );
 
   // 4. Version, Built-in Handraw Skill & Incremental Resource Updates

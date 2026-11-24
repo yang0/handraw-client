@@ -1,0 +1,610 @@
+import { api, clear, closeModal, copyText, el, localImg, openURL, remoteThumb, showModal, toast } from "../api.js";
+
+function absSiteUrl(pathOrUrl, siteBase) {
+  if (!pathOrUrl) return "";
+  if (/^https?:\/\//i.test(pathOrUrl) || pathOrUrl.startsWith("data:")) return pathOrUrl;
+  const base = (siteBase || "https://handraw-style.com").replace(/\/+$/, "");
+  return `${base}/${String(pathOrUrl).replace(/^\/+/, "")}`;
+}
+
+function resolveSlotPrompt(basePrompt, slots, values) {
+  let out = String(basePrompt || "");
+  if (!Array.isArray(slots) || !slots.length) return out;
+  const replacements = [];
+  for (const s of slots) {
+    const key = s?.key || "";
+    const defVal = String(s?.defaultValue || "").trim();
+    const curVal = String(values[key] ?? defVal).trim();
+    if (key && out.includes(`{{${key}}}`)) {
+      out = out.split(`{{${key}}}`).join(curVal || defVal);
+      continue;
+    }
+    if (!curVal || curVal === defVal) continue;
+    if (defVal && out.includes(defVal)) {
+      out = out.split(defVal).join(curVal);
+    } else {
+      replacements.push(`${s.label || key}：${curVal}`);
+    }
+  }
+  if (replacements.length) {
+    out = `${out}\n\n【本次同款替换要求】${replacements.join("；")}`;
+  }
+  return out;
+}
+
+export function openShareInspirationModal(item, ctx, onDone) {
+  if (!item?.id) return;
+  let pricingMode = item.publishedPrice > 0 ? "paid" : "free";
+  let priceVal = item.publishedPrice > 0 ? item.publishedPrice : 5;
+
+  const titleIn = el("input", { class: "input", value: item.title || "", placeholder: "给这张灵感起个一眼看懂的中文标题" });
+  const promptIn = el("textarea", {
+    class: "input mono",
+    rows: 5,
+    placeholder: "可执行的完整提示词（建议先用 AI 一键整理去掉废话）",
+  }, item.prompt || item.promptZh || item.rawText || "");
+  const notesIn = el("input", {
+    class: "input",
+    value: item.notes || "",
+    placeholder: "可选：使用心得、适配比例或避坑提示（社区用户可见）",
+  });
+  const tagsIn = el("input", {
+    class: "input",
+    value: Array.isArray(item.tags) ? item.tags.join("，") : "",
+    placeholder: "标签，用逗号分隔，例如：手绘，小红书封面，治愈",
+  });
+
+  const priceInput = el("input", {
+    class: "input",
+    type: "number",
+    min: "1",
+    max: "20",
+    value: String(priceVal),
+    style: { width: "84px" },
+  });
+  const creatorCutHint = el("span", { class: "muted" }, "");
+  const updateCutHint = () => {
+    const p = Math.max(1, Math.min(20, Math.round(Number(priceInput.value) || 5)));
+    priceVal = p;
+    const cut = Math.max(1, Math.round(p * 0.8));
+    creatorCutHint.textContent = `每被解锁 1 次，你可得 +${cut} 积分（80% 创作者分成）`;
+  };
+  priceInput.addEventListener("input", updateCutHint);
+  updateCutHint();
+
+  const freeCard = el("button", { type: "button", class: "insp-price-card" },
+    el("div", { class: "row", style: { justifyContent: "space-between", width: "100%" } },
+      el("strong", null, "🎁 免费公开赚积分"),
+      el("span", { class: "badge badge-ok" }, "立得 +5 积分")
+    ),
+    el("p", { class: "muted", style: { margin: "4px 0 0", textAlign: "left" } }, "所有人可免费看提示词与做同款，每多 1 位用户做同款再奖 +2 积分。")
+  );
+  const paidCard = el("button", { type: "button", class: "insp-price-card" },
+    el("div", { class: "row", style: { justifyContent: "space-between", width: "100%" } },
+      el("strong", null, "🔒 积分解锁提示词"),
+      el("span", { class: "badge badge-accent" }, "作者拿 80% 分成")
+    ),
+    el("p", { class: "muted", style: { margin: "4px 0 0", textAlign: "left" } }, "效果图免费展示，完整提示词与模板变量需消耗积分后解锁。")
+  );
+  const paidRow = el("div", { class: "row insp-price-input-row" },
+    el("span", null, "解锁所需积分（1~20）："),
+    priceInput,
+    creatorCutHint
+  );
+
+  const syncPricingUI = () => {
+    freeCard.classList.toggle("is-active", pricingMode === "free");
+    paidCard.classList.toggle("is-active", pricingMode === "paid");
+    paidRow.classList.toggle("hidden", pricingMode !== "paid");
+  };
+  freeCard.addEventListener("click", () => { pricingMode = "free"; syncPricingUI(); });
+  paidCard.addEventListener("click", () => { pricingMode = "paid"; syncPricingUI(); });
+  syncPricingUI();
+
+  const previewImgSrc = item.imagePath ? localImg(item.imagePath) : (item.imageUrl ? remoteThumb(item.imageUrl, 360) : "");
+  const body = el("div", { class: "col", style: { gap: "12px" } },
+    previewImgSrc ? el("div", { class: "row", style: { gap: "12px", alignItems: "center" } },
+      el("img", { src: previewImgSrc, alt: "", style: { width: "76px", height: "76px", objectFit: "cover", borderRadius: "8px", border: "1px solid var(--line)" } }),
+      el("div", { class: "col", style: { gap: "4px", flex: "1" } },
+        el("strong", null, item.title || "准备分享灵感"),
+        el("span", { class: "muted" }, "不限图片来源（支持自己创作或从 X / 网页收集整理的优质提示词），系统按内容指纹保护首发者。积分可用于解锁社区收费画风、付费贴与灵感提示词。")
+      )
+    ) : null,
+    el("div", { class: "field" }, el("label", null, "灵感标题"), titleIn),
+    el("div", { class: "field" }, el("label", null, "完整提示词"), promptIn),
+    el("div", { class: "insp-price-grid" }, freeCard, paidCard),
+    paidRow,
+    el("div", { class: "row", style: { gap: "10px" } },
+      el("div", { class: "field", style: { flex: "1" } }, el("label", null, "标签"), tagsIn),
+      el("div", { class: "field", style: { flex: "1" } }, el("label", null, "一句话心得（可选）"), notesIn)
+    )
+  );
+
+  const submitBtn = el("button", {
+    type: "button",
+    class: "btn btn-primary",
+    onClick: async () => {
+      const promptTxt = promptIn.value.trim();
+      if (!promptTxt) {
+        toast("请填写完整提示词后再分享");
+        promptIn.focus();
+        return;
+      }
+      const price = pricingMode === "paid" ? Math.max(1, Math.min(20, Math.round(Number(priceInput.value) || 5))) : 0;
+      const tags = tagsIn.value.split(/[,，、\s]+/).map((s) => s.replace(/^#/, "").trim()).filter(Boolean);
+      submitBtn.disabled = true;
+      submitBtn.textContent = "正在发布…";
+      try {
+        const res = await api("POST", `/api/inspirations/${encodeURIComponent(item.id)}/publish`, {
+          title: titleIn.value.trim(),
+          prompt: promptTxt,
+          notes: notesIn.value.trim(),
+          tags,
+          price,
+        });
+        ctx.refreshTopbar?.();
+        onDone?.(res);
+
+        // Render celebratory Points Receipt Card in place
+        const rewardPts = Number(res.reward?.awarded || 0);
+        const shareUrl = res.fullUrl || res.url || "";
+        const receipt = el("div", { class: "col insp-receipt" },
+          el("div", { class: "insp-receipt-badge" }, price > 0 ? `🔒 已上架积分解锁 · ${price} 积分/次` : (rewardPts > 0 ? `🎉 分享成功 · +${rewardPts} 积分已到账` : "🎉 已分享到社区灵感广场")),
+          el("h3", { style: { margin: "4px 0 0" } }, titleIn.value.trim() || item.title),
+          el("p", { class: "muted", style: { margin: 0 } }, price > 0
+            ? `效果图已公开展示，其他用户每消耗 ${price} 积分解锁一次，你将自动获得 ${Math.max(1, Math.round(price * 0.8))} 积分创作者分成！`
+            : "现在其他创作者可以直接照着你的提示词一键做同款，每有人有效做同款你将再赚 +2 积分！"
+          ),
+          shareUrl ? el("div", { class: "insp-receipt-link mono" }, shareUrl) : null
+        );
+        showModal("分享战报", receipt, [
+          shareUrl ? el("button", {
+            type: "button",
+            class: "btn",
+            onClick: async () => toast((await copyText(shareUrl)) ? "已复制社区分享链接" : "复制失败"),
+          }, "📋 复制链接") : null,
+          shareUrl ? el("button", {
+            type: "button",
+            class: "btn",
+            onClick: () => openURL(shareUrl),
+          }, "↗ 在网站查看") : null,
+          el("button", {
+            type: "button",
+            class: "btn btn-primary",
+            onClick: () => {
+              closeModal();
+              ctx.go("inspirations", { tab: "plaza" });
+            },
+          }, "去社区灵感广场看看"),
+        ].filter(Boolean));
+      } catch (e) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "立即分享到社区";
+        const msg = e?.message || "发布失败";
+        if (/登录|login|401/i.test(msg)) {
+          toast("请先在「设置 → 账号」登录手绘风账号后再分享赚积分");
+        } else {
+          toast(msg);
+        }
+      }
+    },
+  }, "立即分享到社区");
+
+  showModal("分享到社区赚积分", body, [
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+    submitBtn,
+  ]);
+}
+
+export async function openWorkRemixModal(workId, ctx, opts = {}) {
+  const loading = el("div", { class: "row", style: { padding: "24px 8px", justifyContent: "center" } },
+    el("span", { class: "dot-pulse" }),
+    el("span", { class: "muted" }, "正在加载作品配方与提示词…")
+  );
+  showModal(opts.title || "作品详情与做同款", loading, [
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
+  ]);
+
+  let detail;
+  try {
+    detail = await api("GET", `/api/site/works/${encodeURIComponent(workId)}`);
+  } catch (e) {
+    showModal(opts.title || "作品详情", el("div", { class: "col" },
+      el("p", { class: "muted" }, `暂时无法获取作品详情：${e?.message || "网络异常"}`),
+      opts.href ? el("button", { type: "button", class: "btn btn-primary", onClick: () => openURL(opts.href) }, "在网站打开 ↗") : null
+    ), [el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭")]);
+    return;
+  }
+
+  const w = detail.work || detail;
+  const siteBase = detail.siteBase || opts.siteBase || "https://handraw-style.com";
+  const imgRaw = w.imageUrl || w.image_url || w.thumbUrl || w.images?.[0]?.url || opts.image || "";
+  const imgUrl = absSiteUrl(imgRaw, siteBase);
+  const title = w.title || opts.title || "社区作品";
+  const author = w.authorName || w.author || w.username || opts.author || "";
+  const promptTxt = w.prompt || w.originalRequest || w.original_request || w.promptZh || w.prompt_zh || "";
+  const styleId = w.styleId || w.style_id || w.style || "";
+  const style2Id = w.style2Id || w.style2_id || w.style2 || "";
+  const layoutId = w.layoutId || w.layout_id || w.layout || "";
+  const colorId = w.color || (Array.isArray(w.colors) ? w.colors[0] : "") || "";
+  const toneId = w.tone || (Array.isArray(w.tones) ? w.tones[0] : "") || "";
+  const ratio = w.ratio || "3:4";
+  const mode = w.mode || "graphic-text";
+  const forkCount = Number(w.forkCount ?? w.fork_count ?? 0);
+  const recipe = {
+    styleIds: [styleId, style2Id].filter(Boolean),
+    layoutId,
+    colors: colorId ? [colorId] : [],
+    tones: toneId ? [toneId] : [],
+    ratio,
+    mode,
+  };
+  const webHref = opts.href || `${siteBase.replace(/\/+$/, "")}/works/${encodeURIComponent(workId)}`;
+
+  const pills = [
+    styleId ? el("span", { class: "badge badge-accent" }, `画风 ${styleId}`) : null,
+    style2Id ? el("span", { class: "badge badge-accent" }, `融合 ${style2Id}`) : null,
+    layoutId ? el("span", { class: "badge" }, `图型 ${layoutId}`) : null,
+    colorId ? el("span", { class: "badge" }, `色系 ${colorId}`) : null,
+    ratio ? el("span", { class: "badge" }, ratio) : null,
+    forkCount > 0 ? el("span", { class: "badge badge-ok" }, `✨ ${forkCount} 人做过同款`) : null,
+  ].filter(Boolean);
+
+  const saveBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    onClick: async () => {
+      saveBtn.disabled = true;
+      try {
+        await api("POST", "/api/inspirations", {
+          title,
+          imageUrl: imgUrl,
+          prompt: promptTxt || title,
+          source: "community",
+          sourceUrl: webHref,
+          sourceAuthor: author,
+          workId,
+          recipe,
+          suggestedStyle: styleId,
+          syncCollection: true,
+        });
+        saveBtn.textContent = "★ 已收进灵感库";
+        toast("已收藏进本地灵感库");
+      } catch (e) {
+        saveBtn.disabled = false;
+        toast(e?.message || "收藏失败");
+      }
+    },
+  }, "★ 收进灵感库");
+
+  const body = el("div", { class: "insp-modal-layout" },
+    el("div", { class: "insp-modal-media" },
+      imgUrl ? el("img", { src: remoteThumb(imgUrl, 760), alt: title, class: "insp-modal-img" }) : el("div", { class: "muted" }, "暂无预览图")
+    ),
+    el("div", { class: "insp-modal-info col" },
+      el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "flex-start" } },
+        el("div", { class: "col", style: { gap: "2px" } },
+          el("h3", { style: { margin: 0, fontSize: "17px" } }, title),
+          author ? el("span", { class: "muted" }, `作者：${author}`) : null
+        ),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => openURL(webHref) }, "网页 ↗")
+      ),
+      pills.length ? el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } }, ...pills) : null,
+      promptTxt
+        ? el("div", { class: "insp-prompt-box" },
+            el("div", { class: "row", style: { justifyContent: "space-between", marginBottom: "6px" } },
+              el("strong", { style: { fontSize: "12.5px" } }, "创作提示词"),
+              el("button", {
+                type: "button",
+                class: "btn btn-sm",
+                onClick: async () => toast((await copyText(promptTxt)) ? "提示词已复制" : "复制失败"),
+              }, "📋 复制提示词")
+            ),
+            el("div", { class: "insp-prompt-text" }, promptTxt)
+          )
+        : el("p", { class: "muted" }, "该作品未附带公开原文，但你可以直接套用它的画风与图型配方做同款。"),
+      el("div", { class: "insp-remix-actions col" },
+        el("button", {
+          type: "button",
+          class: "btn btn-primary",
+          onClick: () => {
+            closeModal();
+            ctx.go("create", {
+              forkOf: workId,
+              forkTitle: title,
+              recipe,
+              theme: promptTxt ? "" : title,
+            });
+          },
+        }, "✨ 套用配方换主题做同款"),
+        promptTxt ? el("button", {
+          type: "button",
+          class: "btn",
+          onClick: () => {
+            closeModal();
+            ctx.go("create", {
+              forkOf: workId,
+              forkTitle: title,
+              recipe,
+              theme: promptTxt,
+            });
+          },
+        }, "📝 拿完整提示词微调做同款") : null,
+        el("button", {
+          type: "button",
+          class: "btn",
+          onClick: () => {
+            closeModal();
+            ctx.go("chat", {
+              prompt: `帮我参考作品《${title}》${styleId ? `（画风 ${styleId}）` : ""}做一张同款：${promptTxt ? `\n原提示词：${promptTxt}` : ""}\n我想把主题改成：`,
+            });
+          },
+        }, "💬 带入会话让 AI 改写同款"),
+        el("div", { class: "row", style: { justifyContent: "space-between", marginTop: "4px" } },
+          saveBtn,
+          el("span", { class: "muted", style: { fontSize: "11.5px" } }, "做同款将为原作者带来 +2 积分激励")
+        )
+      )
+    )
+  );
+
+  showModal("作品详情与做同款", body, [
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
+  ]);
+}
+
+export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
+  const loading = el("div", { class: "row", style: { padding: "24px 8px", justifyContent: "center" } },
+    el("span", { class: "dot-pulse" }),
+    el("span", { class: "muted" }, "正在加载社区灵感卡…")
+  );
+  showModal(opts.title || "社区灵感详情", loading, [
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
+  ]);
+
+  let detail;
+  try {
+    detail = await api("GET", `/api/site/inspirations/${encodeURIComponent(inspId)}`);
+  } catch (e) {
+    showModal(opts.title || "社区灵感详情", el("p", { class: "muted" }, `加载失败：${e?.message || "网络异常"}`), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
+    ]);
+    return;
+  }
+
+  const renderDetail = (d) => {
+    const item = d.inspiration || d.item || d;
+    const siteBase = d.siteBase || opts.siteBase || "https://handraw-style.com";
+    const imgUrl = absSiteUrl(item.imageUrl || item.image_url || "", siteBase);
+    const title = item.title || "社区灵感";
+    const author = item.authorName || item.author || item.sourceAuthor || "匿名创作者";
+    const price = Number(item.price || 0);
+    const locked = Boolean(item.promptLocked);
+    const promptTxt = item.prompt || "";
+    const promptZh = item.promptZh || "";
+    const slots = Array.isArray(item.slots) ? item.slots : [];
+    const tags = Array.isArray(item.tags) ? item.tags : [];
+    const suggestedStyle = item.suggestedStyle || item.recipe?.styleIds?.[0] || "";
+
+    let showZh = false;
+    const slotValues = {};
+    slots.forEach((s) => {
+      if (s?.key) slotValues[s.key] = s.defaultValue || "";
+    });
+
+    const promptDisplay = el("div", { class: "insp-prompt-text" }, "");
+    const updatePromptDisplay = () => {
+      const base = (showZh && promptZh) ? promptZh : (promptTxt || promptZh);
+      promptDisplay.textContent = resolveSlotPrompt(base, slots, slotValues);
+    };
+
+    const unlockHookArea = el("div", { class: "col", style: { gap: "8px" } });
+
+    let promptSection;
+    if (locked) {
+      const unlockBtn = el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        style: { width: "100%" },
+        onClick: async () => {
+          unlockBtn.disabled = true;
+          unlockBtn.textContent = "正在解锁…";
+          try {
+            const uRes = await api("POST", `/api/site/inspirations/${encodeURIComponent(inspId)}/unlock`, {});
+            ctx.refreshTopbar?.();
+            toast(`已消耗 ${price} 积分解锁完整提示词！`);
+            const refreshed = uRes.inspiration ? { ...d, inspiration: uRes.inspiration } : await api("GET", `/api/site/inspirations/${encodeURIComponent(inspId)}`);
+            renderDetail(refreshed);
+            opts.onUnlocked?.(refreshed);
+          } catch (err) {
+            unlockBtn.disabled = false;
+            unlockBtn.textContent = `🔓 消耗 ${price} 积分解锁完整提示词并做同款`;
+            const msg = err?.message || "解锁失败";
+            clear(unlockHookArea);
+            if (/积分不足|insufficient/i.test(msg)) {
+              unlockHookArea.appendChild(el("div", { class: "insp-hook-banner col" },
+                el("strong", null, "当前积分不足以解锁该提示词"),
+                el("span", { class: "muted" }, "去「灵感库」分享 1 张你的私藏好图即可立赚 +5 积分（无需充钱）！"),
+                el("button", {
+                  type: "button",
+                  class: "btn btn-sm btn-primary",
+                  onClick: () => {
+                    closeModal();
+                    ctx.go("inspirations", { tab: "vault" });
+                  },
+                }, "💡 去灵感库分享 1 张图赚积分 →")
+              ));
+            } else if (/登录|login|401/i.test(msg)) {
+              unlockHookArea.appendChild(el("div", { class: "insp-hook-banner col" },
+                el("strong", null, "请先登录手绘风账号"),
+                el("button", {
+                  type: "button",
+                  class: "btn btn-sm btn-primary",
+                  onClick: () => {
+                    closeModal();
+                    ctx.go("settings", { anchor: "settings-account" });
+                  },
+                }, "去登录账号")
+              ));
+            } else {
+              toast(msg);
+            }
+          }
+        },
+      }, `🔓 消耗 ${price} 积分解锁完整提示词并做同款`);
+
+      promptSection = el("div", { class: "insp-locked-box col" },
+        el("div", { class: "row", style: { justifyContent: "space-between" } },
+          el("strong", null, "🔒 完整提示词与可替换模板已锁定"),
+          el("span", { class: "badge badge-accent" }, `${price} 积分`)
+        ),
+        el("div", { class: "insp-locked-preview" }, item.promptPreview || "解锁后可查看完整双语提示词、替换变量槽位并一键做同款…"),
+        unlockBtn,
+        el("span", { class: "muted", style: { fontSize: "11.5px" } }, "注：积分仅用于解锁社区提示词、付费画风与收费贴，不可兑换生图额度；作者将获得 80% 积分分成。"),
+        unlockHookArea
+      );
+    } else {
+      updatePromptDisplay();
+      const langToggle = promptZh && promptTxt && promptZh !== promptTxt
+        ? el("button", {
+            type: "button",
+            class: "btn btn-sm",
+            onClick: () => {
+              showZh = !showZh;
+              langToggle.textContent = showZh ? "切换原版" : "看中文理解版";
+              updatePromptDisplay();
+            },
+          }, "看中文理解版")
+        : null;
+
+      const slotsBox = slots.length
+        ? el("div", { class: "insp-slots-box col" },
+            el("span", { class: "muted", style: { fontSize: "12px" } }, "✨ 快速换词做同款（改完即生效）："),
+            el("div", { class: "insp-slots-grid" },
+              ...slots.map((s) => {
+                const inp = el("input", {
+                  class: "input",
+                  value: slotValues[s.key] || "",
+                  placeholder: s.defaultValue || s.label,
+                });
+                inp.addEventListener("input", () => {
+                  slotValues[s.key] = inp.value;
+                  updatePromptDisplay();
+                });
+                return el("label", { class: "insp-slot-field" },
+                  el("span", { class: "muted" }, s.label || s.key),
+                  inp
+                );
+              })
+            )
+          )
+        : null;
+
+      const saveBtn = el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: async () => {
+          saveBtn.disabled = true;
+          try {
+            await api("POST", "/api/inspirations", {
+              title,
+              imageUrl: imgUrl,
+              prompt: promptTxt || promptZh,
+              promptZh,
+              slots,
+              tags,
+              notes: item.notes || "",
+              source: "community",
+              sourceAuthor: author,
+              recipe: item.recipe || {},
+              suggestedStyle,
+            });
+            saveBtn.textContent = "★ 已收进灵感库";
+            toast("已保存到本地灵感库");
+          } catch (e) {
+            saveBtn.disabled = false;
+            toast(e?.message || "保存失败");
+          }
+        },
+      }, "★ 收进我的灵感库");
+
+      promptSection = el("div", { class: "col", style: { gap: "10px" } },
+        el("div", { class: "insp-prompt-box" },
+          el("div", { class: "row", style: { justifyContent: "space-between", marginBottom: "6px" } },
+            el("strong", { style: { fontSize: "12.5px" } }, price > 0 ? "🔓 已解锁完整提示词" : "完整提示词"),
+            el("div", { class: "row", style: { gap: "6px" } },
+              langToggle,
+              el("button", {
+                type: "button",
+                class: "btn btn-sm",
+                onClick: async () => toast((await copyText(promptDisplay.textContent)) ? "提示词已复制" : "复制失败"),
+              }, "📋 复制")
+            )
+          ),
+          promptDisplay
+        ),
+        slotsBox,
+        el("div", { class: "insp-remix-actions col" },
+          el("button", {
+            type: "button",
+            class: "btn btn-primary",
+            onClick: () => {
+              const finalPrompt = promptDisplay.textContent;
+              closeModal();
+              ctx.go("create", {
+                forkOf: item.workId || "",
+                forkTitle: title,
+                style: suggestedStyle || "",
+                recipe: item.recipe || (suggestedStyle ? { styleIds: [suggestedStyle] } : {}),
+                theme: finalPrompt,
+              });
+            },
+          }, "✨ 一键带入生图工作台做同款"),
+          el("div", { class: "row", style: { gap: "8px" } },
+            el("button", {
+              type: "button",
+              class: "btn",
+              style: { flex: "1" },
+              onClick: () => {
+                const finalPrompt = promptDisplay.textContent;
+                closeModal();
+                ctx.go("chat", { prompt: `帮我按这个灵感提示词生成同款，并微调成更适合中文读者的画面：\n${finalPrompt}` });
+              },
+            }, "💬 带入会话改写"),
+            saveBtn
+          )
+        )
+      );
+    }
+
+    const body = el("div", { class: "insp-modal-layout" },
+      el("div", { class: "insp-modal-media" },
+        imgUrl ? el("img", { src: remoteThumb(imgUrl, 760), alt: title, class: "insp-modal-img" }) : el("div", { class: "muted" }, "暂无预览图")
+      ),
+      el("div", { class: "insp-modal-info col" },
+        el("div", { class: "col", style: { gap: "4px" } },
+          el("h3", { style: { margin: 0, fontSize: "17px" } }, title),
+          el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+            el("span", { class: "muted" }, `分享者：${author}`),
+            item.sourceChannel === "x" ? el("span", { class: "badge" }, "来自 X") : null,
+            suggestedStyle ? el("span", { class: "badge badge-accent" }, `推荐画风 ${suggestedStyle}`) : null,
+            price > 0
+              ? el("span", { class: "badge badge-accent" }, `${price} 积分解锁 · ${item.unlockCount || 0} 人已解锁`)
+              : el("span", { class: "badge badge-ok" }, `免费 · ${item.forkCount || 0} 人做同款`)
+          ),
+          tags.length ? el("div", { class: "row", style: { gap: "5px", flexWrap: "wrap", marginTop: "2px" } },
+            ...tags.map((t) => el("span", { class: "badge" }, `#${t}`))
+          ) : null,
+          item.notes ? el("p", { class: "muted", style: { margin: "4px 0 0" } }, `作者心得：${item.notes}`) : null
+        ),
+        promptSection
+      )
+    );
+
+    showModal("社区灵感与做同款", body, [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
+    ]);
+  };
+
+  renderDetail(detail);
+}
