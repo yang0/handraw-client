@@ -135,11 +135,27 @@ func (s *Server) Rules() prompt.Rules {
 	return prompt.DefaultRules()
 }
 
-// Listen starts the API on a free loopback port and returns its base URL.
+// DefaultPort is the fixed loopback port shared with the Chrome clipper
+// extension so pairing survives client restarts without reconfiguring (#98).
+const DefaultPort = 18520
+
+// Listen starts the API on the requested loopback port (falling back to
+// nearby ports or an ephemeral port only if already in use) and returns its base URL.
 func (s *Server) Listen(ctx context.Context, port int) (string, error) {
 	s.routes()
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
+	var (
+		ln  net.Listener
+		err error
+	)
+	if port > 0 {
+		for offset := 0; offset < 3; offset++ {
+			ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port+offset))
+			if err == nil {
+				break
+			}
+		}
+	}
+	if ln == nil {
 		ln, err = net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			return "", err

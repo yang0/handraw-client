@@ -750,7 +750,9 @@ export async function renderSettings(root, ctx, params = {}) {
   );
 
   let curClipToken = settRes.clipToken || settings.clipToken || "";
-  const curClipEndpoint = settRes.clipEndpoint || `${location.origin}/api/inspirations/clip`;
+  const curClipEndpoint = String(settRes.clipEndpoint || location.origin)
+    .replace(/\/api\/inspirations\/clip\/?$/i, "")
+    .replace(/\/+$/, "");
   const curClipExtDir = settRes.clipExtensionDir || "";
   const curClipExtExists = settRes.clipExtensionExists;
   const clipTokenDisplay = el("code", { class: "mono muted", style: { fontSize: "12px", wordBreak: "break-all" } }, curClipToken || "尚未生成");
@@ -774,7 +776,7 @@ export async function renderSettings(root, ctx, params = {}) {
     ),
     el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
       el("div", { class: "col", style: { gap: "2px", minWidth: 0, flex: "1" } },
-        el("span", { class: "muted", style: { fontSize: "11.5px" } }, `接口：${curClipEndpoint}`),
+        el("span", { class: "muted", style: { fontSize: "11.5px" } }, `桥接地址：${curClipEndpoint}`),
         clipTokenDisplay
       ),
       el("div", { class: "row", style: { gap: "6px" } },

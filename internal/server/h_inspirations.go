@@ -432,10 +432,7 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 		return tags[i].Tag < tags[j].Tag
 	})
 
-	clipEp := ""
-	if s.Addr() != "" {
-		clipEp = strings.TrimRight(s.Addr(), "/") + "/api/inspirations/clip"
-	}
+	clipEp := strings.TrimRight(s.Addr(), "/")
 	clipExtDir, clipExtExists := resolveClipperExtensionDir()
 	return map[string]any{
 		"ok":                  true,

@@ -72,9 +72,12 @@ export function openClipperSetupModal(meta = {}) {
   let curToken = meta.clipToken || "";
   let curExtDir = meta.clipExtensionDir || "";
   let curExtExists = meta.clipExtensionExists !== false;
-  const ep = meta.clipEndpoint || `${location.origin}/api/inspirations/clip`;
-  const portMatch = ep.match(/:(\d+)\//);
-  const port = portMatch ? portMatch[1] : (location.port || "80");
+  const ep = String(meta.clipEndpoint || location.origin)
+    .replace(/\/api\/inspirations\/clip\/?$/i, "")
+    .replace(/\/+$/, "");
+  const portMatch = ep.match(/:(\d+)$/);
+  const port = portMatch ? portMatch[1] : (location.port || "18520");
+  const isDefaultPort = port === "18520";
 
   const tokenCode = el("code", { class: "mono insp-token-code" }, curToken || "加载中…");
   const extDirCode = el("code", {
@@ -134,14 +137,14 @@ export function openClipperSetupModal(meta = {}) {
     ),
     el("div", { class: "card col", style: { gap: "8px", padding: "12px" } },
       el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap" } },
-        el("strong", null, "1. 本地桥接地址（扩展自动使用）"),
+        el("strong", null, isDefaultPort ? "1. 本地桥接地址（与扩展默认一致，无需修改）" : "1. 本地桥接地址（默认端口被占用，已自动切换）"),
         el("button", {
           type: "button",
           class: "btn btn-sm",
-          onClick: async () => toast((await copyText(ep)) ? "已复制本地接口地址" : "复制失败"),
+          onClick: async () => toast((await copyText(ep)) ? "已复制本地桥接地址" : "复制失败"),
         }, "复制地址")
       ),
-      el("code", { class: "mono muted", style: { wordBreak: "break-all" } }, `${ep}（端口 ${port}）`),
+      el("code", { class: "mono muted", style: { wordBreak: "break-all" } }, ep),
       el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", marginTop: "4px" } },
         el("strong", null, "2. 本机配对 Token（仅限本机扩展通信）"),
         el("div", { class: "row", style: { gap: "6px" } },
@@ -180,7 +183,10 @@ export function openClipperSetupModal(meta = {}) {
             openExtDirBtn
           )
         ),
-        el("li", null, "点击浏览器右上角「手绘风灵感捕手」图标，填入端口 ", el("code", { class: "mono" }, port), " 和上方 Token，点击「测试连接」即可！")
+        el("li", null, isDefaultPort
+          ? ["点击浏览器右上角「手绘风灵感捕手」图标，扩展默认地址已是 ", el("code", { class: "mono" }, ep), "，直接粘贴上方 Token 点击「保存并测试」即可！"]
+          : ["点击浏览器右上角「手绘风灵感捕手」图标，将客户端地址改为 ", el("code", { class: "mono" }, ep), " 并粘贴上方 Token，点击「保存并测试」即可！"]
+        )
       )
     )
   );

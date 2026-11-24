@@ -64,7 +64,7 @@ func main() {
 
 	if mode == "web" {
 		fs := flag.NewFlagSet("web", flag.ExitOnError)
-		port := fs.Int("port", 18765, "监听端口")
+		port := fs.Int("port", server.DefaultPort, "监听端口")
 		noOpen := fs.Bool("no-open", false, "不自动打开浏览器")
 		_ = fs.Parse(rest)
 
@@ -81,7 +81,7 @@ func main() {
 		return
 	}
 
-	addr, err := srv.Listen(ctx, 0)
+	addr, err := srv.Listen(ctx, server.DefaultPort)
 	if err != nil {
 		log.Fatalf("启动本地服务失败：%v", err)
 	}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -491,5 +492,45 @@ func TestInspirationCategoryTaxonomyAndFilter(t *testing.T) {
 	}
 	if len(resp.Categories) != 2 {
 		t.Fatalf("expected 2 non-empty categories, got %+v", resp.Categories)
+	}
+}
+
+func TestDefaultBridgePortAndCleanClipEndpoint(t *testing.T) {
+	if DefaultPort != 18520 {
+		t.Fatalf("expected DefaultPort 18520 matching Chrome clipper default, got %d", DefaultPort)
+	}
+	srv, cancel := setupTestServer(t, "http://127.0.0.1:1")
+	defer cancel()
+
+	// Pick a free preferred port via Listen(ctx, 0), close it, then verify Listen binds it and falls back when occupied.
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	addr, err := srv.Listen(ctx1, 0)
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	h := srv.Handler()
+	rec := doReq(t, h, srv.Token, http.MethodGet, "/api/inspirations", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/inspirations failed: %d", rec.Code)
+	}
+	var resp struct {
+		ClipEndpoint string `json:"clipEndpoint"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.ClipEndpoint != addr {
+		t.Fatalf("expected clipEndpoint to be clean base URL %q, got %q", addr, resp.ClipEndpoint)
+	}
+	if strings.Contains(resp.ClipEndpoint, "/api/inspirations/clip") {
+		t.Fatalf("clipEndpoint must not include /api/inspirations/clip suffix: %q", resp.ClipEndpoint)
+	}
+
+	settRec := doReq(t, h, srv.Token, http.MethodGet, "/api/settings", nil)
+	var settResp struct {
+		ClipEndpoint string `json:"clipEndpoint"`
+	}
+	_ = json.Unmarshal(settRec.Body.Bytes(), &settResp)
+	if settResp.ClipEndpoint != addr {
+		t.Fatalf("expected /api/settings clipEndpoint %q, got %q", addr, settResp.ClipEndpoint)
 	}
 }

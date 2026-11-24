@@ -25,7 +25,7 @@ async function recordClip(entry) {
 }
 
 function normalizeBase(url) {
-  return String(url || "").trim().replace(/\/+$/, "");
+  return String(url || "").trim().replace(/\/api\/inspirations\/clip\/?$/i, "").replace(/\/+$/, "");
 }
 
 async function pingLocalClient(cfg) {
