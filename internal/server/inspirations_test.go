@@ -264,3 +264,104 @@ func TestInspirationsCRUDClipOrganizeAndPublish(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+func TestInspirationsPublishRawTextFallbackAndBatch(t *testing.T) {
+	var mu sync.Mutex
+	var published []map[string]any
+	pubSeq := 0
+
+	mockSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/inspirations":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			pubSeq++
+			seq := pubSeq
+			published = append(published, body)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":    true,
+				"id":    "insp_batch_" + string(rune('0'+seq)),
+				"url":   "/inspirations/insp_batch_" + string(rune('0'+seq)),
+				"price": body["price"],
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "not found"})
+		}
+	}))
+	defer mockSite.Close()
+
+	srv, cancel := setupTestServer(t, mockSite.URL)
+	defer cancel()
+	h := srv.Handler()
+	_ = secrets.Set(secrets.SiteToken, "hwt_batch_token")
+
+	imgDataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(tinyPNG(t))
+
+	// Create an item directly on disk with only RawText (no Prompt/PromptZh) to verify fallback.
+	rawOnlySaved, _, err := saveInspirationImageBytes("insp_rawonly", tinyPNG(t))
+	if err != nil {
+		t.Fatalf("saveInspirationImageBytes: %v", err)
+	}
+	rawOnlyItem, err := srv.saveInspiration("insp_rawonly", inspirationData{
+		Title:     "仅原文灵感",
+		ImagePath: rawOnlySaved,
+		RawText:   "Warm hand-drawn coffee shop at dusk, ink linework",
+		Source:    "x",
+	})
+	if err != nil {
+		t.Fatalf("saveInspiration: %v", err)
+	}
+
+	// Create a second standard item via API.
+	cRec := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations", map[string]any{
+		"title":        "森林小屋插画",
+		"imageDataUrl": imgDataURL,
+		"prompt":       "Watercolor cabin in autumn woods, warm paper texture",
+		"tags":         []string{"水彩", "治愈"},
+		"source":       "local",
+	})
+	if cRec.Code != http.StatusOK {
+		t.Fatalf("create second inspiration failed: %d %s", cRec.Code, cRec.Body.String())
+	}
+	var cResp struct {
+		Item inspirationItem `json:"item"`
+	}
+	_ = json.Unmarshal(cRec.Body.Bytes(), &cResp)
+
+	// Publish both sequentially as the batch-share flow does.
+	for _, id := range []string{rawOnlyItem.ID, cResp.Item.ID} {
+		rec := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/"+id+"/publish", map[string]any{
+			"price": 8,
+			"notes": "批量分享测试",
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("publish %s failed: %d %s", id, rec.Code, rec.Body.String())
+		}
+	}
+
+	mu.Lock()
+	gotCount := len(published)
+	firstPrompt := published[0]["prompt"]
+	mu.Unlock()
+	if gotCount != 2 {
+		t.Fatalf("expected 2 published payloads, got %d", gotCount)
+	}
+	if firstPrompt != "Warm hand-drawn coffee shop at dusk, ink linework" {
+		t.Fatalf("expected rawText fallback prompt, got %v", firstPrompt)
+	}
+
+	// Verify both local items persisted PublishedID and PublishedPrice=8.
+	for _, id := range []string{rawOnlyItem.ID, cResp.Item.ID} {
+		it, err := srv.readInspiration(id)
+		if err != nil {
+			t.Fatalf("readInspiration(%s): %v", id, err)
+		}
+		if it.PublishedID == "" || it.PublishedPrice != 8 {
+			t.Fatalf("expected published metadata on %s, got id=%q price=%d", id, it.PublishedID, it.PublishedPrice)
+		}
+	}
+}

@@ -1,6 +1,6 @@
 import { api, clear, closeModal, copyText, el, localImg, onEvent, openURL, remoteThumb, showModal, toast } from "../api.js";
 import { masonry } from "../masonry.js";
-import { openInspirationRemixModal, openShareInspirationModal } from "./work-remix-modal.js";
+import { openBatchShareInspirationsModal, openInspirationRemixModal, openShareInspirationModal } from "./work-remix-modal.js";
 
 const SOURCE_LABELS = {
   x: "X 采集",
@@ -19,7 +19,19 @@ const viewState = {
   tag: "",
   plazaFilter: "all:latest", // all:latest | all:popular | unlocked:latest | mine:latest
   plazaQ: "",
+  batchMode: false,
+  selectedIds: new Set(),
+  batchPublishing: false,
+  pendingRefresh: false,
 };
+
+function getShareEligibility(item) {
+  const hasImg = Boolean(item?.imagePath || item?.imageUrl);
+  const hasPrompt = Boolean(String(item?.prompt || item?.promptZh || item?.rawText || "").trim());
+  if (!hasImg) return { ok: false, reason: "缺少图片" };
+  if (!hasPrompt) return { ok: false, reason: "缺少提示词" };
+  return { ok: true, published: Boolean(item?.publishedId) };
+}
 
 function readFileAsDataURL(file) {
   return new Promise((resolve, reject) => {
@@ -140,6 +152,10 @@ export async function renderInspirations(root, ctx, params = {}) {
         class: "tab" + (viewState.tab === id ? " active" : ""),
         dataset: { tab: id },
         onClick: () => {
+          if (id !== "vault" && viewState.batchMode) {
+            viewState.batchMode = false;
+            viewState.selectedIds.clear();
+          }
           viewState.tab = id;
           drawTabs();
           drawBody();
@@ -202,6 +218,10 @@ export async function renderInspirations(root, ctx, params = {}) {
     if (msg.type === "inspirations" && viewState.tab === "vault") {
       if (msg.data?.clipped && msg.data?.title) {
         toast(`📌 收到来自浏览器捕手的新灵感：${msg.data.title}`);
+      }
+      if (viewState.batchPublishing) {
+        viewState.pendingRefresh = true;
+        return;
       }
       drawBody();
     }
@@ -685,8 +705,30 @@ async function renderVaultTab(stage, ctx, onMeta) {
     ["import", "手动收集"],
   ];
 
+  const batchToggleBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm insp-batch-toggle",
+    dataset: { role: "batch-toggle" },
+    onClick: () => {
+      if (!currentItems.length && !viewState.batchMode) {
+        toast("当前灵感库还没有可分享的条目");
+        return;
+      }
+      viewState.batchMode = !viewState.batchMode;
+      if (!viewState.batchMode) {
+        viewState.selectedIds.clear();
+      }
+      renderVaultGrid(currentItems);
+    },
+  }, "☑ 批量分享");
+
   const tagsBar = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } });
+  const batchBar = el("div", { class: "card insp-batch-bar hidden", dataset: { role: "batch-bar" } });
   const gridWrap = el("div");
+
+  let currentItems = [];
+  let latestRes = { clipToken: "", clipEndpoint: "" };
+  const cardRefs = new Map();
 
   const drawSrcPills = () => {
     clear(srcPills);
@@ -713,12 +755,300 @@ async function renderVaultTab(stage, ctx, onMeta) {
     }, 180);
   });
 
-  stage.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "10px" } },
+  stage.appendChild(el("div", { class: "row insp-vault-toolbar", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "10px", alignItems: "center" } },
     searchIn,
-    srcPills
+    el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
+      srcPills,
+      batchToggleBtn
+    )
   ));
   stage.appendChild(tagsBar);
+  stage.appendChild(batchBar);
   stage.appendChild(gridWrap);
+
+  const syncBatchUI = () => {
+    const eligibleItems = currentItems.filter((it) => getShareEligibility(it).ok);
+    const unpubEligible = eligibleItems.filter((it) => !it.publishedId);
+    const eligibleIdSet = new Set(eligibleItems.map((it) => it.id));
+    for (const id of Array.from(viewState.selectedIds)) {
+      if (!eligibleIdSet.has(id)) viewState.selectedIds.delete(id);
+    }
+
+    const active = viewState.batchMode && currentItems.length > 0;
+    batchToggleBtn.classList.toggle("btn-accent-soft", active);
+    batchToggleBtn.textContent = active ? "退出批量选择" : "☑ 批量分享";
+    batchToggleBtn.disabled = !currentItems.length && !viewState.batchMode;
+
+    cardRefs.forEach((ref, id) => {
+      const checked = active && viewState.selectedIds.has(id);
+      ref.card.classList.toggle("is-selected", checked);
+      if (ref.checkBtn) {
+        ref.checkBtn.classList.toggle("is-checked", checked);
+        ref.checkBtn.setAttribute("aria-checked", checked ? "true" : "false");
+        ref.checkBtn.textContent = checked ? "✓" : "";
+      }
+      if (ref.footHint && ref.elig.ok) {
+        ref.footHint.textContent = checked
+          ? "✓ 已选中"
+          : (ref.elig.published ? "点击选中（更新分享）" : "点击卡片选中");
+      }
+    });
+
+    if (!active) {
+      batchBar.classList.add("hidden");
+      clear(batchBar);
+      return;
+    }
+
+    const selectedCount = viewState.selectedIds.size;
+    batchBar.classList.remove("hidden");
+    clear(batchBar);
+    batchBar.appendChild(el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
+      el("span", { class: "badge badge-accent" }, "批量分享模式"),
+      el("strong", { style: { fontSize: "13px" }, dataset: { role: "batch-count" } }, `已选 ${selectedCount} 项`),
+      el("span", { class: "muted", style: { fontSize: "12px" } }, `当前可分享 ${eligibleItems.length} 项（未分享 ${unpubEligible.length} 项）`)
+    ));
+
+    const openBatchModal = () => {
+      const picked = currentItems.filter((it) => viewState.selectedIds.has(it.id) && getShareEligibility(it).ok);
+      if (!picked.length) {
+        toast("请先勾选至少一张可分享的灵感图片");
+        return;
+      }
+      openBatchShareInspirationsModal(picked, ctx, {
+        onStart: () => {
+          viewState.batchPublishing = true;
+        },
+        onFinished: ({ succeededIds }) => {
+          for (const sid of succeededIds || []) {
+            viewState.selectedIds.delete(sid);
+          }
+        },
+        onClose: ({ anySucceeded, failedIds }) => {
+          viewState.batchPublishing = false;
+          const shouldRefresh = anySucceeded || viewState.pendingRefresh;
+          viewState.pendingRefresh = false;
+          if (anySucceeded && (!failedIds || failedIds.length === 0)) {
+            viewState.batchMode = false;
+            viewState.selectedIds.clear();
+          }
+          if (shouldRefresh) {
+            loadVault();
+          } else {
+            syncBatchUI();
+          }
+        },
+      });
+    };
+
+    batchBar.appendChild(el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } },
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        dataset: { role: "batch-select-unpublished" },
+        disabled: unpubEligible.length === 0,
+        onClick: () => {
+          viewState.selectedIds.clear();
+          unpubEligible.forEach((it) => viewState.selectedIds.add(it.id));
+          syncBatchUI();
+        },
+      }, `全选未分享 (${unpubEligible.length})`),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        dataset: { role: "batch-select-all" },
+        disabled: eligibleItems.length === 0,
+        onClick: () => {
+          eligibleItems.forEach((it) => viewState.selectedIds.add(it.id));
+          syncBatchUI();
+        },
+      }, `全选当前 (${eligibleItems.length})`),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        dataset: { role: "batch-clear" },
+        disabled: selectedCount === 0,
+        onClick: () => {
+          viewState.selectedIds.clear();
+          syncBatchUI();
+        },
+      }, "清空"),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        dataset: { role: "batch-share-submit" },
+        disabled: selectedCount === 0,
+        onClick: openBatchModal,
+      }, `☁ 批量分享到社区 (${selectedCount})`)
+    ));
+  };
+
+  function renderVaultGrid(items) {
+    currentItems = Array.isArray(items) ? items : [];
+    cardRefs.clear();
+    clear(gridWrap);
+
+    if (!currentItems.length) {
+      if (viewState.batchMode) {
+        viewState.batchMode = false;
+        viewState.selectedIds.clear();
+      }
+      syncBatchUI();
+      gridWrap.appendChild(el("div", { class: "card col insp-empty" },
+        el("h3", { style: { margin: 0 } }, "💡 你的个人灵感库还是空的"),
+        el("p", { class: "muted", style: { margin: "4px 0 8px", maxWidth: "520px" } },
+          "无论是在 X (Twitter) 刷到的神级提示词、在画廊看到的惊艳作品，还是你自己刚画出的得意之作，都可以一键收进这里；用 AI 自动剥离废话、提炼变量，再分享到社区赚积分！"
+        ),
+        el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+          el("button", {
+            type: "button",
+            class: "btn btn-primary",
+            onClick: () => openCreateInspirationModal(ctx, loadVault, { clipToken: latestRes.clipToken, clipEndpoint: latestRes.clipEndpoint }),
+          }, "＋ 粘贴第一条灵感 / 推文"),
+          el("button", {
+            type: "button",
+            class: "btn",
+            onClick: () => openClipperSetupModal({ clipToken: latestRes.clipToken, clipEndpoint: latestRes.clipEndpoint }),
+          }, "🧩 配置 Chrome 灵感捕手"),
+          el("button", {
+            type: "button",
+            class: "btn",
+            onClick: () => ctx.go("inspirations", { tab: "plaza" }),
+          }, "去社区灵感广场逛逛 →")
+        )
+      ));
+      return;
+    }
+
+    const inBatch = viewState.batchMode;
+    const cards = currentItems.map((item) => {
+      const imgSrc = item.imagePath ? localImg(item.imagePath) : (item.imageUrl ? remoteThumb(item.imageUrl, 480) : "");
+      const excerpt = (item.promptZh || item.prompt || item.rawText || "").replace(/\s+/g, " ").trim().slice(0, 88);
+      const elig = getShareEligibility(item);
+      const selected = inBatch && elig.ok && viewState.selectedIds.has(item.id);
+
+      const toggleSelect = () => {
+        if (!elig.ok) {
+          toast(`该条目暂不可分享：${elig.reason}`);
+          return;
+        }
+        if (viewState.selectedIds.has(item.id)) {
+          viewState.selectedIds.delete(item.id);
+        } else {
+          viewState.selectedIds.add(item.id);
+        }
+        syncBatchUI();
+      };
+
+      let checkBtn = null;
+      let cornerOverlay = null;
+      if (inBatch) {
+        if (elig.ok) {
+          checkBtn = el("button", {
+            type: "button",
+            role: "checkbox",
+            "aria-checked": selected ? "true" : "false",
+            "aria-label": `选择 ${item.title || "灵感"}`,
+            class: "insp-batch-check" + (selected ? " is-checked" : ""),
+            onClick: (e) => {
+              e.stopPropagation();
+              toggleSelect();
+            },
+          }, selected ? "✓" : "");
+          cornerOverlay = checkBtn;
+        } else {
+          cornerOverlay = el("span", { class: "insp-batch-ineligible-tag" }, `不可分享 · ${elig.reason}`);
+        }
+      }
+
+      let footHint = null;
+      const footerEl = inBatch
+        ? el("footer", { class: "insp-card-foot insp-card-foot-batch" },
+            (footHint = el("span", { class: "muted", style: { fontSize: "11.5px", flex: "1" } },
+              elig.ok
+                ? (selected ? "✓ 已选中" : (elig.published ? "点击选中（更新分享）" : "点击卡片选中"))
+                : `不可分享：${elig.reason}`
+            )),
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              style: { flex: "0 0 auto" },
+              onClick: (e) => {
+                e.stopPropagation();
+                openLocalInspirationDetail(item, ctx, loadVault);
+              },
+            }, "详情")
+          )
+        : el("footer", { class: "insp-card-foot" },
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              onClick: () => {
+                const hasSkill = Boolean(item.suggestedStyle || item.recipe?.styleIds?.length || item.recipe?.layoutId);
+                ctx.go("create", {
+                  directPrompt: !hasSkill,
+                  forkOf: hasSkill ? (item.workId || "") : "",
+                  forkTitle: item.title || "",
+                  style: hasSkill ? (item.suggestedStyle || item.recipe?.styleIds?.[0] || "") : "",
+                  recipe: hasSkill ? (item.recipe || (item.suggestedStyle ? { styleIds: [item.suggestedStyle] } : {})) : undefined,
+                  theme: item.prompt || item.promptZh || item.rawText || item.title,
+                });
+              },
+            }, "✨ 做同款"),
+            el("button", {
+              type: "button",
+              class: "btn btn-sm btn-primary",
+              onClick: () => openShareInspirationModal(item, ctx, loadVault),
+            }, item.publishedId ? "已分享" : "☁ 分享赚积分")
+          );
+
+      const cardEl = el("article", {
+        class: "style-card insp-card"
+          + (inBatch ? " is-batch" : "")
+          + (selected ? " is-selected" : "")
+          + (inBatch && !elig.ok ? " is-ineligible" : ""),
+        dataset: { id: item.id },
+      },
+        cornerOverlay,
+        el("div", {
+          class: "insp-card-click",
+          onClick: () => {
+            if (inBatch) {
+              toggleSelect();
+            } else {
+              openLocalInspirationDetail(item, ctx, loadVault);
+            }
+          },
+        },
+          imgSrc
+            ? el("img", { class: "style-thumb", src: imgSrc, alt: item.title || "", loading: "lazy" })
+            : el("div", { class: "insp-text-cover" }, excerpt || item.title),
+          el("div", { class: "style-body" },
+            el("div", { class: "row", style: { justifyContent: "space-between", gap: "4px", flexWrap: "wrap" } },
+              el("span", { class: "badge" }, SOURCE_LABELS[item.source] || item.source || "灵感"),
+              item.publishedId
+                ? el("span", { class: "badge badge-ok" }, item.publishedPrice > 0 ? `🔒 ${item.publishedPrice} 积分` : "已分享")
+                : (item.aiOrganized ? el("span", { class: "badge badge-accent" }, "✨ 已整理") : null)
+            ),
+            el("div", { class: "style-name", title: item.title }, item.title || "未命名灵感"),
+            imgSrc && excerpt ? el("p", { class: "style-traits insp-excerpt" }, excerpt) : null,
+            (item.tags || []).length
+              ? el("div", { class: "row", style: { gap: "4px", flexWrap: "wrap", marginTop: "4px" } },
+                  ...item.tags.slice(0, 3).map((t) => el("span", { class: "muted", style: { fontSize: "11px" } }, `#${t}`))
+                )
+              : null
+          )
+        ),
+        footerEl
+      );
+
+      cardRefs.set(item.id, { card: cardEl, checkBtn, footHint, item, elig });
+      return cardEl;
+    });
+
+    gridWrap.appendChild(masonry({ class: "insp-grid" + (inBatch ? " is-batch-mode" : "") }, cards));
+    syncBatchUI();
+  }
 
   async function loadVault() {
     const qs = new URLSearchParams();
@@ -726,6 +1056,7 @@ async function renderVaultTab(stage, ctx, onMeta) {
     if (viewState.source && viewState.source !== "all") qs.set("source", viewState.source);
     if (viewState.tag) qs.set("tag", viewState.tag);
     const res = await api("GET", `/api/inspirations?${qs.toString()}`).catch(() => ({ items: [], tags: [] }));
+    latestRes = res;
     onMeta?.({ clipToken: res.clipToken || "", clipEndpoint: res.clipEndpoint || "", siteBase: res.siteBase || "" });
 
     clear(tagsBar);
@@ -749,88 +1080,7 @@ async function renderVaultTab(stage, ctx, onMeta) {
       });
     }
 
-    clear(gridWrap);
-    const items = res.items || [];
-    if (!items.length) {
-      gridWrap.appendChild(el("div", { class: "card col insp-empty" },
-        el("h3", { style: { margin: 0 } }, "💡 你的个人灵感库还是空的"),
-        el("p", { class: "muted", style: { margin: "4px 0 8px", maxWidth: "520px" } },
-          "无论是在 X (Twitter) 刷到的神级提示词、在画廊看到的惊艳作品，还是你自己刚画出的得意之作，都可以一键收进这里；用 AI 自动剥离废话、提炼变量，再分享到社区赚积分！"
-        ),
-        el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
-          el("button", {
-            type: "button",
-            class: "btn btn-primary",
-            onClick: () => openCreateInspirationModal(ctx, loadVault, { clipToken: res.clipToken, clipEndpoint: res.clipEndpoint }),
-          }, "＋ 粘贴第一条灵感 / 推文"),
-          el("button", {
-            type: "button",
-            class: "btn",
-            onClick: () => openClipperSetupModal({ clipToken: res.clipToken, clipEndpoint: res.clipEndpoint }),
-          }, "🧩 配置 Chrome 灵感捕手"),
-          el("button", {
-            type: "button",
-            class: "btn",
-            onClick: () => ctx.go("inspirations", { tab: "plaza" }),
-          }, "去社区灵感广场逛逛 →")
-        )
-      ));
-      return;
-    }
-
-    const cards = items.map((item) => {
-      const imgSrc = item.imagePath ? localImg(item.imagePath) : (item.imageUrl ? remoteThumb(item.imageUrl, 480) : "");
-      const excerpt = (item.promptZh || item.prompt || item.rawText || "").replace(/\s+/g, " ").trim().slice(0, 88);
-      return el("article", { class: "style-card insp-card" },
-        el("div", {
-          class: "insp-card-click",
-          onClick: () => openLocalInspirationDetail(item, ctx, loadVault),
-        },
-          imgSrc
-            ? el("img", { class: "style-thumb", src: imgSrc, alt: item.title || "", loading: "lazy" })
-            : el("div", { class: "insp-text-cover" }, excerpt || item.title),
-          el("div", { class: "style-body" },
-            el("div", { class: "row", style: { justifyContent: "space-between", gap: "4px", flexWrap: "wrap" } },
-              el("span", { class: "badge" }, SOURCE_LABELS[item.source] || item.source || "灵感"),
-              item.publishedId
-                ? el("span", { class: "badge badge-ok" }, item.publishedPrice > 0 ? `🔒 ${item.publishedPrice} 积分` : "已分享")
-                : (item.aiOrganized ? el("span", { class: "badge badge-accent" }, "✨ 已整理") : null)
-            ),
-            el("div", { class: "style-name", title: item.title }, item.title || "未命名灵感"),
-            imgSrc && excerpt ? el("p", { class: "style-traits insp-excerpt" }, excerpt) : null,
-            (item.tags || []).length
-              ? el("div", { class: "row", style: { gap: "4px", flexWrap: "wrap", marginTop: "4px" } },
-                  ...item.tags.slice(0, 3).map((t) => el("span", { class: "muted", style: { fontSize: "11px" } }, `#${t}`))
-                )
-              : null
-          )
-        ),
-        el("footer", { class: "insp-card-foot" },
-          el("button", {
-            type: "button",
-            class: "btn btn-sm",
-            onClick: () => {
-              const hasSkill = Boolean(item.suggestedStyle || item.recipe?.styleIds?.length || item.recipe?.layoutId);
-              ctx.go("create", {
-                directPrompt: !hasSkill,
-                forkOf: hasSkill ? (item.workId || "") : "",
-                forkTitle: item.title || "",
-                style: hasSkill ? (item.suggestedStyle || item.recipe?.styleIds?.[0] || "") : "",
-                recipe: hasSkill ? (item.recipe || (item.suggestedStyle ? { styleIds: [item.suggestedStyle] } : {})) : undefined,
-                theme: item.prompt || item.promptZh || item.rawText || item.title,
-              });
-            },
-          }, "✨ 做同款"),
-          el("button", {
-            type: "button",
-            class: "btn btn-sm btn-primary",
-            onClick: () => openShareInspirationModal(item, ctx, loadVault),
-          }, item.publishedId ? "已分享" : "☁ 分享赚积分")
-        )
-      );
-    });
-
-    gridWrap.appendChild(masonry({ class: "insp-grid" }, cards));
+    renderVaultGrid(res.items || []);
   }
 
   await loadVault();

@@ -817,8 +817,8 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 		return nil, bad("灵感提示词须设置 1~20 积分解锁，暂不支持免费分享")
 	}
 
-	title := firstStr(strings.TrimSpace(body.Title), cur.Title)
-	promptTxt := firstStr(strings.TrimSpace(body.Prompt), cur.Prompt, cur.PromptZh)
+	title := firstStr(strings.TrimSpace(body.Title), cur.Title, "灵感分享")
+	promptTxt := firstStr(strings.TrimSpace(body.Prompt), cur.Prompt, cur.PromptZh, cur.RawText)
 	if promptTxt == "" {
 		return nil, bad("分享灵感卡需要包含提示词")
 	}

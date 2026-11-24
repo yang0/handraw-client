@@ -193,6 +193,489 @@ export function openShareInspirationModal(item, ctx, onDone) {
   ]);
 }
 
+function parseTagList(raw) {
+  return String(raw || "")
+    .split(/[,，、\s]+/)
+    .map((s) => s.replace(/^#/, "").trim())
+    .filter(Boolean);
+}
+
+function mergeTags(baseTags, extraTags) {
+  const out = [];
+  const seen = new Set();
+  for (const t of [...(Array.isArray(baseTags) ? baseTags : []), ...(extraTags || [])]) {
+    const clean = String(t || "").replace(/^#/, "").trim();
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}
+
+export function openBatchShareInspirationsModal(items, ctx, opts = {}) {
+  const initialList = Array.isArray(items) ? items.filter((it) => it && it.id) : [];
+  if (!initialList.length) {
+    toast("请先选择至少一张要分享的灵感图片");
+    return;
+  }
+
+  let queue = initialList.map((item) => ({
+    item,
+    status: "idle", // idle | queued | running | done | error | cancelled
+    error: "",
+    url: item.publishedUrl || "",
+  }));
+
+  let priceVal = 5;
+  let running = false;
+  let stopRequested = false;
+  let authFailed = false;
+  let hasRun = false;
+  let closeNotified = false;
+
+  const priceInput = el("input", {
+    class: "input",
+    type: "number",
+    min: "1",
+    max: "20",
+    value: String(priceVal),
+    style: { width: "84px" },
+  });
+  const creatorCutHint = el("span", { class: "muted" }, "");
+  const presetBtns = [];
+  const updateCutHint = (val) => {
+    const p = Math.max(1, Math.min(20, Math.round(Number(val ?? priceInput.value) || 5)));
+    priceVal = p;
+    priceInput.value = String(p);
+    const cut = Math.max(1, Math.floor((p * 80) / 100));
+    creatorCutHint.textContent = `每张每被解锁 1 次，你自动获得 +${cut} 积分（80% 分成）`;
+    presetBtns.forEach(({ n, btn }) => btn.classList.toggle("pill-accent", n === p));
+  };
+  priceInput.addEventListener("input", () => updateCutHint(priceInput.value));
+
+  const presetsRow = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } });
+  [2, 5, 8, 10, 15, 20].forEach((n) => {
+    const btn = el("button", {
+      type: "button",
+      class: "pill-btn" + (n === priceVal ? " pill-accent" : ""),
+      onClick: () => {
+        if (running) return;
+        updateCutHint(n);
+      },
+    }, n === 5 ? `${n} 积分（推荐）` : `${n} 积分`);
+    presetBtns.push({ n, btn });
+    presetsRow.appendChild(btn);
+  });
+  updateCutHint(priceVal);
+
+  const extraTagsIn = el("input", {
+    class: "input",
+    placeholder: "可选：用逗号分隔，会追加到每条原有标签中",
+  });
+  const fallbackNotesIn = el("input", {
+    class: "input",
+    placeholder: "可选：仅填充给未填写心得的条目",
+  });
+
+  const pricingBox = el("div", {
+    class: "card col",
+    style: {
+      gap: "8px",
+      padding: "12px",
+      background: "var(--accent-soft)",
+      borderColor: "color-mix(in srgb, var(--accent) 32%, var(--line))",
+    },
+  },
+    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "6px" } },
+      el("strong", null, "🔒 统一积分解锁定价（必填 1~20 积分 · 不支持免费）"),
+      el("span", { class: "badge badge-accent" }, "作者享 80% 分成")
+    ),
+    presetsRow,
+    el("div", { class: "row", style: { gap: "10px", flexWrap: "wrap" } },
+      el("span", { style: { fontSize: "12.5px" } }, "自定义积分（1~20）："),
+      priceInput,
+      creatorCutHint
+    ),
+    el("span", { class: "muted", style: { fontSize: "11.5px" } }, "批量上架保留每张图各自的标题、提示词与标签，效果图公开展示，完整提示词按上述统一定价解锁。")
+  );
+
+  const metaFieldsRow = el("div", { class: "row insp-batch-meta-row", style: { gap: "10px", flexWrap: "wrap" } },
+    el("div", { class: "field", style: { flex: "1 1 220px" } }, el("label", null, "统一追加标签（可选）"), extraTagsIn),
+    el("div", { class: "field", style: { flex: "1 1 220px" } }, el("label", null, "默认补充心得（可选）"), fallbackNotesIn)
+  );
+
+  const progressWrap = el("div", { class: "insp-batch-progress hidden" });
+  const progressLabel = el("div", { class: "row", style: { justifyContent: "space-between", fontSize: "12.5px" } });
+  const progressTitle = el("strong", null, "");
+  const progressPct = el("span", { class: "muted mono" }, "");
+  progressLabel.appendChild(progressTitle);
+  progressLabel.appendChild(progressPct);
+  const progressFill = el("div", { class: "insp-batch-progress-fill", style: { width: "0%" } });
+  progressWrap.appendChild(progressLabel);
+  progressWrap.appendChild(el("div", { class: "insp-batch-progress-track" }, progressFill));
+
+  const summaryWrap = el("div", { class: "insp-batch-summary hidden" });
+  const queueHeader = el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px", alignItems: "center" } });
+  const queueListEl = el("div", { class: "insp-batch-list col" });
+  const footerBox = el("div", { class: "row insp-batch-footer", style: { width: "100%", justifyContent: "flex-end", gap: "8px", flexWrap: "wrap" } });
+
+  const setControlsDisabled = (disabled) => {
+    priceInput.disabled = disabled;
+    extraTagsIn.disabled = disabled;
+    fallbackNotesIn.disabled = disabled;
+    presetBtns.forEach(({ btn }) => { btn.disabled = disabled; });
+  };
+
+  const getStats = () => {
+    let done = 0;
+    let error = 0;
+    let cancelled = 0;
+    let pending = 0;
+    for (const q of queue) {
+      if (q.status === "done") done++;
+      else if (q.status === "error") error++;
+      else if (q.status === "cancelled") cancelled++;
+      else pending++;
+    }
+    return { done, error, cancelled, pending, total: queue.length };
+  };
+
+  const notifyCloseOnce = () => {
+    if (closeNotified) return;
+    closeNotified = true;
+    stopRequested = true;
+    const succeededIds = queue.filter((q) => q.status === "done").map((q) => q.item.id);
+    const failedIds = queue.filter((q) => q.status === "error" || q.status === "cancelled").map((q) => q.item.id);
+    opts.onClose?.({
+      succeededIds,
+      failedIds,
+      anySucceeded: succeededIds.length > 0,
+      wasRunning: running,
+    });
+  };
+
+  const renderQueue = () => {
+    clear(queueHeader);
+    const alreadyPubCount = queue.filter((q) => q.item.publishedId && q.status === "idle").length;
+    const stats = getStats();
+    const headerTitle = hasRun
+      ? `分享清单 · 共 ${stats.total} 项（成功 ${stats.done}${stats.error ? ` · 失败 ${stats.error}` : ""}${stats.cancelled ? ` · 取消 ${stats.cancelled}` : ""}）`
+      : `待分享清单 · 共 ${stats.total} 项`;
+    queueHeader.appendChild(el("strong", { style: { fontSize: "13px" } }, headerTitle));
+    if (!running && !hasRun && alreadyPubCount > 0) {
+      queueHeader.appendChild(el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: () => {
+          queue = queue.filter((q) => !q.item.publishedId);
+          renderQueue();
+          renderFooter();
+        },
+      }, `移除已分享项 (${alreadyPubCount})`));
+    }
+
+    clear(queueListEl);
+    if (!queue.length) {
+      queueListEl.appendChild(el("div", { class: "muted", style: { padding: "18px 8px", textAlign: "center" } }, "清单已清空，请关闭窗口重新选择要分享的灵感图片。"));
+      return;
+    }
+
+    queue.forEach((entry) => {
+      const it = entry.item;
+      const thumbSrc = it.imagePath ? localImg(it.imagePath) : (it.imageUrl ? remoteThumb(it.imageUrl, 160) : "");
+      const excerpt = (it.promptZh || it.prompt || it.rawText || "").replace(/\s+/g, " ").trim().slice(0, 72);
+
+      let statusNode = null;
+      if (entry.status === "idle") {
+        statusNode = el("span", { class: "badge" }, it.publishedId ? "已分享 · 将更新" : "待分享");
+      } else if (entry.status === "queued") {
+        statusNode = el("span", { class: "badge" }, "等待中");
+      } else if (entry.status === "running") {
+        statusNode = el("span", { class: "badge badge-accent insp-batch-status-running" },
+          el("span", { class: "dot-pulse" }),
+          "上传中…"
+        );
+      } else if (entry.status === "done") {
+        statusNode = el("span", { class: "badge badge-ok" }, "✓ 已分享");
+      } else if (entry.status === "error") {
+        statusNode = el("span", { class: "badge insp-badge-err" }, "✕ 失败");
+      } else if (entry.status === "cancelled") {
+        statusNode = el("span", { class: "badge" }, "已取消");
+      }
+
+      const rowActions = el("div", { class: "row", style: { gap: "6px", flexShrink: "0", alignItems: "center" } },
+        statusNode,
+        entry.status === "done" && entry.url
+          ? el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              onClick: () => openURL(entry.url),
+            }, "查看 ↗")
+          : null,
+        !running && entry.status === "idle"
+          ? el("button", {
+              type: "button",
+              class: "btn btn-sm insp-batch-remove-btn",
+              title: "从本次批量分享中移除",
+              "aria-label": `移除 ${it.title || "该条目"}`,
+              onClick: () => {
+                queue = queue.filter((q) => q.item.id !== it.id);
+                renderQueue();
+                renderFooter();
+              },
+            }, "✕")
+          : null
+      );
+
+      const rowEl = el("div", {
+        class: "insp-batch-row" + (entry.status === "running" ? " is-running" : "") + (entry.status === "done" ? " is-done" : "") + (entry.status === "error" ? " is-error" : ""),
+        dataset: { id: it.id, status: entry.status },
+      },
+        thumbSrc
+          ? el("img", { class: "insp-batch-thumb", src: thumbSrc, alt: it.title || "" })
+          : el("div", { class: "insp-batch-thumb insp-batch-thumb-empty" }, "文"),
+        el("div", { class: "col insp-batch-row-info" },
+          el("div", { class: "insp-batch-row-title", title: it.title || "未命名灵感" }, it.title || "未命名灵感"),
+          entry.error
+            ? el("div", { class: "insp-batch-row-err" }, entry.error)
+            : el("div", { class: "muted insp-batch-row-sub" }, excerpt || "无提示词预览")
+        ),
+        rowActions
+      );
+      entry._node = rowEl;
+      queueListEl.appendChild(rowEl);
+    });
+  };
+
+  const renderSummary = () => {
+    clear(summaryWrap);
+    if (!hasRun || running) {
+      summaryWrap.classList.add("hidden");
+      return;
+    }
+    const stats = getStats();
+    const cut = Math.max(1, Math.floor((priceVal * 80) / 100));
+    summaryWrap.classList.remove("hidden");
+    summaryWrap.classList.toggle("is-ok", stats.error === 0 && stats.cancelled === 0 && stats.done > 0);
+    summaryWrap.classList.toggle("is-warn", stats.error > 0 || stats.cancelled > 0);
+
+    if (authFailed) {
+      summaryWrap.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px", alignItems: "center" } },
+        el("div", { class: "col", style: { gap: "2px" } },
+          el("strong", null, "请先登录手绘风账号后再批量分享"),
+          el("span", { class: "muted", style: { fontSize: "12px" } }, "已暂停剩余分享队列，登录后回到灵感库即可继续上架赚积分。")
+        ),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: () => {
+            closeModal();
+            ctx.go("settings", { anchor: "settings-account" });
+          },
+        }, "前往登录账号")
+      ));
+      return;
+    }
+
+    if (stats.error === 0 && stats.cancelled === 0 && stats.done > 0) {
+      summaryWrap.appendChild(el("div", { class: "col", style: { gap: "3px" } },
+        el("strong", null, `🎉 批量分享完成！已成功上架 ${stats.done} 张灵感（${priceVal} 积分解锁）`),
+        el("span", { class: "muted", style: { fontSize: "12px" } }, `每张灵感每被解锁 1 次，你将自动获得 +${cut} 积分创作者分成（80%）。`)
+      ));
+      return;
+    }
+
+    const parts = [`成功 ${stats.done} 项`];
+    if (stats.error > 0) parts.push(`失败 ${stats.error} 项`);
+    if (stats.cancelled > 0) parts.push(`已取消 ${stats.cancelled} 项`);
+    summaryWrap.appendChild(el("div", { class: "col", style: { gap: "3px" } },
+      el("strong", null, `批量分享结束：${parts.join(" · ")}`),
+      el("span", { class: "muted", style: { fontSize: "12px" } }, "已成功的灵感已经上架到社区；你可以点击下方「重试未完成项」继续处理未完成条目。")
+    ));
+  };
+
+  const runBatch = async (onlyRetry = false) => {
+    const targets = onlyRetry
+      ? queue.filter((q) => q.status === "error" || q.status === "cancelled")
+      : queue.filter((q) => q.status !== "done");
+    if (!targets.length) return;
+
+    const price = Math.max(1, Math.min(20, Math.round(Number(priceInput.value) || 5)));
+    updateCutHint(price);
+    const extraTags = parseTagList(extraTagsIn.value);
+    const fallbackNote = fallbackNotesIn.value.trim();
+
+    running = true;
+    stopRequested = false;
+    authFailed = false;
+    hasRun = true;
+    setControlsDisabled(true);
+    opts.onStart?.();
+
+    targets.forEach((q) => {
+      q.status = "queued";
+      q.error = "";
+    });
+    summaryWrap.classList.add("hidden");
+    progressWrap.classList.remove("hidden");
+
+    const updateProgress = (completedInRun) => {
+      const pct = Math.round((completedInRun / targets.length) * 100);
+      progressTitle.textContent = stopRequested
+        ? `正在停止剩余任务… (${completedInRun} / ${targets.length})`
+        : `正在批量分享到社区… (${completedInRun} / ${targets.length})`;
+      progressPct.textContent = `${pct}%`;
+      progressFill.style.width = `${pct}%`;
+    };
+
+    updateProgress(0);
+    renderQueue();
+    renderFooter();
+
+    let processed = 0;
+    const reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    for (let i = 0; i < targets.length; i++) {
+      const entry = targets[i];
+      if (stopRequested) {
+        entry.status = "cancelled";
+        entry.error = "已手动停止";
+        continue;
+      }
+
+      entry.status = "running";
+      entry.error = "";
+      renderQueue();
+      if (entry._node?.scrollIntoView) {
+        try {
+          entry._node.scrollIntoView({ block: "nearest", behavior: reducedMotion ? "auto" : "smooth" });
+        } catch {}
+      }
+
+      const it = entry.item;
+      const promptTxt = String(it.prompt || it.promptZh || it.rawText || "").trim();
+      const titleTxt = String(it.title || "").trim() || promptTxt.replace(/\s+/g, " ").slice(0, 24) || "未命名灵感";
+      const mergedTags = mergeTags(it.tags, extraTags);
+      const notesTxt = String(it.notes || "").trim() || fallbackNote;
+
+      try {
+        const res = await api("POST", `/api/inspirations/${encodeURIComponent(it.id)}/publish`, {
+          title: titleTxt,
+          prompt: promptTxt,
+          notes: notesTxt,
+          tags: mergedTags,
+          price,
+        });
+        entry.status = "done";
+        entry.url = res.fullUrl || res.url || "";
+        if (res.item) {
+          entry.item = res.item;
+        }
+      } catch (err) {
+        const msg = err?.message || "发布失败";
+        entry.status = "error";
+        entry.error = msg;
+        if (/登录|login|401/i.test(msg)) {
+          authFailed = true;
+          for (let j = i + 1; j < targets.length; j++) {
+            targets[j].status = "cancelled";
+            targets[j].error = "需先登录手绘风账号";
+          }
+          processed = targets.length;
+          updateProgress(processed);
+          break;
+        }
+      }
+
+      processed++;
+      updateProgress(processed);
+      renderQueue();
+    }
+
+    running = false;
+    setControlsDisabled(false);
+    progressWrap.classList.add("hidden");
+    renderQueue();
+    renderSummary();
+    renderFooter();
+
+    const succeededIds = queue.filter((q) => q.status === "done").map((q) => q.item.id);
+    const failedIds = queue.filter((q) => q.status === "error" || q.status === "cancelled").map((q) => q.item.id);
+    if (succeededIds.length > 0) {
+      ctx.refreshTopbar?.();
+    }
+    opts.onFinished?.({ succeededIds, failedIds, total: queue.length });
+  };
+
+  const renderFooter = () => {
+    clear(footerBox);
+    if (running) {
+      footerBox.appendChild(el("button", {
+        type: "button",
+        class: "btn btn-danger",
+        onClick: () => {
+          stopRequested = true;
+          toast("将在当前这张完成后停止剩余分享");
+        },
+      }, "停止剩余任务"));
+      return;
+    }
+
+    const stats = getStats();
+    if (!hasRun) {
+      footerBox.appendChild(el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"));
+      footerBox.appendChild(el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        disabled: queue.length === 0,
+        onClick: () => runBatch(false),
+      }, `立即批量上架 (${queue.length} 项)`));
+      return;
+    }
+
+    const retryCount = stats.error + stats.cancelled;
+    if (retryCount > 0 && !authFailed) {
+      footerBox.appendChild(el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: () => runBatch(true),
+      }, `🔄 重试未完成项 (${retryCount})`));
+    }
+    if (stats.done > 0) {
+      footerBox.appendChild(el("button", {
+        type: "button",
+        class: retryCount > 0 ? "btn" : "btn btn-primary",
+        onClick: () => {
+          closeModal();
+          ctx.go("inspirations", { tab: "plaza" });
+        },
+      }, "去社区灵感广场看看"));
+    }
+    footerBox.appendChild(el("button", {
+      type: "button",
+      class: "btn",
+      onClick: closeModal,
+    }, "完成并关闭"));
+  };
+
+  renderQueue();
+  renderFooter();
+
+  const body = el("div", { class: "col insp-batch-modal-body", style: { gap: "12px" } },
+    pricingBox,
+    metaFieldsRow,
+    progressWrap,
+    summaryWrap,
+    queueHeader,
+    queueListEl
+  );
+
+  showModal(`批量分享到社区 (${initialList.length} 项)`, body, [footerBox], {
+    className: "modal-batch-share",
+    onClose: notifyCloseOnce,
+  });
+}
+
 export async function openWorkRemixModal(workId, ctx, opts = {}) {
   const loading = el("div", { class: "row", style: { padding: "24px 8px", justifyContent: "center" } },
     el("span", { class: "dot-pulse" }),
