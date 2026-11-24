@@ -197,3 +197,32 @@ func TestInspirationsAntiHallucinationAndHTMLImageReject(t *testing.T) {
 		t.Fatalf("expected PNG header bytes to be accepted as image")
 	}
 }
+
+func TestExtractFirstNetworkURLAndPreserveOnCreate(t *testing.T) {
+	got := extractFirstNetworkURL("小红书好图分享 https://xhslink.com/abc123，快来抄作业！")
+	if got != "https://xhslink.com/abc123" {
+		t.Fatalf("unexpected extracted URL: %q", got)
+	}
+	if got2 := extractFirstNetworkURL("https://example.com/a.png https://x.com/foo/status/42"); got2 != "https://x.com/foo/status/42" {
+		t.Fatalf("expected non-image URL to win, got %q", got2)
+	}
+
+	srv, cancel := setupTestServer(t, "http://127.0.0.1:1")
+	defer cancel()
+	h := srv.Handler()
+	rr := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations", map[string]any{
+		"title":   "测试保留链接",
+		"rawText": "超好看的宋制汉服工笔人物 https://x.com/creator/status/12345 推荐收藏",
+		"prompt":  "超好看的宋制汉服工笔人物 https://x.com/creator/status/12345 推荐收藏",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("create failed: %d %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Item inspirationItem `json:"item"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.Item.SourceURL != "https://x.com/creator/status/12345" {
+		t.Fatalf("expected sourceUrl preserved, got %q", resp.Item.SourceURL)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -474,6 +475,10 @@ func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any
 		}
 	}
 
+	if strings.TrimSpace(body.SourceURL) == "" {
+		body.SourceURL = extractFirstNetworkURL(body.RawText, body.Prompt, body.Notes)
+	}
+
 	id := jobs.NewID("insp")
 	imgPath := strings.TrimSpace(body.ImagePath)
 	if imgPath != "" {
@@ -556,6 +561,7 @@ func (s *Server) inspirationsPatch(w http.ResponseWriter, r *http.Request) (any,
 		Tags           *[]string          `json:"tags"`
 		Slots          *[]inspirationSlot `json:"slots"`
 		SuggestedStyle *string            `json:"suggestedStyle"`
+		SourceURL      *string            `json:"sourceUrl"`
 		Recipe         map[string]any     `json:"recipe"`
 	}
 	if err := decode(r, &body); err != nil {
@@ -585,6 +591,9 @@ func (s *Server) inspirationsPatch(w http.ResponseWriter, r *http.Request) (any,
 	}
 	if body.SuggestedStyle != nil {
 		d.SuggestedStyle = strings.TrimSpace(*body.SuggestedStyle)
+	}
+	if body.SourceURL != nil {
+		d.SourceURL = strings.TrimSpace(*body.SourceURL)
 	}
 	if body.Recipe != nil {
 		d.Recipe = body.Recipe
@@ -636,6 +645,10 @@ func (s *Server) inspirationsClip(w http.ResponseWriter, r *http.Request) (any, 
 	prm := strings.TrimSpace(firstStr(body.Prompt, rawTxt))
 	if strings.TrimSpace(body.ImageDataURL) == "" && strings.TrimSpace(body.ImageURL) == "" && prm == "" {
 		return nil, bad("剪藏内容至少需要包含图片或文字")
+	}
+
+	if strings.TrimSpace(body.SourceURL) == "" {
+		body.SourceURL = extractFirstNetworkURL(rawTxt, prm)
 	}
 
 	id := jobs.NewID("insp")
@@ -869,13 +882,14 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 		return nil, err
 	}
 	var body struct {
-		Title   string   `json:"title"`
-		Prompt  string   `json:"prompt"`
-		Notes   string   `json:"notes"`
-		Price   int      `json:"price"`
-		Tags    []string `json:"tags"`
-		Encoded string   `json:"encoded"`
-		Images  []string `json:"images"`
+		Title     string   `json:"title"`
+		Prompt    string   `json:"prompt"`
+		Notes     string   `json:"notes"`
+		Price     int      `json:"price"`
+		Tags      []string `json:"tags"`
+		SourceURL string   `json:"sourceUrl"`
+		Encoded   string   `json:"encoded"`
+		Images    []string `json:"images"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -915,6 +929,7 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 		return nil, bad("分享灵感卡需要至少一张图片")
 	}
 
+	sourceURL := firstStr(strings.TrimSpace(body.SourceURL), cur.SourceURL, extractFirstNetworkURL(cur.RawText, cur.Prompt))
 	payload := map[string]any{
 		"title":          title,
 		"prompt":         promptTxt,
@@ -923,7 +938,7 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 		"tags":           tags,
 		"recipe":         cur.Recipe,
 		"suggestedStyle": cur.SuggestedStyle,
-		"sourceUrl":      cur.SourceURL,
+		"sourceUrl":      sourceURL,
 		"sourceAuthor":   cur.SourceAuthor,
 		"sourceChannel":  firstStr(cur.Source, "client"),
 		"notes":          firstStr(strings.TrimSpace(body.Notes), cur.Notes),
@@ -951,6 +966,9 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 	d.Prompt = promptTxt
 	d.Tags = tags
 	d.Notes = firstStr(strings.TrimSpace(body.Notes), cur.Notes)
+	if sourceURL != "" {
+		d.SourceURL = sourceURL
+	}
 	d.PublishedID = pubID
 	d.PublishedURL = pubURL
 	d.PublishedPrice = body.Price
@@ -1145,6 +1163,33 @@ func (s *Server) siteCollectionsToggle(w http.ResponseWriter, r *http.Request) (
 		return nil, err
 	}
 	return json.RawMessage(raw), nil
+}
+
+var reNetworkURL = regexp.MustCompile(`https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+`)
+
+func extractFirstNetworkURL(texts ...string) string {
+	fallbackImg := ""
+	for _, raw := range texts {
+		for _, m := range reNetworkURL.FindAllString(raw, 8) {
+			cleaned := strings.TrimRight(m, ".,;:!?)]}，。；：！？）》】'\"")
+			u, err := url.Parse(cleaned)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				continue
+			}
+			lowerPath := strings.ToLower(u.Path)
+			isImg := strings.HasSuffix(lowerPath, ".png") || strings.HasSuffix(lowerPath, ".jpg") ||
+				strings.HasSuffix(lowerPath, ".jpeg") || strings.HasSuffix(lowerPath, ".webp") ||
+				strings.HasSuffix(lowerPath, ".gif") || strings.HasSuffix(lowerPath, ".avif")
+			if isImg {
+				if fallbackImg == "" {
+					fallbackImg = cleaned
+				}
+				continue
+			}
+			return cleaned
+		}
+	}
+	return ""
 }
 
 func (s *Server) siteCreatorEarnings(w http.ResponseWriter, r *http.Request) (any, error) {

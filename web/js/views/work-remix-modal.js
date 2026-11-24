@@ -52,6 +52,12 @@ export function openShareInspirationModal(item, ctx, onDone) {
     value: Array.isArray(item.tags) ? item.tags.join("，") : "",
     placeholder: "标签，用逗号分隔，例如：手绘，小红书封面，治愈",
   });
+  const sourceUrlIn = el("input", {
+    class: "input",
+    type: "url",
+    value: item.sourceUrl || "",
+    placeholder: "来源链接（选填，解锁后可见）",
+  });
 
   const priceInput = el("input", {
     class: "input",
@@ -116,7 +122,8 @@ export function openShareInspirationModal(item, ctx, onDone) {
     el("div", { class: "row", style: { gap: "10px" } },
       el("div", { class: "field", style: { flex: "1" } }, el("label", null, "标签"), tagsIn),
       el("div", { class: "field", style: { flex: "1" } }, el("label", null, "一句话心得（可选）"), notesIn)
-    )
+    ),
+    el("div", { class: "field" }, el("label", null, "来源链接（选填，解锁后展示给已解锁用户）"), sourceUrlIn)
   );
 
   const submitBtn = el("button", {
@@ -131,6 +138,13 @@ export function openShareInspirationModal(item, ctx, onDone) {
       }
       const price = Math.max(1, Math.min(20, Math.round(Number(priceInput.value) || 5)));
       const tags = tagsIn.value.split(/[,，、\s]+/).map((s) => s.replace(/^#/, "").trim()).filter(Boolean);
+      const rawSource = sourceUrlIn.value.trim();
+      const sourceUrl = /^https?:\/\//i.test(rawSource) ? rawSource : "";
+      if (rawSource && !sourceUrl) {
+        toast("来源链接须以 http:// 或 https:// 开头");
+        sourceUrlIn.focus();
+        return;
+      }
       submitBtn.disabled = true;
       submitBtn.textContent = "正在压缩 WebP 并上架…";
       try {
@@ -143,6 +157,7 @@ export function openShareInspirationModal(item, ctx, onDone) {
           prompt: promptTxt,
           notes: notesIn.value.trim(),
           tags,
+          sourceUrl,
           price,
           encoded,
         });
@@ -1260,7 +1275,20 @@ export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
             tags.length ? el("div", { class: "row", style: { gap: "5px", flexWrap: "wrap", marginTop: "2px" } },
               ...tags.map((t) => el("span", { class: "badge" }, `#${t}`))
             ) : null,
-            item.notes ? el("p", { class: "muted", style: { margin: "4px 0 0" } }, `作者心得：${item.notes}`) : null
+            item.notes ? el("p", { class: "muted", style: { margin: "4px 0 0" } }, `作者心得：${item.notes}`) : null,
+            (!locked && /^https?:\/\//i.test(String(item.sourceUrl || "").trim()))
+              ? el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap", marginTop: "4px" } },
+                el("span", { class: "muted", style: { fontSize: "12px" } }, "🔗 来源："),
+                el("a", {
+                  href: String(item.sourceUrl).trim(),
+                  target: "_blank",
+                  rel: "noopener noreferrer nofollow",
+                  referrerpolicy: "no-referrer",
+                  style: { fontSize: "12px", color: "var(--accent)", wordBreak: "break-all" },
+                  onClick: (e) => { e.preventDefault(); openURL(String(item.sourceUrl).trim()); },
+                }, String(item.sourceUrl).trim())
+              )
+              : null
           ),
           promptSection
         )

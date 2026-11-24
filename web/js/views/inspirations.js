@@ -448,9 +448,13 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
   }, "⚡ 解析链接");
   const sourceChipEl = el("div", { class: "insp-source-chip hidden" });
   const autoOrgChk = el("input", { type: "checkbox", checked: true });
+  let sourceUrlIn = null;
 
   const renderSourceChip = () => {
     clear(sourceChipEl);
+    if (sourceUrlIn && sourceUrlIn.value.trim() !== sourceUrl) {
+      sourceUrlIn.value = sourceUrl || "";
+    }
     if (!sourceUrl) {
       sourceChipEl.classList.add("hidden");
       return;
@@ -643,6 +647,26 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
     document.removeEventListener("paste", onPaste);
   };
 
+  sourceUrlIn = el("input", {
+    class: "input",
+    type: "url",
+    placeholder: "来源链接（选填，粘贴网络链接收录时自动保留，分享解锁后可见）",
+  });
+  sourceUrlIn.addEventListener("input", () => {
+    const v = sourceUrlIn.value.trim();
+    if (/^https?:\/\//i.test(v)) sourceUrl = v;
+    else if (!v) sourceUrl = "";
+  });
+
+  const extractFirstHttpUrl = (txt) => {
+    const m = String(txt || "").match(/https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/gi) || [];
+    for (const raw of m) {
+      const cleaned = raw.replace(/[.,;:!?)\]}'"]+$/g, "");
+      if (!isDirectImageUrl(cleaned)) return cleaned;
+    }
+    return "";
+  };
+
   const body = el("div", { class: "col insp-create-form", style: { gap: "12px" } },
     el("div", { class: "col", style: { gap: "8px" } },
       dropZone,
@@ -657,6 +681,7 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
       sourceChipEl,
       fetchStatusEl
     ),
+    sourceUrlIn,
     titleIn,
     el("label", { class: "row", style: { cursor: "pointer", fontSize: "12.5px", alignItems: "center" } },
       autoOrgChk,
@@ -673,7 +698,11 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
         remoteImageUrl = rawTxt;
         rawTxt = "";
       }
-      const effectiveSrc = sourceUrl || (isBareHttpUrl(rawTxt) && !isDirectImageUrl(rawTxt) ? rawTxt : "");
+      const typedSrc = sourceUrlIn.value.trim();
+      const effectiveSrc = (/^https?:\/\//i.test(typedSrc) ? typedSrc : "")
+        || sourceUrl
+        || (isBareHttpUrl(rawTxt) && !isDirectImageUrl(rawTxt) ? rawTxt : "")
+        || extractFirstHttpUrl(rawTxt);
       if (!imageDataUrl && !remoteImageUrl && !rawTxt && !effectiveSrc) {
         toast("请粘贴图片、输入提示词，或直接粘贴链接");
         return;
