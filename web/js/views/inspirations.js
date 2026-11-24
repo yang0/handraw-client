@@ -1,5 +1,5 @@
 import { api, clear, closeModal, copyText, el, localImg, onEvent, openURL, remoteThumb, showModal, toast } from "../api.js";
-import { masonry } from "../masonry.js";
+import { createCardSizeSwitcher, masonry } from "../masonry.js";
 import { openBatchShareInspirationsModal, openInspirationRemixModal, openShareInspirationModal } from "./work-remix-modal.js";
 
 const SOURCE_LABELS = {
@@ -69,11 +69,64 @@ function applySlotValues(basePrompt, slots, values) {
 
 export function openClipperSetupModal(meta = {}) {
   let curToken = meta.clipToken || "";
+  let curExtDir = meta.clipExtensionDir || "";
+  let curExtExists = meta.clipExtensionExists !== false;
   const ep = meta.clipEndpoint || `${location.origin}/api/inspirations/clip`;
   const portMatch = ep.match(/:(\d+)\//);
   const port = portMatch ? portMatch[1] : (location.port || "80");
 
   const tokenCode = el("code", { class: "mono insp-token-code" }, curToken || "加载中…");
+  const extDirCode = el("code", {
+    class: "mono",
+    dataset: { role: "clip-ext-dir" },
+    style: { wordBreak: "break-all" },
+  }, curExtDir || "正在获取扩展目录…");
+
+  const copyExtDirBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    dataset: { role: "clip-ext-copy" },
+    disabled: !curExtDir,
+    onClick: async () => {
+      if (!curExtDir) return;
+      toast((await copyText(curExtDir)) ? "已复制扩展文件夹路径" : "复制失败");
+    },
+  }, "📋 复制路径");
+
+  const openExtDirBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm" + (!curExtDir || !curExtExists ? " hidden" : ""),
+    dataset: { role: "clip-ext-open" },
+    onClick: async () => {
+      if (!curExtDir) return;
+      try {
+        await api("POST", "/api/open", { path: curExtDir });
+      } catch (e) {
+        toast(e?.message || "无法打开扩展目录");
+      }
+    },
+  }, "📂 打开文件夹");
+
+  const syncExtDirUI = () => {
+    extDirCode.textContent = curExtDir || "extensions/handraw-clipper";
+    copyExtDirBtn.disabled = !curExtDir;
+    openExtDirBtn.classList.toggle("hidden", !curExtDir || !curExtExists);
+  };
+
+  if (!curExtDir || !curToken) {
+    api("GET", "/api/settings").then((r) => {
+      if (!curToken && r?.clipToken) {
+        curToken = r.clipToken;
+        tokenCode.textContent = curToken;
+      }
+      if (!curExtDir && r?.clipExtensionDir) {
+        curExtDir = r.clipExtensionDir;
+        curExtExists = r.clipExtensionExists !== false;
+        syncExtDirUI();
+      }
+    }).catch(() => {});
+  }
+
   const body = el("div", { class: "col", style: { gap: "12px" } },
     el("p", { class: "muted", style: { margin: 0 } },
       "安装内置的「手绘风灵感捕手」Chrome / Edge 扩展后，刷 X (Twitter) 或任意网页时，点一下按钮或右键即可把图片和杂乱推文直接收进本机灵感库，并自动用 AI 提炼成可复用提示词。"
@@ -118,7 +171,14 @@ export function openClipperSetupModal(meta = {}) {
       el("strong", null, "3. 如何加载 Chrome / Edge 扩展（30 秒完成）"),
       el("ol", { style: { margin: "4px 0 0", paddingLeft: "20px", fontSize: "12.5px", lineHeight: "1.7" } },
         el("li", null, "打开 Chrome / Edge，在地址栏输入 ", el("code", { class: "mono" }, "chrome://extensions"), " 并开启右上角「开发者模式」。"),
-        el("li", null, "点击「加载已解压的扩展程序」，选择客户端目录下的 ", el("code", { class: "mono" }, "extensions/handraw-clipper"), " 文件夹。"),
+        el("li", null,
+          "点击「加载已解压的扩展程序」，选择扩展文件夹：",
+          el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center", marginTop: "4px" } },
+            extDirCode,
+            copyExtDirBtn,
+            openExtDirBtn
+          )
+        ),
         el("li", null, "点击浏览器右上角「手绘风灵感捕手」图标，填入端口 ", el("code", { class: "mono" }, port), " 和上方 Token，点击「测试连接」即可！")
       )
     )
@@ -135,7 +195,7 @@ export async function renderInspirations(root, ctx, params = {}) {
   }
   clear(root);
 
-  let latestVaultMeta = { clipToken: "", clipEndpoint: "", siteBase: "" };
+  let latestVaultMeta = { clipToken: "", clipEndpoint: "", clipExtensionDir: "", clipExtensionExists: false, siteBase: "" };
 
   const tabBar = el("div", { class: "tabs" });
   const tabsDef = [
@@ -165,7 +225,12 @@ export async function renderInspirations(root, ctx, params = {}) {
   };
   drawTabs();
 
-  const headerActions = el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+  const sizeSwitcher = createCardSizeSwitcher({
+    storageKey: "handraw_inspirations_size",
+    host: root,
+  });
+
+  const headerActions = el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
     el("button", {
       type: "button",
       class: "btn btn-sm",
@@ -181,7 +246,8 @@ export async function renderInspirations(root, ctx, params = {}) {
         }
         drawBody();
       }, latestVaultMeta),
-    }, "＋ 收集新灵感")
+    }, "＋ 收集新灵感"),
+    sizeSwitcher.el
   );
 
   root.appendChild(el("div", { class: "page-head" },
@@ -1036,12 +1102,22 @@ async function renderVaultTab(stage, ctx, onMeta) {
           el("button", {
             type: "button",
             class: "btn btn-primary",
-            onClick: () => openCreateInspirationModal(ctx, loadVault, { clipToken: latestRes.clipToken, clipEndpoint: latestRes.clipEndpoint }),
+            onClick: () => openCreateInspirationModal(ctx, loadVault, {
+              clipToken: latestRes.clipToken,
+              clipEndpoint: latestRes.clipEndpoint,
+              clipExtensionDir: latestRes.clipExtensionDir,
+              clipExtensionExists: latestRes.clipExtensionExists,
+            }),
           }, "＋ 粘贴第一条灵感 / 推文"),
           el("button", {
             type: "button",
             class: "btn",
-            onClick: () => openClipperSetupModal({ clipToken: latestRes.clipToken, clipEndpoint: latestRes.clipEndpoint }),
+            onClick: () => openClipperSetupModal({
+              clipToken: latestRes.clipToken,
+              clipEndpoint: latestRes.clipEndpoint,
+              clipExtensionDir: latestRes.clipExtensionDir,
+              clipExtensionExists: latestRes.clipExtensionExists,
+            }),
           }, "🧩 配置 Chrome 灵感捕手"),
           el("button", {
             type: "button",
@@ -1190,7 +1266,13 @@ async function renderVaultTab(stage, ctx, onMeta) {
     if (viewState.tag) qs.set("tag", viewState.tag);
     const res = await api("GET", `/api/inspirations?${qs.toString()}`).catch(() => ({ items: [], tags: [] }));
     latestRes = res;
-    onMeta?.({ clipToken: res.clipToken || "", clipEndpoint: res.clipEndpoint || "", siteBase: res.siteBase || "" });
+    onMeta?.({
+      clipToken: res.clipToken || "",
+      clipEndpoint: res.clipEndpoint || "",
+      clipExtensionDir: res.clipExtensionDir || "",
+      clipExtensionExists: res.clipExtensionExists,
+      siteBase: res.siteBase || "",
+    });
 
     clear(tagsBar);
     const tags = (res.tags || []).slice(0, 14);

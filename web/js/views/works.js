@@ -1,5 +1,5 @@
 import { api, clear, closeModal, copyText, el, localImg, onEvent, openURL, remoteThumb, showModal, toast, toWebp } from "../api.js";
-import { masonry } from "../masonry.js";
+import { createCardSizeSwitcher, masonry } from "../masonry.js";
 
 const state = {
   tab: "local", // local | history | collections
@@ -26,12 +26,20 @@ export async function renderWorks(root, ctx, params = {}) {
     }, label));
   });
 
+  const sizeSwitcher = createCardSizeSwitcher({
+    storageKey: "handraw_works_size",
+    host: root,
+  });
+
   root.appendChild(el("div", { class: "page-head" },
     el("div", { class: "row" },
       el("h1", { class: "page-title" }, "作品中心"),
       tabBar
     ),
-    el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create") }, "+ 新建创作")
+    el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
+      el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create") }, "+ 新建创作"),
+      sizeSwitcher.el
+    )
   ));
 
   const stage = el("div");
