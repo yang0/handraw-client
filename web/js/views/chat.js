@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, localImg, money, onEvent, showModal, toast } from "../api.js";
+import { api, clear, closeModal, copyText, el, localImg, money, onEvent, showModal, toast } from "../api.js";
 import { openHarnessSkillImportModal } from "../skills-ui.js";
 import { buildGroupedAIModelSelect, buildGroupedModelSelect } from "./create.js";
 import { bindPageImagePaste, importTempReferenceFile, MAX_REF_IMAGES, openReferencePickerModal } from "./ref-picker.js";
@@ -7,6 +7,8 @@ import { openShareInspirationModal } from "./work-remix-modal.js";
 
 const chatCss = el("link", { rel: "stylesheet", href: new URL("../../css/chat.css", import.meta.url).href });
 document.head.appendChild(chatCss);
+
+const SIDEBAR_COLLAPSED_KEY = "handraw:chat:sidebarCollapsed";
 
 const STARTERS = [
   { tag: "💬 自由对话", text: "帮我构思 3 个小红书手账内容选题，并给出吸睛封面标题建议" },
@@ -29,7 +31,95 @@ function fmtTime(ts) {
   }
 }
 
-// Lightweight XSS-safe Markdown renderer built strictly with DOM nodes.
+function getSidebarCollapsed() {
+  try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch { return false; }
+}
+
+function setSidebarCollapsed(collapsed) {
+  try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0"); } catch {}
+}
+
+/**
+ * Resolve internal model references like
+ * `prov_20261124T025254_3b30cb35e792:auto/deepseek-v4.1-flash`
+ * into clean human-readable display labels (never leaking internal prov_* IDs).
+ */
+function formatModelDisplay(rawRef, modRes = {}, { compact = false } = {}) {
+  const s = String(rawRef || "").trim();
+  if (!s) return "";
+  if (s === "site:text" || s === "site:auto") return compact ? "官方智能" : "网站官方智能";
+
+  const rawSite = modRes?.site;
+  const siteModels = Array.isArray(rawSite)
+    ? rawSite
+    : (rawSite?.specifications || rawSite?.models || rawSite?.items || []);
+
+  if (s.startsWith("site:")) {
+    const id = s.slice(5);
+    const hit = siteModels.find((m) => (m?.model || m?.id) === id);
+    return hit?.label || hit?.name || id;
+  }
+
+  const colonIdx = s.indexOf(":");
+  if (colonIdx > 0) {
+    const provId = s.slice(0, colonIdx);
+    let modelId = s.slice(colonIdx + 1).replace(/^auto\//i, "");
+    const allProvs = [
+      ...(Array.isArray(modRes?.textProviders) ? modRes.textProviders : []),
+      ...(Array.isArray(modRes?.providers) ? modRes.providers : []),
+    ];
+    const prov = allProvs.find((p) => p?.id === provId);
+    const modelObj = prov?.models?.find((m) => m?.id === modelId || `auto/${m?.id}` === s.slice(colonIdx + 1));
+    const modelLabel = modelObj?.label || modelObj?.name || modelId;
+    if (compact) return modelLabel;
+    const provName = prov?.name || (provId.startsWith("prov_") ? "" : provId);
+    return provName ? `${provName} · ${modelLabel}` : modelLabel;
+  }
+
+  return s.replace(/^auto\//i, "");
+}
+
+function splitTableRow(line) {
+  let trimmed = line.trim();
+  if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+  if (trimmed.endsWith("|") && !trimmed.endsWith("\\|")) trimmed = trimmed.slice(0, -1);
+  const cells = [];
+  let cur = "";
+  for (let i = 0; i < trimmed.length; i++) {
+    if (trimmed[i] === "\\" && trimmed[i + 1] === "|") {
+      cur += "|";
+      i++;
+    } else if (trimmed[i] === "|") {
+      cells.push(cur.trim());
+      cur = "";
+    } else {
+      cur += trimmed[i];
+    }
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+function isTableSeparator(line) {
+  const t = line.trim();
+  if (!t.includes("-")) return false;
+  const cells = splitTableRow(t);
+  if (!cells.length) return false;
+  if (!t.includes("|") && cells.length < 2) return false;
+  return cells.every((c) => /^:?-{3,}:?$/.test(c));
+}
+
+function parseTableAlignments(line) {
+  return splitTableRow(line).map((c) => {
+    const left = c.startsWith(":");
+    const right = c.endsWith(":");
+    if (left && right) return "center";
+    if (right) return "right";
+    return "left";
+  });
+}
+
+// Lightweight XSS-safe GFM Markdown renderer built strictly with DOM nodes.
 function renderMarkdown(text) {
   const container = el("div", { class: "chat-md" });
   const src = String(text || "").replace(/\r\n/g, "\n");
@@ -37,16 +127,22 @@ function renderMarkdown(text) {
   let i = 0;
 
   const appendInline = (parent, line) => {
-    const tokenRe = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
+    const tokenRe = /(\*\*[^*]+\*\*|~~[^~]+~~|`[^`]+`|\*[^*\s][^*]*\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
     let last = 0;
     let m;
     while ((m = tokenRe.exec(line)) !== null) {
       if (m.index > last) parent.appendChild(document.createTextNode(line.slice(last, m.index)));
       const tok = m[0];
       if (tok.startsWith("**") && tok.endsWith("**")) {
-        parent.appendChild(el("strong", null, tok.slice(2, -2)));
+        const strong = el("strong");
+        appendInline(strong, tok.slice(2, -2));
+        parent.appendChild(strong);
+      } else if (tok.startsWith("~~") && tok.endsWith("~~")) {
+        parent.appendChild(el("del", null, tok.slice(2, -2)));
       } else if (tok.startsWith("`") && tok.endsWith("`")) {
         parent.appendChild(el("code", null, tok.slice(1, -1)));
+      } else if (tok.startsWith("*") && tok.endsWith("*") && tok.length > 2) {
+        parent.appendChild(el("em", null, tok.slice(1, -1)));
       } else if (tok.startsWith("[")) {
         const sep = tok.indexOf("](");
         const label = tok.slice(1, sep);
@@ -60,8 +156,10 @@ function renderMarkdown(text) {
 
   while (i < lines.length) {
     const line = lines[i];
-    if (line.trim().startsWith("```")) {
-      const lang = line.trim().slice(3).trim() || "text";
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith("```")) {
+      const lang = trimmed.slice(3).trim() || "text";
       const codeLines = [];
       i++;
       while (i < lines.length && !lines[i].trim().startsWith("```")) {
@@ -72,13 +170,13 @@ function renderMarkdown(text) {
       const codeStr = codeLines.join("\n");
       const copyBtn = el("button", {
         type: "button",
-        class: "btn btn-sm",
-        style: { padding: "2px 7px", fontSize: "11px" },
+        class: "chat-inline-action",
         onClick: async () => {
-          try {
-            await navigator.clipboard.writeText(codeStr);
-            toast("已复制代码");
-          } catch {
+          const ok = await copyText(codeStr);
+          if (ok) {
+            copyBtn.textContent = "已复制";
+            setTimeout(() => { copyBtn.textContent = "复制"; }, 1400);
+          } else {
             toast("复制失败");
           }
         },
@@ -89,20 +187,85 @@ function renderMarkdown(text) {
       ));
       continue;
     }
-    if (!line.trim()) {
+
+    if (!trimmed) {
       i++;
       continue;
     }
-    const hm = /^(#{1,3})\s+(.+)$/.exec(line.trim());
+
+    // Horizontal rule
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
+      container.appendChild(el("hr", { class: "chat-md-hr" }));
+      i++;
+      continue;
+    }
+
+    // GFM Table: header line with '|' followed by separator line
+    if (trimmed.includes("|") && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      const headers = splitTableRow(trimmed);
+      const aligns = parseTableAlignments(lines[i + 1]);
+      i += 2;
+      const bodyRows = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes("|")) {
+        bodyRows.push(splitTableRow(lines[i]));
+        i++;
+      }
+      const thead = el("thead", null,
+        el("tr", null, ...headers.map((cell, ci) => {
+          const th = el("th", { scope: "col", style: aligns[ci] ? { textAlign: aligns[ci] } : null });
+          appendInline(th, cell);
+          return th;
+        }))
+      );
+      const tbody = el("tbody", null,
+        ...bodyRows.map((row) => el("tr", null,
+          ...headers.map((_, ci) => {
+            const td = el("td", { style: aligns[ci] ? { textAlign: aligns[ci] } : null });
+            appendInline(td, row[ci] ?? "");
+            return td;
+          })
+        ))
+      );
+      container.appendChild(el("div", {
+        class: "chat-md-table-wrap",
+        tabindex: "0",
+        role: "region",
+        "aria-label": "数据表格",
+      }, el("table", { class: "chat-md-table" }, thead, tbody)));
+      continue;
+    }
+
+    // Blockquote
+    if (trimmed.startsWith(">")) {
+      const quoteLines = [];
+      while (i < lines.length && lines[i].trim().startsWith(">")) {
+        quoteLines.push(lines[i].trim().replace(/^>\s?/, ""));
+        i++;
+      }
+      const bq = el("blockquote", { class: "chat-md-quote" });
+      quoteLines.forEach((ql) => {
+        if (!ql) return;
+        const p = el("p");
+        appendInline(p, ql);
+        bq.appendChild(p);
+      });
+      container.appendChild(bq);
+      continue;
+    }
+
+    // Headings
+    const hm = /^(#{1,4})\s+(.+)$/.exec(trimmed);
     if (hm) {
-      const tag = "h" + Math.min(3, hm[1].length);
-      const h = el(tag);
+      const level = Math.min(4, hm[1].length);
+      const h = el(`h${level}`);
       appendInline(h, hm[2]);
       container.appendChild(h);
       i++;
       continue;
     }
-    if (/^[-*•]\s+/.test(line.trim())) {
+
+    // Unordered list
+    if (/^[-*•]\s+/.test(trimmed)) {
       const ul = el("ul");
       while (i < lines.length && /^[-*•]\s+/.test(lines[i].trim())) {
         const li = el("li");
@@ -113,7 +276,9 @@ function renderMarkdown(text) {
       container.appendChild(ul);
       continue;
     }
-    if (/^\d+[.)]\s+/.test(line.trim())) {
+
+    // Ordered list
+    if (/^\d+[.)]\s+/.test(trimmed)) {
       const ol = el("ol");
       while (i < lines.length && /^\d+[.)]\s+/.test(lines[i].trim())) {
         const li = el("li");
@@ -124,6 +289,8 @@ function renderMarkdown(text) {
       container.appendChild(ol);
       continue;
     }
+
+    // Paragraph (combine consecutive plain lines up to block markers)
     const p = el("p");
     appendInline(p, line);
     container.appendChild(p);
@@ -189,6 +356,10 @@ export async function renderChat(root, ctx, params = {}) {
   let activeId = sessions[0].id;
   let draftRefs = [];
   let isSending = false;
+  let sidebarCollapsed = getSidebarCollapsed();
+  let threadQuery = "";
+  let editingThreadId = "";
+  let modelPopoverOpen = false;
 
   const activeSession = () => sessions.find((s) => s.id === activeId) || sessions[0];
 
@@ -205,7 +376,29 @@ export async function renderChat(root, ctx, params = {}) {
     } catch {}
   }
 
-  // ---------- Left Sidebar (clean thread list only) ----------
+  const startNewChat = () => {
+    const ns = makeBlankSession();
+    sessions = [ns, ...sessions];
+    activeId = ns.id;
+    draftRefs = [];
+    editingThreadId = "";
+    syncModelPickers();
+    renderAll();
+    inputEl.focus();
+  };
+
+  // ---------- Left Sidebar ----------
+  const threadSearchInput = el("input", {
+    type: "search",
+    class: "input chat-thread-search",
+    placeholder: "搜索聊天…",
+    "aria-label": "搜索聊天",
+  });
+  threadSearchInput.addEventListener("input", () => {
+    threadQuery = threadSearchInput.value.trim().toLowerCase();
+    renderThreads();
+  });
+  const threadSearchWrap = el("div", { class: "chat-thread-search-wrap hidden" }, threadSearchInput);
   const threadList = el("div", { class: "chat-thread-list", role: "listbox", "aria-label": "聊天列表" });
 
   const sidebar = el("aside", { class: "chat-sidebar", "aria-label": "聊天列表" },
@@ -214,24 +407,66 @@ export async function renderChat(root, ctx, params = {}) {
       el("button", {
         type: "button",
         class: "btn btn-sm btn-primary",
-        onClick: () => {
-          const ns = makeBlankSession();
-          sessions = [ns, ...sessions];
-          activeId = ns.id;
-          draftRefs = [];
-          syncModelPickers();
-          renderAll();
-          inputEl.focus();
-        },
+        onClick: startNewChat,
       }, "＋ 新聊天")
     ),
+    threadSearchWrap,
     threadList
   );
 
-  // ---------- Right Main Pane ----------
-  const messagesBox = el("div", { class: "chat-messages", "aria-live": "polite" });
+  // ---------- Right Main Pane Header ----------
+  const sidebarToggleBtn = el("button", {
+    type: "button",
+    class: "chat-header-icon-btn",
+    title: "收起/展开聊天列表",
+    "aria-label": "收起或展开聊天列表",
+    "aria-expanded": String(!sidebarCollapsed),
+    onClick: () => {
+      sidebarCollapsed = !sidebarCollapsed;
+      setSidebarCollapsed(sidebarCollapsed);
+      syncSidebarState();
+    },
+  }, "☰");
 
-  // Composer
+  const headerTitleHost = el("div", { class: "chat-header-title-wrap" });
+  const headerMetaBadge = el("span", { class: "chat-header-count" });
+  const headerNewBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm chat-header-new-btn hidden",
+    onClick: startNewChat,
+  }, "＋ 新聊天");
+  const headerModelChip = el("button", {
+    type: "button",
+    class: "chat-header-model-btn",
+    title: "点击切换文字模型、生图模型和默认比例",
+    onClick: (e) => {
+      e.stopPropagation();
+      toggleModelPopover();
+    },
+  });
+
+  const mainHeader = el("header", { class: "chat-header" },
+    el("div", { class: "chat-header-left" }, sidebarToggleBtn, headerTitleHost, headerMetaBadge),
+    el("div", { class: "chat-header-right" }, headerModelChip, headerNewBtn)
+  );
+
+  // ---------- Messages Area & Scroll-to-Bottom ----------
+  const messagesBox = el("div", { class: "chat-messages", "aria-live": "polite" });
+  const scrollBottomBtn = el("button", {
+    type: "button",
+    class: "chat-scroll-bottom-btn hidden",
+    "aria-label": "回到底部",
+    onClick: () => {
+      messagesBox.scrollTo({ top: messagesBox.scrollHeight, behavior: "smooth" });
+    },
+  }, "↓ 回到底部");
+
+  messagesBox.addEventListener("scroll", () => {
+    const gap = messagesBox.scrollHeight - messagesBox.scrollTop - messagesBox.clientHeight;
+    scrollBottomBtn.classList.toggle("hidden", gap < 160);
+  });
+
+  // ---------- Composer ----------
   const slashMenu = el("div", { class: "chat-slash-menu hidden", role: "listbox", "aria-label": "技能快捷命令" });
   const refsStrip = el("div", { class: "make-image-composer-attachments hidden" });
   const selectedSkillsBar = el("div", { class: "chat-selected-skills hidden", "aria-label": "已选择的 Skill" });
@@ -328,23 +563,23 @@ export async function renderChat(root, ctx, params = {}) {
     chatModeSkillBtn.setAttribute("aria-pressed", String(!isDirect));
     chatModeDirectBtn.setAttribute("aria-pressed", String(isDirect));
     pickSkillBtn.classList.toggle("hidden", isDirect);
-    pickSkillBtn.textContent = validIds.length > 0 ? `选择 Skill (${validIds.length})` : "选择 Skill";
+    pickSkillBtn.textContent = validIds.length > 0 ? `⚡ Skill · ${validIds.length}` : "⚡ Skill";
     pickSkillBtn.classList.toggle("is-has-skills", validIds.length > 0);
     inputEl.placeholder = isDirect
-      ? "已开启提示词直出（不调用手绘 Skill）：直接粘贴外部提示词或发消息生图，将原样传给生图模型…（Ctrl/⌘ + Enter 发送）"
-      : "发消息聊天、描述想画的图，或输入 / 调用已安装 Skill、安装新 Skill / 插件…（Ctrl/⌘ + Enter 发送）";
+      ? "提示词直出模式：输入或粘贴完整提示词直接生图…（Ctrl/⌘ + Enter 发送）"
+      : "发消息聊天、描述想画的图，或输入 / 调用 Skill…（Ctrl/⌘ + Enter 发送）";
   }
 
   const inputEl = el("textarea", {
     class: "chat-composer-input",
     rows: "2",
     "aria-label": "输入聊天消息、生图需求或 /skill 指令",
-    placeholder: "发消息聊天、描述想画的图，或输入 / 调用已安装 Skill、安装新 Skill / 插件…（Ctrl/⌘ + Enter 发送）",
+    placeholder: "发消息聊天、描述想画的图，或输入 / 调用 Skill…（Ctrl/⌘ + Enter 发送）",
   });
 
   function autoResize() {
     inputEl.style.height = "auto";
-    inputEl.style.height = `${Math.min(180, Math.max(54, inputEl.scrollHeight))}px`;
+    inputEl.style.height = `${Math.min(180, Math.max(48, inputEl.scrollHeight))}px`;
   }
 
   function updateSlashMenu() {
@@ -395,6 +630,7 @@ export async function renderChat(root, ctx, params = {}) {
   inputEl.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       slashMenu.classList.add("hidden");
+      if (modelPopoverOpen) closeModelPopover();
       return;
     }
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !e.isComposing && e.keyCode !== 229) {
@@ -404,39 +640,165 @@ export async function renderChat(root, ctx, params = {}) {
     }
   });
 
+  // Model & Ratio selects live inside the dedicated clean floating popover
   const textModelSel = buildGroupedAIModelSelect(modRes, activeSession().data.textModelRef, "text");
+  textModelSel.style.maxWidth = "100%";
   textModelSel.addEventListener("change", () => {
     const s = activeSession();
     s.data.textModelRef = textModelSel.value;
+    syncModelSummary();
     if (s.persisted) persistSession(s);
   });
 
   const imageModelSel = buildGroupedModelSelect(modRes, activeSession().data.imageModelRef);
+  imageModelSel.style.maxWidth = "100%";
   imageModelSel.addEventListener("change", () => {
     const s = activeSession();
     s.data.imageModelRef = imageModelSel.value;
+    syncModelSummary();
     if (s.persisted) persistSession(s);
   });
 
-  const ratioSel = el("select", { class: "select select-sm", style: { maxWidth: "105px" }, "aria-label": "默认生图比例" },
+  const ratioSel = el("select", { class: "select select-sm hidden", "aria-label": "默认生图比例" },
     ...RATIOS.map(([val, lbl]) => el("option", { value: val }, `${val} ${lbl}`))
   );
   ratioSel.value = activeSession().data.ratio || "3:4";
-  ratioSel.addEventListener("change", () => {
+
+  const ratioPillsWrap = el("div", { class: "chat-ratio-pills", role: "group", "aria-label": "默认画幅比例" });
+  const renderRatioPills = () => {
+    clear(ratioPillsWrap);
+    const cur = activeSession().data.ratio || "3:4";
+    RATIOS.forEach(([val, lbl]) => {
+      const on = cur === val;
+      ratioPillsWrap.appendChild(el("button", {
+        type: "button",
+        class: "btn btn-sm chat-ratio-pill" + (on ? " btn-primary is-active" : ""),
+        "aria-pressed": String(on),
+        onClick: (e) => {
+          e.stopPropagation();
+          const s = activeSession();
+          s.data.ratio = val;
+          ratioSel.value = val;
+          renderRatioPills();
+          syncModelSummary();
+          if (s.persisted) persistSession(s);
+        },
+      }, `${val} ${lbl}`));
+    });
+  };
+
+  const modelPopover = el("div", {
+    id: "chat-model-popover",
+    class: "chat-model-popover hidden",
+    role: "region",
+    "aria-label": "模型与画幅设置",
+  },
+    el("div", { class: "chat-model-popover-head" },
+      el("strong", null, "模型与画幅设置"),
+      el("button", {
+        type: "button",
+        class: "chat-inline-action",
+        "aria-label": "关闭模型与画幅设置",
+        onClick: () => closeModelPopover(),
+      }, "✕")
+    ),
+    el("div", { class: "chat-model-popover-field" },
+      el("label", { class: "chat-model-popover-label" }, "对话文字模型"),
+      textModelSel
+    ),
+    el("div", { class: "chat-model-popover-field" },
+      el("label", { class: "chat-model-popover-label" }, "生图模型"),
+      imageModelSel
+    ),
+    el("div", { class: "chat-model-popover-field" },
+      el("span", { class: "chat-model-popover-label" }, "默认生图画幅"),
+      ratioPillsWrap
+    )
+  );
+
+  const modelCapsuleText = el("span", { class: "chat-model-capsule-text" });
+  const modelCapsuleBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm chat-model-capsule-btn",
+    "aria-expanded": "false",
+    "aria-controls": "chat-model-popover",
+    onClick: (e) => {
+      e.stopPropagation();
+      toggleModelPopover();
+    },
+  }, modelCapsuleText, el("span", { class: "chat-model-capsule-caret", "aria-hidden": "true" }, "▾"));
+
+  function closeModelPopover() {
+    modelPopoverOpen = false;
+    modelPopover.classList.add("hidden");
+    modelCapsuleBtn.setAttribute("aria-expanded", "false");
+    modelCapsuleBtn.classList.remove("is-open");
+  }
+
+  function toggleModelPopover() {
+    modelPopoverOpen = !modelPopoverOpen;
+    modelPopover.classList.toggle("hidden", !modelPopoverOpen);
+    modelCapsuleBtn.setAttribute("aria-expanded", String(modelPopoverOpen));
+    modelCapsuleBtn.classList.toggle("is-open", modelPopoverOpen);
+    if (modelPopoverOpen) renderRatioPills();
+  }
+
+  modelPopover.addEventListener("click", (e) => e.stopPropagation());
+
+  const onDocClickClosePopover = (e) => {
+    if (!page.isConnected) {
+      document.removeEventListener("click", onDocClickClosePopover);
+      document.removeEventListener("keydown", onDocKeyClosePopover);
+      return;
+    }
+    if (!modelPopoverOpen) return;
+    const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+    if (
+      path.includes(modelPopover) ||
+      modelPopover.contains(e.target) ||
+      modelCapsuleBtn.contains(e.target) ||
+      headerModelChip.contains(e.target)
+    ) {
+      return;
+    }
+    closeModelPopover();
+  };
+  const onDocKeyClosePopover = (e) => {
+    if (!page.isConnected) {
+      document.removeEventListener("click", onDocClickClosePopover);
+      document.removeEventListener("keydown", onDocKeyClosePopover);
+      return;
+    }
+    if (modelPopoverOpen && e.key === "Escape") {
+      e.preventDefault();
+      closeModelPopover();
+      modelCapsuleBtn.focus();
+    }
+  };
+  document.addEventListener("click", onDocClickClosePopover);
+  document.addEventListener("keydown", onDocKeyClosePopover);
+
+  function syncModelSummary() {
     const s = activeSession();
-    s.data.ratio = ratioSel.value;
-    if (s.persisted) persistSession(s);
-  });
+    const txtName = formatModelDisplay(s.data.textModelRef, modRes, { compact: true }) || "官方智能";
+    const imgName = formatModelDisplay(s.data.imageModelRef, modRes, { compact: true }) || "默认生图";
+    const ratio = s.data.ratio || "3:4";
+    const fullTip = `文本模型：${formatModelDisplay(s.data.textModelRef, modRes)}\n生图模型：${formatModelDisplay(s.data.imageModelRef, modRes)}\n默认画幅：${ratio}`;
+    modelCapsuleText.textContent = `${txtName} · ${ratio}`;
+    modelCapsuleBtn.title = fullTip;
+    headerModelChip.textContent = `${txtName} · 生图 ${imgName} · ${ratio}`;
+    headerModelChip.title = fullTip;
+  }
 
   const addRefBtn = el("button", {
     type: "button",
-    class: "make-image-add-reference",
+    class: "make-image-add-reference chat-add-ref-btn",
     title: "从自建图库选择、上传或粘贴参考图（也支持直接 Ctrl/⌘ + V 粘贴）",
     "aria-label": "添加参考图",
     onClick: () => openReferencePickerModal({
       currentRefs: draftRefs || [],
       maxCount: MAX_REF_IMAGES,
-      title: "选择参考图",
+      title: "选择参考图（自建图库 / 本地上传 / 粘贴）",
       onConfirm: (nextRefs) => {
         draftRefs = nextRefs;
         renderDraftRefs();
@@ -450,7 +812,7 @@ export async function renderChat(root, ctx, params = {}) {
     "data-chat-mode": "skill",
     title: "调用手绘 Skill 画风与图型规范生图",
     onClick: () => setChatDirectMode(false),
-  }, "🎨 手绘 Skill");
+  }, "🎨 手绘");
 
   const chatModeDirectBtn = el("button", {
     type: "button",
@@ -478,28 +840,32 @@ export async function renderChat(root, ctx, params = {}) {
   const pickSkillBtn = el("button", {
     type: "button",
     class: "btn btn-sm chat-pick-skill-btn",
+    title: "选择或管理本次会话启用的 Skill",
     onClick: () => openSkillPickerModal(),
-  }, "选择 Skill");
+  }, "⚡ Skill");
 
-  const sendBtn = el("button", { type: "submit", class: "btn btn-primary btn-sm" }, "发送");
+  const sendBtn = el("button", { type: "submit", class: "btn btn-primary btn-sm chat-send-btn" }, "发送");
 
   const composerForm = el("form", { class: "chat-composer" },
     fileInput,
+    ratioSel,
     refsStrip,
     selectedSkillsBar,
     inputEl,
     el("div", { class: "chat-composer-bar" },
-      addRefBtn,
-      chatModeSwitch,
-      el("label", { class: "chat-model-chip" }, el("span", null, "文本"), textModelSel),
-      el("label", { class: "chat-model-chip" }, el("span", null, "生图"), imageModelSel),
-      ratioSel,
-      el("div", { class: "chat-composer-right" }, pickSkillBtn, sendBtn)
+      el("div", { class: "chat-composer-left" },
+        addRefBtn,
+        chatModeSwitch,
+        pickSkillBtn,
+        modelCapsuleBtn
+      ),
+      el("div", { class: "chat-composer-right" }, sendBtn)
     )
   );
   composerForm.addEventListener("submit", (e) => {
     e.preventDefault();
     slashMenu.classList.add("hidden");
+    closeModelPopover();
     sendCurrentInput(false);
   });
   bindPageImagePaste(composerForm, async (files) => {
@@ -521,53 +887,180 @@ export async function renderChat(root, ctx, params = {}) {
     }
   });
 
-  const mainPane = el("section", { class: "chat-main", "aria-label": "对话内容" },
-    messagesBox,
-    el("div", { class: "chat-composer-wrap" }, slashMenu, composerForm)
+  const composerWrap = el("div", { class: "chat-composer-wrap" },
+    scrollBottomBtn,
+    slashMenu,
+    modelPopover,
+    composerForm
   );
 
-  page.appendChild(el("div", { class: "chat-workspace" }, sidebar, mainPane));
+  const mainPane = el("section", { class: "chat-main", "aria-label": "对话内容" },
+    mainHeader,
+    messagesBox,
+    composerWrap
+  );
+
+  const workspace = el("div", { class: "chat-workspace" }, sidebar, mainPane);
+  page.appendChild(workspace);
+
+  function syncSidebarState() {
+    workspace.classList.toggle("is-sidebar-collapsed", sidebarCollapsed);
+    sidebarToggleBtn.setAttribute("aria-expanded", String(!sidebarCollapsed));
+    sidebarToggleBtn.title = sidebarCollapsed ? "展开聊天列表" : "收起聊天列表";
+    headerNewBtn.classList.toggle("hidden", !sidebarCollapsed);
+  }
 
   // ---------- Render Functions ----------
+  function renderHeader() {
+    const sess = activeSession();
+    const count = sess.data.messages.length;
+    headerMetaBadge.textContent = count > 0 ? `${count} 条消息` : "空对话";
+    clear(headerTitleHost);
+    if (editingThreadId === `header:${sess.id}`) {
+      const inp = el("input", {
+        type: "text",
+        class: "input chat-header-title-input",
+        value: sess.name || "新聊天",
+        maxlength: "40",
+        "aria-label": "重命名当前聊天",
+      });
+      const finish = async (save) => {
+        const next = inp.value.trim();
+        editingThreadId = "";
+        if (save && next && next !== sess.name) {
+          sess.name = next;
+          if (sess.persisted) await persistSession(sess);
+        }
+        renderHeader();
+        renderThreads();
+      };
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); finish(true); }
+        else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+      });
+      inp.addEventListener("blur", () => finish(true));
+      headerTitleHost.appendChild(inp);
+      queueMicrotask(() => { inp.focus(); inp.select(); });
+    } else {
+      headerTitleHost.appendChild(el("button", {
+        type: "button",
+        class: "chat-header-title-btn",
+        title: "点击重命名聊天",
+        onClick: () => {
+          editingThreadId = `header:${sess.id}`;
+          renderHeader();
+        },
+      },
+        el("span", { class: "chat-header-title-text" }, sess.name || "新聊天"),
+        el("span", { class: "chat-header-title-edit", "aria-hidden": "true" }, "✎")
+      ));
+    }
+    syncModelSummary();
+  }
+
   function renderThreads() {
+    threadSearchWrap.classList.toggle("hidden", sessions.length < 2);
     clear(threadList);
-    sessions.forEach((sess) => {
+    const filtered = sessions.filter((sess) => {
+      if (!threadQuery) return true;
+      const inName = (sess.name || "").toLowerCase().includes(threadQuery);
+      const inMsg = (sess.data.messages || []).some((m) => (m.content || "").toLowerCase().includes(threadQuery));
+      return inName || inMsg;
+    });
+
+    if (!filtered.length) {
+      threadList.appendChild(el("p", { class: "muted", style: { fontSize: "12px", textAlign: "center", padding: "16px 8px", margin: 0 } }, "没有匹配的聊天"));
+      return;
+    }
+
+    filtered.forEach((sess) => {
       const isAct = sess.id === activeId;
-      const cnt = sess.data.messages.length;
-      const sub = cnt > 0 ? `${cnt} 条消息 · ${fmtTime(sess.updatedAt)}` : "空聊天";
+      const msgCount = sess.data.messages.length;
+      const sub = msgCount > 0 ? `${msgCount} 条 · ${fmtTime(sess.updatedAt)}` : "空聊天";
+
+      if (editingThreadId === sess.id) {
+        const inp = el("input", {
+          type: "text",
+          class: "input chat-thread-rename-input",
+          value: sess.name || "新聊天",
+          maxlength: "40",
+          "aria-label": `重命名聊天 ${sess.name}`,
+        });
+        const finish = async (save) => {
+          const next = inp.value.trim();
+          editingThreadId = "";
+          if (save && next && next !== sess.name) {
+            sess.name = next;
+            if (sess.persisted) await persistSession(sess);
+          }
+          renderThreads();
+          renderHeader();
+        };
+        inp.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); finish(true); }
+          else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+        });
+        inp.addEventListener("blur", () => finish(true));
+        threadList.appendChild(el("div", { class: "chat-thread-item is-active" }, inp));
+        queueMicrotask(() => { inp.focus(); inp.select(); });
+        return;
+      }
+
       const row = el("div", {
         class: "chat-thread-item" + (isAct ? " is-active" : ""),
         role: "option",
         "aria-selected": String(isAct),
+        tabindex: "0",
         onClick: () => {
           activeId = sess.id;
           syncModelPickers();
           renderAll();
+        },
+        onKeydown: (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            activeId = sess.id;
+            syncModelPickers();
+            renderAll();
+          }
         },
       },
         el("div", { class: "chat-thread-meta" },
           el("span", { class: "chat-thread-name", title: sess.name }, sess.name || "新聊天"),
           el("span", { class: "chat-thread-sub" }, sub)
         ),
-        sessions.length > 1
-          ? el("button", {
-              type: "button",
-              class: "chat-thread-del",
-              title: "删除聊天",
-              "aria-label": `删除聊天 ${sess.name}`,
-              onClick: async (e) => {
-                e.stopPropagation();
-                if (sess.persisted) {
-                  await api("DELETE", `/api/docs/chat_session/${encodeURIComponent(sess.id)}`).catch(() => {});
-                }
-                sessions = sessions.filter((x) => x.id !== sess.id);
-                if (sessions.length === 0) sessions = [makeBlankSession()];
-                if (activeId === sess.id) activeId = sessions[0].id;
-                syncModelPickers();
-                renderAll();
-              },
-            }, "×")
-          : null
+        el("div", { class: "chat-thread-actions" },
+          el("button", {
+            type: "button",
+            class: "chat-thread-act",
+            title: "重命名聊天",
+            "aria-label": `重命名聊天 ${sess.name}`,
+            onClick: (e) => {
+              e.stopPropagation();
+              editingThreadId = sess.id;
+              renderThreads();
+            },
+          }, "✎"),
+          sessions.length > 1
+            ? el("button", {
+                type: "button",
+                class: "chat-thread-act is-danger",
+                title: "删除聊天",
+                "aria-label": `删除聊天 ${sess.name}`,
+                onClick: async (e) => {
+                  e.stopPropagation();
+                  if (sess.persisted) {
+                    await api("DELETE", `/api/docs/chat_session/${encodeURIComponent(sess.id)}`).catch(() => {});
+                  }
+                  sessions = sessions.filter((x) => x.id !== sess.id);
+                  if (sessions.length === 0) sessions = [makeBlankSession()];
+                  if (activeId === sess.id) activeId = sessions[0].id;
+                  syncModelPickers();
+                  renderAll();
+                },
+              }, "×")
+            : null
+        )
       );
       threadList.appendChild(row);
     });
@@ -582,12 +1075,14 @@ export async function renderChat(root, ctx, params = {}) {
       imageModelSel.value = s.data.imageModelRef;
     }
     ratioSel.value = s.data.ratio || "3:4";
+    renderRatioPills();
+    syncModelSummary();
   }
 
   function openLightbox(im, run) {
     const body = el("div", { class: "col", style: { alignItems: "center", gap: "8px" } },
       el("img", { src: localImg(im.path), alt: run?.title || "", style: { maxWidth: "100%", maxHeight: "72vh", borderRadius: "8px" } }),
-      el("div", { class: "muted mono", style: { fontSize: "12px" } }, `${im.path}${im.width ? ` (${im.width}×${im.height})` : ""}`)
+      im.width ? el("div", { class: "muted mono", style: { fontSize: "12px" } }, `${im.width}×${im.height}`) : null
     );
     showModal(run?.title || "大图预览", body, [
       run?.id ? el("button", { type: "button", class: "btn", onClick: () => api("POST", `/api/works/${encodeURIComponent(run.id)}/reveal`).catch(() => {}) }, "在目录中打开") : null,
@@ -616,16 +1111,17 @@ export async function renderChat(root, ctx, params = {}) {
                   await api("POST", `/api/images/${encodeURIComponent(im.id)}/copy`).catch((e) => toast(e.message));
                   toast("已复制到剪贴板");
                 },
-              }, "📋 复制"),
+              }, "复制"),
               el("button", {
                 type: "button",
                 class: "btn btn-sm",
                 onClick: () => {
+                  if (draftRefs.length >= MAX_REF_IMAGES) return toast(`参考图最多 ${MAX_REF_IMAGES} 张`);
                   if (!draftRefs.includes(im.path)) draftRefs = [...draftRefs, im.path];
                   renderDraftRefs();
                   toast("已设为参考图");
                 },
-              }, "🔁 垫图"),
+              }, "垫图"),
               el("button", {
                 type: "button",
                 class: "btn btn-sm",
@@ -636,7 +1132,7 @@ export async function renderChat(root, ctx, params = {}) {
                   try { rec = typeof run.recipe === "string" ? JSON.parse(run.recipe) : (run.recipe || {}); } catch {}
                   try {
                     await api("POST", "/api/inspirations", {
-                      title: run.title || im.theme || "会话生图灵感",
+                      title: run.title || im.theme || "聊天生图灵感",
                       imagePath: im.path,
                       prompt: im.prompt || run.promptZh || run.promptEn || im.theme || run.originalRequest || "",
                       promptZh: run.promptZh || "",
@@ -645,14 +1141,14 @@ export async function renderChat(root, ctx, params = {}) {
                       recipe: rec,
                       suggestedStyle: rec.styleIds?.[0] || "",
                     });
-                    btn.textContent = "★ 已收藏";
+                    btn.textContent = "已收藏";
                     toast("已收进灵感库");
                   } catch (e) {
                     btn.disabled = false;
                     toast(e?.message || "收藏失败");
                   }
                 },
-              }, "★ 收藏"),
+              }, "收藏"),
               el("button", {
                 type: "button",
                 class: "btn btn-sm",
@@ -661,7 +1157,7 @@ export async function renderChat(root, ctx, params = {}) {
                   try { rec = typeof run.recipe === "string" ? JSON.parse(run.recipe) : (run.recipe || {}); } catch {}
                   try {
                     const saved = await api("POST", "/api/inspirations", {
-                      title: run.title || im.theme || "会话生图灵感",
+                      title: run.title || im.theme || "聊天生图灵感",
                       imagePath: im.path,
                       prompt: im.prompt || run.promptZh || run.promptEn || im.theme || run.originalRequest || "",
                       promptZh: run.promptZh || "",
@@ -677,12 +1173,12 @@ export async function renderChat(root, ctx, params = {}) {
                     toast(e?.message || "准备分享失败");
                   }
                 },
-              }, "💎 赚积分"),
+              }, "赚积分"),
               el("button", {
                 type: "button",
                 class: "btn btn-sm",
                 onClick: () => ctx.go("works", { openRun: run.id }),
-              }, "☁ 发布")
+              }, "发布")
             )
           );
         } else if (im.status === "failed" || im.status === "canceled") {
@@ -732,9 +1228,9 @@ export async function renderChat(root, ctx, params = {}) {
 
     if (!sess.data.messages.length && !isSending) {
       messagesBox.appendChild(el("div", { class: "chat-empty" },
-        el("div", { class: "chat-empty-badge", "aria-hidden": "true" }, "💬"),
+        el("div", { class: "chat-empty-badge", "aria-hidden": "true" }, "✦"),
         el("h2", null, "手绘风 AI 聊天工作台"),
-        el("p", null, "像 Codex / DSH 一样自由对话：可随时切换文本模型与生图模型，在发送旁选择自定义 Skill，直接在聊天中生图、装 Skill 或安装插件。"),
+        el("p", null, "自由对话、策划选题、调用 Skill 或直接生图。点击左下角 + 可从自建图库选图或粘贴参考图。"),
         el("div", { class: "chat-starters" },
           ...STARTERS.map((st) => el("button", {
             type: "button",
@@ -750,32 +1246,60 @@ export async function renderChat(root, ctx, params = {}) {
           ))
         )
       ));
+      scrollBottomBtn.classList.add("hidden");
       return;
     }
 
-    sess.data.messages.forEach((msg) => {
+    sess.data.messages.forEach((msg, msgIdx) => {
       const wrap = el("article", { class: `chat-msg is-${msg.role}` });
-      const bubble = el("div", { class: "chat-bubble" });
 
       if (msg.role === "user") {
+        const bubble = el("div", { class: "chat-bubble" });
         if (msg.skillNames?.length) {
-          bubble.appendChild(el("div", { class: "row", style: { gap: "4px", flexWrap: "wrap", marginBottom: "4px" } },
+          bubble.appendChild(el("div", { class: "chat-user-tags" },
             ...msg.skillNames.map((nm) => el("span", { class: "badge badge-accent" }, `⚡ ${nm}`))
           ));
         }
         if (msg.refs?.length) {
           bubble.appendChild(el("div", { class: "chat-msg-refs" },
-            ...msg.refs.map((rp) => el("img", { src: localImg(rp), alt: "参考图" }))
+            ...msg.refs.map((rp, rIdx) => el("button", {
+              type: "button",
+              class: "chat-msg-ref-btn",
+              "aria-label": `放大查看参考图 ${rIdx + 1}`,
+              onClick: () => openLightbox({ path: rp }, { title: `参考图 ${rIdx + 1}` }),
+            }, el("img", { src: localImg(rp), alt: `参考图 ${rIdx + 1}` })))
           ));
         }
-        bubble.appendChild(el("div", { style: { whiteSpace: "pre-wrap" } }, msg.content || ""));
+        bubble.appendChild(el("div", { class: "chat-user-text" }, msg.content || ""));
+
+        const copyUserBtn = el("button", {
+          type: "button",
+          class: "chat-msg-act-btn",
+          onClick: async () => {
+            if (await copyText(msg.content || "")) {
+              copyUserBtn.textContent = "已复制";
+              setTimeout(() => { copyUserBtn.textContent = "复制"; }, 1400);
+            }
+          },
+        }, "复制");
+
+        wrap.append(
+          bubble,
+          el("div", { class: "chat-user-foot" },
+            msg.ts ? el("span", { class: "chat-msg-time" }, fmtTime(msg.ts)) : null,
+            copyUserBtn
+          )
+        );
       } else {
+        const body = el("div", { class: "chat-assistant-body" });
+
         if (msg.toolCalls?.length) {
           const allOk = msg.toolCalls.every((t) => t.ok);
           const det = el("details", { class: "chat-tool-trace", open: !allOk },
             el("summary", null,
-              el("span", null, `🔧 执行了 ${msg.toolCalls.length} 项工具调用`),
-              el("span", { class: allOk ? "chat-tool-ok" : "chat-tool-err" }, allOk ? "全部完成" : "部分异常")
+              el("span", { class: allOk ? "chat-tool-dot is-ok" : "chat-tool-dot is-err", "aria-hidden": "true" }, allOk ? "✓" : "!"),
+              el("span", { class: "chat-tool-summary-text" }, `已调用 ${msg.toolCalls.length} 项工具`),
+              el("span", { class: "chat-tool-summary-caret", "aria-hidden": "true" }, "▾")
             ),
             el("div", { class: "chat-tool-list" },
               ...msg.toolCalls.map((tc) => el("div", { class: "chat-tool-item" },
@@ -785,20 +1309,20 @@ export async function renderChat(root, ctx, params = {}) {
               ))
             )
           );
-          bubble.appendChild(det);
+          body.appendChild(det);
         }
 
         if (msg.content) {
-          bubble.appendChild(renderMarkdown(msg.content));
+          body.appendChild(renderMarkdown(msg.content));
         }
 
         if (msg.runs?.length) {
-          bubble.appendChild(renderRunGrid(msg.runs));
+          body.appendChild(renderRunGrid(msg.runs));
         }
 
         if (msg.pendingConfirm) {
           const pc = msg.pendingConfirm;
-          bubble.appendChild(el("div", { class: "chat-confirm-box" },
+          body.appendChild(el("div", { class: "chat-confirm-box" },
             el("span", null, `预计生成 ${pc.count || 1} 张，费用 ${money(pc.totalCents || 0)}（超单次阈值 ${money(pc.limitCents || 0)}）`),
             el("button", {
               type: "button",
@@ -811,30 +1335,63 @@ export async function renderChat(root, ctx, params = {}) {
           ));
         }
 
-        const footItems = [];
-        if (msg.textModel) footItems.push(el("span", { class: "mono" }, `文本: ${msg.textModel}`));
-        if (msg.runs?.length && msg.imageModel) footItems.push(el("span", { class: "mono" }, `生图: ${msg.imageModel}`));
+        // Actions (copy / regenerate) + clean human-readable metadata
+        const copyMdBtn = el("button", {
+          type: "button",
+          class: "chat-msg-act-btn",
+          title: "复制整条回复内容",
+          onClick: async () => {
+            if (await copyText(msg.content || "")) {
+              copyMdBtn.textContent = "✓ 已复制";
+              setTimeout(() => { copyMdBtn.textContent = "复制"; }, 1400);
+            }
+          },
+        }, "复制");
+
+        const regenBtn = el("button", {
+          type: "button",
+          class: "chat-msg-act-btn",
+          disabled: isSending,
+          title: "基于上一条提问重新生成本条回复",
+          onClick: () => regenerateFromIndex(msgIdx),
+        }, "↻ 重新生成");
+
+        const metaItems = [];
+        const friendlyText = formatModelDisplay(msg.textModel, modRes);
+        const friendlyImg = formatModelDisplay(msg.imageModel, modRes);
+        if (friendlyText) metaItems.push(el("span", { class: "chat-meta-model", title: msg.textModel }, friendlyText));
+        if (msg.runs?.length && friendlyImg) metaItems.push(el("span", { class: "chat-meta-model" }, `生图 · ${friendlyImg}`));
         if (msg.usedSkills?.length) {
-          footItems.push(el("span", null, `Skills: ${msg.usedSkills.map((s) => s.name).join("、")}`));
+          metaItems.push(el("span", { class: "chat-meta-skill" }, msg.usedSkills.map((s) => s.name).join("、")));
         }
         if (msg.usage?.cache_read_tokens > 0) {
-          footItems.push(el("span", { class: "badge badge-ok", title: "已命中中转站 Prompt Cache，显著节约输入 token 费用" }, `⚡ 缓存命中 ${msg.usage.cache_read_tokens} tok`));
+          metaItems.push(el("span", {
+            class: "chat-cache-pill",
+            title: "已命中 Prompt Cache，节约输入 token 费用",
+          }, `⚡ 缓存 ${msg.usage.cache_read_tokens} tok`));
         } else if (msg.usage?.total_tokens > 0) {
-          footItems.push(el("span", { class: "mono" }, `${msg.usage.total_tokens} tok`));
+          metaItems.push(el("span", { class: "chat-meta-tok" }, `${msg.usage.total_tokens} tok`));
         }
-        if (footItems.length) {
-          bubble.appendChild(el("div", { class: "chat-msg-foot" }, ...footItems));
-        }
+
+        body.appendChild(el("div", { class: "chat-msg-foot" },
+          el("div", { class: "chat-msg-acts" }, copyMdBtn, regenBtn),
+          el("div", { class: "chat-msg-meta" }, ...metaItems)
+        ));
+
+        wrap.append(
+          el("div", { class: "chat-assistant-avatar", "aria-hidden": "true" }, "✦"),
+          body
+        );
       }
 
-      wrap.appendChild(bubble);
       messagesBox.appendChild(wrap);
     });
 
     if (isSending) {
       messagesBox.appendChild(el("article", { class: "chat-msg is-assistant" },
-        el("div", { class: "chat-bubble" },
-          el("div", { class: "row", style: { gap: "8px" } },
+        el("div", { class: "chat-assistant-avatar", "aria-hidden": "true" }, "✦"),
+        el("div", { class: "chat-assistant-body" },
+          el("div", { class: "chat-thinking-pill" },
             el("span", { class: "dot-pulse" }),
             el("span", { class: "muted" }, "正在思考与执行工具…")
           )
@@ -844,6 +1401,7 @@ export async function renderChat(root, ctx, params = {}) {
 
     if (scrollToBottom) {
       messagesBox.scrollTop = messagesBox.scrollHeight;
+      scrollBottomBtn.classList.add("hidden");
     } else {
       messagesBox.scrollTop = prevScrollTop;
       if (mainScroller) mainScroller.scrollTop = prevMainScrollTop;
@@ -851,59 +1409,57 @@ export async function renderChat(root, ctx, params = {}) {
   }
 
   function renderAll() {
+    syncSidebarState();
+    renderHeader();
     renderThreads();
     renderSelectedSkills();
     renderDraftRefs();
     renderMessages(true);
     sendBtn.disabled = isSending;
-    sendBtn.textContent = isSending ? "处理中…" : "发送";
+    sendBtn.textContent = isSending ? "思考中…" : "发送";
   }
 
   // ---------- Skill Picker Modal ----------
   async function reloadSkills() {
-    const r = await api("GET", "/api/skills").catch(() => ({ items: [] }));
-    skillsList = Array.isArray(r.items) ? r.items : [];
-    renderSelectedSkills();
+    const res = await api("GET", "/api/skills").catch(() => ({ items: [] }));
+    if (Array.isArray(res.items)) skillsList = res.items;
   }
 
-  function setSkillInlineBtn(btn, state, label, pct = 0, titleText = "") {
+  function setSkillInlineBtn(btn, stateName, text, progress = 0, title = "") {
     if (!btn) return;
-    btn.classList.add("btn-update-inline");
-    btn.dataset.state = state;
-    btn.style.setProperty("--upd-pct", `${Math.max(0, Math.min(100, Number(pct || 0)))}%`);
-    btn.disabled = state === "busy";
-    btn.setAttribute("aria-busy", String(state === "busy"));
-    if (titleText) btn.title = titleText;
-    clear(btn);
-    if (state === "busy") {
-      btn.append(el("span", { class: "upd-spinner", "aria-hidden": "true" }), el("span", null, label));
-    } else if (state === "done") {
-      btn.append(el("span", { class: "upd-check", "aria-hidden": "true" }, "✓"), el("span", null, label));
-    } else {
-      btn.append(el("span", null, label));
+    btn.disabled = stateName === "busy";
+    btn.classList.remove("is-busy", "is-done", "is-error");
+    if (stateName === "busy" || stateName === "done" || stateName === "error") {
+      btn.classList.add(`is-${stateName}`);
     }
+    btn.style.setProperty("--upd-pct", `${Math.max(0, Math.min(100, progress))}%`);
+    btn.textContent = text;
+    if (title) btn.title = title;
   }
 
   async function openSkillPickerModal() {
     await reloadSkills();
     const sess = activeSession();
+    const selectedSet = new Set(sess.data.skillIds || []);
+
     const searchIn = el("input", {
-      class: "input",
       type: "search",
-      placeholder: "筛选 Skill 名称、ID 或介绍…",
-      "aria-label": "筛选 Skill",
+      class: "input",
+      placeholder: "搜索已安装的 Skill 名称、命令或说明…",
+      "aria-label": "搜索 Skill",
     });
     const listWrap = el("div", { class: "chat-skill-picker-list" });
-    const countLabel = el("span", { class: "muted", style: { fontSize: "12px" } }, "");
+    const countLabel = el("span", { class: "muted", style: { fontSize: "12px" } });
 
     const renderList = () => {
-      clear(listWrap);
       const q = searchIn.value.trim().toLowerCase();
-      const selectedSet = new Set(sess.data.skillIds || []);
-      const filtered = skillsList.filter((sk) => {
-        if (!q) return true;
-        return `${sk.name} ${sk.id} ${sk.description || ""}`.toLowerCase().includes(q);
-      });
+      clear(listWrap);
+      const filtered = skillsList.filter((sk) =>
+        !q ||
+        (sk.name || "").toLowerCase().includes(q) ||
+        (sk.id || "").toLowerCase().includes(q) ||
+        (sk.description || "").toLowerCase().includes(q)
+      );
       countLabel.textContent = `共 ${filtered.length} 个 Skill`;
 
       if (!skillsList.length) {
@@ -1015,10 +1571,10 @@ export async function renderChat(root, ctx, params = {}) {
           const items = Array.isArray(r?.items) ? r.items : [];
           const cnt = items.filter((it) => it.updateAvailable).length;
           await reloadSkills();
-          if (listWrap.isConnected) renderList();
+          renderList();
           setSkillInlineBtn(checkAllBtn, "done", cnt > 0 ? `发现 ${cnt} 项更新` : "全部已是最新", 100);
           setTimeout(() => {
-            if (checkAllBtn.isConnected) setSkillInlineBtn(checkAllBtn, "idle", "检查 Skill 更新", 0);
+            if (checkAllBtn.isConnected) setSkillInlineBtn(checkAllBtn, "", "检查 Skill 更新", 0);
           }, 1800);
         } catch (err) {
           setSkillInlineBtn(checkAllBtn, "error", "检查失败，重试", 0, err?.message || "检查失败");
@@ -1065,7 +1621,7 @@ export async function renderChat(root, ctx, params = {}) {
     searchIn.focus();
   }
 
-  // ---------- Send Turn ----------
+  // ---------- Send Turn & Regenerate ----------
   async function sendMessages(sess, confirmed) {
     isSending = true;
     renderAll();
@@ -1123,6 +1679,14 @@ export async function renderChat(root, ctx, params = {}) {
       isSending = false;
       renderAll();
     }
+  }
+
+  async function regenerateFromIndex(assistantIdx) {
+    if (isSending) return;
+    const sess = activeSession();
+    if (assistantIdx <= 0 || assistantIdx >= sess.data.messages.length) return;
+    sess.data.messages = sess.data.messages.slice(0, assistantIdx);
+    await sendMessages(sess, false);
   }
 
   async function sendCurrentInput(confirmed) {
