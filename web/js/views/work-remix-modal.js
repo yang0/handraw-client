@@ -1,4 +1,4 @@
-import { api, clear, closeModal, copyText, el, localImg, openURL, remoteThumb, showModal, toast } from "../api.js";
+import { api, clear, closeModal, copyText, el, localImg, openURL, remoteThumb, showModal, toast, toWebp } from "../api.js";
 
 function absSiteUrl(pathOrUrl, siteBase) {
   if (!pathOrUrl) return "";
@@ -132,14 +132,19 @@ export function openShareInspirationModal(item, ctx, onDone) {
       const price = Math.max(1, Math.min(20, Math.round(Number(priceInput.value) || 5)));
       const tags = tagsIn.value.split(/[,，、\s]+/).map((s) => s.replace(/^#/, "").trim()).filter(Boolean);
       submitBtn.disabled = true;
-      submitBtn.textContent = "正在上架…";
+      submitBtn.textContent = "正在压缩 WebP 并上架…";
       try {
+        let encoded = "";
+        if (item.imagePath) {
+          encoded = await toWebp(localImg(item.imagePath), { maxEdge: 1024, quality: 0.85 });
+        }
         const res = await api("POST", `/api/inspirations/${encodeURIComponent(item.id)}/publish`, {
           title: titleIn.value.trim(),
           prompt: promptTxt,
           notes: notesIn.value.trim(),
           tags,
           price,
+          encoded,
         });
         ctx.refreshTopbar?.();
         onDone?.(res);

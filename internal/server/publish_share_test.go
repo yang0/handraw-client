@@ -49,8 +49,8 @@ func TestShareImageDownscalesLargePNGWithoutEncodedWebP(t *testing.T) {
 	}
 	raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(dataURL, "data:image/jpeg;base64,"))
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
-	if err != nil || cfg.Width != 2048 || cfg.Height != 1024 {
-		t.Fatalf("want 2048x1024, got %+v %v", cfg, err)
+	if err != nil || cfg.Width != 1024 || cfg.Height != 512 {
+		t.Fatalf("want 1024x512, got %+v %v", cfg, err)
 	}
 }
 

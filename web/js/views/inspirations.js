@@ -1289,7 +1289,7 @@ async function renderPlazaTab(stage, ctx) {
           el("div", { class: "style-body" },
             el("div", { class: "row", style: { justifyContent: "space-between", gap: "4px", flexWrap: "wrap" } },
               el("span", { class: "badge " + (locked ? "badge-accent" : "badge-ok") }, locked ? `🔒 ${price} 积分解锁` : `🔓 已解锁 (${price} 积分)`),
-              el("span", { class: "muted", style: { fontSize: "11.5px" } }, `${it.unlockCount || 0} 解锁`)
+              el("span", { class: "muted", style: { fontSize: "11.5px" } }, `${it.unlockCount || 0} 解锁 · 💬 ${it.commentCount || 0}`)
             ),
             el("div", { class: "style-name", title: it.title }, it.title || "社区灵感"),
             it.promptPreview ? el("p", { class: "style-traits insp-excerpt" }, it.promptPreview) : null,

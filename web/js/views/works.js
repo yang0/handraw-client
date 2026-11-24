@@ -713,8 +713,8 @@ async function openRunDetail(runId, ctx, onChanged) {
     let n = 0;
     for (const id of ids) {
       const im = run.images.find((x) => x.id === id);
-      btn.textContent = `正在压缩图片 ${++n}/${ids.length}…`;
-      const url = im ? await toWebp(localImg(im.path)) : "";
+      btn.textContent = `正在压缩 WebP ${++n}/${ids.length}…`;
+      const url = im ? await toWebp(localImg(im.path), { maxEdge: 1024, quality: 0.85 }) : "";
       if (url) {
         encoded[id] = url;
         orderedDataUrls.push(url);

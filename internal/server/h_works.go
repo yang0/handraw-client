@@ -350,8 +350,8 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 	return map[string]any{"ok": true, "workId": wid, "url": workURL, "price": body.Price}, nil
 }
 
-// shareMaxEdge follows docs/sharing-v2.md (WebP, long edge <= 2048, q85).
-const shareMaxEdge = 2048
+// shareMaxEdge caps uploaded showcase images to longest edge <= 1024px (WebP preferred, #91).
+const shareMaxEdge = 1024
 
 // shareImage returns the data URL uploaded for one image. The UI encodes WebP
 // (Go has no WebP encoder); when that is missing or invalid, a WebP original

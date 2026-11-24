@@ -221,9 +221,13 @@ func (s *Server) pullCloudClipsBestEffort(ctx context.Context) int {
 
 func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, error) {
 	if r.URL.Query().Get("sync") != "0" && s.Site != nil && s.Site.LoggedIn() {
-		cctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		_ = s.pullCloudClipsBestEffort(cctx)
-		cancel()
+		go func() {
+			cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if s.pullCloudClipsBestEffort(cctx) > 0 {
+				s.Emit("inspirations", map[string]any{"updated": true, "synced": true})
+			}
+		}()
 	}
 	docs, err := s.DB.ListDocs("inspiration", false)
 	if err != nil {
@@ -829,23 +833,18 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 
 	imageDataOrURL := strings.TrimSpace(body.Encoded)
 	imageSHA := ""
-	if imageDataOrURL == "" && cur.ImagePath != "" {
-		raw, rErr := os.ReadFile(cur.ImagePath)
-		if rErr != nil {
-			return nil, bad("读取本地灵感图失败：" + rErr.Error())
+	if cur.ImagePath != "" {
+		if encodedURL, _, sErr := shareImage(store.Image{Path: cur.ImagePath}, imageDataOrURL); sErr == nil && encodedURL != "" {
+			imageDataOrURL = encodedURL
+			if idx := strings.Index(encodedURL, ","); idx > 0 {
+				if rawBytes, dErr := base64.StdEncoding.DecodeString(encodedURL[idx+1:]); dErr == nil {
+					sum := sha256.Sum256(rawBytes)
+					imageSHA = hex.EncodeToString(sum[:])
+				}
+			}
+		} else if imageDataOrURL == "" {
+			return nil, bad("读取或压缩本地灵感图失败：" + sErr.Error())
 		}
-		sum := sha256.Sum256(raw)
-		imageSHA = hex.EncodeToString(sum[:])
-		mime := "image/png"
-		switch sniffImageExt(raw) {
-		case ".jpg":
-			mime = "image/jpeg"
-		case ".webp":
-			mime = "image/webp"
-		case ".gif":
-			mime = "image/gif"
-		}
-		imageDataOrURL = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
 	} else if imageDataOrURL == "" && cur.ImageURL != "" {
 		imageDataOrURL = cur.ImageURL
 	}
