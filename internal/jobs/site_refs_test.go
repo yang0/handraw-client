@@ -137,3 +137,110 @@ func TestRunSiteEncodesLocalRefImagesForEdit(t *testing.T) {
 		t.Fatalf("expected promptFromSkill=true preserved in body, got %#v", capturedBody["promptFromSkill"])
 	}
 }
+
+func TestRunSiteCloudflare520RecoveryAndIdempotentRetry(t *testing.T) {
+	tinyPNG, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")
+
+	for _, tc := range []struct {
+		name           string
+		taskFound      bool
+		wantGenCalls   int
+		wantTaskLookup int
+	}{
+		{name: "recover_via_task", taskFound: true, wantGenCalls: 1, wantTaskLookup: 1},
+		{name: "retry_when_task_404", taskFound: false, wantGenCalls: 2, wantTaskLookup: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HANDRAW_SECRETS", "memory")
+			_ = secrets.Set(secrets.SiteToken, "hwt_test_520")
+
+			var genCalls, taskCalls int
+			var firstReqID, secondReqID string
+			siteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/studio/generate":
+					genCalls++
+					var b map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&b)
+					rid, _ := b["requestId"].(string)
+					if genCalls == 1 {
+						firstReqID = rid
+						w.WriteHeader(520)
+						_, _ = w.Write([]byte(`{"error":"The origin web server returned an invalid or incomplete response to Cloudflare."}`))
+						return
+					}
+					secondReqID = rid
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"taskId":"t_retry","status":"completed","images":["/img/out.png"]}`))
+				case "/api/studio/tasks":
+					taskCalls++
+					if !tc.taskFound {
+						w.WriteHeader(404)
+						_, _ = w.Write([]byte(`{"error":"not found"}`))
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"taskId":"t_rec","status":"completed","images":["/img/out.png"]}`))
+				case "/img/out.png":
+					w.Header().Set("Content-Type", "image/png")
+					_, _ = w.Write(tinyPNG)
+				default:
+					w.WriteHeader(404)
+				}
+			}))
+			defer siteSrv.Close()
+			_, _ = settings.Update(func(st *settings.Settings) error {
+				st.SiteBase = siteSrv.URL
+				return nil
+			})
+
+			db, err := store.Open(filepath.Join(t.TempDir(), "db.sqlite"))
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			defer db.Close()
+
+			runDir := filepath.Join(t.TempDir(), "run520")
+			_ = os.MkdirAll(runDir, 0o755)
+			spec := Spec{
+				ModelRef:  "site:gpt-image-2.5",
+				Prompt:    "加一只猫",
+				Ratio:     "3:4",
+				RequestID: "req_520_" + tc.name,
+				QuoteID:   "q_520",
+				SiteBody:  map[string]any{"model": "gpt-image-2.5", "mode": "edit"},
+			}
+			meta, _ := json.Marshal(spec)
+			if err := db.InsertRun(&store.Run{ID: "run_520", Mode: "edit", Title: "520", Model: "site:gpt-image-2.5", Source: "site", Status: "queued", Dir: runDir}, []store.Image{{ID: "img_520", Idx: 0, Status: "queued", Prompt: spec.Prompt, Meta: meta}}); err != nil {
+				t.Fatalf("insert run: %v", err)
+			}
+
+			doneCh := make(chan Event, 4)
+			mgr := New(db, site.New(siteSrv.URL), func(ev Event) {
+				if ev.Type == "image" && (ev.Status == "done" || ev.Status == "failed") {
+					doneCh <- ev
+				}
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			mgr.Start(ctx, 1)
+			mgr.Enqueue("img_520")
+
+			select {
+			case ev := <-doneCh:
+				if ev.Status != "done" {
+					t.Fatalf("expected job done after 520 recovery/retry, got status=%s err=%s", ev.Status, ev.Error)
+				}
+			case <-time.After(8 * time.Second):
+				t.Fatal("timed out waiting for 520 recovery test")
+			}
+
+			if genCalls != tc.wantGenCalls || taskCalls != tc.wantTaskLookup {
+				t.Fatalf("unexpected call counts: gen=%d (want %d), task=%d (want %d)", genCalls, tc.wantGenCalls, taskCalls, tc.wantTaskLookup)
+			}
+			if !tc.taskFound && (firstReqID == "" || firstReqID != secondReqID) {
+				t.Fatalf("expected idempotent requestId on retry, got first=%q second=%q", firstReqID, secondReqID)
+			}
+		})
+	}
+}

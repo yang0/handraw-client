@@ -265,10 +265,11 @@ export async function renderAnnotate(root, ctx, params = {}) {
 
   function renderTimeline() {
     clear(timelineWrap);
+    const visibleVersions = versions.filter((v) => v.id === run.id || v.status === "done");
     timelineWrap.appendChild(el("span", { class: "muted", style: { fontSize: "12px" } }, "版本："));
-    versions.forEach((v, idx) => {
+    visibleVersions.forEach((v, idx) => {
       const isCur = v.id === run.id;
-      const isNewestRev = activeRevision?.runId === v.id;
+      const isNewestRev = activeRevision?.status === "done" && activeRevision?.runId === v.id;
       timelineWrap.appendChild(el("button", {
         type: "button",
         class: "pill-btn" + (isCur ? " pill-accent" : ""),
@@ -805,6 +806,7 @@ export async function renderAnnotate(root, ctx, params = {}) {
         activeRevision.status = "failed";
         activeRevision.error = im?.error || detail.run?.error || "生成失败，请重试";
         stopRevisionWatchers();
+        renderTimeline();
         syncExecButton();
         renderStage();
         toast(activeRevision.error);

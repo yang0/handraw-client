@@ -387,6 +387,42 @@ func encodeSiteRefDataURL(refPath string) (string, error) {
 	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw), nil
 }
 
+func isTransientSiteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ae *site.APIError
+	if errors.As(err, &ae) {
+		switch ae.Status {
+		case 502, 503, 504, 520, 521, 522, 523, 524:
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "cloudflare") ||
+		strings.Contains(msg, "origin web server") ||
+		strings.Contains(msg, "unexpected eof") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "timeout")
+}
+
+func friendlySiteError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	low := strings.ToLower(msg)
+	if strings.Contains(low, "cloudflare") || strings.Contains(low, "origin web server") {
+		var ae *site.APIError
+		code := 520
+		if errors.As(err, &ae) && ae.Status >= 500 {
+			code = ae.Status
+		}
+		return fmt.Errorf("网站上游响应中断（Cloudflare %d），已自动尝试恢复与重试仍未成功；通常是服务临时波动，请稍后重试（未出图不会重复扣费）", code)
+	}
+	return err
+}
+
 func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byte, int, error) {
 	body := map[string]any{}
 	for k, v := range spec.SiteBody {
@@ -458,8 +494,37 @@ func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byt
 				}
 			}
 		}
+		// Recover from transient Cloudflare 520/5xx or dropped connections (#77):
+		// first probe the idempotent requestId via Task (in case the server already
+		// created/finished the image), and if 404 retry Generate once with the same requestId.
+		if err != nil && isTransientSiteError(err) {
+			select {
+			case <-ctx.Done():
+				return nil, 0, ctx.Err()
+			case <-time.After(1500 * time.Millisecond):
+			}
+			tRes, tErr := m.Site.Task(ctx, "", spec.RequestID)
+			if tErr == nil && tRes.Status != "" {
+				res, err = tRes, nil
+			} else {
+				var tae *site.APIError
+				if tErr == nil || (errors.As(tErr, &tae) && tae.Status == 404) {
+					rRetry, retryErr := m.Site.Generate(ctx, body)
+					if retryErr == nil {
+						res, err = rRetry, nil
+					} else {
+						err = retryErr
+						if isTransientSiteError(retryErr) {
+							if tRes2, tErr2 := m.Site.Task(ctx, "", spec.RequestID); tErr2 == nil && tRes2.Status != "" {
+								res, err = tRes2, nil
+							}
+						}
+					}
+				}
+			}
+		}
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, friendlySiteError(err)
 		}
 	}
 	if res.TaskID != "" {
