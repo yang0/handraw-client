@@ -144,60 +144,108 @@ function mountDiscovery(root, initialBase, ctx) {
 export async function renderHome(container, ctx) {
   const root = el("div");
   container.replaceChildren(root);
-  const [recRes, sumRes, worksRes, settRes] = await Promise.all([
-    api("GET", "/api/mine/recipes").catch(() => ({ items: [] })),
+  const [sumRes, worksRes, settRes] = await Promise.all([
     api("GET", "/api/resources/summary").catch(() => ({ counts: {} })),
     api("GET", "/api/works?limit=6&hasImages=1").catch(() => ({ items: [] })),
     api("GET", "/api/settings").catch(() => ({ settings: {} })),
   ]);
 
-  const recipes = recRes.items || [];
-  let activeRecipe = recipes[0] || { id: "", name: "默认画风", styleIds: ["FA-013"], ratio: "3:4", mode: "graphic-text" };
-  const themeInput = el("input", { class: "input", type: "text", placeholder: "今天想画什么？例如：雨夜街角亮着暖灯的小书店，一只橘猫在橱窗里打盹…", style: { fontSize: "15px", padding: "12px 14px" } });
-
-  const recipeStrip = el("div", { class: "row", style: { marginTop: "10px" } });
-  const drawStrip = () => {
-    clear(recipeStrip);
-    recipes.slice(0, 8).forEach((rec) => {
-      recipeStrip.appendChild(el("button", {
-        type: "button",
-        class: "pill-btn" + (activeRecipe?.id === rec.id ? " pill-accent" : ""),
-        onClick: () => { activeRecipe = rec; drawStrip(); },
-      }, rec.name));
-    });
-  };
-  drawStrip();
-
-  const submitQuick = () => {
-    const t = themeInput.value.trim();
-    ctx.go("create", {
-      recipe: activeRecipe,
-      theme: t,
-    });
-  };
-  themeInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") submitQuick();
+  const themeInput = el("textarea", {
+    id: "home-theme-input",
+    class: "home-composer-input",
+    rows: "2",
+    placeholder: "描述想画的画面、氛围或分镜，例如：雨夜街角亮着暖灯的小书店，一只橘猫在橱窗里打盹…",
   });
+
+  const composerField = el("div", { class: "home-composer-field", dataset: { replicatedValue: "" } }, themeInput);
+  const charCount = el("span", { class: "home-composer-count", "aria-live": "polite" });
+  const clearBtn = el("button", {
+    type: "button",
+    class: "home-composer-clear",
+    onClick: () => {
+      themeInput.value = "";
+      syncComposerState();
+      themeInput.focus();
+    },
+  }, "清空");
+
+  const composerForm = el("form", { class: "home-composer", novalidate: true });
+  const supportsFieldSizing = typeof CSS !== "undefined"
+    && typeof CSS.supports === "function"
+    && CSS.supports("field-sizing", "content");
+
+  const syncComposerState = () => {
+    const raw = themeInput.value;
+    const trimmed = raw.trim();
+    const len = Array.from(trimmed).length;
+    composerForm.classList.toggle("has-content", len > 0);
+    charCount.textContent = len > 0 ? `${len} 字` : "";
+    if (!supportsFieldSizing) {
+      composerField.dataset.replicatedValue = raw;
+    }
+  };
+
+  themeInput.addEventListener("input", syncComposerState);
+
+  themeInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      if (event.isComposing || event.keyCode === 229) {
+        return;
+      }
+      composerForm.requestSubmit();
+    }
+  });
+
+  composerForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const theme = themeInput.value.trim();
+    ctx.go("create", theme ? { theme } : {});
+  });
+
+  composerForm.append(
+    el("label", { for: "home-theme-input", class: "sr-only" }, "画面主题描述"),
+    composerField,
+    el("div", { class: "home-composer-bar" },
+      el("div", { class: "home-composer-meta" },
+        el("span", { class: "home-composer-hint" },
+          el("kbd", null, "Enter"),
+          "带入工作台",
+          el("span", { class: "home-composer-sep", "aria-hidden": "true" }, "·"),
+          el("kbd", null, "Shift + Enter"),
+          "换行"
+        ),
+        el("span", { class: "home-composer-status" }, charCount, clearBtn)
+      ),
+      el("div", { class: "home-composer-actions" },
+        el("button", {
+          type: "button",
+          class: "btn home-composer-atlas",
+          onClick: () => ctx.go("atlas"),
+        }, "先翻风格画廊"),
+        el("button", {
+          type: "submit",
+          class: "btn btn-primary home-composer-submit",
+        }, "带入生图工作台", el("span", { class: "home-composer-submit-arrow", "aria-hidden": "true" }, "→"))
+      )
+    )
+  );
+  syncComposerState();
 
   const sizeSwitcher = createCardSizeSwitcher({
     storageKey: "handraw_home_size",
     host: root,
   });
 
-  const hero = el("section", { class: "card", style: { marginBottom: "18px", padding: "18px 20px" } },
-    el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "10px", marginBottom: "10px" } },
-      el("h1", { class: "page-title" }, "今天想画什么？"),
-      el("div", { class: "row", style: { gap: "10px", alignItems: "center", flexWrap: "wrap" } },
-        el("span", { class: "muted" }, `本地画风 ${sumRes.counts?.styles || 0} · 图型 ${sumRes.counts?.layouts || 0} · 主题色 ${sumRes.counts?.colors || 0} · 影调 ${sumRes.counts?.tones || 0}`),
+  const hero = el("section", { class: "home-hero", "aria-labelledby": "home-hero-title" },
+    el("div", { class: "home-hero-head" },
+      el("h1", { id: "home-hero-title", class: "home-hero-title" }, "今天想画什么？"),
+      el("div", { class: "home-hero-meta" },
+        el("span", { class: "home-hero-stats" }, `本地画风 ${sumRes.counts?.styles || 0} · 图型 ${sumRes.counts?.layouts || 0} · 主题色 ${sumRes.counts?.colors || 0} · 影调 ${sumRes.counts?.tones || 0}`),
         sizeSwitcher.el
       )
     ),
-    el("div", { class: "row" },
-      el("div", { style: { flex: "1", minWidth: "240px" } }, themeInput),
-      el("button", { type: "button", class: "btn btn-primary", onClick: submitQuick }, "带入生图工作台"),
-      el("button", { type: "button", class: "btn", onClick: () => ctx.go("atlas") }, "先翻风格画廊")
-    ),
-    recipeStrip
+    composerForm
   );
   root.appendChild(hero);
 
