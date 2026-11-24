@@ -241,8 +241,7 @@ export async function renderHome(container, ctx) {
     el("div", { class: "home-hero-head" },
       el("h1", { id: "home-hero-title", class: "home-hero-title" }, "今天想画什么？"),
       el("div", { class: "home-hero-meta" },
-        el("span", { class: "home-hero-stats" }, `本地画风 ${sumRes.counts?.styles || 0} · 图型 ${sumRes.counts?.layouts || 0} · 主题色 ${sumRes.counts?.colors || 0} · 影调 ${sumRes.counts?.tones || 0}`),
-        sizeSwitcher.el
+        el("span", { class: "home-hero-stats" }, `本地画风 ${sumRes.counts?.styles || 0} · 图型 ${sumRes.counts?.layouts || 0} · 主题色 ${sumRes.counts?.colors || 0} · 影调 ${sumRes.counts?.tones || 0}`)
       )
     ),
     composerForm
@@ -271,8 +270,9 @@ export async function renderHome(container, ctx) {
     el("div", { class: "page-head" },
       el("h2", { style: { margin: 0, fontSize: "16px" } }, "最近创作"),
       el("div", { class: "row" },
+        sizeSwitcher.el,
         el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("create") }, "生图工作台"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("article") }, "文章到图文"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("article") }, "文章配图"),
         el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("canvas") }, "自由画布"),
         el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("works") }, "全部作品 →")
       )
