@@ -322,15 +322,78 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 	if s.Addr() != "" {
 		clipEp = strings.TrimRight(s.Addr(), "/") + "/api/inspirations/clip"
 	}
+	clipExtDir, clipExtExists := resolveClipperExtensionDir()
 	return map[string]any{
-		"ok":           true,
-		"items":        items,
-		"folders":      folders,
-		"tags":         tags,
-		"clipToken":    settings.EnsureClipToken(),
-		"clipEndpoint": clipEp,
-		"siteBase":     s.Site.Base(),
+		"ok":                  true,
+		"items":               items,
+		"folders":             folders,
+		"tags":                tags,
+		"clipToken":           settings.EnsureClipToken(),
+		"clipEndpoint":        clipEp,
+		"clipExtensionDir":    clipExtDir,
+		"clipExtensionExists": clipExtExists,
+		"siteBase":            s.Site.Base(),
 	}, nil
+}
+
+func resolveClipperExtensionDirFrom(exePath, wd, dataDir string) (string, bool) {
+	seen := map[string]struct{}{}
+	var candidates []string
+	addCand := func(parts ...string) {
+		p := filepath.Clean(filepath.Join(parts...))
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		candidates = append(candidates, p)
+	}
+
+	var exeDir string
+	if strings.TrimSpace(exePath) != "" {
+		if resolved, err := filepath.EvalSymlinks(exePath); err == nil && resolved != "" {
+			exePath = resolved
+		}
+		exeDir = filepath.Dir(exePath)
+		// 1. Packaged release: extensions/handraw-clipper alongside executable
+		addCand(exeDir, "extensions", "handraw-clipper")
+		// 2. macOS .app bundle: Contents/MacOS/handraw -> Contents/Resources/extensions/handraw-clipper
+		addCand(exeDir, "..", "Resources", "extensions", "handraw-clipper")
+		// 3. Dev build inside dist/: <repo>/dist/handraw.exe -> <repo>/extensions/handraw-clipper
+		addCand(exeDir, "..", "extensions", "handraw-clipper")
+	}
+	if strings.TrimSpace(wd) != "" {
+		addCand(wd, "extensions", "handraw-clipper")
+		addCand(wd, "..", "extensions", "handraw-clipper")
+	}
+	if strings.TrimSpace(dataDir) != "" {
+		addCand(dataDir, "extensions", "handraw-clipper")
+	}
+
+	for _, c := range candidates {
+		if fi, err := os.Stat(filepath.Join(c, "manifest.json")); err == nil && !fi.IsDir() {
+			return c, true
+		}
+	}
+	if exeDir != "" {
+		p := filepath.Join(exeDir, "extensions", "handraw-clipper")
+		if abs, err := filepath.Abs(p); err == nil {
+			return abs, false
+		}
+		return filepath.Clean(p), false
+	}
+	if len(candidates) > 0 {
+		return candidates[0], false
+	}
+	return filepath.Join("extensions", "handraw-clipper"), false
+}
+
+func resolveClipperExtensionDir() (string, bool) {
+	exe, _ := os.Executable()
+	wd, _ := os.Getwd()
+	return resolveClipperExtensionDirFrom(exe, wd, appdir.Root())
 }
 
 func (s *Server) inspirationsFetchURL(w http.ResponseWriter, r *http.Request) (any, error) {

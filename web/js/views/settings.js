@@ -751,6 +751,8 @@ export async function renderSettings(root, ctx, params = {}) {
 
   let curClipToken = settRes.clipToken || settings.clipToken || "";
   const curClipEndpoint = settRes.clipEndpoint || `${location.origin}/api/inspirations/clip`;
+  const curClipExtDir = settRes.clipExtensionDir || "";
+  const curClipExtExists = settRes.clipExtensionExists;
   const clipTokenDisplay = el("code", { class: "mono muted", style: { fontSize: "12px", wordBreak: "break-all" } }, curClipToken || "尚未生成");
 
   const clipperCard = el("div", { class: "card col", style: { gap: "8px", marginTop: "6px", background: "var(--paper)" } },
@@ -762,7 +764,12 @@ export async function renderSettings(root, ctx, params = {}) {
       el("button", {
         type: "button",
         class: "btn btn-sm",
-        onClick: () => openClipperSetupModal({ clipToken: curClipToken, clipEndpoint: curClipEndpoint }),
+        onClick: () => openClipperSetupModal({
+          clipToken: curClipToken,
+          clipEndpoint: curClipEndpoint,
+          clipExtensionDir: curClipExtDir,
+          clipExtensionExists: curClipExtExists,
+        }),
       }, "查看安装指引")
     ),
     el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },

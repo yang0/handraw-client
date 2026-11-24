@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -362,6 +364,69 @@ func TestInspirationsPublishRawTextFallbackAndBatch(t *testing.T) {
 		}
 		if it.PublishedID == "" || it.PublishedPrice != 8 {
 			t.Fatalf("expected published metadata on %s, got id=%q price=%d", id, it.PublishedID, it.PublishedPrice)
+		}
+	}
+}
+
+func TestResolveClipperExtensionDir(t *testing.T) {
+	writeManifest := func(dir string) string {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"manifest_version":3}`), 0o644); err != nil {
+			t.Fatalf("write manifest: %v", err)
+		}
+		abs, _ := filepath.Abs(dir)
+		return abs
+	}
+
+	// 1. Packaged layout: extensions/handraw-clipper alongside executable
+	t1 := t.TempDir()
+	want1 := writeManifest(filepath.Join(t1, "extensions", "handraw-clipper"))
+	got1, ok1 := resolveClipperExtensionDirFrom(filepath.Join(t1, "handraw.exe"), t.TempDir(), t.TempDir())
+	if !ok1 || got1 != want1 {
+		t.Fatalf("packaged layout: got (%q, %v), want (%q, true)", got1, ok1, want1)
+	}
+
+	// 2. Dev dist/ layout: <repo>/dist/handraw.exe -> <repo>/extensions/handraw-clipper
+	t2 := t.TempDir()
+	want2 := writeManifest(filepath.Join(t2, "extensions", "handraw-clipper"))
+	got2, ok2 := resolveClipperExtensionDirFrom(filepath.Join(t2, "dist", "handraw.exe"), t.TempDir(), t.TempDir())
+	if !ok2 || got2 != want2 {
+		t.Fatalf("dist layout: got (%q, %v), want (%q, true)", got2, ok2, want2)
+	}
+
+	// 3. macOS .app bundle layout: Contents/MacOS/handraw -> Contents/Resources/extensions/handraw-clipper
+	t3 := t.TempDir()
+	want3 := writeManifest(filepath.Join(t3, "Handraw.app", "Contents", "Resources", "extensions", "handraw-clipper"))
+	got3, ok3 := resolveClipperExtensionDirFrom(filepath.Join(t3, "Handraw.app", "Contents", "MacOS", "handraw"), t.TempDir(), t.TempDir())
+	if !ok3 || got3 != want3 {
+		t.Fatalf("macOS bundle layout: got (%q, %v), want (%q, true)", got3, ok3, want3)
+	}
+
+	// 4. Fallback when missing: still returns absolute path alongside executable with exists=false
+	t4 := t.TempDir()
+	got4, ok4 := resolveClipperExtensionDirFrom(filepath.Join(t4, "handraw.exe"), t.TempDir(), t.TempDir())
+	want4, _ := filepath.Abs(filepath.Join(t4, "extensions", "handraw-clipper"))
+	if ok4 || got4 != want4 || !filepath.IsAbs(got4) {
+		t.Fatalf("missing fallback: got (%q, %v), want (%q, false)", got4, ok4, want4)
+	}
+
+	// 5. Verify both API endpoints expose absolute clipExtensionDir
+	srv, cancel := setupTestServer(t, "http://127.0.0.1:1")
+	defer cancel()
+	h := srv.Handler()
+	for _, ep := range []string{"/api/inspirations", "/api/settings"} {
+		rec := doReq(t, h, srv.Token, http.MethodGet, ep, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s failed: %d %s", ep, rec.Code, rec.Body.String())
+		}
+		var payload map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+		dir, _ := payload["clipExtensionDir"].(string)
+		if dir == "" || !filepath.IsAbs(dir) {
+			t.Fatalf("GET %s returned non-absolute clipExtensionDir: %q", ep, dir)
 		}
 	}
 }

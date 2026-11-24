@@ -35,12 +35,15 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) (any, error
 	if s.Addr() != "" {
 		clipEp = strings.TrimRight(s.Addr(), "/") + "/api/inspirations/clip"
 	}
+	clipExtDir, clipExtExists := resolveClipperExtensionDir()
 	return map[string]any{
-		"settings":     st,
-		"providers":    provs,
-		"dataDir":      appdir.Root(),
-		"clipToken":    clipTok,
-		"clipEndpoint": clipEp,
+		"settings":            st,
+		"providers":           provs,
+		"dataDir":             appdir.Root(),
+		"clipToken":           clipTok,
+		"clipEndpoint":        clipEp,
+		"clipExtensionDir":    clipExtDir,
+		"clipExtensionExists": clipExtExists,
 	}, nil
 }
 
