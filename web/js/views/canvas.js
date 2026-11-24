@@ -1234,8 +1234,7 @@ export async function renderCanvas(host, ctx, params = {}) {
           ),
         }));
         card.appendChild(el("div", { class: "row" },
-          el("button", { type: "button", class: "btn btn-sm", onClick: () => api("POST", `/api/images/${encodeURIComponent(im.id)}/copy`).then(() => toast("已复制到剪贴板")) }, "📋 复制"),
-          el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("annotate", { runId: run.id }) }, "📌 批注")
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => api("POST", `/api/images/${encodeURIComponent(im.id)}/copy`).then(() => toast("已复制到剪贴板")) }, "📋 复制")
         ));
       } else if (im.status === "failed") {
         card.appendChild(el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => api("POST", `/api/images/${encodeURIComponent(im.id)}/retry`).then(() => toast("已重新入队")) }, "重试"));

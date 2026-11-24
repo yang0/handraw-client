@@ -9,7 +9,6 @@ import { renderStudio } from "./views/studio.js";
 import { renderChat } from "./views/chat.js";
 import { renderArticle } from "./views/article.js";
 import { renderCanvas } from "./views/canvas.js";
-import { renderAnnotate } from "./views/annotate.js";
 import { renderWorks } from "./views/works.js";
 import { renderInspirations } from "./views/inspirations.js";
 import { renderPlugins } from "./views/plugins.js";
@@ -22,7 +21,6 @@ const VIEWS = {
   chat: renderChat,
   article: renderArticle,
   canvas: renderCanvas,
-  annotate: renderAnnotate,
   works: renderWorks,
   inspirations: renderInspirations,
   plugins: renderPlugins,
@@ -36,7 +34,6 @@ const CORE_NAV = [
   { id: "chat", ico: "💬", label: "会话" },
   { id: "article", ico: "📰", label: "文章", plugin: "article" },
   { id: "canvas", ico: "🧩", label: "画布", plugin: "canvas" },
-  { id: "annotate", ico: "📌", label: "批注", plugin: "annotate" },
   { id: "works", ico: "🖼", label: "作品" },
   { id: "inspirations", ico: "💡", label: "灵感库" },
   { id: "plugins", ico: "🔌", label: "插件" },
@@ -197,7 +194,7 @@ async function start() {
     });
   }
 
-  const PADDED_VIEWS = new Set(["home", "atlas", "annotate", "works", "inspirations", "plugins", "settings"]);
+  const PADDED_VIEWS = new Set(["home", "atlas", "works", "inspirations", "plugins", "settings"]);
 
   async function go(view, params = {}) {
     if (view === "series") {

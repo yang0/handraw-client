@@ -566,11 +566,6 @@ export async function renderChat(root, ctx, params = {}) {
               el("button", {
                 type: "button",
                 class: "btn btn-sm",
-                onClick: () => ctx.go("annotate", { runId: run.id }),
-              }, "📌 批注"),
-              el("button", {
-                type: "button",
-                class: "btn btn-sm",
                 onClick: async (ev) => {
                   const btn = ev.currentTarget;
                   btn.disabled = true;

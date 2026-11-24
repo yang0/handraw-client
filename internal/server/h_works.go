@@ -36,6 +36,7 @@ func (s *Server) works(w http.ResponseWriter, r *http.Request) (any, error) {
 		Published: q.Get("published"),
 		GroupID:   q.Get("groupId"),
 		Status:    q.Get("status"),
+		HasImages: q.Get("hasImages") == "1",
 		Limit:     qint(r, "limit", 48),
 		Offset:    qint(r, "offset", 0),
 	})

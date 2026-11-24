@@ -391,8 +391,7 @@ export async function renderSeries(host, ctx, params = {}) {
 
     if (im && im.status === "done" && im.path) {
       focusedBox.appendChild(el("div", { class: "row", style: { justifyContent: "flex-end" } },
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => api("POST", `/api/images/${encodeURIComponent(im.id)}/copy`).then(() => toast("已复制图片")) }, "📋 复制"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("annotate", { runId: state.activeRun.id }) }, "📌 批注精修")
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => api("POST", `/api/images/${encodeURIComponent(im.id)}/copy`).then(() => toast("已复制图片")) }, "📋 复制")
       ));
     }
 

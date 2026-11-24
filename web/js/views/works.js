@@ -52,7 +52,7 @@ async function drawLocal(stage, ctx, root) {
   const searchIn = el("input", { class: "input", type: "search", value: state.q, placeholder: "搜标题、主题、提示词…", style: { maxWidth: "240px" } });
   const modeSel = el("select", { class: "select select-sm" },
     el("option", { value: "" }, "全部类型"),
-    ...[["quick", "快门"], ["single", "单图"], ["series", "系列"], ["article", "文章配图"], ["canvas", "画布"], ["edit", "批注改图"]].map(([v, l]) => el("option", { value: v, selected: state.mode === v }, l))
+    ...[["quick", "快门"], ["single", "单图"], ["series", "系列"], ["article", "文章配图"], ["canvas", "画布"]].map(([v, l]) => el("option", { value: v, selected: state.mode === v }, l))
   );
   const pubSel = el("select", { class: "select select-sm" },
     el("option", { value: "" }, "发布状态"),
@@ -81,18 +81,20 @@ async function drawLocal(stage, ctx, root) {
       mode: state.mode,
       starred: state.starred ? "1" : "",
       published: state.published,
+      hasImages: "1",
       limit: "60",
     });
     const res = await api("GET", `/api/works?${qs.toString()}`).catch(() => ({ items: [] }));
-    const items = res.items || [];
+    const items = (res.items || []).filter((run) => (run.images || []).some((i) => i.status === "done" && i.path));
     clear(grid);
     if (!items.length) {
       grid.appendChild(el("div", { class: "card muted", style: { gridColumn: "1 / -1" } }, "当前筛选下暂无本地作品。所有生成的图片默认均保存于本地目录。"));
       return;
     }
     items.forEach((run) => {
-      const im = run.images?.[0];
-      const src = im?.thumb ? localImg(im.thumb) : (im?.path ? localImg(im.path) : "/img/logo.svg");
+      const doneImgs = (run.images || []).filter((i) => i.status === "done" && i.path);
+      const im = doneImgs[0];
+      const src = im.thumb ? localImg(im.thumb) : localImg(im.path);
       grid.appendChild(el("div", { class: "style-card", onClick: () => openRunDetail(run.id, ctx, loadGrid) },
         el("img", { class: "style-thumb", src, alt: run.title || "", loading: "lazy" }),
         el("div", { class: "style-body" },
@@ -101,7 +103,7 @@ async function drawLocal(stage, ctx, root) {
             run.publishedWorkId ? el("span", { class: "badge badge-ok" }, "已发布") : el("span", { class: "muted" }, "仅本地")
           ),
           el("div", { class: "style-name" }, (run.starred ? "★ " : "") + (run.title || "未命名作品")),
-          el("div", { class: "muted" }, `${run.modelLabel || run.model} · ${(run.images || []).length} 张`)
+          el("div", { class: "muted" }, `${run.modelLabel || run.model} · ${doneImgs.length} 张`)
         )
       ));
     });
@@ -133,10 +135,11 @@ async function openRunDetail(runId, ctx, onChanged) {
   const notesIn = el("textarea", { class: "input", rows: 2, maxlength: 2000, placeholder: "可选：创作说明、心得或配方要点（别人做同款时能看到）" });
   const body = el("div", { class: "col", style: { gap: "12px" } });
 
-  // Versions strip if >1
-  if (versions.length > 1) {
+  // Versions strip if >1 completed version
+  const doneVersions = versions.filter((v) => v.id === run.id || v.status === "done");
+  if (doneVersions.length > 1) {
     const vRow = el("div", { class: "row" }, el("span", { class: "muted" }, "修订版本："));
-    versions.forEach((v, idx) => {
+    doneVersions.forEach((v, idx) => {
       vRow.appendChild(el("button", {
         type: "button",
         class: "pill-btn" + (v.id === run.id ? " pill-accent" : ""),
@@ -146,22 +149,11 @@ async function openRunDetail(runId, ctx, onChanged) {
     body.appendChild(vRow);
   }
 
-  // Images gallery + selection for publishing
-  const selectedIds = new Set((run.images || []).filter((i) => i.status === "done" && i.path).slice(0, 12).map((i) => i.id));
+  // Images gallery + selection for publishing (completed images only)
+  const doneImages = (run.images || []).filter((i) => i.status === "done" && i.path);
+  const selectedIds = new Set(doneImages.slice(0, 12).map((i) => i.id));
   const imgGrid = el("div", { class: "row", style: { gap: "10px", alignItems: "stretch" } });
-  (run.images || []).forEach((im, idx) => {
-    if (im.status !== "done" || !im.path) {
-      imgGrid.appendChild(el("div", { class: "card col", style: { width: "160px", padding: "10px" } },
-        el("span", { class: "badge badge-warn" }, im.status),
-        el("span", { class: "muted" }, im.error || "未完成"),
-        im.status === "failed" ? el("button", {
-          type: "button",
-          class: "btn btn-sm btn-primary",
-          onClick: async () => { await api("POST", `/api/images/${encodeURIComponent(im.id)}/retry`); toast("已重试"); closeModal(); onChanged?.(); },
-        }, "重试") : null
-      ));
-      return;
-    }
+  doneImages.forEach((im, idx) => {
     const chk = el("input", { type: "checkbox", checked: selectedIds.has(im.id) });
     chk.addEventListener("change", () => {
       if (chk.checked) selectedIds.add(im.id);
@@ -289,7 +281,6 @@ async function openRunDetail(runId, ctx, onChanged) {
   showModal(run.title || "作品详情", body, [
     el("button", { type: "button", class: "btn", onClick: () => api("POST", `/api/works/${encodeURIComponent(run.id)}/reveal`) }, "📂 打开文件夹"),
     el("button", { type: "button", class: "btn", onClick: async () => { const r = await api("POST", `/api/works/${encodeURIComponent(run.id)}/export`, { format: "zip" }); toast("已导出：" + r.path); } }, "导出 ZIP"),
-    el("button", { type: "button", class: "btn", onClick: () => { closeModal(); ctx.go("annotate", { runId: run.id }); } }, "📌 批注改图"),
     el("button", {
       type: "button",
       class: "btn btn-danger",
@@ -308,10 +299,17 @@ async function drawSiteHistory(stage, ctx) {
   try {
     const res = await api("GET", "/api/site/history");
     const raw = res.data || {};
-    const list = Array.isArray(raw) ? raw : (raw.items || raw.generations || raw.runs || []);
+    const rawList = Array.isArray(raw) ? raw : (raw.items || raw.generations || raw.runs || []);
+    const list = rawList.filter((it) => {
+      const st = String(it.status || "").toLowerCase();
+      if (st === "failed" || st === "error" || st === "cancelled") return false;
+      const imgs = it.images || (it.imageUrl ? [it.imageUrl] : (it.coverUrl ? [it.coverUrl] : []));
+      const urls = imgs.map((x) => (typeof x === "string" ? x : (x.url || x.imageUrl || ""))).filter(Boolean);
+      return urls.length > 0;
+    });
     const base = res.siteBase || "https://handraw-style.com";
     if (!list.length) {
-      stage.appendChild(el("div", { class: "card muted" }, "暂无网站生图历史。"));
+      stage.appendChild(el("div", { class: "card muted" }, "暂无已完成的网站生图历史。"));
       return;
     }
     const grid = masonry();

@@ -313,9 +313,10 @@ type RunQuery struct {
 	Search    string
 	Mode      string
 	Starred   bool
-	Published string // "", "yes", "no"
+	Published string // "", "yes", "no", "1", "0"
 	GroupID   string
 	Status    string
+	HasImages bool
 	Limit     int
 	Offset    int
 }
@@ -341,9 +342,9 @@ func (d *DB) ListRuns(q RunQuery) ([]Run, int, error) {
 	if q.Starred {
 		where = append(where, "r.starred = 1")
 	}
-	if q.Published == "yes" {
+	if q.Published == "yes" || q.Published == "1" {
 		where = append(where, "r.published_work_id != ''")
-	} else if q.Published == "no" {
+	} else if q.Published == "no" || q.Published == "0" {
 		where = append(where, "r.published_work_id = ''")
 	}
 	if q.GroupID != "" {
@@ -353,6 +354,9 @@ func (d *DB) ListRuns(q RunQuery) ([]Run, int, error) {
 	if q.Status != "" {
 		where = append(where, "r.status = ?")
 		args = append(args, q.Status)
+	}
+	if q.HasImages {
+		where = append(where, "EXISTS (SELECT 1 FROM images i WHERE i.run_id = r.id AND i.status = 'done' AND i.path != '')")
 	}
 	w := strings.Join(where, " AND ")
 	var total int

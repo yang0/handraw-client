@@ -60,14 +60,6 @@ func (s *Server) RegisterBuiltins() {
 		Pages:    []string{"article"},
 		InUse:    countKind("article"),
 	})
-	s.Plugins.Register(plugins.Manifest{
-		ID:       "annotate",
-		Name:     "批注改图",
-		Desc:     "在图片任意位置添加多条批注或框选区域批量修改",
-		API:      "^1",
-		Provides: []string{"annotate"},
-		Pages:    []string{"annotate"},
-	})
 	st := settings.Get()
 	s.Plugins.Reconcile(st.Plugins, st.PluginConfig)
 }
