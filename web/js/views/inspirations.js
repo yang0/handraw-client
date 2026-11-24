@@ -14,6 +14,7 @@ const SOURCE_LABELS = {
 
 const viewState = {
   tab: "vault", // vault | plaza | earnings
+  userPickedTab: false,
   q: "",
   category: "",
   tag: "",
@@ -190,12 +191,35 @@ export function openClipperSetupModal(meta = {}) {
 }
 
 export async function renderInspirations(root, ctx, params = {}) {
+  let latestVaultMeta = { clipToken: "", clipEndpoint: "", clipExtensionDir: "", clipExtensionExists: false, siteBase: "" };
+  let prefetchedVaultRes = null;
+
   if (params.tab && ["vault", "plaza", "earnings"].includes(params.tab)) {
     viewState.tab = params.tab;
+    viewState.userPickedTab = true;
+  } else if (!viewState.userPickedTab) {
+    const probe = await api("GET", "/api/inspirations").catch(() => null);
+    if (!root.isConnected) return;
+    if (probe) {
+      latestVaultMeta = {
+        clipToken: probe.clipToken || "",
+        clipEndpoint: probe.clipEndpoint || "",
+        clipExtensionDir: probe.clipExtensionDir || "",
+        clipExtensionExists: probe.clipExtensionExists,
+        siteBase: probe.siteBase || "",
+      };
+      const totalLocal = Number(probe.totalCount ?? (probe.items || []).length);
+      if (totalLocal === 0) {
+        viewState.tab = "plaza";
+      } else {
+        viewState.tab = "vault";
+        if (!viewState.q && !viewState.category && !viewState.tag) {
+          prefetchedVaultRes = probe;
+        }
+      }
+    }
   }
   clear(root);
-
-  let latestVaultMeta = { clipToken: "", clipEndpoint: "", clipExtensionDir: "", clipExtensionExists: false, siteBase: "" };
 
   const tabBar = el("div", { class: "tabs" });
   const tabsDef = [
@@ -216,6 +240,7 @@ export async function renderInspirations(root, ctx, params = {}) {
             viewState.batchMode = false;
             viewState.selectedIds.clear();
           }
+          viewState.userPickedTab = true;
           viewState.tab = id;
           drawTabs();
           drawBody();
@@ -240,6 +265,7 @@ export async function renderInspirations(root, ctx, params = {}) {
       type: "button",
       class: "btn btn-sm btn-primary",
       onClick: () => openCreateInspirationModal(ctx, () => {
+        viewState.userPickedTab = true;
         if (viewState.tab !== "vault") {
           viewState.tab = "vault";
           drawTabs();
@@ -264,11 +290,14 @@ export async function renderInspirations(root, ctx, params = {}) {
   async function drawBody() {
     clear(stage);
     if (viewState.tab === "vault") {
-      await renderVaultTab(stage, ctx, (meta) => { latestVaultMeta = meta; });
+      const initialRes = prefetchedVaultRes;
+      prefetchedVaultRes = null;
+      await renderVaultTab(stage, ctx, (meta) => { latestVaultMeta = meta; }, initialRes);
     } else if (viewState.tab === "plaza") {
       await renderPlazaTab(stage, ctx);
     } else {
       await renderEarningsTab(stage, ctx, () => {
+        viewState.userPickedTab = true;
         viewState.tab = "vault";
         drawTabs();
         drawBody();
@@ -928,7 +957,7 @@ const TAG_ICON_SVG = '<svg viewBox="0 0 20 20" width="14" height="14" fill="none
 const BATCH_SHARE_ICON_SVG = '<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="10" height="10" rx="2.2"/><path d="m6 9 1.8 1.8L10.8 7.6"/><path d="M7.5 16.5h7.3a2.2 2.2 0 0 0 2.2-2.2V7"/></svg>';
 const CLOSE_BATCH_ICON_SVG = '<svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M5.5 5.5 14.5 14.5M14.5 5.5 5.5 14.5"/></svg>';
 
-async function renderVaultTab(stage, ctx, onMeta) {
+async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
   const searchIn = el("input", {
     class: "insp-search-input",
     type: "search",
@@ -1422,7 +1451,11 @@ async function renderVaultTab(stage, ctx, onMeta) {
     if (viewState.q) qs.set("q", viewState.q);
     if (viewState.category) qs.set("category", viewState.category);
     if (viewState.tag) qs.set("tag", viewState.tag);
-    const res = await api("GET", `/api/inspirations?${qs.toString()}`).catch(() => ({ items: [], tags: [], categories: [], totalCount: 0 }));
+    const usePrefetched = Boolean(initialRes) && !viewState.q && !viewState.category && !viewState.tag;
+    const res = usePrefetched
+      ? initialRes
+      : await api("GET", `/api/inspirations?${qs.toString()}`).catch(() => ({ items: [], tags: [], categories: [], totalCount: 0 }));
+    initialRes = null;
     latestRes = res;
     onMeta?.({
       clipToken: res.clipToken || "",
