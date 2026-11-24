@@ -234,6 +234,7 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
   let imageDataUrl = "";
   let remoteImageUrl = "";
   let imageCaption = "";
+  let sourceUrl = "";
   let extractedAuthor = "";
   let extractedPlatform = "";
   let fetchedImages = [];
@@ -241,14 +242,11 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
 
   const isBareHttpUrl = (s) => /^https?:\/\/\S+$/i.test(String(s || "").trim());
   const isDirectImageUrl = (s) => /^https?:\/\/\S+\.(?:png|jpe?g|webp|gif)(?:[?#]\S*)?$/i.test(String(s || "").trim());
+  const extractFirstUrl = (s) => {
+    const m = String(s || "").match(/https?:\/\/[^\s<>"{}|\\^`[\]]+/i);
+    return m ? m[0] : "";
+  };
 
-  const fetchUrlIn = el("input", {
-    class: "input",
-    type: "url",
-    placeholder: "可选：粘贴 X / 网页链接自动抓取正文与图片（同时记作来源）",
-    style: { flex: "1", minWidth: "0" },
-  });
-  const fetchBtn = el("button", { type: "button", class: "btn btn-sm", style: { flexShrink: "0" } }, "⚡ 解析");
   const fetchStatusEl = el("div", { class: "insp-fetch-status hidden" });
   const fetchedThumbsEl = el("div", { class: "insp-fetch-thumbs hidden" });
 
@@ -259,24 +257,7 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
     el("span", { class: "muted" }, "点击选图、拖拽图片到这里，或直接按 Ctrl+V 粘贴剪贴板图片")
   );
 
-  const imgUrlIn = el("input", { class: "input", type: "url", placeholder: "https://…（未传本地图时生效）" });
-  const titleIn = el("input", { class: "input", placeholder: "留空可由 AI 自动起名" });
-  const moreSummaryText = el("span", null, "更多选项（自定义标题 / 远程图片链接）");
-  const moreDetails = el("details", { class: "insp-more-options" },
-    el("summary", { class: "insp-more-summary muted" }, moreSummaryText),
-    el("div", { class: "row insp-more-grid", style: { gap: "10px", marginTop: "8px", flexWrap: "wrap" } },
-      el("div", { class: "field", style: { flex: "1 1 200px" } }, el("label", null, "灵感标题（可选）"), titleIn),
-      el("div", { class: "field", style: { flex: "1 1 200px" } }, el("label", null, "远程图片 URL（可选）"), imgUrlIn)
-    )
-  );
-
-  const syncMoreSummary = () => {
-    const t = titleIn.value.trim();
-    moreSummaryText.textContent = t
-      ? `更多选项 · 已填标题：${t.slice(0, 22)}${t.length > 22 ? "…" : ""}`
-      : "更多选项（自定义标题 / 远程图片链接）";
-  };
-  titleIn.addEventListener("input", syncMoreSummary);
+  const titleIn = el("input", { class: "input", placeholder: "标题（可选，留空由 AI 自动起名）" });
 
   const syncThumbActive = () => {
     fetchedThumbsEl.querySelectorAll(".insp-fetch-thumb").forEach((btn, bi) => {
@@ -300,6 +281,14 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
     syncThumbActive();
   };
 
+  const clearDirectImgStatus = () => {
+    if (fetchStatusEl.dataset.kind === "direct-image") {
+      delete fetchStatusEl.dataset.kind;
+      clear(fetchStatusEl);
+      fetchStatusEl.className = "insp-fetch-status hidden";
+    }
+  };
+
   const clearPickedImage = (e) => {
     e?.stopPropagation?.();
     imageDataUrl = "";
@@ -307,7 +296,7 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
     imageCaption = "";
     selectedFetchedIdx = -1;
     fileIn.value = "";
-    imgUrlIn.value = "";
+    clearDirectImgStatus();
     renderImageState();
   };
 
@@ -316,9 +305,9 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
     try {
       imageDataUrl = await readFileAsDataURL(file);
       remoteImageUrl = "";
-      imgUrlIn.value = "";
       selectedFetchedIdx = -1;
       imageCaption = file.name ? `本地图：${file.name}` : "剪贴板图片";
+      clearDirectImgStatus();
       renderImageState();
     } catch (e) { toast(e.message); }
   };
@@ -328,7 +317,6 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
     imageDataUrl = "";
     fileIn.value = "";
     remoteImageUrl = clean;
-    imgUrlIn.value = clean;
     selectedFetchedIdx = fetchedIdx;
     imageCaption = clean ? caption : "";
     renderImageState();
@@ -364,16 +352,6 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
     if (fileIn.files?.[0]) setPickedImage(fileIn.files[0]);
   });
 
-  imgUrlIn.addEventListener("input", () => {
-    const v = imgUrlIn.value.trim();
-    if (!imageDataUrl) {
-      remoteImageUrl = v;
-      selectedFetchedIdx = -1;
-      imageCaption = v ? "远程图片链接" : "";
-      renderImageState();
-    }
-  });
-
   const dropZone = el("div", {
     class: "insp-dropzone",
     tabindex: "0",
@@ -394,10 +372,52 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
 
   const rawTextIn = el("textarea", {
     class: "input",
-    rows: 5,
-    placeholder: "粘贴提示词或推文原文…（直接粘贴 X / 网页链接将自动解析）",
+    rows: 6,
+    placeholder: "粘贴提示词或推文原文；也可直接粘贴 X / 网页链接自动抓取，或粘贴图片直链载入预览…",
   });
+  const parseInlineBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm hidden",
+    dataset: { role: "insp-parse-inline" },
+  }, "⚡ 解析链接");
+  const sourceChipEl = el("div", { class: "insp-source-chip hidden" });
   const autoOrgChk = el("input", { type: "checkbox", checked: true });
+
+  const renderSourceChip = () => {
+    clear(sourceChipEl);
+    if (!sourceUrl) {
+      sourceChipEl.classList.add("hidden");
+      return;
+    }
+    sourceChipEl.classList.remove("hidden");
+    const shortUrl = sourceUrl.replace(/^https?:\/\//i, "").slice(0, 46);
+    sourceChipEl.append(
+      el("span", { class: "muted", style: { fontSize: "11.5px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+        `🔗 来源：${shortUrl}${sourceUrl.length > 54 ? "…" : ""}`
+      ),
+      el("button", {
+        type: "button",
+        class: "insp-source-clear",
+        title: "清除来源链接",
+        onClick: () => {
+          sourceUrl = "";
+          extractedPlatform = "";
+          extractedAuthor = "";
+          renderSourceChip();
+        },
+      }, "✕")
+    );
+  };
+
+  const syncInlineParseBtn = () => {
+    const found = extractFirstUrl(rawTextIn.value);
+    if (found && !isFetching) {
+      parseInlineBtn.classList.remove("hidden");
+      parseInlineBtn.textContent = isDirectImageUrl(found) ? "🖼 载入图片链接" : "⚡ 解析链接";
+    } else if (!isFetching) {
+      parseInlineBtn.classList.add("hidden");
+    }
+  };
 
   const renderFetchedThumbs = () => {
     clear(fetchedThumbsEl);
@@ -431,31 +451,31 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
   };
 
   let isFetching = false;
-  const runFetchUrl = async (explicitUrl) => {
-    const target = String(explicitUrl ?? fetchUrlIn.value).trim();
-    if (!target) {
-      toast("请先粘贴要解析的链接");
-      fetchUrlIn.focus();
+  const runFetchUrl = async (explicitUrl, { clearRawIfBare = false } = {}) => {
+    const target = String(explicitUrl ?? extractFirstUrl(rawTextIn.value)).trim();
+    if (!target || !isBareHttpUrl(target)) {
+      toast("未检测到完整的 http:// 或 https:// 链接");
       return;
     }
-    if (!isBareHttpUrl(target)) {
-      toast("请输入完整的 http:// 或 https:// 链接");
-      return;
-    }
-    fetchUrlIn.value = target;
     if (isDirectImageUrl(target)) {
       fetchedImages = [];
       fetchedThumbsEl.classList.add("hidden");
       clear(fetchStatusEl);
+      fetchStatusEl.dataset.kind = "direct-image";
       fetchStatusEl.className = "insp-fetch-status is-ok";
-      fetchStatusEl.appendChild(el("span", null, "✓ 已识别为图片直链并载入预览"));
+      fetchStatusEl.appendChild(el("span", null, "✓ 已识别图片直链并载入上方预览"));
       setRemoteImage(target, "远程图片链接", -1);
+      if (clearRawIfBare || rawTextIn.value.trim() === target) {
+        rawTextIn.value = "";
+      }
+      syncInlineParseBtn();
       return;
     }
     if (isFetching) return;
     isFetching = true;
-    fetchBtn.disabled = true;
-    fetchBtn.textContent = "解析中…";
+    parseInlineBtn.disabled = true;
+    parseInlineBtn.classList.remove("hidden");
+    parseInlineBtn.textContent = "解析中…";
     clear(fetchStatusEl);
     fetchStatusEl.className = "insp-fetch-status";
     fetchStatusEl.appendChild(el("span", { class: "muted" }, "正在抓取原文与高清原图…"));
@@ -465,12 +485,16 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
       const ext = res.extracted || {};
       extractedPlatform = ext.platform || "";
       extractedAuthor = ext.author || "";
-      if (ext.sourceUrl) fetchUrlIn.value = ext.sourceUrl;
+      sourceUrl = ext.sourceUrl || target;
+      renderSourceChip();
 
-      if (ext.text) rawTextIn.value = ext.text;
+      if (ext.text) {
+        rawTextIn.value = ext.text;
+      } else if (clearRawIfBare && rawTextIn.value.trim() === target) {
+        rawTextIn.value = "";
+      }
       if (ext.title && !titleIn.value.trim()) {
         titleIn.value = ext.title;
-        syncMoreSummary();
       }
 
       fetchedImages = Array.isArray(ext.images) ? ext.images.filter(Boolean) : [];
@@ -504,36 +528,33 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
         }
       }
     } catch (e) {
+      sourceUrl = target;
+      renderSourceChip();
       clear(fetchStatusEl);
       fetchStatusEl.className = "insp-fetch-status is-warn";
-      fetchStatusEl.appendChild(el("span", null, e?.message || "解析失败，可改用「Chrome 灵感捕手」或直接手动粘贴"));
+      fetchStatusEl.appendChild(el("span", null, e?.message || "解析失败，可改用「Chrome 灵感捕手」或直接手动粘贴内容"));
     } finally {
       isFetching = false;
-      fetchBtn.disabled = false;
-      fetchBtn.textContent = "⚡ 解析";
+      parseInlineBtn.disabled = false;
+      syncInlineParseBtn();
     }
   };
 
-  fetchBtn.addEventListener("click", () => runFetchUrl());
-  fetchUrlIn.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      runFetchUrl();
-    }
-  });
-  fetchUrlIn.addEventListener("paste", (e) => {
-    const pasted = (e.clipboardData?.getData("text") || "").trim();
-    if (isBareHttpUrl(pasted)) {
-      setTimeout(() => runFetchUrl(pasted), 40);
-    }
-  });
+  parseInlineBtn.addEventListener("click", () => runFetchUrl(extractFirstUrl(rawTextIn.value), { clearRawIfBare: true }));
+  rawTextIn.addEventListener("input", syncInlineParseBtn);
   rawTextIn.addEventListener("paste", (e) => {
     const pasted = (e.clipboardData?.getData("text") || "").trim();
     const curVal = rawTextIn.value.trim();
-    if (isBareHttpUrl(pasted) && (!curVal || (rawTextIn.selectionStart === 0 && rawTextIn.selectionEnd === rawTextIn.value.length))) {
+    const replacingAll = !curVal || (rawTextIn.selectionStart === 0 && rawTextIn.selectionEnd === rawTextIn.value.length);
+    if (isDirectImageUrl(pasted) && replacingAll) {
       e.preventDefault();
-      fetchUrlIn.value = pasted;
-      runFetchUrl(pasted);
+      runFetchUrl(pasted, { clearRawIfBare: true });
+      return;
+    }
+    if (isBareHttpUrl(pasted) && replacingAll) {
+      e.preventDefault();
+      rawTextIn.value = pasted;
+      runFetchUrl(pasted, { clearRawIfBare: true });
     }
   });
 
@@ -556,22 +577,21 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
     document.removeEventListener("paste", onPaste);
   };
 
-  const urlRow = el("div", { class: "col", style: { gap: "6px" } },
-    el("div", { class: "row", style: { gap: "8px" } }, fetchUrlIn, fetchBtn),
-    fetchStatusEl
-  );
-
   const body = el("div", { class: "col insp-create-form", style: { gap: "12px" } },
-    urlRow,
     el("div", { class: "col", style: { gap: "8px" } },
       dropZone,
       fetchedThumbsEl
     ),
     el("div", { class: "field" },
-      el("label", null, "提示词 / 原文"),
-      rawTextIn
+      el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px" } },
+        el("label", { style: { margin: 0 } }, "提示词 / 原文 / 链接"),
+        parseInlineBtn
+      ),
+      rawTextIn,
+      sourceChipEl,
+      fetchStatusEl
     ),
-    moreDetails,
+    titleIn,
     el("label", { class: "row", style: { cursor: "pointer", fontSize: "12.5px", alignItems: "center" } },
       autoOrgChk,
       el("span", null, "✨ 保存后用 AI 自动整理（去杂讯、中文翻译、提炼变量与标签）")
@@ -582,26 +602,29 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
     type: "button",
     class: "btn btn-primary",
     onClick: async () => {
-      const rawTxt = rawTextIn.value.trim();
-      const urlVal = remoteImageUrl || imgUrlIn.value.trim();
-      const srcUrl = fetchUrlIn.value.trim();
-      if (!imageDataUrl && !urlVal && !rawTxt && !isBareHttpUrl(srcUrl)) {
-        toast("请粘贴图片、输入提示词，或粘贴链接解析");
+      let rawTxt = rawTextIn.value.trim();
+      if (!imageDataUrl && !remoteImageUrl && isDirectImageUrl(rawTxt)) {
+        remoteImageUrl = rawTxt;
+        rawTxt = "";
+      }
+      const effectiveSrc = sourceUrl || (isBareHttpUrl(rawTxt) && !isDirectImageUrl(rawTxt) ? rawTxt : "");
+      if (!imageDataUrl && !remoteImageUrl && !rawTxt && !effectiveSrc) {
+        toast("请粘贴图片、输入提示词，或直接粘贴链接");
         return;
       }
       saveBtn.disabled = true;
       saveBtn.textContent = autoOrgChk.checked ? "正在保存并 AI 整理…" : "正在保存…";
       try {
         const inferredSource = extractedPlatform
-          || (/x\.com|twitter\.com/i.test(srcUrl) ? "x" : (/xiaohongshu\.com|xhslink\.com/i.test(srcUrl) ? "xiaohongshu" : "import"));
+          || (/x\.com|twitter\.com/i.test(effectiveSrc) ? "x" : (/xiaohongshu\.com|xhslink\.com/i.test(effectiveSrc) ? "xiaohongshu" : "import"));
         const res = await api("POST", "/api/inspirations", {
           title: titleIn.value.trim(),
           imageDataUrl,
-          imageUrl: imageDataUrl ? "" : urlVal,
+          imageUrl: imageDataUrl ? "" : remoteImageUrl,
           rawText: rawTxt,
           prompt: rawTxt,
           source: inferredSource,
-          sourceUrl: isDirectImageUrl(srcUrl) ? "" : srcUrl,
+          sourceUrl: effectiveSrc,
           sourceAuthor: extractedAuthor,
           autoOrganize: autoOrgChk.checked,
         });
