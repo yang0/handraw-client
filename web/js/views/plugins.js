@@ -148,10 +148,107 @@ export async function renderPlugins(root, ctx, params = {}) {
       .catch(() => {});
   }
 
+  const buildDshDiscover = ({ idPrefix, buttonLabel, onImported } = {}) => {
+    const panelId = `dsh-discover-${idPrefix || "panel"}`;
+    const discoverBox = el("div", {
+      id: panelId,
+      class: "col",
+      hidden: true,
+      style: { gap: "6px", display: "none" },
+    });
+    const hide = (restoreFocus = false) => {
+      discoverBox.hidden = true;
+      discoverBox.style.display = "none";
+      discoverBox.removeAttribute("aria-busy");
+      scanBtn.setAttribute("aria-expanded", "false");
+      if (restoreFocus) scanBtn.focus();
+    };
+    const scanBtn = el("button", {
+      type: "button",
+      class: "btn btn-sm",
+      "aria-expanded": "false",
+      "aria-controls": panelId,
+      onClick: () => load(),
+    }, buttonLabel || "扫描本机 DSH 插件");
+
+    const load = async () => {
+      discoverBox.hidden = false;
+      discoverBox.style.display = "flex";
+      discoverBox.setAttribute("aria-busy", "true");
+      scanBtn.setAttribute("aria-expanded", "true");
+      clear(discoverBox);
+      discoverBox.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px" } },
+        el("span", { class: "muted" }, "正在扫描本机 ~/.dsh/profiles/desktop 插件…"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => hide(true) }, "收起")
+      ));
+      try {
+        const res = await api("GET", "/api/plugins/dsh/discover");
+        discoverBox.removeAttribute("aria-busy");
+        clear(discoverBox);
+        const items = res.items || [];
+        discoverBox.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+          el("span", { class: "muted", role: "status" }, items.length
+            ? `已在 ~/.dsh/profiles/desktop 发现 ${items.length} 个本机 DSH 插件`
+            : "未在本机 ~/.dsh/profiles/desktop 中发现可导入的 DSH 插件。"),
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => hide(true) }, "收起")
+        ));
+        if (!items.length) return;
+        items.forEach((it) => {
+          const badgeClass = it.compat === "full" ? "badge badge-ok" : (it.compat === "partial" ? "badge badge-warn" : "badge badge-err");
+          const badgeText = it.compat === "full" ? "完全兼容" : (it.compat === "partial" ? "部分兼容" : "需完整 DSH");
+          let actionEl;
+          if (it.installed) {
+            actionEl = el("span", { class: "badge" }, "已导入");
+          } else {
+            actionEl = el("button", {
+              type: "button",
+              class: "btn btn-sm btn-primary",
+              disabled: it.compat === "unsupported",
+              "aria-label": `导入 ${it.name}`,
+              onClick: async () => {
+                actionEl.disabled = true;
+                actionEl.textContent = "导入中…";
+                try {
+                  await api("POST", "/api/plugins/install", { source: "link:" + it.dir });
+                  toast(`已导入 DSH 插件「${it.name}」`);
+                  if (onImported) await onImported(it);
+                } catch (e) {
+                  actionEl.disabled = it.compat === "unsupported";
+                  actionEl.textContent = "导入";
+                  toast(e.message);
+                }
+              },
+            }, "导入");
+          }
+          discoverBox.appendChild(el("div", { class: "settings-subcard row", style: { justifyContent: "space-between", padding: "8px 10px", gap: "8px" } },
+            el("div", { class: "col", style: { gap: "2px", minWidth: 0 } },
+              el("div", { class: "row", style: { flexWrap: "wrap" } },
+                el("strong", null, `${it.name} (${it.version || "dev"})`),
+                el("span", { class: "badge" }, it.packageName),
+                el("span", { class: badgeClass, title: (it.compatReasons || []).join("；") }, badgeText)
+              ),
+              el("span", { class: "muted mono", style: { fontSize: "11px" } }, it.dir)
+            ),
+            actionEl
+          ));
+        });
+      } catch (e) {
+        discoverBox.removeAttribute("aria-busy");
+        clear(discoverBox);
+        discoverBox.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px" } },
+          el("span", { class: "muted", role: "status" }, "扫描失败：" + e.message),
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => hide(true) }, "收起")
+        ));
+      }
+    };
+
+    return { button: scanBtn, box: discoverBox, load, hide };
+  };
+
   if (state.tab === "market") {
-    renderMarketTab(stage, root, ctx);
+    renderMarketTab(stage, root, ctx, buildDshDiscover);
   } else if (state.tab === "installed") {
-    renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap, dshStatus);
+    renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap, dshStatus, buildDshDiscover);
   } else if (state.tab === "skills") {
     renderSkillsTab(stage, root, ctx, skillsList);
   } else {
@@ -182,7 +279,7 @@ function makeSkeletonGrid(count = 6) {
   return grid;
 }
 
-function renderMarketTab(stage, root, ctx) {
+function renderMarketTab(stage, root, ctx, buildDshDiscover) {
   const sourcesRow = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } });
   const filterRow = el("div", { class: "pm-filter-bar" });
   const gridHost = el("div", { class: "col", style: { gap: "10px" } });
@@ -551,24 +648,37 @@ function renderMarketTab(stage, root, ctx) {
     }
   };
 
+  const dshDiscover = buildDshDiscover({
+    idPrefix: "market",
+    buttonLabel: "扫描本机 DSH 插件",
+    onImported: async () => {
+      state.lastCheck = null;
+      ctx?.refreshNav?.();
+      await dshDiscover.load();
+      loadMarket(false);
+    },
+  });
+
   stage.appendChild(el("div", { class: "card col", style: { gap: "10px" } },
     el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
       el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
         el("strong", null, "市场源"),
         sourcesRow
       ),
-      el("div", { class: "row", style: { gap: "6px" } },
+      el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+        dshDiscover.button,
         el("button", { type: "button", class: "btn btn-sm", onClick: openAddMarketDialog }, "+ 添加市场源"),
         el("button", { type: "button", class: "btn btn-sm", onClick: () => loadMarket(true) }, "↻ 刷新市场")
       )
     ),
-    filterRow
+    filterRow,
+    dshDiscover.box
   ));
   stage.appendChild(gridHost);
   loadMarket(false);
 }
 
-function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap, dshStatus) {
+function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap, dshStatus, buildDshDiscover) {
   const checkMap = new Map(((state.lastCheck?.plugins) || []).map((x) => [x.id, x]));
   const outdated = community.filter((c) => checkMap.get(c.id)?.status === "update");
 
@@ -675,52 +785,15 @@ function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap
     placeholder: "输入本地目录、Git 仓库（GitHub/Gitee）、npm:包名 或 .tar.gz / .zip 地址…",
   });
 
-  const discoverBox = el("div", { class: "col", style: { gap: "6px", display: "none" } });
-  const loadDiscover = async () => {
-    discoverBox.style.display = "flex";
-    clear(discoverBox);
-    discoverBox.appendChild(el("span", { class: "muted" }, "正在扫描本机 ~/.dsh/profiles/desktop 插件…"));
-    try {
-      const res = await api("GET", "/api/plugins/dsh/discover");
-      clear(discoverBox);
-      const items = res.items || [];
-      if (!items.length) {
-        discoverBox.appendChild(el("span", { class: "muted" }, "未在本机 ~/.dsh/profiles/desktop 中发现可导入的 DSH 插件。"));
-        return;
-      }
-      items.forEach((it) => {
-        const badgeClass = it.compat === "full" ? "badge badge-ok" : (it.compat === "partial" ? "badge badge-warn" : "badge badge-err");
-        const badgeText = it.compat === "full" ? "完全兼容" : (it.compat === "partial" ? "部分兼容" : "需完整 DSH");
-        discoverBox.appendChild(el("div", { class: "settings-subcard row", style: { justifyContent: "space-between", padding: "8px 10px" } },
-          el("div", { class: "col", style: { gap: "2px", minWidth: 0 } },
-            el("div", { class: "row", style: { flexWrap: "wrap" } },
-              el("strong", null, `${it.name} (${it.version || "dev"})`),
-              el("span", { class: "badge" }, it.packageName),
-              el("span", { class: badgeClass, title: (it.compatReasons || []).join("；") }, badgeText)
-            ),
-            el("span", { class: "muted mono", style: { fontSize: "11px" } }, it.dir)
-          ),
-          it.installed
-            ? el("span", { class: "badge" }, "已导入")
-            : el("button", {
-              type: "button",
-              class: "btn btn-sm btn-primary",
-              disabled: it.compat === "unsupported",
-              onClick: async () => {
-                try {
-                  await api("POST", "/api/plugins/install", { source: "link:" + it.dir });
-                  toast(`已导入 DSH 插件「${it.name}」`);
-                  renderPlugins(root, ctx);
-                } catch (e) { toast(e.message); }
-              },
-            }, "导入")
-        ));
-      });
-    } catch (e) {
-      clear(discoverBox);
-      discoverBox.appendChild(el("span", { class: "muted" }, "扫描失败：" + e.message));
-    }
-  };
+  const dshDiscover = buildDshDiscover({
+    idPrefix: "installed",
+    buttonLabel: "扫描本机 DSH 插件",
+    onImported: () => {
+      state.lastCheck = null;
+      ctx?.refreshNav?.();
+      renderPlugins(root, ctx);
+    },
+  });
 
   stage.appendChild(el("div", { class: "card col", style: { gap: "10px" } },
     el("strong", null, "手动安装或导入本地插件"),
@@ -749,9 +822,9 @@ function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap
           } catch (e) { toast(e.message); }
         },
       }, "安装插件"),
-      el("button", { type: "button", class: "btn btn-sm", onClick: loadDiscover }, "扫描本机 DSH 插件")
+      dshDiscover.button
     ),
-    discoverBox
+    dshDiscover.box
   ));
 
   if (!community.length) {
