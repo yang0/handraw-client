@@ -191,18 +191,42 @@ export function installDialogLightDismiss() {
   }
 }
 
-export function showModal(title, bodyNode, footerNodes = []) {
+let _activeModalCleanup = null;
+
+export function showModal(title, bodyNode, footerNodes = [], opts = {}) {
   const dlg = document.getElementById("app-dialog");
+  const headEl = dlg.querySelector(".modal-head");
   const titleEl = document.getElementById("app-dialog-title");
   const bodyEl = document.getElementById("app-dialog-body");
   const footEl = document.getElementById("app-dialog-foot");
-  titleEl.textContent = title;
+  if (_activeModalCleanup) {
+    try { _activeModalCleanup(); } catch {}
+    _activeModalCleanup = null;
+  }
+  dlg.className = "modal" + (opts.className ? " " + opts.className : "");
+  if (headEl) headEl.hidden = Boolean(opts.hideHeader);
+  footEl.hidden = Boolean(opts.hideFooter);
+  bodyEl.classList.toggle("modal-body-flush", Boolean(opts.flush));
+  titleEl.textContent = title || "";
   clear(bodyEl);
   clear(footEl);
   if (bodyNode) bodyEl.appendChild(bodyNode);
   for (const fn of footerNodes) footEl.appendChild(fn);
+  if (typeof opts.onClose === "function") {
+    const fn = opts.onClose;
+    const handler = () => {
+      if (_activeModalCleanup === cleanup) _activeModalCleanup = null;
+      fn();
+    };
+    const cleanup = () => {
+      dlg.removeEventListener("close", handler);
+      fn();
+    };
+    _activeModalCleanup = cleanup;
+    dlg.addEventListener("close", handler, { once: true });
+  }
   dlg.returnValue = "";
-  dlg.showModal();
+  if (!dlg.open) dlg.showModal();
   return dlg;
 }
 

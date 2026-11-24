@@ -423,7 +423,7 @@ export async function openWorkRemixModal(workId, ctx, opts = {}) {
 
     showModal("作品详情与做同款", body, [
       el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
-    ]);
+    ], { className: "modal-remix" });
   };
 
   renderWorkDetail(detail);
@@ -772,7 +772,7 @@ export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
 
     showModal("社区灵感与做同款", body, [
       el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
-    ]);
+    ], { className: "modal-remix" });
   };
 
   renderDetail(detail);
