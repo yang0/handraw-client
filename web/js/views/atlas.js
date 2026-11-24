@@ -1,15 +1,14 @@
-import { api, clear, closeModal, copyText, el, galleryImg, localImg, money, openURL, packImg, showModal, toast, toWebp } from "../api.js";
+import { api, clear, closeModal, copyText, el, galleryImg, localImg, openURL, packImg, showModal, toast, toWebp } from "../api.js";
 import { buildGroupedAIModelSelect } from "./create.js";
 import { masonry } from "../masonry.js";
 
 const BUILTIN_GALLERY_IDS = new Set(["styles", "layouts", "colors", "tones", "characters", "props", "scenes"]);
 
 const state = {
-  tab: "styles", // styles | layouts | colors | tones | assets | <ext-gallery> | compare | dice | find
+  tab: "styles", // styles | layouts | colors | tones | assets | <ext-gallery> | dice
   group: "",
   groups: { layouts: "", colors: "", tones: "", assets: "" },
   q: "",
-  compareIds: [],
   dice: { style: null, layout: null, color: null, lockStyle: false, lockLayout: false, lockColor: false },
 };
 
@@ -90,8 +89,6 @@ export async function renderAtlas(root, ctx, params = {}) {
     ["tones", `影调 (${summary.counts?.tones || 0})`],
     ["assets", "自建图库"],
     ...extraGalleries.map((g) => [g.id, `${g.name || g.id} (${g.count || 0})`]),
-    ["compare", `对比台 (${state.compareIds.length}/4)`],
-    ["find", "以图找风格"],
     ["dice", "画风骰子"],
   ];
   if (!tabs.some(([k]) => k === state.tab)) state.tab = "styles";
@@ -136,8 +133,6 @@ export async function renderAtlas(root, ctx, params = {}) {
     else if (state.tab === "tones") await drawTones(stage, ctx);
     else if (state.tab === "assets") await drawAssets(stage);
     else if (extraById.has(state.tab)) await drawExtensionGallery(stage, extraById.get(state.tab), ctx);
-    else if (state.tab === "compare") await drawCompare(stage, ctx);
-    else if (state.tab === "find") await drawFindByImage(stage, ctx);
     else if (state.tab === "dice") await drawDice(stage, ctx);
   }
 
@@ -191,7 +186,6 @@ async function drawStyles(stage, groups, ctx) {
         grid.appendChild(mineStyleCard(s, ctx, drawStylesWrap));
         return;
       }
-      const inCmp = state.compareIds.includes(s.number);
       const card = el("div", { class: "style-card" },
         el("img", {
           class: "style-thumb",
@@ -209,17 +203,7 @@ async function drawStyles(stage, groups, ctx) {
           el("div", { class: "style-traits" }, s.traits || s.reference)
         ),
         el("div", { class: "style-actions" },
-          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { style: s.number }) }, "用于创作"),
-          el("button", {
-            type: "button",
-            class: "btn btn-sm",
-            onClick: () => {
-              if (inCmp) state.compareIds = state.compareIds.filter((x) => x !== s.number);
-              else if (state.compareIds.length < 4) state.compareIds.push(s.number);
-              else return toast("对比台最多选 4 个画风");
-              drawStylesWrap();
-            },
-          }, inCmp ? "已选对比" : "+对比")
+          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { style: s.number }) }, "用于创作")
         )
       );
       grid.appendChild(card);
@@ -781,146 +765,6 @@ function openEditLayoutDialog(initial = {}, onSaved) {
       },
     }, "保存图型"),
   ]);
-}
-
-async function drawCompare(stage, ctx) {
-  if (state.compareIds.length === 0) {
-    stage.appendChild(el("div", { class: "card muted" }, "对比台为空。请在「画风」列表点击卡片上的「+对比」选择最多 4 个画风并排比较，并可用同一主题一键生成真实对比。"));
-    return;
-  }
-  const styles = [];
-  for (const id of state.compareIds) {
-    const r = await api("GET", `/api/resources/styles/${encodeURIComponent(id)}`).catch(() => null);
-    if (r?.style) styles.push(r.style);
-  }
-  const themeIn = el("input", { class: "input", placeholder: "输入同一主题，一键对比各画风真实出图效果…", style: { flex: "1" } });
-  const modRes = await api("GET", "/api/models").catch(() => ({ defaultModel: "", site: [], providers: [] }));
-  const modelRef = modRes.defaultModel || (modRes.site?.[0]?.model ? "site:" + modRes.site[0].model : (modRes.providers?.[0]?.models?.[0]?.id ? `${modRes.providers[0].id}:${modRes.providers[0].models[0].id}` : ""));
-
-  const genBtn = el("button", {
-    type: "button",
-    class: "btn btn-primary",
-    onClick: async () => {
-      if (!themeIn.value.trim()) return toast("请先输入对比主题");
-      try {
-        const res = await api("POST", "/api/generate", {
-          mode: "compare",
-          title: `画风对比：${themeIn.value.trim()}`,
-          modelRef,
-          items: styles.map((s) => ({ style: s.number, theme: themeIn.value.trim(), ratio: "3:4", mode: "pure-image" })),
-        });
-        if (res.needConfirm) {
-          if (!confirm(`预计花费 ${money(res.totalCents)}（${res.count} 张），是否继续？`)) return;
-          await api("POST", "/api/generate", {
-            mode: "compare", title: `画风对比：${themeIn.value.trim()}`, modelRef, confirmed: true,
-            items: styles.map((s) => ({ style: s.number, theme: themeIn.value.trim(), ratio: "3:4", mode: "pure-image" })),
-          });
-        }
-        toast(`已提交 ${styles.length} 张对比生图任务`);
-        ctx.go("works");
-      } catch (e) { toast(e.message); }
-    },
-  }, `用同一主题生成 ${styles.length} 张对比`);
-
-  stage.appendChild(el("div", { class: "card row", style: { marginBottom: "14px" } }, themeIn, genBtn));
-  const grid = masonry();
-  styles.forEach((s) => {
-    grid.appendChild(el("div", { class: "style-card" },
-      el("img", { class: "style-thumb", src: packImg(s.image), alt: s.generation_name }),
-      el("div", { class: "style-body" },
-        el("div", { class: "style-code" }, s.number),
-        el("div", { class: "style-name" }, s.nameZh || s.generation_name),
-        el("div", { class: "muted", style: { marginTop: "4px" } }, s.traits)
-      ),
-      el("div", { class: "style-actions" },
-        el("button", {
-          type: "button",
-          class: "btn btn-sm",
-          onClick: () => { state.compareIds = state.compareIds.filter((x) => x !== s.number); clear(stage); drawCompare(stage, ctx); },
-        }, "移出")
-      )
-    ));
-  });
-  stage.appendChild(grid);
-}
-
-async function drawFindByImage(stage, ctx) {
-  const modRes = await api("GET", "/api/models").catch(() => ({ siteAI: [], textProviders: [] }));
-  const visionSel = buildGroupedAIModelSelect(modRes, modRes.defaultVisionModel || "", "vision");
-  const fileIn = el("input", { type: "file", accept: "image/*" });
-  const resultBox = el("div", { style: { marginTop: "14px" } });
-  const analyzeFile = async (f) => {
-    const fd = new FormData();
-    fd.append("file", f);
-    clear(resultBox);
-    resultBox.appendChild(el("div", { class: "sketch-loader" }, el("span", null, "正在分析参考图视觉语言并匹配最相近画风…")));
-    try {
-      const up = await api("POST", "/api/mine/upload", fd);
-      const res = await api("POST", "/api/mine/analyze", {
-        images: [up.path],
-        purpose: "find",
-        modelRef: visionSel.value,
-      });
-      clear(resultBox);
-      const srcLabel = res.source === "site"
-        ? "网站官方视觉服务"
-        : (res.model ? `第三方接口 · ${res.model}` : "第三方接口");
-      resultBox.appendChild(el("div", { class: "card", style: { marginBottom: "12px" } },
-        el("div", { class: "row", style: { justifyContent: "space-between", marginBottom: "4px" } },
-          el("strong", null, "提取的视觉语言特征"),
-          el("span", { class: "badge" }, srcLabel)
-        ),
-        el("p", { style: { margin: "6px 0" } }, res.traitsZh || "—"),
-        el("p", { class: "muted", style: { margin: 0 } }, res.traitsEn || ""),
-        el("div", { style: { marginTop: "8px" } },
-          el("button", {
-            type: "button",
-            class: "btn btn-sm btn-primary",
-            onClick: () => openEditStyleDialog({ traits: res.traitsZh, traitsEn: res.traitsEn, image: up.path }, () => { state.tab = "styles"; state.group = MINE; ctx.go("atlas", { tab: "styles" }); }),
-          }, "据此新建我的画风")
-        )
-      ));
-      const grid = masonry();
-      (res.matches || []).forEach((s) => {
-        grid.appendChild(el("div", { class: "style-card" },
-          el("img", { class: "style-thumb", src: packImg(s.image), alt: s.generation_name }),
-          el("div", { class: "style-body" },
-            el("div", { class: "style-code" }, s.number),
-            el("div", { class: "style-name" }, s.nameZh || s.generation_name),
-            el("div", { class: "style-traits" }, s.traits)
-          ),
-          el("div", { class: "style-actions" },
-            el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { style: s.number }) }, "用于创作")
-          )
-        ));
-      });
-      resultBox.appendChild(grid);
-    } catch (e) {
-      clear(resultBox);
-      resultBox.appendChild(el("div", { class: "card badge-err" }, e.message));
-    }
-  };
-  fileIn.addEventListener("change", () => { if (fileIn.files?.[0]) analyzeFile(fileIn.files[0]); });
-
-  const drop = el("div", { class: "card", style: { textAlign: "center", padding: "24px", borderStyle: "dashed" } },
-    el("p", { style: { marginTop: 0 } }, "拖入任意参考图片，或点击选择文件：提取纯视觉语言并找出最接近的 5 种画风"),
-    el("div", { class: "row", style: { justifyContent: "center", flexWrap: "wrap", gap: "10px", marginBottom: "8px" } },
-      fileIn,
-      el("label", { class: "row", style: { gap: "6px", fontSize: "12.5px" } },
-        el("span", { class: "muted" }, "视觉解析模型"),
-        visionSel
-      )
-    ),
-    el("div", { class: "muted", style: { fontSize: "12px" } }, "支持直接使用网站线上接口，或在「设置 → 模型与接口配置」添加第三方中转站")
-  );
-  drop.addEventListener("dragover", (e) => e.preventDefault());
-  drop.addEventListener("drop", (e) => {
-    e.preventDefault();
-    const f = e.dataTransfer?.files?.[0];
-    if (f) analyzeFile(f);
-  });
-  stage.appendChild(drop);
-  stage.appendChild(resultBox);
 }
 
 async function drawDice(stage, ctx) {
