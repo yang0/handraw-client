@@ -16,7 +16,7 @@ const viewState = {
   q: "",
   source: "all",
   tag: "",
-  plazaPricing: "all", // all | free | paid
+  plazaFilter: "all:latest", // all:latest | all:popular | unlocked:latest | mine:latest
   plazaQ: "",
 };
 
@@ -674,15 +674,16 @@ async function renderPlazaTab(stage, ctx) {
   const drawPricePills = () => {
     clear(pricePills);
     [
-      ["all", "全部灵感"],
-      ["free", "免费公开"],
-      ["paid", "🔒 积分解锁"],
+      ["all:latest", "最新上架"],
+      ["all:popular", "热门解锁"],
+      ["unlocked:latest", "我已解锁"],
+      ["mine:latest", "我发布的"],
     ].forEach(([val, lbl]) => {
       pricePills.appendChild(el("button", {
         type: "button",
-        class: "pill-btn" + (viewState.plazaPricing === val ? " pill-accent" : ""),
+        class: "pill-btn" + (viewState.plazaFilter === val ? " pill-accent" : ""),
         onClick: () => {
-          viewState.plazaPricing = val;
+          viewState.plazaFilter = val;
           drawPricePills();
           loadPlaza();
         },
@@ -703,13 +704,13 @@ async function renderPlazaTab(stage, ctx) {
   stage.appendChild(el("div", { class: "card row insp-plaza-banner", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "10px" } },
     el("div", { class: "col", style: { gap: "2px" } },
       el("strong", null, "社区灵感广场 · 看图选灵感，积分解锁完整提示词并一键做同款"),
-      el("span", { class: "muted" }, "积分可通过分享私藏提示词或被做同款免费赚取，仅用于解锁社区提示词、付费画风与收费贴。")
+      el("span", { class: "muted" }, "提示词统一采用 1~20 积分解锁（作者享 80% 积分分成），积分仅用于解锁收费提示词、付费画风与收费贴，不兑换生图额度。")
     ),
     el("button", {
       type: "button",
       class: "btn btn-sm btn-primary",
       onClick: () => ctx.go("inspirations", { tab: "vault" }),
-    }, "去分享我的灵感赚积分 →")
+    }, "去分享我的提示词赚积分 →")
   ));
   stage.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "10px" } }, searchIn, pricePills));
   stage.appendChild(gridWrap);
@@ -718,9 +719,10 @@ async function renderPlazaTab(stage, ctx) {
     clear(gridWrap);
     gridWrap.appendChild(el("p", { class: "muted" }, "正在加载社区灵感广场…"));
     try {
-      const qs = new URLSearchParams({ limit: "36" });
+      const [scope, sort] = String(viewState.plazaFilter || "all:latest").split(":");
+      const qs = new URLSearchParams({ limit: "36", sort: sort || "latest" });
       if (viewState.plazaQ) qs.set("q", viewState.plazaQ);
-      if (viewState.plazaPricing !== "all") qs.set("pricing", viewState.plazaPricing);
+      if (scope && scope !== "all") qs.set("pricing", scope);
       const res = await api("GET", `/api/site/inspirations?${qs.toString()}`);
       const siteBase = (res.siteBase || "https://handraw-style.com").replace(/\/+$/, "");
       const items = res.items || [];
@@ -728,7 +730,7 @@ async function renderPlazaTab(stage, ctx) {
       if (!items.length) {
         gridWrap.appendChild(el("div", { class: "card col insp-empty" },
           el("h3", { style: { margin: 0 } }, "广场正在等待第一批灵感分享者！"),
-          el("p", { class: "muted", style: { margin: "4px 0 8px" } }, "成为首批分享者：在「我的灵感库」分享 1 张好图和提示词，立得 +5 积分，还能设置 1~20 积分解锁赚取 80% 分成。"),
+          el("p", { class: "muted", style: { margin: "4px 0 8px" } }, "成为首批分享者：在「我的灵感库」分享 1 张好图和提示词，设置 1~20 积分解锁即可赚取 80% 创作者分成。"),
           el("button", {
             type: "button",
             class: "btn btn-primary",
@@ -750,10 +752,8 @@ async function renderPlazaTab(stage, ctx) {
           imgUrl ? el("img", { class: "style-thumb", src: remoteThumb(imgUrl, 480), alt: it.title || "", loading: "lazy" }) : null,
           el("div", { class: "style-body" },
             el("div", { class: "row", style: { justifyContent: "space-between", gap: "4px", flexWrap: "wrap" } },
-              price > 0
-                ? el("span", { class: "badge " + (locked ? "badge-accent" : "badge-ok") }, locked ? `🔒 ${price} 积分解锁` : `🔓 已解锁 (${price} 积分)`)
-                : el("span", { class: "badge badge-ok" }, "免费做同款"),
-              el("span", { class: "muted", style: { fontSize: "11.5px" } }, price > 0 ? `${it.unlockCount || 0} 解锁` : `${it.forkCount || 0} 同款`)
+              el("span", { class: "badge " + (locked ? "badge-accent" : "badge-ok") }, locked ? `🔒 ${price} 积分解锁` : `🔓 已解锁 (${price} 积分)`),
+              el("span", { class: "muted", style: { fontSize: "11.5px" } }, `${it.unlockCount || 0} 解锁`)
             ),
             el("div", { class: "style-name", title: it.title }, it.title || "社区灵感"),
             it.promptPreview ? el("p", { class: "style-traits insp-excerpt" }, it.promptPreview) : null,
@@ -764,8 +764,23 @@ async function renderPlazaTab(stage, ctx) {
       gridWrap.appendChild(masonry({ class: "insp-grid" }, cards));
     } catch (e) {
       clear(gridWrap);
+      const msg = e?.message || "网络异常";
+      if (/灰度|内测|feature_not_enabled|403/i.test(msg)) {
+        gridWrap.appendChild(el("div", { class: "card col insp-empty" },
+          el("h3", { style: { margin: 0 } }, "🚦 社区灵感广场正在灰度内测中"),
+          el("p", { class: "muted", style: { margin: "4px 0 8px", maxWidth: "500px" } },
+            "当前社区广场按「管理员/运营 → 版主 → 指定内测网友 → 逐步放量」的节奏开放。你的「我的灵感库」（本地收集、Chrome 捕手、AI 整理与做同款）不受影响，可照常使用。"
+          ),
+          el("button", {
+            type: "button",
+            class: "btn btn-primary",
+            onClick: () => ctx.go("inspirations", { tab: "vault" }),
+          }, "返回我的本地灵感库")
+        ));
+        return;
+      }
       gridWrap.appendChild(el("div", { class: "card row muted" },
-        `加载社区灵感广场失败：${e?.message || "网络异常"}`,
+        `加载社区灵感广场失败：${msg}`,
         el("button", { type: "button", class: "btn btn-sm", onClick: loadPlaza }, "重试")
       ));
     }
@@ -798,7 +813,7 @@ async function renderEarningsTab(stage, ctx, goVault) {
     stage.appendChild(el("div", { class: "card row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "10px" } },
       el("div", { class: "col", style: { gap: "3px" } },
         el("strong", null, "积分生态说明"),
-        el("span", { class: "muted" }, "分享免费灵感 +5 积分 · 被做同款 +2 积分/人 · 收费提示词解锁享 80% 分成。积分专门用于解锁社区付费画风、收费贴和灵感提示词，不兑换生图额度。")
+        el("span", { class: "muted" }, "灵感提示词统一采用 1~20 积分解锁（作者享 80% 分成），社区公开作品被做同款享 +2 积分/人。积分仅用于解锁收费提示词、付费画风与社区付费贴，不兑换生图额度。")
       ),
       el("button", { type: "button", class: "btn btn-primary btn-sm", onClick: goVault }, "去灵感库继续分享 →")
     ));

@@ -34,8 +34,7 @@ function resolveSlotPrompt(basePrompt, slots, values) {
 
 export function openShareInspirationModal(item, ctx, onDone) {
   if (!item?.id) return;
-  let pricingMode = item.publishedPrice > 0 ? "paid" : "free";
-  let priceVal = item.publishedPrice > 0 ? item.publishedPrice : 5;
+  let priceVal = item.publishedPrice >= 1 && item.publishedPrice <= 20 ? item.publishedPrice : 5;
 
   const titleIn = el("input", { class: "input", value: item.title || "", placeholder: "给这张灵感起个一眼看懂的中文标题" });
   const promptIn = el("textarea", {
@@ -63,43 +62,44 @@ export function openShareInspirationModal(item, ctx, onDone) {
     style: { width: "84px" },
   });
   const creatorCutHint = el("span", { class: "muted" }, "");
-  const updateCutHint = () => {
-    const p = Math.max(1, Math.min(20, Math.round(Number(priceInput.value) || 5)));
+  const presetBtns = [];
+  const updateCutHint = (val) => {
+    const p = Math.max(1, Math.min(20, Math.round(Number(val ?? priceInput.value) || 5)));
     priceVal = p;
-    const cut = Math.max(1, Math.round(p * 0.8));
-    creatorCutHint.textContent = `每被解锁 1 次，你可得 +${cut} 积分（80% 创作者分成）`;
+    priceInput.value = String(p);
+    const cut = Math.max(1, Math.floor((p * 80) / 100));
+    creatorCutHint.textContent = `每被解锁 1 次，你自动获得 +${cut} 积分（80% 创作者分成）`;
+    presetBtns.forEach(({ n, btn }) => {
+      btn.classList.toggle("pill-accent", n === p);
+    });
   };
-  priceInput.addEventListener("input", updateCutHint);
-  updateCutHint();
+  priceInput.addEventListener("input", () => updateCutHint(priceInput.value));
 
-  const freeCard = el("button", { type: "button", class: "insp-price-card" },
-    el("div", { class: "row", style: { justifyContent: "space-between", width: "100%" } },
-      el("strong", null, "🎁 免费公开赚积分"),
-      el("span", { class: "badge badge-ok" }, "立得 +5 积分")
-    ),
-    el("p", { class: "muted", style: { margin: "4px 0 0", textAlign: "left" } }, "所有人可免费看提示词与做同款，每多 1 位用户做同款再奖 +2 积分。")
-  );
-  const paidCard = el("button", { type: "button", class: "insp-price-card" },
-    el("div", { class: "row", style: { justifyContent: "space-between", width: "100%" } },
-      el("strong", null, "🔒 积分解锁提示词"),
-      el("span", { class: "badge badge-accent" }, "作者拿 80% 分成")
-    ),
-    el("p", { class: "muted", style: { margin: "4px 0 0", textAlign: "left" } }, "效果图免费展示，完整提示词与模板变量需消耗积分后解锁。")
-  );
-  const paidRow = el("div", { class: "row insp-price-input-row" },
-    el("span", null, "解锁所需积分（1~20）："),
-    priceInput,
-    creatorCutHint
-  );
+  const presetsRow = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } });
+  [2, 5, 8, 10, 15, 20].forEach((n) => {
+    const btn = el("button", {
+      type: "button",
+      class: "pill-btn" + (n === priceVal ? " pill-accent" : ""),
+      onClick: () => updateCutHint(n),
+    }, n === 5 ? `${n} 积分（推荐）` : `${n} 积分`);
+    presetBtns.push({ n, btn });
+    presetsRow.appendChild(btn);
+  });
+  updateCutHint(priceVal);
 
-  const syncPricingUI = () => {
-    freeCard.classList.toggle("is-active", pricingMode === "free");
-    paidCard.classList.toggle("is-active", pricingMode === "paid");
-    paidRow.classList.toggle("hidden", pricingMode !== "paid");
-  };
-  freeCard.addEventListener("click", () => { pricingMode = "free"; syncPricingUI(); });
-  paidCard.addEventListener("click", () => { pricingMode = "paid"; syncPricingUI(); });
-  syncPricingUI();
+  const pricingBox = el("div", { class: "card col", style: { gap: "8px", padding: "12px", background: "var(--accent-soft)", borderColor: "color-mix(in srgb, var(--accent) 32%, var(--line))" } },
+    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "6px" } },
+      el("strong", null, "🔒 积分解锁定价（必填 1~20 积分 · 不支持免费）"),
+      el("span", { class: "badge badge-accent" }, "作者享 80% 分成")
+    ),
+    presetsRow,
+    el("div", { class: "row", style: { gap: "10px", flexWrap: "wrap" } },
+      el("span", { style: { fontSize: "12.5px" } }, "自定义积分（1~20）："),
+      priceInput,
+      creatorCutHint
+    ),
+    el("span", { class: "muted", style: { fontSize: "11.5px" } }, "效果图免费展示，完整提示词与可替换变量需消耗积分后解锁。积分仅用于解锁收费提示词、付费画风与社区付费贴，不可兑换生图额度。")
+  );
 
   const previewImgSrc = item.imagePath ? localImg(item.imagePath) : (item.imageUrl ? remoteThumb(item.imageUrl, 360) : "");
   const body = el("div", { class: "col", style: { gap: "12px" } },
@@ -107,13 +107,12 @@ export function openShareInspirationModal(item, ctx, onDone) {
       el("img", { src: previewImgSrc, alt: "", style: { width: "76px", height: "76px", objectFit: "cover", borderRadius: "8px", border: "1px solid var(--line)" } }),
       el("div", { class: "col", style: { gap: "4px", flex: "1" } },
         el("strong", null, item.title || "准备分享灵感"),
-        el("span", { class: "muted" }, "不限图片来源（支持自己创作或从 X / 网页收集整理的优质提示词），系统按内容指纹保护首发者。积分可用于解锁社区收费画风、付费贴与灵感提示词。")
+        el("span", { class: "muted" }, "不限图片来源（支持自己创作或从 X / 网页收集整理的优质提示词），系统按内容指纹保护首位分享者的解锁收益权。")
       )
     ) : null,
     el("div", { class: "field" }, el("label", null, "灵感标题"), titleIn),
     el("div", { class: "field" }, el("label", null, "完整提示词"), promptIn),
-    el("div", { class: "insp-price-grid" }, freeCard, paidCard),
-    paidRow,
+    pricingBox,
     el("div", { class: "row", style: { gap: "10px" } },
       el("div", { class: "field", style: { flex: "1" } }, el("label", null, "标签"), tagsIn),
       el("div", { class: "field", style: { flex: "1" } }, el("label", null, "一句话心得（可选）"), notesIn)
@@ -130,10 +129,10 @@ export function openShareInspirationModal(item, ctx, onDone) {
         promptIn.focus();
         return;
       }
-      const price = pricingMode === "paid" ? Math.max(1, Math.min(20, Math.round(Number(priceInput.value) || 5))) : 0;
+      const price = Math.max(1, Math.min(20, Math.round(Number(priceInput.value) || 5)));
       const tags = tagsIn.value.split(/[,，、\s]+/).map((s) => s.replace(/^#/, "").trim()).filter(Boolean);
       submitBtn.disabled = true;
-      submitBtn.textContent = "正在发布…";
+      submitBtn.textContent = "正在上架…";
       try {
         const res = await api("POST", `/api/inspirations/${encodeURIComponent(item.id)}/publish`, {
           title: titleIn.value.trim(),
@@ -145,15 +144,13 @@ export function openShareInspirationModal(item, ctx, onDone) {
         ctx.refreshTopbar?.();
         onDone?.(res);
 
-        // Render celebratory Points Receipt Card in place
-        const rewardPts = Number(res.reward?.awarded || 0);
         const shareUrl = res.fullUrl || res.url || "";
+        const cut = Math.max(1, Math.floor((price * 80) / 100));
         const receipt = el("div", { class: "col insp-receipt" },
-          el("div", { class: "insp-receipt-badge" }, price > 0 ? `🔒 已上架积分解锁 · ${price} 积分/次` : (rewardPts > 0 ? `🎉 分享成功 · +${rewardPts} 积分已到账` : "🎉 已分享到社区灵感广场")),
+          el("div", { class: "insp-receipt-badge" }, `🔒 已上架积分解锁 · ${price} 积分/次`),
           el("h3", { style: { margin: "4px 0 0" } }, titleIn.value.trim() || item.title),
-          el("p", { class: "muted", style: { margin: 0 } }, price > 0
-            ? `效果图已公开展示，其他用户每消耗 ${price} 积分解锁一次，你将自动获得 ${Math.max(1, Math.round(price * 0.8))} 积分创作者分成！`
-            : "现在其他创作者可以直接照着你的提示词一键做同款，每有人有效做同款你将再赚 +2 积分！"
+          el("p", { class: "muted", style: { margin: 0 } },
+            `效果图已公开展示，其他用户每消耗 ${price} 积分解锁一次，你将自动获得 +${cut} 积分创作者分成（80%）！`
           ),
           shareUrl ? el("div", { class: "insp-receipt-link mono" }, shareUrl) : null
         );
@@ -179,7 +176,7 @@ export function openShareInspirationModal(item, ctx, onDone) {
         ].filter(Boolean));
       } catch (e) {
         submitBtn.disabled = false;
-        submitBtn.textContent = "立即分享到社区";
+        submitBtn.textContent = "立即上架积分解锁";
         const msg = e?.message || "发布失败";
         if (/登录|login|401/i.test(msg)) {
           toast("请先在「设置 → 账号」登录手绘风账号后再分享赚积分");
@@ -188,7 +185,7 @@ export function openShareInspirationModal(item, ctx, onDone) {
         }
       }
     },
-  }, "立即分享到社区");
+  }, "立即上架积分解锁");
 
   showModal("分享到社区赚积分", body, [
     el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
@@ -424,7 +421,7 @@ export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
             if (/积分不足|insufficient/i.test(msg)) {
               unlockHookArea.appendChild(el("div", { class: "insp-hook-banner col" },
                 el("strong", null, "当前积分不足以解锁该提示词"),
-                el("span", { class: "muted" }, "去「灵感库」分享 1 张你的私藏好图即可立赚 +5 积分（无需充钱）！"),
+                el("span", { class: "muted" }, "去「灵感库」分享你的私藏好图与提示词（设置 1~20 积分解锁），每次被解锁自动赚取 80% 积分分成！"),
                 el("button", {
                   type: "button",
                   class: "btn btn-sm btn-primary",

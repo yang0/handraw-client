@@ -725,8 +725,8 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
-	if body.Price < 0 || body.Price > 20 {
-		return nil, bad("积分解锁价格需为 0（免费）或 1~20 之间的整数")
+	if body.Price < 1 || body.Price > 20 {
+		return nil, bad("灵感提示词须设置 1~20 积分解锁，暂不支持免费分享")
 	}
 
 	title := firstStr(strings.TrimSpace(body.Title), cur.Title)

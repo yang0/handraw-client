@@ -198,7 +198,15 @@ func TestInspirationsCRUDClipOrganizeAndPublish(t *testing.T) {
 		t.Fatalf("unexpected organized item: %+v", orgResp.Item)
 	}
 
-	// 3. Publish to community with price=5 (paid unlock)
+	// 3. Publish with price=0 must be rejected (paid-only prompt sharing #76)
+	freePubRec := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/"+inspID+"/publish", map[string]any{
+		"price": 0,
+	})
+	if freePubRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when publishing free prompt, got %d %s", freePubRec.Code, freePubRec.Body.String())
+	}
+
+	// Publish to community with price=5 (paid unlock)
 	pubRec := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/"+inspID+"/publish", map[string]any{
 		"price": 5,
 		"notes": "适合做小红书封面",
