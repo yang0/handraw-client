@@ -4139,15 +4139,12 @@ dialog::backdrop {
   font-variant-numeric: tabular-nums;
 }
 
-/* Single-row clean category strip */
+/* Custom folder strip — fits on 1 row on wide screens and wraps cleanly when many folders exist */
 .insp-category-bar {
   display: flex;
   align-items: center;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 6px;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
   padding: 2px 1px;
 }
 

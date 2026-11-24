@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -171,9 +172,50 @@ func cleanInspirationFolderName(raw string) (string, error) {
 	return name, nil
 }
 
+func defaultInspirationFolders() []string {
+	out := make([]string, 0, len(inspirationCategoryRules))
+	for _, r := range inspirationCategoryRules {
+		if clean, err := cleanInspirationFolderName(r.Name); err == nil {
+			out = append(out, clean)
+		}
+	}
+	return out
+}
+
+func (s *Server) backfillDefaultFoldersOnce() {
+	docs, err := s.DB.ListDocs("inspiration", false)
+	if err != nil {
+		return
+	}
+	for _, d := range docs {
+		var data inspirationData
+		if err := json.Unmarshal(d.Data, &data); err != nil {
+			continue
+		}
+		if strings.TrimSpace(data.Folder) != "" {
+			continue
+		}
+		cat := inferInspirationCategory(data)
+		if cat == "" || cat == "其他灵感" {
+			continue
+		}
+		data.Folder = cat
+		_, _ = s.saveInspiration(d.ID, data)
+	}
+}
+
 func (s *Server) loadSavedInspirationFolders() []string {
 	var raw []string
-	if err := s.DB.GetKV(inspirationFoldersKVKey, &raw); err != nil {
+	err := s.DB.GetKV(inspirationFoldersKVKey, &raw)
+	if errors.Is(err, store.ErrNotFound) {
+		defaults := defaultInspirationFolders()
+		if saved, sErr := s.saveInspirationFolders(defaults); sErr == nil {
+			s.backfillDefaultFoldersOnce()
+			return saved
+		}
+		return defaults
+	}
+	if err != nil {
 		return nil
 	}
 	out := make([]string, 0, len(raw))
@@ -387,6 +429,8 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 			}
 		}()
 	}
+	// Ensure default editable folders are initialized (and legacy ungrouped items backfilled once) before listing.
+	savedFolders := s.loadSavedInspirationFolders()
 	docs, err := s.DB.ListDocs("inspiration", false)
 	if err != nil {
 		return nil, err
@@ -511,7 +555,6 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 		Name  string `json:"name"`
 		Count int    `json:"count"`
 	}
-	savedFolders := s.loadSavedInspirationFolders()
 	folderSeen := map[string]bool{}
 	folderItems := make([]folderCount, 0, len(savedFolders)+len(folderCounts))
 	folders := make([]string, 0, len(savedFolders)+len(folderCounts))

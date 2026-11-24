@@ -561,6 +561,21 @@ func TestInspirationCustomFoldersBatchMoveAndMultiTagFilter(t *testing.T) {
 	h := srv.Handler()
 	_ = secrets.Set(secrets.SiteToken, "hwt_folders_test")
 
+	// 0. Fresh DB auto-seeds the 7 default editable folders and lets users edit/delete them freely.
+	initRec := doReq(t, h, srv.Token, http.MethodGet, "/api/inspirations", nil)
+	var initResp struct {
+		Folders []string `json:"folders"`
+	}
+	_ = json.Unmarshal(initRec.Body.Bytes(), &initResp)
+	if len(initResp.Folders) != len(inspirationCategoryRules) {
+		t.Fatalf("expected %d default editable folders on fresh DB, got %v", len(inspirationCategoryRules), initResp.Folders)
+	}
+	// Delete one default folder ("创意脑洞") and verify it stays deleted (never re-seeded).
+	delDef := doReq(t, h, srv.Token, http.MethodDelete, "/api/inspirations/folders?name="+url.QueryEscape("创意脑洞"), nil)
+	if delDef.Code != http.StatusOK {
+		t.Fatalf("delete default folder failed: %d %s", delDef.Code, delDef.Body.String())
+	}
+
 	// 1. Create custom folders + verify reserved/duplicate names are rejected
 	rec := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/folders", map[string]any{"name": "茶饮客户"})
 	if rec.Code != http.StatusOK {
@@ -593,7 +608,7 @@ func TestInspirationCustomFoldersBatchMoveAndMultiTagFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 3. List all: verify empty folder 空分组测试 persists in folderItems with count=0, and ungroupedCount=1
+	// 3. List all: verify 6 remaining default folders + 2 custom folders (including 0-count 空分组测试) & deleted default stays gone
 	listRec := doReq(t, h, srv.Token, http.MethodGet, "/api/inspirations", nil)
 	var listResp struct {
 		TotalCount     int `json:"totalCount"`
@@ -608,8 +623,22 @@ func TestInspirationCustomFoldersBatchMoveAndMultiTagFilter(t *testing.T) {
 	if listResp.TotalCount != 3 || listResp.UngroupedCount != 1 {
 		t.Fatalf("unexpected counts: total=%d ungrouped=%d", listResp.TotalCount, listResp.UngroupedCount)
 	}
-	if len(listResp.FolderItems) != 2 || listResp.FolderItems[0].Name != "茶饮客户" || listResp.FolderItems[0].Count != 2 || listResp.FolderItems[1].Name != "空分组测试" || listResp.FolderItems[1].Count != 0 {
-		t.Fatalf("unexpected folderItems: %+v", listResp.FolderItems)
+	wantFolderTotal := len(inspirationCategoryRules) - 1 + 2
+	if len(listResp.FolderItems) != wantFolderTotal {
+		t.Fatalf("expected %d folderItems, got %+v", wantFolderTotal, listResp.FolderItems)
+	}
+	byName := map[string]int{}
+	for _, fi := range listResp.FolderItems {
+		byName[fi.Name] = fi.Count
+	}
+	if _, stillExists := byName["创意脑洞"]; stillExists {
+		t.Fatalf("deleted default folder 创意脑洞 must not be re-seeded: %+v", listResp.FolderItems)
+	}
+	if byName["茶饮客户"] != 2 {
+		t.Fatalf("expected 茶饮客户 count=2, got %+v", listResp.FolderItems)
+	}
+	if c, ok := byName["空分组测试"]; !ok || c != 0 {
+		t.Fatalf("expected 空分组测试 present with count=0, got %+v", listResp.FolderItems)
 	}
 
 	// 4. Filter by folder + multi-tag intersection (tags=水彩,封面 -> only it1)
@@ -677,5 +706,42 @@ func TestInspirationCustomFoldersBatchMoveAndMultiTagFilter(t *testing.T) {
 	got2, err = srv.readInspiration(it2.ID)
 	if err != nil || got2.Folder != "" {
 		t.Fatalf("expected it2 preserved and moved to ungrouped, err=%v folder=%q", err, got2.Folder)
+	}
+
+	// 10. Deleting ALL remaining folders persists [] (must NOT re-seed defaults on next list).
+	for _, f := range srv.loadSavedInspirationFolders() {
+		dRec := doReq(t, h, srv.Token, http.MethodDelete, "/api/inspirations/folders?name="+url.QueryEscape(f), nil)
+		if dRec.Code != http.StatusOK {
+			t.Fatalf("delete folder %q failed: %d", f, dRec.Code)
+		}
+	}
+	emptyListRec := doReq(t, h, srv.Token, http.MethodGet, "/api/inspirations", nil)
+	var emptyListResp struct {
+		Folders []string `json:"folders"`
+	}
+	_ = json.Unmarshal(emptyListRec.Body.Bytes(), &emptyListResp)
+	if len(emptyListResp.Folders) != 0 {
+		t.Fatalf("expected 0 folders after deleting all, got %v", emptyListResp.Folders)
+	}
+
+	// 11. Fresh server with pre-existing ungrouped item backfills matching default folder ONCE on first init.
+	srv2, cancel2 := setupTestServer(t, mockSite.URL)
+	defer cancel2()
+	legacyItem, err := srv2.saveInspiration("", inspirationData{
+		Title:  "手绘水彩猫咪绘本",
+		Tags:   []string{"水彩", "绘本"},
+		Prompt: "Watercolor cat storybook",
+		Source: "local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bfRec := doReq(t, srv2.Handler(), srv2.Token, http.MethodGet, "/api/inspirations", nil)
+	if bfRec.Code != http.StatusOK {
+		t.Fatalf("backfill list failed: %d", bfRec.Code)
+	}
+	gotLegacy, err := srv2.readInspiration(legacyItem.ID)
+	if err != nil || gotLegacy.Folder != "插画绘本" {
+		t.Fatalf("expected legacy ungrouped item backfilled to 插画绘本, got folder=%q err=%v", gotLegacy.Folder, err)
 	}
 }

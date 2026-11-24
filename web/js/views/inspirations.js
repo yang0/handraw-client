@@ -13,7 +13,7 @@ const SOURCE_LABELS = {
 };
 
 const UNGROUPED_FOLDER = "__ungrouped__";
-const FOLDER_PRESET_SUGGESTIONS = ["小红书封面", "公众号配图", "海报排版", "插画参考", "角色设定", "场景氛围"];
+const FOLDER_PRESET_SUGGESTIONS = ["小红书封面", "公众号配图", "电商主图", "品牌提案", "待出图参考", "配色灵感"];
 
 const viewState = {
   tab: "vault", // vault | plaza | earnings
@@ -2044,7 +2044,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
           },
         },
           el("span", null, label),
-          typeof count === "number" ? el("span", { class: "insp-cat-count" }, String(count)) : null
+          typeof count === "number" && count > 0 ? el("span", { class: "insp-cat-count" }, String(count)) : null
         );
       };
 
