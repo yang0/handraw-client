@@ -5117,6 +5117,49 @@ dialog.modal-asset-detail {
   flex: 0 0 auto;
   white-space: nowrap;
 }
+/* Works directory picker & migration modal (#108) */
+.modal-works-dir-migrate {
+  width: min(560px, 92vw);
+}
+.works-dir-summary-box {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+}
+.works-dir-path-code {
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+  word-break: break-all;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.works-dir-warn {
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #8a3d10;
+  background: color-mix(in srgb, #d97706 11%, var(--paper));
+  border: 1px solid color-mix(in srgb, #d97706 32%, var(--line));
+}
+.works-dir-hint {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.works-dir-explain {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+.works-dir-explain strong {
+  color: var(--ink);
+}
 @media (prefers-reduced-motion: reduce) {
   .pose-angle-chip,
   .pose-film-item {

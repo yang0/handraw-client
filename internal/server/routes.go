@@ -169,6 +169,8 @@ func (s *Server) routes() {
 	// settings, providers, plugins, updates
 	m.HandleFunc("GET /api/settings", s.h(s.getSettings))
 	m.HandleFunc("PATCH /api/settings", s.h(s.patchSettings))
+	m.HandleFunc("POST /api/settings/works-dir/inspect", s.h(s.inspectWorksDir))
+	m.HandleFunc("POST /api/settings/works-dir/switch", s.h(s.switchWorksDir))
 	m.HandleFunc("POST /api/providers", s.h(s.providerPut))
 	m.HandleFunc("DELETE /api/providers/{id}", s.h(s.providerDelete))
 	m.HandleFunc("POST /api/providers/{id}/models", s.h(s.providerModels))

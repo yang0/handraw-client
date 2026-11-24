@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -72,10 +71,20 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 			st.SiteBase = strings.TrimRight(strings.TrimSpace(*body.SiteBase), "/")
 		}
 		if body.WorksDir != nil && strings.TrimSpace(*body.WorksDir) != "" {
-			if err := os.MkdirAll(*body.WorksDir, 0o755); err != nil {
+			nextDir, rErr := resolveDirPath(*body.WorksDir)
+			if rErr != nil {
+				return fmt.Errorf("作品目录无效：%w", rErr)
+			}
+			if err := ensureDirWritable(nextDir); err != nil {
 				return fmt.Errorf("作品目录不可写：%w", err)
 			}
-			st.WorksDir = *body.WorksDir
+			if st.WorksDir != "" && !sameCleanPath(st.WorksDir, nextDir) {
+				if scanDirUsage(st.WorksDir).HasContent {
+					st.LegacyWorksDirs = appendUniqueDir(st.LegacyWorksDirs, st.WorksDir)
+				}
+			}
+			st.WorksDir = nextDir
+			st.LegacyWorksDirs = removeDirFromList(st.LegacyWorksDirs, nextDir)
 		}
 		if body.Theme != nil {
 			st.Theme = *body.Theme

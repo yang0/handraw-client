@@ -105,6 +105,7 @@ func DefaultPluginMarkets() []PluginMarketSource {
 type Settings struct {
 	SiteBase           string               `json:"siteBase"`
 	WorksDir           string               `json:"worksDir"`
+	LegacyWorksDirs    []string             `json:"legacyWorksDirs,omitempty"`
 	ArticleVaultDir    string               `json:"articleVaultDir,omitempty"`
 	ArticleVaultDirs   []string             `json:"articleVaultDirs,omitempty"`
 	Theme              string               `json:"theme"` // light | dark | system

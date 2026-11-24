@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -534,4 +536,196 @@ func (d *DB) Stats() map[string]int {
 	d.sql.QueryRow(`SELECT COALESCE(SUM(cost_cents),0) FROM runs WHERE deleted_at = ''`).Scan(&n)
 	out["costCents"] = n
 	return out
+}
+
+// PathRewriteStats reports how many database rows were updated when migrating
+// a storage directory from one location to another.
+type PathRewriteStats struct {
+	Runs   int `json:"runs"`
+	Images int `json:"images"`
+	Docs   int `json:"docs"`
+}
+
+// RewritePathPrefix rewrites all stored file paths under oldRoot to point to
+// newRoot across runs, images, and docs JSON payloads inside one transaction.
+func (d *DB) RewritePathPrefix(oldRoot, newRoot string) (PathRewriteStats, error) {
+	var stats PathRewriteStats
+	oldClean := filepath.Clean(strings.TrimSpace(oldRoot))
+	newClean := filepath.Clean(strings.TrimSpace(newRoot))
+	if oldClean == "" || newClean == "" || samePathRoot(oldClean, newClean) {
+		return stats, nil
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return stats, err
+	}
+	defer tx.Rollback()
+
+	// 1. Update runs.dir
+	type idDir struct {
+		id, dir string
+	}
+	var runUpdates []idDir
+	if rows, err := tx.Query(`SELECT id, dir FROM runs WHERE dir != ''`); err != nil {
+		return stats, err
+	} else {
+		for rows.Next() {
+			var id, dir string
+			if err := rows.Scan(&id, &dir); err != nil {
+				rows.Close()
+				return stats, err
+			}
+			if next, changed := RewritePath(dir, oldClean, newClean); changed {
+				runUpdates = append(runUpdates, idDir{id: id, dir: next})
+			}
+		}
+		rows.Close()
+	}
+	for _, u := range runUpdates {
+		if _, err := tx.Exec(`UPDATE runs SET dir = ? WHERE id = ?`, u.dir, u.id); err != nil {
+			return stats, err
+		}
+		stats.Runs++
+	}
+
+	// 2. Update images.path and images.thumb
+	type imgUpd struct {
+		id, path, thumb string
+	}
+	var imgUpdates []imgUpd
+	if rows, err := tx.Query(`SELECT id, path, thumb FROM images WHERE path != '' OR thumb != ''`); err != nil {
+		return stats, err
+	} else {
+		for rows.Next() {
+			var id, p, th string
+			if err := rows.Scan(&id, &p, &th); err != nil {
+				rows.Close()
+				return stats, err
+			}
+			nextP, c1 := RewritePath(p, oldClean, newClean)
+			nextTh, c2 := RewritePath(th, oldClean, newClean)
+			if c1 || c2 {
+				imgUpdates = append(imgUpdates, imgUpd{id: id, path: nextP, thumb: nextTh})
+			}
+		}
+		rows.Close()
+	}
+	for _, u := range imgUpdates {
+		if _, err := tx.Exec(`UPDATE images SET path = ?, thumb = ? WHERE id = ?`, u.path, u.thumb, u.id); err != nil {
+			return stats, err
+		}
+		stats.Images++
+	}
+
+	// 3. Update any local file paths embedded inside docs.data JSON (canvas, articles, recipes, etc.)
+	type docUpd struct {
+		kind, id, data string
+	}
+	var docUpdates []docUpd
+	if rows, err := tx.Query(`SELECT kind, id, data FROM docs WHERE data != '' AND data != '{}'`); err != nil {
+		return stats, err
+	} else {
+		for rows.Next() {
+			var kind, id, data string
+			if err := rows.Scan(&kind, &id, &data); err != nil {
+				rows.Close()
+				return stats, err
+			}
+			var decoded any
+			if err := json.Unmarshal([]byte(data), &decoded); err != nil {
+				continue
+			}
+			nextVal, changed := rewriteJSONPaths(decoded, oldClean, newClean)
+			if !changed {
+				continue
+			}
+			encoded, err := json.Marshal(nextVal)
+			if err != nil {
+				continue
+			}
+			docUpdates = append(docUpdates, docUpd{kind: kind, id: id, data: string(encoded)})
+		}
+		rows.Close()
+	}
+	for _, u := range docUpdates {
+		if _, err := tx.Exec(`UPDATE docs SET data = ? WHERE kind = ? AND id = ?`, u.data, u.kind, u.id); err != nil {
+			return stats, err
+		}
+		stats.Docs++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+// RewritePath replaces oldRoot prefix with newRoot if p equals oldRoot or is a
+// child path under oldRoot (case-insensitive on Windows).
+func RewritePath(p, oldRoot, newRoot string) (string, bool) {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return p, false
+	}
+	cleanP := filepath.Clean(trimmed)
+	cleanOld := filepath.Clean(oldRoot)
+	cleanNew := filepath.Clean(newRoot)
+
+	cmpP, cmpOld := cleanP, cleanOld
+	if runtime.GOOS == "windows" {
+		cmpP = strings.ToLower(cmpP)
+		cmpOld = strings.ToLower(cmpOld)
+	}
+	if cmpP == cmpOld {
+		return cleanNew, true
+	}
+	prefix := cmpOld
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	if strings.HasPrefix(cmpP, prefix) {
+		rel := cleanP[len(cleanOld):]
+		rel = strings.TrimLeft(rel, `/\`)
+		return filepath.Join(cleanNew, rel), true
+	}
+	return p, false
+}
+
+func samePathRoot(a, b string) bool {
+	ca, cb := filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(ca, cb)
+	}
+	return ca == cb
+}
+
+func rewriteJSONPaths(v any, oldRoot, newRoot string) (any, bool) {
+	switch x := v.(type) {
+	case string:
+		return RewritePath(x, oldRoot, newRoot)
+	case []any:
+		changed := false
+		for i, elem := range x {
+			if nv, c := rewriteJSONPaths(elem, oldRoot, newRoot); c {
+				x[i] = nv
+				changed = true
+			}
+		}
+		return x, changed
+	case map[string]any:
+		changed := false
+		for k, val := range x {
+			if nv, c := rewriteJSONPaths(val, oldRoot, newRoot); c {
+				x[k] = nv
+				changed = true
+			}
+		}
+		return x, changed
+	default:
+		return v, false
+	}
 }

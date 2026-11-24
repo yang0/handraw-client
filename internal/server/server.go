@@ -415,7 +415,9 @@ func (s *Server) serveLocal(w http.ResponseWriter, r *http.Request, path string)
 		http.NotFound(w, r)
 		return
 	}
-	allowed := []string{settings.Get().WorksDir, s.PackDir, filepath.Dir(s.DBPathHint()), appdir.Galleries()}
+	curSettings := settings.Get()
+	allowed := []string{curSettings.WorksDir, s.PackDir, filepath.Dir(s.DBPathHint()), appdir.Galleries()}
+	allowed = append(allowed, curSettings.LegacyWorksDirs...)
 	if tk := profile.TukuDir(); tk != "" {
 		allowed = append(allowed, tk)
 	}

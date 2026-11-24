@@ -625,6 +625,7 @@ export async function renderSettings(root, ctx, params = {}) {
     toast("外观主题已切换");
   });
 
+  let savedWorksDir = settings.worksDir || "";
   const worksIn = el("input", {
     id: "pref-works-dir",
     name: "worksDir",
@@ -633,8 +634,217 @@ export async function renderSettings(root, ctx, params = {}) {
     autocorrect: "off",
     autocapitalize: "none",
     spellcheck: "false",
-    value: settings.worksDir || "",
+    value: savedWorksDir,
   });
+
+  function formatDirBytes(bytes) {
+    const n = Number(bytes || 0);
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  function applySwitchedWorksDir(res, fallbackDir) {
+    const nextDir = res?.settings?.worksDir || fallbackDir;
+    savedWorksDir = nextDir;
+    worksIn.value = nextDir;
+    if (res?.migrated) {
+      const skippedPart = res.skippedFiles > 0 ? `（跳过 ${res.skippedFiles} 个同名已存在文件）` : "";
+      toast(`已迁移 ${res.movedFiles || 0} 个文件（${formatDirBytes(res.movedBytes)}）并切换作品目录${skippedPart}`);
+      prefStatus.textContent = "目录已迁移并切换";
+    } else {
+      toast("本地作品保存目录已切换，原目录中的历史作品仍可正常浏览");
+      prefStatus.textContent = "目录已切换";
+    }
+  }
+
+  async function promptSwitchWorksDir(targetRaw) {
+    const targetDir = String(targetRaw || "").trim();
+    if (!targetDir) {
+      toast("请选择或输入有效的存储目录");
+      return { switched: false, canceled: true };
+    }
+    const info = await api("POST", "/api/settings/works-dir/inspect", { targetDir });
+    if (info.sameDir) {
+      savedWorksDir = info.currentDir;
+      worksIn.value = info.currentDir;
+      return { switched: false, canceled: false };
+    }
+    // Empty old directory: switch immediately without unnecessary prompt.
+    if (!info.hasContent) {
+      const res = await api("POST", "/api/settings/works-dir/switch", { targetDir: info.targetDir, migrate: false });
+      savedWorksDir = res?.settings?.worksDir || info.targetDir;
+      worksIn.value = savedWorksDir;
+      prefStatus.textContent = "目录已切换";
+      toast("本地作品保存目录已切换");
+      return { switched: true, canceled: false };
+    }
+
+    // Old directory has content: ask user whether to migrate existing files.
+    return new Promise((resolve) => {
+      let settled = false;
+      let busy = false;
+      const finish = (outcome) => {
+        if (settled) return;
+        settled = true;
+        resolve(outcome);
+      };
+
+      const contentSummary = info.fileCount > 0
+        ? `共 ${info.fileCount} 个文件，约 ${formatDirBytes(info.totalBytes)}`
+        : `共 ${info.dirCount} 个子文件夹`;
+
+      const statusLine = el("p", { class: "muted hidden", style: { margin: 0, fontSize: "12.5px" } });
+
+      const body = el("div", { class: "col works-dir-migrate-modal", style: { gap: "12px" } },
+        el("p", { style: { margin: 0, lineHeight: "1.6" } },
+          "检测到原作品存储目录中已有内容。是否将原目录中的作品文件一起迁移到新目录？"
+        ),
+        el("div", { class: "works-dir-summary-box col", style: { gap: "8px" } },
+          el("div", { class: "col", style: { gap: "3px" } },
+            el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+              el("span", { class: "muted", style: { fontSize: "12px", fontWeight: "600" } }, "原存储目录"),
+              el("span", { class: "badge badge-accent" }, contentSummary)
+            ),
+            el("code", { class: "mono works-dir-path-code" }, info.currentDir)
+          ),
+          el("div", { class: "col", style: { gap: "3px" } },
+            el("span", { class: "muted", style: { fontSize: "12px", fontWeight: "600" } }, "目标存储目录"),
+            el("code", { class: "mono works-dir-path-code" }, info.targetDir)
+          )
+        ),
+        info.nested
+          ? el("div", { class: "works-dir-warn" }, `⚠ ${info.nestedReason}（此时仅支持「仅切换目录」或更换其他目标目录）`)
+          : null,
+        info.activeJobs > 0
+          ? el("div", { class: "works-dir-warn" }, `⚠ 当前有 ${info.activeJobs} 个进行中的生图任务，请等待任务完成后再执行文件迁移。`)
+          : null,
+        info.targetHasContent && !info.nested
+          ? el("div", { class: "works-dir-hint muted" }, `提示：目标目录中已有 ${info.targetFileCount} 个文件，迁移时遇到同名文件将自动跳过，不会覆盖目标目录已有文件。`)
+          : null,
+        el("ul", { class: "works-dir-explain muted" },
+          el("li", null, el("strong", null, "迁移并切换："), "将原目录内容移动到新目录，并自动更新历史作品的路径索引。"),
+          el("li", null, el("strong", null, "仅切换（保留原文件）："), "原目录文件保留不动且历史作品仍可正常查看，后续新作品保存到新目录。")
+        ),
+        statusLine
+      );
+
+      const cancelBtn = el("button", {
+        type: "button",
+        class: "btn",
+        dataset: { role: "works-dir-cancel" },
+        onClick: () => {
+          if (busy) return;
+          worksIn.value = savedWorksDir;
+          closeModal();
+          finish({ switched: false, canceled: true });
+        },
+      }, "取消");
+
+      const switchOnlyBtn = el("button", {
+        type: "button",
+        class: "btn",
+        dataset: { role: "works-dir-switch-only" },
+        onClick: async () => {
+          if (busy) return;
+          busy = true;
+          cancelBtn.disabled = true;
+          switchOnlyBtn.disabled = true;
+          migrateBtn.disabled = true;
+          switchOnlyBtn.textContent = "切换中…";
+          try {
+            const res = await api("POST", "/api/settings/works-dir/switch", {
+              targetDir: info.targetDir,
+              migrate: false,
+            });
+            applySwitchedWorksDir(res, info.targetDir);
+            closeModal();
+            finish({ switched: true, canceled: false });
+          } catch (err) {
+            busy = false;
+            cancelBtn.disabled = false;
+            switchOnlyBtn.disabled = false;
+            migrateBtn.disabled = Boolean(info.nested || info.activeJobs > 0);
+            switchOnlyBtn.textContent = "仅切换（保留原文件）";
+            statusLine.textContent = err?.message || "切换目录失败";
+            statusLine.classList.remove("hidden");
+            toast(err?.message || "切换目录失败");
+          }
+        },
+      }, "仅切换（保留原文件）");
+
+      const migrateDisabled = Boolean(info.nested || info.activeJobs > 0);
+      const migrateBtn = el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        disabled: migrateDisabled,
+        dataset: { role: "works-dir-migrate" },
+        onClick: async () => {
+          if (busy || migrateDisabled) return;
+          busy = true;
+          cancelBtn.disabled = true;
+          switchOnlyBtn.disabled = true;
+          migrateBtn.disabled = true;
+          migrateBtn.textContent = "正在迁移文件…";
+          statusLine.textContent = "正在迁移原目录内容并更新作品索引，请勿关闭窗口…";
+          statusLine.classList.remove("hidden");
+          try {
+            const res = await api("POST", "/api/settings/works-dir/switch", {
+              targetDir: info.targetDir,
+              migrate: true,
+            });
+            applySwitchedWorksDir(res, info.targetDir);
+            closeModal();
+            finish({ switched: true, canceled: false });
+          } catch (err) {
+            busy = false;
+            cancelBtn.disabled = false;
+            switchOnlyBtn.disabled = false;
+            migrateBtn.disabled = false;
+            migrateBtn.textContent = "迁移原目录内容并切换";
+            statusLine.textContent = err?.message || "迁移失败";
+            toast(err?.message || "迁移失败");
+          }
+        },
+      }, "迁移原目录内容并切换");
+
+      showModal("切换本地作品保存目录", body, [cancelBtn, switchOnlyBtn, migrateBtn], {
+        className: "modal-works-dir-migrate",
+        onClose: () => {
+          if (!settled) {
+            worksIn.value = savedWorksDir;
+            finish({ switched: false, canceled: true });
+          }
+        },
+      });
+    });
+  }
+
+  const pickWorksDirBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    dataset: { role: "pick-works-dir" },
+    title: "打开系统文件夹选择器选择存储目录",
+    onClick: async () => {
+      pickWorksDirBtn.disabled = true;
+      const origLabel = pickWorksDirBtn.textContent;
+      pickWorksDirBtn.textContent = "选择中…";
+      try {
+        const picked = await api("POST", "/api/host/pick-directory", {});
+        const dir = String(picked?.path || "").trim();
+        if (!dir) return;
+        worksIn.value = dir;
+        await promptSwitchWorksDir(dir);
+      } catch (err) {
+        toast(err?.message || "无法打开目录选择器，可手动粘贴路径");
+      } finally {
+        pickWorksDirBtn.disabled = false;
+        pickWorksDirBtn.textContent = origLabel;
+      }
+    },
+  }, "📁 选择目录");
+
   const costYuanIn = el("input", {
     id: "pref-cost-limit",
     name: "costLimitYuan",
@@ -670,8 +880,14 @@ export async function renderSettings(root, ctx, params = {}) {
     onSubmit: async (e) => {
       e.preventDefault();
       try {
-        await api("PATCH", "/api/settings", {
-          worksDir: worksIn.value.trim(),
+        const nextWorksDir = worksIn.value.trim();
+        let dirHandled = false;
+        if (nextWorksDir && nextWorksDir !== savedWorksDir) {
+          const outcome = await promptSwitchWorksDir(nextWorksDir);
+          if (outcome.canceled) return;
+          dirHandled = true;
+        }
+        const payload = {
           costLimitCents: Math.round(Number(costYuanIn.value || 0) * 100),
           quickShotHotkey: hotkeyIn.value.trim(),
           quickShotEnabled: quickChk.checked,
@@ -679,9 +895,11 @@ export async function renderSettings(root, ctx, params = {}) {
           autoCheckUpdate: autoUpdChk.checked,
           autoSyncResources: autoSyncChk.checked,
           keepSiteGenerationsPrivate: !publicChk.checked,
-        });
+        };
+        if (!dirHandled && nextWorksDir) payload.worksDir = nextWorksDir;
+        await api("PATCH", "/api/settings", payload);
         prefStatus.textContent = "已保存";
-        toast("偏好设置已保存");
+        if (!dirHandled) toast("偏好设置已保存");
       } catch (err) {
         toast(err.message);
       }
@@ -698,10 +916,11 @@ export async function renderSettings(root, ctx, params = {}) {
       el("div", { class: "settings-row" },
         el("div", { class: "settings-row-meta" },
           el("label", { for: "pref-works-dir", class: "settings-row-label" }, "本地作品保存目录"),
-          el("span", { class: "muted" }, "所有本地生图原图与缩略图均保存在此目录")
+          el("span", { class: "muted" }, "所有本地生图原图与缩略图均保存在此目录；切换时若原目录有内容会询问是否迁移")
         ),
-        el("div", { class: "row", style: { flex: "1", maxWidth: "440px" } },
+        el("div", { class: "row works-dir-input-row", style: { flex: "1", maxWidth: "520px", gap: "6px" } },
           worksIn,
+          pickWorksDirBtn,
           el("button", { type: "button", class: "btn btn-sm", onClick: () => api("POST", "/api/open", { path: worksIn.value.trim() }).catch((err) => toast(err.message)) }, "打开目录")
         )
       ),

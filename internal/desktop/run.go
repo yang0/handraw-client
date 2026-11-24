@@ -68,6 +68,10 @@ func (h *desktopHost) PickDirectory() (string, error) {
 		if err == nil {
 			return strings.TrimSpace(res), nil
 		}
+		// Do not re-open a second fallback dialog if the user simply canceled.
+		if strings.Contains(strings.ToLower(err.Error()), "cancel") {
+			return "", nil
+		}
 	}
 	return PickDirectoryOS()
 }
