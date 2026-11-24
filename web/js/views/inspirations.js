@@ -720,8 +720,8 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
   const initFolder = (clipMeta.defaultFolder && clipMeta.defaultFolder !== UNGROUPED_FOLDER) ? clipMeta.defaultFolder : "";
   const folderOpts = Array.from(new Set(initFolder ? [initFolder, ...availFolders] : availFolders));
   const folderSel = el("select", { class: "input insp-create-folder-sel", "aria-label": "所属分组" },
-    el("option", { value: "" }, "📁 未分组"),
-    ...folderOpts.map((f) => el("option", { value: f, selected: f === initFolder }, `📁 ${f}`))
+    el("option", { value: "" }, "未分组"),
+    ...folderOpts.map((f) => el("option", { value: f, selected: f === initFolder }, f))
   );
   if (initFolder) folderSel.value = initFolder;
 
@@ -955,7 +955,7 @@ function openManageFoldersModal(initialFolderItems, onChanged) {
 
       listEl.appendChild(el("div", { class: "insp-folder-mgr-row", dataset: { folder: f.name } },
         el("div", { class: "row", style: { gap: "8px", flex: "1", minWidth: "0", alignItems: "center" } },
-          el("span", { class: "insp-folder-mgr-name", title: f.name }, `📁 ${f.name}`),
+          el("span", { class: "insp-folder-mgr-name", title: f.name }, f.name),
           el("span", { class: "muted", style: { fontSize: "12px", flexShrink: "0" } }, `${f.count || 0} 条`)
         ),
         el("div", { class: "row", style: { gap: "6px", flexShrink: "0" } },
@@ -1040,7 +1040,7 @@ function openBatchMoveFolderModal(ids, folderItems, onMoved) {
   };
 
   addOpt("", "未分组（移除所属分组）", "");
-  list.forEach((f) => addOpt(f.name, `📁 ${f.name}`, `${f.count || 0} 条`));
+  list.forEach((f) => addOpt(f.name, f.name, `${f.count || 0} 条`));
   if (list.length > 0) picked = list[0].name;
   syncSelection();
 
@@ -1163,8 +1163,8 @@ function openLocalInspirationDetail(item, ctx, onChanged, availableFolders = [])
       dataset: { role: "detail-folder-select" },
       "aria-label": "所属分组",
     },
-      el("option", { value: "" }, "📁 未分组"),
-      ...foldersList.map((f) => el("option", { value: f, selected: cur.folder === f }, `📁 ${f}`)),
+      el("option", { value: "" }, "未分组"),
+      ...foldersList.map((f) => el("option", { value: f, selected: cur.folder === f }, f)),
       el("option", { value: "__new__" }, "＋ 新建分组…")
     );
     folderSel.value = cur.folder || "";
@@ -1737,7 +1737,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
         dataset: { role: "batch-move-folder" },
         disabled: selectedCount === 0,
         onClick: openBatchMoveModal,
-      }, `📁 移入分组 (${selectedCount})`),
+      }, `移入分组 (${selectedCount})`),
       el("button", {
         type: "button",
         class: "btn btn-sm btn-primary",
@@ -1767,7 +1767,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
         gridWrap.appendChild(el("div", { class: "card col insp-empty" },
           el("h3", { style: { margin: 0 } },
             inNamedFolder
-              ? `📁 分组「${viewState.folder}」里还没有灵感`
+              ? `分组「${viewState.folder}」里还没有灵感`
               : (inUngrouped ? "✨ 所有灵感都已归入自定义分组" : "没有符合当前筛选条件的灵感")
           ),
           el("p", { class: "muted", style: { margin: "4px 0 8px", maxWidth: "500px" } },
@@ -1946,7 +1946,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
             el("div", { class: "row", style: { justifyContent: "space-between", gap: "4px", flexWrap: "wrap" } },
               el("div", { class: "row", style: { gap: "4px", flexWrap: "wrap" } },
                 item.folder
-                  ? el("span", { class: "badge insp-card-folder-badge", title: `分组：${item.folder}` }, `📁 ${item.folder}`)
+                  ? el("span", { class: "badge insp-card-folder-badge", title: `分组：${item.folder}` }, item.folder)
                   : el("span", { class: "badge" }, SOURCE_LABELS[item.source] || item.source || "灵感")
               ),
               item.publishedId
@@ -2050,7 +2050,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
 
       folderBar.appendChild(makeFolderPill("", "全部", totalVaultCount));
       folderItems.forEach(({ name, count }) => {
-        folderBar.appendChild(makeFolderPill(name, `📁 ${name}`, count));
+        folderBar.appendChild(makeFolderPill(name, name, count));
       });
       if (folderItems.length > 0 && ungroupedCount > 0) {
         folderBar.appendChild(makeFolderPill(UNGROUPED_FOLDER, "未分组", ungroupedCount));
