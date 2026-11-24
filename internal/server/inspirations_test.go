@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -428,5 +429,67 @@ func TestResolveClipperExtensionDir(t *testing.T) {
 		if dir == "" || !filepath.IsAbs(dir) {
 			t.Fatalf("GET %s returned non-absolute clipExtensionDir: %q", ep, dir)
 		}
+	}
+}
+
+func TestInspirationCategoryTaxonomyAndFilter(t *testing.T) {
+	cases := []struct {
+		title string
+		tags  []string
+		want  string
+	}{
+		{"明制红梅祈福雪景古风摄影", []string{"古风摄影", "明制汉服"}, "人物写真"},
+		{"一张自拍生成12种美姿", []string{"自拍姿势", "3x4网格", "人像摄影"}, "人物写真"},
+		{"结构即版式：自然科学编辑海报", []string{"自然科学海报", "标本档案"}, "科普信息图"},
+		{"负空间植物艺术海报模板", []string{"负空间", "植物海报", "极简排版"}, "海报排版"},
+		{"电影级角色设定参考图", []string{"角色设定图", "角色三视图"}, "角色设定"},
+		{"手绘儿童绘本插画", []string{"儿童绘本"}, "插画绘本"},
+		{"创意反差视觉广告", []string{"反差创意"}, "创意脑洞"},
+	}
+	for _, tc := range cases {
+		got := inferInspirationCategory(inspirationData{Title: tc.title, Tags: tc.tags})
+		if got != tc.want {
+			t.Errorf("inferInspirationCategory(%q, %v) = %q, want %q", tc.title, tc.tags, got, tc.want)
+		}
+	}
+
+	norm := normalizeInspirationTags([]string{"#人物写真", "人物写真", " #古风 ", "汉服", "多余第四个"})
+	if len(norm) != 3 || norm[0] != "人物写真" || norm[1] != "古风" || norm[2] != "汉服" {
+		t.Fatalf("unexpected normalizeInspirationTags output: %v", norm)
+	}
+
+	srv, cancel := setupTestServer(t, "http://127.0.0.1:1")
+	defer cancel()
+	h := srv.Handler()
+	if _, err := srv.saveInspiration("", inspirationData{Title: "明制汉服摄影", Tags: []string{"古风摄影", "明制汉服"}, Prompt: "p1", Source: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.saveInspiration("", inspirationData{Title: "负空间艺术海报", Tags: []string{"负空间", "植物海报"}, Prompt: "p2", Source: "x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doReq(t, h, srv.Token, http.MethodGet, "/api/inspirations?category="+url.QueryEscape("海报排版"), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/inspirations?category failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		TotalCount int               `json:"totalCount"`
+		Items      []inspirationItem `json:"items"`
+		Categories []struct {
+			Category string `json:"category"`
+			Count    int    `json:"count"`
+		} `json:"categories"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.TotalCount != 2 {
+		t.Fatalf("expected totalCount=2, got %d", resp.TotalCount)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].Category != "海报排版" {
+		t.Fatalf("expected 1 filtered item in 海报排版, got %+v", resp.Items)
+	}
+	if len(resp.Categories) != 2 {
+		t.Fatalf("expected 2 non-empty categories, got %+v", resp.Categories)
 	}
 }

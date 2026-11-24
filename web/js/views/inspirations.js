@@ -15,7 +15,7 @@ const SOURCE_LABELS = {
 const viewState = {
   tab: "vault", // vault | plaza | earnings
   q: "",
-  source: "all",
+  category: "",
   tag: "",
   plazaFilter: "all:latest", // all:latest | all:popular | unlocked:latest | mine:latest
   plazaQ: "",
@@ -915,24 +915,160 @@ function openLocalInspirationDetail(item, ctx, onChanged) {
   renderModal();
 }
 
+function createSvgEl(svgMarkup) {
+  const wrap = document.createElement("span");
+  wrap.className = "insp-btn-icon";
+  wrap.setAttribute("aria-hidden", "true");
+  wrap.innerHTML = svgMarkup;
+  return wrap;
+}
+
+const SEARCH_ICON_SVG = '<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="5.5"/><path d="m13.5 13.5 3.5 3.5"/></svg>';
+const TAG_ICON_SVG = '<svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 9.8V4.5a1 1 0 0 1 1-1h5.3a1 1 0 0 1 .7.3l6.2 6.2a1 1 0 0 1 0 1.4l-5.3 5.3a1 1 0 0 1-1.4 0L3.8 10.5a1 1 0 0 1-.3-.7Z"/><circle cx="7.2" cy="7.2" r="1" fill="currentColor" stroke="none"/></svg>';
+const BATCH_SHARE_ICON_SVG = '<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="10" height="10" rx="2.2"/><path d="m6 9 1.8 1.8L10.8 7.6"/><path d="M7.5 16.5h7.3a2.2 2.2 0 0 0 2.2-2.2V7"/></svg>';
+const CLOSE_BATCH_ICON_SVG = '<svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M5.5 5.5 14.5 14.5M14.5 5.5 5.5 14.5"/></svg>';
+
 async function renderVaultTab(stage, ctx, onMeta) {
   const searchIn = el("input", {
-    class: "input",
+    class: "insp-search-input",
     type: "search",
     value: viewState.q,
     placeholder: "搜标题、提示词、作者、标签…",
-    style: { maxWidth: "280px" },
+    "aria-label": "搜索个人灵感库",
   });
+  const searchWrap = el("div", { class: "insp-search-box" },
+    createSvgEl(SEARCH_ICON_SVG),
+    searchIn
+  );
 
-  const srcPills = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } });
-  const srcDefs = [
-    ["all", "全部"],
-    ["web_clip", "X 与网页捕手"],
-    ["local", "我的生图"],
-    ["community", "社区收藏"],
-    ["import", "手动收集"],
-  ];
+  // Fine-grained tag picker popover (keeps main view clean even with hundreds of tags #95)
+  const tagTriggerLabel = el("span", { class: "insp-tag-trigger-label" }, "标签");
+  const tagTriggerCount = el("span", { class: "insp-tag-trigger-count" }, "0");
+  const tagTriggerBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm insp-tag-trigger hidden",
+    dataset: { role: "tag-popover-trigger" },
+    "aria-expanded": "false",
+    "aria-haspopup": "dialog",
+  },
+    createSvgEl(TAG_ICON_SVG),
+    tagTriggerLabel,
+    tagTriggerCount,
+    el("span", { class: "insp-tag-caret", "aria-hidden": "true" }, "▾")
+  );
 
+  const tagSearchIn = el("input", {
+    class: "input insp-tag-popover-search",
+    type: "search",
+    placeholder: "筛选具体标签…",
+    "aria-label": "筛选具体标签",
+  });
+  const tagListWrap = el("div", { class: "insp-tag-popover-list" });
+  const tagPopover = el("div", {
+    class: "insp-tag-popover hidden",
+    role: "dialog",
+    "aria-label": "按细粒度标签筛选",
+    dataset: { role: "tag-popover" },
+  },
+    el("div", { class: "insp-tag-popover-head" },
+      el("strong", null, "全部标签"),
+      el("span", { class: "muted", dataset: { role: "tag-popover-total" } }, "")
+    ),
+    tagSearchIn,
+    tagListWrap
+  );
+  const tagPickerWrap = el("div", { class: "insp-tag-picker" }, tagTriggerBtn, tagPopover);
+
+  let allFineTags = [];
+  let tagPopoverOpen = false;
+
+  const setTagPopoverOpen = (open) => {
+    tagPopoverOpen = Boolean(open);
+    tagPopover.classList.toggle("hidden", !tagPopoverOpen);
+    tagTriggerBtn.setAttribute("aria-expanded", tagPopoverOpen ? "true" : "false");
+    tagTriggerBtn.classList.toggle("is-open", tagPopoverOpen);
+    if (tagPopoverOpen) {
+      tagSearchIn.value = "";
+      renderFineTagList("");
+      setTimeout(() => tagSearchIn.focus(), 10);
+    }
+  };
+
+  const renderFineTagList = (filterText) => {
+    clear(tagListWrap);
+    const needle = String(filterText || "").trim().toLowerCase();
+    const matched = needle
+      ? allFineTags.filter(({ tag }) => tag.toLowerCase().includes(needle))
+      : allFineTags;
+
+    if (viewState.tag) {
+      tagListWrap.appendChild(el("button", {
+        type: "button",
+        class: "insp-tag-chip is-clear",
+        onClick: () => {
+          viewState.tag = "";
+          setTagPopoverOpen(false);
+          loadVault();
+        },
+      }, "✕ 清除当前标签筛选"));
+    }
+
+    if (!matched.length) {
+      tagListWrap.appendChild(el("div", { class: "muted", style: { padding: "12px 4px", textAlign: "center", width: "100%" } }, "没有匹配的标签"));
+      return;
+    }
+
+    matched.forEach(({ tag, count }) => {
+      const active = tag === viewState.tag;
+      tagListWrap.appendChild(el("button", {
+        type: "button",
+        class: "insp-tag-chip" + (active ? " is-active" : ""),
+        onClick: () => {
+          viewState.tag = active ? "" : tag;
+          setTagPopoverOpen(false);
+          loadVault();
+        },
+      },
+        el("span", null, `#${tag}`),
+        el("span", { class: "insp-tag-chip-cnt" }, String(count))
+      ));
+    });
+  };
+
+  tagTriggerBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setTagPopoverOpen(!tagPopoverOpen);
+  });
+  tagSearchIn.addEventListener("input", () => renderFineTagList(tagSearchIn.value));
+
+  const onDocClick = (e) => {
+    if (!stage.isConnected) {
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onDocKey);
+      return;
+    }
+    if (tagPopoverOpen && !tagPickerWrap.contains(e.target)) {
+      setTagPopoverOpen(false);
+    }
+  };
+  const onDocKey = (e) => {
+    if (!stage.isConnected) {
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onDocKey);
+      return;
+    }
+    if (tagPopoverOpen && e.key === "Escape") {
+      setTagPopoverOpen(false);
+      tagTriggerBtn.focus();
+    }
+  };
+  document.addEventListener("click", onDocClick);
+  document.addEventListener("keydown", onDocKey);
+
+  // Beautified Batch Share button (#95)
+  const batchIconSlot = createSvgEl(BATCH_SHARE_ICON_SVG);
+  const batchLabelEl = el("span", { class: "insp-batch-toggle-label" }, "批量分享");
+  const batchBadgeEl = el("span", { class: "insp-batch-toggle-badge hidden" }, "");
   const batchToggleBtn = el("button", {
     type: "button",
     class: "btn btn-sm insp-batch-toggle",
@@ -948,31 +1084,15 @@ async function renderVaultTab(stage, ctx, onMeta) {
       }
       renderVaultGrid(currentItems);
     },
-  }, "☑ 批量分享");
+  }, batchIconSlot, batchLabelEl, batchBadgeEl);
 
-  const tagsBar = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } });
+  const categoryBar = el("div", { class: "insp-category-bar", role: "tablist", "aria-label": "灵感分类筛选", dataset: { role: "category-bar" } });
   const batchBar = el("div", { class: "card insp-batch-bar hidden", dataset: { role: "batch-bar" } });
   const gridWrap = el("div");
 
   let currentItems = [];
   let latestRes = { clipToken: "", clipEndpoint: "" };
   const cardRefs = new Map();
-
-  const drawSrcPills = () => {
-    clear(srcPills);
-    srcDefs.forEach(([val, lbl]) => {
-      srcPills.appendChild(el("button", {
-        type: "button",
-        class: "pill-btn" + (viewState.source === val ? " pill-accent" : ""),
-        onClick: () => {
-          viewState.source = val;
-          drawSrcPills();
-          loadVault();
-        },
-      }, lbl));
-    });
-  };
-  drawSrcPills();
 
   let debounce = null;
   searchIn.addEventListener("input", () => {
@@ -983,14 +1103,14 @@ async function renderVaultTab(stage, ctx, onMeta) {
     }, 180);
   });
 
-  stage.appendChild(el("div", { class: "row insp-vault-toolbar", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "10px", alignItems: "center" } },
-    searchIn,
-    el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
-      srcPills,
+  stage.appendChild(el("div", { class: "row insp-vault-toolbar" },
+    searchWrap,
+    el("div", { class: "row insp-toolbar-actions" },
+      tagPickerWrap,
       batchToggleBtn
     )
   ));
-  stage.appendChild(tagsBar);
+  stage.appendChild(categoryBar);
   stage.appendChild(batchBar);
   stage.appendChild(gridWrap);
 
@@ -1003,8 +1123,17 @@ async function renderVaultTab(stage, ctx, onMeta) {
     }
 
     const active = viewState.batchMode && currentItems.length > 0;
-    batchToggleBtn.classList.toggle("btn-accent-soft", active);
-    batchToggleBtn.textContent = active ? "退出批量选择" : "☑ 批量分享";
+    batchToggleBtn.classList.toggle("is-active", active);
+    batchToggleBtn.setAttribute("aria-pressed", active ? "true" : "false");
+    batchIconSlot.innerHTML = active ? CLOSE_BATCH_ICON_SVG : BATCH_SHARE_ICON_SVG;
+    batchLabelEl.textContent = active ? "退出批量选择" : "批量分享";
+    if (!active && unpubEligible.length > 0) {
+      batchBadgeEl.textContent = `${unpubEligible.length} 待分享`;
+      batchBadgeEl.classList.remove("hidden");
+    } else {
+      batchBadgeEl.textContent = "";
+      batchBadgeEl.classList.add("hidden");
+    }
     batchToggleBtn.disabled = !currentItems.length && !viewState.batchMode;
 
     cardRefs.forEach((ref, id) => {
@@ -1271,8 +1400,8 @@ async function renderVaultTab(stage, ctx, onMeta) {
             el("div", { class: "style-name", title: item.title }, item.title || "未命名灵感"),
             imgSrc && excerpt ? el("p", { class: "style-traits insp-excerpt" }, excerpt) : null,
             (item.tags || []).length
-              ? el("div", { class: "row", style: { gap: "4px", flexWrap: "wrap", marginTop: "4px" } },
-                  ...item.tags.slice(0, 3).map((t) => el("span", { class: "muted", style: { fontSize: "11px" } }, `#${t}`))
+              ? el("div", { class: "row insp-card-tags" },
+                  ...item.tags.slice(0, 2).map((t) => el("span", { class: "muted", style: { fontSize: "11px" } }, `#${t}`))
                 )
               : null
           )
@@ -1291,9 +1420,9 @@ async function renderVaultTab(stage, ctx, onMeta) {
   async function loadVault() {
     const qs = new URLSearchParams();
     if (viewState.q) qs.set("q", viewState.q);
-    if (viewState.source && viewState.source !== "all") qs.set("source", viewState.source);
+    if (viewState.category) qs.set("category", viewState.category);
     if (viewState.tag) qs.set("tag", viewState.tag);
-    const res = await api("GET", `/api/inspirations?${qs.toString()}`).catch(() => ({ items: [], tags: [] }));
+    const res = await api("GET", `/api/inspirations?${qs.toString()}`).catch(() => ({ items: [], tags: [], categories: [], totalCount: 0 }));
     latestRes = res;
     onMeta?.({
       clipToken: res.clipToken || "",
@@ -1303,25 +1432,59 @@ async function renderVaultTab(stage, ctx, onMeta) {
       siteBase: res.siteBase || "",
     });
 
-    clear(tagsBar);
-    const tags = (res.tags || []).slice(0, 14);
-    if (tags.length) {
-      tagsBar.appendChild(el("span", { class: "muted", style: { fontSize: "12px" } }, "标签："));
-      if (viewState.tag) {
-        tagsBar.appendChild(el("button", {
+    allFineTags = Array.isArray(res.tags) ? res.tags : [];
+    const categories = Array.isArray(res.categories) ? res.categories : [];
+    const totalCount = Number(res.totalCount ?? (res.items || []).length);
+
+    // Sync fine-tag popover trigger
+    tagTriggerBtn.classList.toggle("hidden", allFineTags.length === 0 && !viewState.tag);
+    tagTriggerBtn.classList.toggle("is-filtered", Boolean(viewState.tag));
+    tagTriggerLabel.textContent = viewState.tag ? `#${viewState.tag}` : "标签";
+    tagTriggerCount.textContent = String(allFineTags.length);
+    tagTriggerCount.classList.toggle("hidden", Boolean(viewState.tag));
+    const popTotal = tagPopover.querySelector('[data-role="tag-popover-total"]');
+    if (popTotal) popTotal.textContent = `共 ${allFineTags.length} 个`;
+    if (tagPopoverOpen) renderFineTagList(tagSearchIn.value);
+
+    // Render clean single-row canonical category strip (#95)
+    clear(categoryBar);
+    const showCategoryBar = categories.length > 0 || Boolean(viewState.tag);
+    categoryBar.classList.toggle("hidden", !showCategoryBar);
+    if (showCategoryBar) {
+      const makeCatPill = (catKey, label, count) => {
+        const active = viewState.category === catKey && !viewState.tag;
+        return el("button", {
           type: "button",
-          class: "pill-btn pill-accent",
-          onClick: () => { viewState.tag = ""; loadVault(); },
+          role: "tab",
+          "aria-selected": active ? "true" : "false",
+          class: "insp-cat-pill" + (active ? " is-active" : ""),
+          onClick: () => {
+            viewState.category = catKey;
+            viewState.tag = "";
+            loadVault();
+          },
+        },
+          el("span", null, label),
+          count > 0 ? el("span", { class: "insp-cat-count" }, String(count)) : null
+        );
+      };
+
+      categoryBar.appendChild(makeCatPill("", "全部", totalCount));
+      categories.forEach(({ category, count }) => {
+        categoryBar.appendChild(makeCatPill(category, category, count));
+      });
+
+      if (viewState.tag) {
+        categoryBar.appendChild(el("button", {
+          type: "button",
+          class: "insp-cat-pill is-tag-active",
+          title: "点击清除此标签筛选",
+          onClick: () => {
+            viewState.tag = "";
+            loadVault();
+          },
         }, `#${viewState.tag} ✕`));
       }
-      tags.forEach(({ tag, count }) => {
-        if (tag === viewState.tag) return;
-        tagsBar.appendChild(el("button", {
-          type: "button",
-          class: "pill-btn",
-          onClick: () => { viewState.tag = tag; loadVault(); },
-        }, `#${tag} (${count})`));
-      });
     }
 
     renderVaultGrid(res.items || []);

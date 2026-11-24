@@ -60,7 +60,96 @@ type inspirationItem struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	UpdatedAt string `json:"updatedAt"`
+	Category  string `json:"category,omitempty"`
 	inspirationData
+}
+
+type inspirationCategoryRule struct {
+	Name     string
+	Keywords []string
+}
+
+// Canonical top-level inspiration categories (#95) to prevent free-form tag sprawl.
+var inspirationCategoryRules = []inspirationCategoryRule{
+	{
+		Name:     "科普信息图",
+		Keywords: []string{"信息图", "科普", "自然科学", "标本", "档案", "教育", "流程图", "知识卡", "结构", "拆解", "图解", "数据", "百科", "对比图", "infographic"},
+	},
+	{
+		Name:     "角色设定",
+		Keywords: []string{"角色设定", "三视图", "角色", "一致性", "ip", "盲盒", "潮玩", "三维", "3d", "动画", "手办", "立绘", "q版", "character"},
+	},
+	{
+		Name:     "海报排版",
+		Keywords: []string{"海报", "排版", "负空间", "极简", "封面", "杂志", "书法", "题字", "字体", "社媒", "小红书", "卡片", "poster", "editorial"},
+	},
+	{
+		Name:     "人物写真",
+		Keywords: []string{"人像", "写真", "摄影", "汉服", "古风", "自拍", "姿势", "网格", "工笔人物", "肖像", "时尚", "穿搭", "模特", "portrait"},
+	},
+	{
+		Name:     "插画绘本",
+		Keywords: []string{"插画", "绘本", "手绘", "水彩", "漫画", "二次元", "治愈", "卡通", "儿童", "涂鸦", "线稿", "国画", "工笔", "illustration"},
+	},
+	{
+		Name:     "场景氛围",
+		Keywords: []string{"场景", "风景", "建筑", "室内", "街景", "氛围", "电影感", "光影", "微缩", "空间", "雨夜", "雪景", "landscape"},
+	},
+	{
+		Name:     "创意脑洞",
+		Keywords: []string{"创意", "反差", "超现实", "电商", "产品", "包装", "奇幻", "特效", "合成", "广告", "概念", "surreal"},
+	},
+}
+
+func inferInspirationCategory(data inspirationData) string {
+	// 1. Exact match against canonical category name in tags
+	for _, rawTag := range data.Tags {
+		t := strings.TrimPrefix(strings.TrimSpace(rawTag), "#")
+		for _, rule := range inspirationCategoryRules {
+			if t == rule.Name {
+				return rule.Name
+			}
+		}
+	}
+	// 2. Keyword match across tags + title (tags weighted first)
+	tagHay := strings.ToLower(strings.Join(data.Tags, " "))
+	for _, rule := range inspirationCategoryRules {
+		for _, kw := range rule.Keywords {
+			if strings.Contains(tagHay, strings.ToLower(kw)) {
+				return rule.Name
+			}
+		}
+	}
+	titleHay := strings.ToLower(data.Title + " " + data.Notes)
+	for _, rule := range inspirationCategoryRules {
+		for _, kw := range rule.Keywords {
+			if strings.Contains(titleHay, strings.ToLower(kw)) {
+				return rule.Name
+			}
+		}
+	}
+	return "其他灵感"
+}
+
+func normalizeInspirationTags(raw []string) []string {
+	out := make([]string, 0, 3)
+	seen := map[string]bool{}
+	for _, t := range raw {
+		clean := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(t), "#"))
+		if clean == "" {
+			continue
+		}
+		key := strings.ToLower(clean)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, clean)
+		if len(out) >= 3 {
+			break
+		}
+	}
+	return out
 }
 
 func inspirationImageDir() string {
@@ -237,10 +326,13 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	srcFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
 	folderFilter := strings.TrimSpace(r.URL.Query().Get("folder"))
+	categoryFilter := strings.TrimSpace(r.URL.Query().Get("category"))
 	tagFilter := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("tag")), "#")
 
 	foldersSet := map[string]bool{}
 	tagsSet := map[string]int{}
+	catsSet := map[string]int{}
+	totalCount := 0
 	items := make([]inspirationItem, 0, len(docs))
 
 	for _, d := range docs {
@@ -249,6 +341,9 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 		if data.Title == "" {
 			data.Title = d.Name
 		}
+		totalCount++
+		cat := inferInspirationCategory(data)
+		catsSet[cat]++
 		if data.Folder != "" {
 			foldersSet[data.Folder] = true
 		}
@@ -269,6 +364,9 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 		if folderFilter != "" && data.Folder != folderFilter {
 			continue
 		}
+		if categoryFilter != "" && categoryFilter != "all" && cat != categoryFilter {
+			continue
+		}
 		if tagFilter != "" {
 			matched := false
 			for _, t := range data.Tags {
@@ -284,7 +382,7 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 		if q != "" {
 			hay := strings.ToLower(strings.Join([]string{
 				data.Title, data.Prompt, data.PromptZh, data.RawText, data.Notes,
-				data.SourceAuthor, data.SuggestedStyle, strings.Join(data.Tags, " "),
+				data.SourceAuthor, data.SuggestedStyle, cat, strings.Join(data.Tags, " "),
 			}, " "))
 			if !strings.Contains(hay, q) {
 				continue
@@ -294,6 +392,7 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 			ID:              d.ID,
 			Name:            d.Name,
 			UpdatedAt:       d.UpdatedAt,
+			Category:        cat,
 			inspirationData: data,
 		})
 	}
@@ -303,6 +402,20 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 		folders = append(folders, f)
 	}
 	sort.Strings(folders)
+
+	type categoryCount struct {
+		Category string `json:"category"`
+		Count    int    `json:"count"`
+	}
+	categories := make([]categoryCount, 0, len(catsSet))
+	for _, rule := range inspirationCategoryRules {
+		if c := catsSet[rule.Name]; c > 0 {
+			categories = append(categories, categoryCount{Category: rule.Name, Count: c})
+		}
+	}
+	if c := catsSet["其他灵感"]; c > 0 {
+		categories = append(categories, categoryCount{Category: "其他灵感", Count: c})
+	}
 
 	type tagCount struct {
 		Tag   string `json:"tag"`
@@ -327,6 +440,8 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 	return map[string]any{
 		"ok":                  true,
 		"items":               items,
+		"totalCount":          totalCount,
+		"categories":          categories,
 		"folders":             folders,
 		"tags":                tags,
 		"clipToken":           settings.EnsureClipToken(),
@@ -772,10 +887,10 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
     {"key": "subject", "label": "主体", "defaultValue": "原提示词中的主体"},
     {"key": "scene", "label": "场景/氛围", "defaultValue": "原场景"}
   ],
-  "tags": ["标签1", "标签2", "标签3"],
+  "tags": ["主分类", "子标签1"],
   "suggestedStyle": "仅当原提示词明确属于手绘/水彩/插画且高度匹配下方编号时才填写如 FA-013；若原提示词为 3D/写实摄影/电影/通用外部风格，请务必留空字符串 \"\""
 }
-要求：slots 提炼 1~4 个最值得用户「做同款」时替换的关键变量；tags 给 3~5 个简洁中文标签（不带#）。` + styleHint
+要求：slots 提炼 1~4 个最值得用户「做同款」时替换的关键变量；tags 严格控制为 2~3 个简洁中文标签（不带#），第 1 个标签必须从以下 7 个标准主分类中精确选 1 个：人物写真、海报排版、插画绘本、科普信息图、角色设定、场景氛围、创意脑洞；其余 1~2 个为可复用高频子标签（2~4 字），避免造生僻词。` + styleHint
 
 	userPrompt := fmt.Sprintf("来源：%s\n作者：%s\n原标题：%s\n原始内容：\n%s",
 		firstStr(item.Source, "web"),
@@ -849,7 +964,7 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
 		d.Slots = parsed.Slots
 	}
 	if len(parsed.Tags) > 0 {
-		d.Tags = parsed.Tags
+		d.Tags = normalizeInspirationTags(parsed.Tags)
 	}
 	if strings.TrimSpace(parsed.SuggestedStyle) != "" {
 		d.SuggestedStyle = strings.TrimSpace(parsed.SuggestedStyle)
