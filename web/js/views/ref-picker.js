@@ -188,7 +188,7 @@ export function openReferencePickerModal({
   let activeCategory = "ALL";
   let uploadCategory = "character";
   let showNewCatForm = false;
-  let saveToLibrary = true;
+  let saveToLibrary = false;
   let isUploading = false;
   let searchQuery = "";
   let newlyAddedPath = "";
@@ -500,7 +500,7 @@ export function openReferencePickerModal({
     if (!pool.length && activeTab === "mine") {
       grid.appendChild(el("div", { class: "ref-picker-empty" },
         el("strong", null, "自建图库还没有参考图"),
-        el("p", { class: "muted" }, "可以点击下方按钮从本地上传，或直接按 Ctrl/⌘ + V 粘贴剪贴板图片并自动存入自建图库，下次出图随时复用。"),
+        el("p", { class: "muted" }, "可在「画廊 → 自建图库」维护长期复用的角色、道具与场景；如果只需要本次一次性垫图，可直接切换到「本地上传 / 粘贴」或按 Ctrl/⌘ + V 粘贴。"),
         el("div", { class: "row", style: { gap: "8px", justifyContent: "center", flexWrap: "wrap" } },
           el("button", {
             type: "button",
@@ -810,7 +810,7 @@ export function openReferencePickerModal({
 
     const saveToggleRow = el("label", { class: "ref-picker-save-toggle" },
       saveToLibChk,
-      el("span", null, "同时存入自建图库（下次可直接在自建图库复用）")
+      el("span", null, "同时存入自建图库（默认仅作为本次临时参考图，勾选后才存入自建图库）")
     );
 
     uploadHost.appendChild(el("div", { class: "ref-picker-upload-card" },
