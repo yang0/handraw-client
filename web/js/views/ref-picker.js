@@ -1,4 +1,6 @@
-import { api, clear, closeModal, el, localImg, showModal, toast } from "../api.js";
+import { api, clear, closeModal, el, galleryImg, localImg, showModal, toast } from "../api.js";
+
+const BUILTIN_EXT_IGNORE = new Set(["styles", "layouts", "colors", "tones", "characters", "props", "scenes"]);
 
 export const MAX_REF_IMAGES = 6;
 
@@ -182,10 +184,19 @@ export function openReferencePickerModal({
   let categories = BUILTIN_ASSET_CATEGORIES.map((c) => ({ ...c }));
   let mineItems = [];
   let officialItems = [];
+  let extGalleries = [];
+  const extItemsCache = new Map();
+  const extLoadingSet = new Set();
+  const extKeyToPath = new Map();
   const itemByPath = new Map();
   let loading = true;
-  let activeTab = "mine"; // "mine" | "official" | "upload"
+  let activeTab = "mine"; // "mine" | "official" | "ext:<kind>" | "upload"
   let activeCategory = "ALL";
+  let extSeries = "";
+  let extAngle = "front";
+  let extPageLimit = 48;
+  let focusedPoseItem = null;
+  let materializingKey = "";
   let uploadCategory = "character";
   let showNewCatForm = false;
   let saveToLibrary = false;
@@ -204,13 +215,14 @@ export function openReferencePickerModal({
   const searchInput = el("input", {
     type: "search",
     class: "input",
-    placeholder: "搜索自建图库编号、名称或分类…",
+    placeholder: "搜索图库编号、名称、角度或分类…",
     "aria-label": "搜索参考图",
   });
   const countEl = el("span", { class: "muted ref-picker-count", role: "status" }, "正在加载自建图库…");
   const searchRow = el("div", { class: "ref-picker-search-row" }, searchInput, countEl);
 
   const catWrap = el("div", { class: "col", style: { gap: "6px", flex: "0 0 auto" } });
+  const poseDrawerEl = el("div", { class: "pose-picker-drawer hidden", "aria-label": "姿态 5 视角选择区" });
   const uploadHost = el("div", { class: "ref-picker-upload-host hidden" });
   const grid = el("div", { class: "studio-resource-grid ref-picker-grid" });
 
@@ -322,6 +334,114 @@ export function openReferencePickerModal({
     return row;
   }
 
+  function activeExtGallery() {
+    if (!activeTab.startsWith("ext:")) return null;
+    const id = activeTab.slice(4);
+    return extGalleries.find((g) => g.id === id) || null;
+  }
+
+  function ensureExtItemsLoaded(gal) {
+    if (!gal || extItemsCache.has(gal.id) || extLoadingSet.has(gal.id)) return;
+    extLoadingSet.add(gal.id);
+    api("GET", `/api/galleries/${encodeURIComponent(gal.id)}/items`)
+      .then((res) => {
+        extItemsCache.set(gal.id, Array.isArray(res?.items) ? res.items : []);
+      })
+      .catch(() => {
+        extItemsCache.set(gal.id, []);
+      })
+      .finally(() => {
+        extLoadingSet.delete(gal.id);
+        if (activeTab === `ext:${gal.id}`) renderView();
+      });
+  }
+
+  async function toggleExtGalleryItem(gal, item, variantObj = null) {
+    const vKey = variantObj?.key || "";
+    const compKey = `${gal.id}:${item.id}:${vKey}`;
+    const knownPath = extKeyToPath.get(compKey);
+    if (knownPath && selectedRefs.includes(knownPath)) {
+      toggleSelectPath(knownPath);
+      renderPoseDrawer();
+      return;
+    }
+    if (selectedRefs.length >= limit) {
+      toast(`最多选用 ${limit} 张参考图，请先取消一张`);
+      return;
+    }
+    if (materializingKey) return;
+    materializingKey = compKey;
+    renderPoseDrawer();
+    try {
+      const res = await api("POST", `/api/galleries/${encodeURIComponent(gal.id)}/items/${encodeURIComponent(item.id)}/materialize`, {
+        variant: vKey,
+      });
+      if (!res?.path) throw new Error("缓存参考图失败");
+      extKeyToPath.set(compKey, res.path);
+      itemByPath.set(res.path, {
+        name: res.name || (variantObj ? `${item.name} · ${variantObj.label}` : item.name),
+        image: res.path,
+        thumbUrl: variantObj?.thumbUrl || item.thumbUrl || "",
+      });
+      if (!selectedRefs.includes(res.path)) {
+        selectedRefs.push(res.path);
+      }
+      syncSelectionUI();
+      renderPoseDrawer();
+    } catch (e) {
+      toast(e?.message || "加载参考图失败");
+    } finally {
+      materializingKey = "";
+      renderPoseDrawer();
+      if (activeTab.startsWith("ext:")) renderExtGrid();
+    }
+  }
+
+  function renderPoseDrawer() {
+    const gal = activeExtGallery();
+    const vars = Array.isArray(focusedPoseItem?.variants) ? focusedPoseItem.variants : [];
+    if (!gal || !gal.multiVariant || !focusedPoseItem || vars.length < 2) {
+      poseDrawerEl.classList.add("hidden");
+      clear(poseDrawerEl);
+      return;
+    }
+    poseDrawerEl.classList.remove("hidden");
+    clear(poseDrawerEl);
+    const item = focusedPoseItem;
+    const head = el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+      el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
+        el("strong", { style: { fontSize: "13px" } }, `🧍 ${item.name || item.id}`),
+        el("span", { class: "muted", style: { fontSize: "12px" } }, "点选下方任意角度（可多选，直接作为本次本地参考图，不同步至网站）")
+      ),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: () => { focusedPoseItem = null; renderPoseDrawer(); },
+      }, "收起")
+    );
+    const strip = el("div", { class: "pose-filmstrip is-compact" });
+    vars.forEach((v) => {
+      const compKey = `${gal.id}:${item.id}:${v.key}`;
+      const p = extKeyToPath.get(compKey);
+      const isSel = Boolean(p && selectedRefs.includes(p));
+      const isBusy = materializingKey === compKey;
+      strip.appendChild(el("button", {
+        type: "button",
+        class: "pose-film-item" + (isSel ? " is-selected" : ""),
+        dataset: { poseAnglePick: v.key },
+        disabled: Boolean(materializingKey && !isBusy),
+        onClick: () => toggleExtGalleryItem(gal, item, v),
+      },
+        el("img", { src: galleryImg(v.thumbUrl || v.imageUrl || ""), alt: v.label, loading: "eager" }),
+        el("div", { class: "pose-film-foot" },
+          el("span", null, isBusy ? "缓存中…" : v.label),
+          isSel ? el("span", { class: "badge badge-accent", style: { padding: "1px 5px", fontSize: "10.5px" } }, "✓") : null
+        )
+      ));
+    });
+    poseDrawerEl.append(head, strip);
+  }
+
   function renderTabs() {
     clear(topTabsWrap);
     const tabs = [
@@ -330,6 +450,9 @@ export function openReferencePickerModal({
     if (officialItems.length > 0) {
       tabs.push({ id: "official", label: `官方图库 (${officialItems.length})` });
     }
+    extGalleries.forEach((g) => {
+      tabs.push({ id: `ext:${g.id}`, label: `${g.name || g.id} (${g.count || 0})` });
+    });
     tabs.push({ id: "upload", label: "本地上传 / 粘贴" });
     if (!tabs.some((t) => t.id === activeTab)) activeTab = "mine";
 
@@ -344,10 +467,16 @@ export function openReferencePickerModal({
         onClick: () => {
           if (activeTab === t.id) return;
           activeTab = t.id;
+          activeCategory = "ALL";
+          extSeries = "";
+          extPageLimit = 48;
+          focusedPoseItem = null;
           showNewCatForm = false;
           if (activeTab === "upload" && activeCategory !== "ALL" && categories.some((c) => c.key === activeCategory)) {
             uploadCategory = activeCategory;
           }
+          const gal = activeExtGallery();
+          if (gal) ensureExtItemsLoaded(gal);
           renderTabs();
           renderView();
         },
@@ -384,7 +513,10 @@ export function openReferencePickerModal({
     confirmBtn.textContent = `✓ 确认选用 (${selectedRefs.length}/${limit})`;
     clearBtn.disabled = selectedRefs.length === 0;
     renderSelectedBar();
-    if (activeTab !== "upload") {
+    if (activeExtGallery()) {
+      renderPoseDrawer();
+      renderExtGrid();
+    } else if (activeTab !== "upload") {
       grid.querySelectorAll(".ref-picker-card").forEach((card) => {
         const p = card.dataset.refPath || "";
         const isSel = selectedRefs.includes(p);
@@ -823,16 +955,189 @@ export function openReferencePickerModal({
     setUploadingState(isUploading);
   }
 
+  function renderExtCategoriesAndAngles(gal) {
+    clear(catWrap);
+    const items = extItemsCache.get(gal.id) || [];
+    const seriesMap = new Map();
+    items.forEach((it) => {
+      const sk = it.meta?.series;
+      if (!sk) return;
+      if (!seriesMap.has(sk)) seriesMap.set(sk, { key: sk, label: it.meta?.seriesShort || sk, count: 0 });
+      seriesMap.get(sk).count++;
+    });
+
+    if (gal.multiVariant) {
+      const angles = [];
+      const seen = new Set();
+      for (const it of items) {
+        for (const v of (it.variants || [])) {
+          if (!v?.key || seen.has(v.key)) continue;
+          seen.add(v.key);
+          angles.push({ key: v.key, label: v.label || v.key });
+        }
+        if (angles.length >= 5) break;
+      }
+      if (angles.length) {
+        if (!angles.some((a) => a.key === extAngle)) extAngle = angles[0].key;
+        catWrap.appendChild(el("div", { class: "studio-cat-tabs", role: "group", "aria-label": "默认预览视角" },
+          el("span", { class: "muted", style: { fontSize: "11.5px", alignSelf: "center", marginRight: "4px" } }, "默认视角："),
+          ...angles.map((a) => el("button", {
+            type: "button",
+            class: "btn btn-sm" + (extAngle === a.key ? " btn-primary" : ""),
+            onClick: () => { extAngle = a.key; renderExtCategoriesAndAngles(gal); renderExtGrid(); },
+          }, a.label))
+        ));
+      }
+    }
+
+    if (seriesMap.size > 1) {
+      catWrap.appendChild(el("div", { class: "studio-cat-tabs", role: "group", "aria-label": "系列筛选" },
+        ...[{ key: "", label: `全部系列 (${items.length})` }, ...Array.from(seriesMap.values()).map((s) => ({ key: s.key, label: `${s.label} (${s.count})` }))].map((s) =>
+          el("button", {
+            type: "button",
+            class: "btn btn-sm" + (extSeries === s.key ? " btn-primary" : ""),
+            onClick: () => { extSeries = s.key; activeCategory = "ALL"; extPageLimit = 48; renderExtCategoriesAndAngles(gal); renderExtGrid(); },
+          }, s.label)
+        )
+      ));
+    }
+
+    const basePool = extSeries ? items.filter((it) => (it.meta?.series || "") === extSeries) : items;
+    const cMap = new Map();
+    basePool.forEach((it) => {
+      const ck = it.category || "other";
+      if (!cMap.has(ck)) cMap.set(ck, { key: ck, label: it.categoryName || ck, count: 0 });
+      cMap.get(ck).count++;
+    });
+    if (activeCategory !== "ALL" && !cMap.has(activeCategory)) activeCategory = "ALL";
+    if (cMap.size > 1) {
+      const pills = el("div", { class: "studio-cat-tabs" + (cMap.size > 7 ? " is-scroll-row" : ""), role: "group", "aria-label": "分类筛选" });
+      [{ key: "ALL", label: `全部 (${basePool.length})` }, ...Array.from(cMap.values()).map((c) => ({ key: c.key, label: `${c.label} (${c.count})` }))].forEach((g) => {
+        pills.appendChild(el("button", {
+          type: "button",
+          class: "btn btn-sm" + (activeCategory === g.key ? " btn-primary" : ""),
+          onClick: () => { activeCategory = g.key; extPageLimit = 48; renderExtCategoriesAndAngles(gal); renderExtGrid(); },
+        }, g.label));
+      });
+      catWrap.appendChild(pills);
+    }
+  }
+
+  function renderExtGrid() {
+    const gal = activeExtGallery();
+    if (!gal) return;
+    clear(grid);
+    if (extLoadingSet.has(gal.id) || !extItemsCache.has(gal.id)) {
+      countEl.textContent = `正在加载 ${gal.name || gal.id}…`;
+      grid.appendChild(el("p", { class: "muted", style: { gridColumn: "1 / -1", textAlign: "center", padding: "28px 0" } }, `正在加载 ${gal.name || gal.id}…`));
+      return;
+    }
+    const items = extItemsCache.get(gal.id) || [];
+    const q = searchQuery.trim().toLowerCase();
+    const visible = items.filter((it) => {
+      if (extSeries && (it.meta?.series || "") !== extSeries) return false;
+      if (activeCategory !== "ALL" && (it.category || "other") !== activeCategory) return false;
+      if (!q) return true;
+      const hay = `${it.id || ""} ${it.name || ""} ${it.nameEn || ""} ${it.categoryName || ""} ${it.traits || ""} ${(it.tags || []).join(" ")}`.toLowerCase();
+      return hay.includes(q);
+    });
+
+    const localHint = gal.localOnly ? " · 🔒 仅本机参考，不同步至网站" : "";
+    countEl.textContent = `共 ${visible.length} 项 · 已选 ${selectedRefs.length}/${limit}${localHint}`;
+    if (!visible.length) {
+      grid.appendChild(el("p", { class: "muted", style: { gridColumn: "1 / -1", textAlign: "center", padding: "28px 0" } }, "当前筛选条件下没有匹配条目"));
+      return;
+    }
+
+    const slice = visible.slice(0, extPageLimit);
+    slice.forEach((it, idx) => {
+      const vars = Array.isArray(it.variants) ? it.variants : [];
+      const activeVar = vars.length ? (vars.find((v) => v.key === extAngle) || vars[0]) : null;
+      const thumbSrc = activeVar
+        ? galleryImg(activeVar.thumbUrl || activeVar.imageUrl || "")
+        : galleryImg(it.thumbUrl || it.imageUrl || "");
+
+      // Check whether any angle of this pose (or this single item) is currently selected
+      const pickedAngles = vars.length
+        ? vars.filter((v) => {
+            const p = extKeyToPath.get(`${gal.id}:${it.id}:${v.key}`);
+            return Boolean(p && selectedRefs.includes(p));
+          })
+        : [];
+      const singlePath = !vars.length ? extKeyToPath.get(`${gal.id}:${it.id}:`) : "";
+      const isSel = vars.length ? pickedAngles.length > 0 : Boolean(singlePath && selectedRefs.includes(singlePath));
+
+      const wrap = el("div", { class: "studio-resource-thumb-wrap", dataset: { fallback: it.id || "图" } });
+      const img = el("img", {
+        src: thumbSrc,
+        alt: it.name || it.id,
+        decoding: "async",
+        loading: idx < 18 ? "eager" : "lazy",
+      });
+      img.addEventListener("load", () => { img.classList.add("is-loaded"); wrap.classList.remove("is-error"); });
+      img.addEventListener("error", () => { img.classList.add("is-error"); wrap.classList.add("is-error"); });
+      if (img.complete && img.naturalWidth > 0) img.classList.add("is-loaded", "is-instant");
+
+      const badgeText = isSel
+        ? (pickedAngles.length ? `✓ ${pickedAngles.map((v) => v.label).join("/")}` : "✓ 已选")
+        : (vars.length > 1 ? `${vars.length}视角` : "");
+      const checkBadge = el("span", { class: "ref-picker-check", "aria-hidden": "true" }, badgeText);
+      wrap.append(img, checkBadge);
+
+      const isBusy = materializingKey === `${gal.id}:${it.id}:${activeVar?.key || ""}`;
+      const card = el("button", {
+        type: "button",
+        class: "studio-resource-option ref-picker-card" + (isSel ? " is-selected" : "") + (focusedPoseItem?.id === it.id ? " is-focused-pose" : ""),
+        "aria-pressed": String(isSel),
+        dataset: { extKind: gal.id, assetId: it.id || "" },
+        onClick: () => {
+          if (vars.length > 1) {
+            focusedPoseItem = focusedPoseItem?.id === it.id ? null : it;
+            renderPoseDrawer();
+            renderExtGrid();
+            if (focusedPoseItem) poseDrawerEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          } else {
+            toggleExtGalleryItem(gal, it, null);
+          }
+        },
+      },
+        wrap,
+        el("small", { class: "mono" }, vars.length > 1
+          ? `${it.meta?.no || it.id} · 点开选5视角`
+          : `${it.id} · ${it.categoryName || ""}`),
+        el("strong", null, isBusy ? "正在缓存…" : (it.name || it.id))
+      );
+      grid.appendChild(card);
+    });
+
+    if (visible.length > extPageLimit) {
+      grid.appendChild(el("div", { style: { gridColumn: "1 / -1", textAlign: "center", padding: "10px 0 4px" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => { extPageLimit += 48; renderExtGrid(); },
+        }, `加载更多（已显示 ${slice.length} / ${visible.length}）`)
+      ));
+    }
+  }
+
   function renderView() {
     const isUpload = activeTab === "upload";
+    const extGal = activeExtGallery();
     searchRow.classList.toggle("hidden", isUpload);
     catWrap.classList.toggle("hidden", isUpload);
     grid.classList.toggle("hidden", isUpload);
     uploadHost.classList.toggle("hidden", !isUpload);
 
     if (isUpload) {
+      poseDrawerEl.classList.add("hidden");
       renderUploadPanel();
+    } else if (extGal) {
+      renderExtCategoriesAndAngles(extGal);
+      renderPoseDrawer();
+      renderExtGrid();
     } else {
+      poseDrawerEl.classList.add("hidden");
       renderCategoryPills();
       renderGrid();
     }
@@ -842,8 +1147,12 @@ export function openReferencePickerModal({
   let searchTimer = null;
   searchInput.addEventListener("input", () => {
     searchQuery = searchInput.value;
+    extPageLimit = 48;
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(renderGrid, 60);
+    searchTimer = setTimeout(() => {
+      if (activeExtGallery()) renderExtGrid();
+      else renderGrid();
+    }, 60);
   });
 
   const body = el("div", { class: "studio-picker-dialog-body ref-picker-body" },
@@ -851,6 +1160,7 @@ export function openReferencePickerModal({
     topBar,
     searchRow,
     catWrap,
+    poseDrawerEl,
     uploadHost,
     grid,
     selectedBar
@@ -876,12 +1186,13 @@ export function openReferencePickerModal({
   renderTabs();
   renderView();
 
-  // Hydrate categories, 自建图库 & 官方图库 asynchronously without blocking modal open.
+  // Hydrate categories, 自建图库, 官方图库 & installed extension galleries asynchronously.
   Promise.all([
     fetchAssetCategories(),
     api("GET", "/api/mine/assets").catch(() => ({ items: [] })),
     api("GET", "/api/resources/assets").catch(() => ({ items: [] })),
-  ]).then(([cats, mineRes, packRes]) => {
+    api("GET", "/api/galleries").catch(() => ({ galleries: [] })),
+  ]).then(([cats, mineRes, packRes, galRes]) => {
     if (Array.isArray(cats) && cats.length) categories = cats;
     const mMap = new Map();
     for (const a of (mineRes?.items || [])) {
@@ -901,6 +1212,8 @@ export function openReferencePickerModal({
       if (!oMap.has(key)) oMap.set(key, a);
     }
     officialItems = Array.from(oMap.values());
+
+    extGalleries = (galRes?.galleries || []).filter((g) => g && g.id && !BUILTIN_EXT_IGNORE.has(g.id) && g.supportsRefImage && Number(g.count || 0) > 0);
 
     loading = false;
     indexItems();

@@ -35,9 +35,13 @@ func (s *Server) routes() {
 
 	// extensible galleries (built-in + pack/personal JSON + plugin-contributed) (#48)
 	m.HandleFunc("GET /api/galleries", s.h(s.galleryList))
+	m.HandleFunc("GET /api/galleries/packs", s.h(s.galleryPacksList))
+	m.HandleFunc("POST /api/galleries/packs/install", s.h(s.galleryPacksInstall))
+	m.HandleFunc("POST /api/galleries/packs/{id}/uninstall", s.h(s.galleryPackUninstall))
 	m.HandleFunc("GET /api/galleries/{kind}/items", s.h(s.galleryItems))
 	m.HandleFunc("GET /api/galleries/{kind}/items/{id}", s.h(s.galleryItem))
 	m.HandleFunc("GET /api/galleries/{kind}/items/{id}/image", s.galleryItemImage)
+	m.HandleFunc("POST /api/galleries/{kind}/items/{id}/materialize", s.h(s.galleryItemMaterialize))
 	m.HandleFunc("GET /api/host/models", s.h(s.hostModelsList))
 	m.HandleFunc("POST /api/host/models/chat", s.h(s.hostModelsChat))
 	m.HandleFunc("GET /api/host/skills", s.h(s.hostSkillsList))

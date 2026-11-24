@@ -284,3 +284,125 @@ func TestPluginGalleryAndModelGateway(t *testing.T) {
 		t.Fatalf("expected poses gallery to be unregistered on disable, got %d %s", rrAfter.Code, rrAfter.Body.String())
 	}
 }
+
+func TestExternalPacksAndFiveAnglePoseMaterialize(t *testing.T) {
+	pngBytes := tinyPNG(t)
+	var hits int
+	mockCDN := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(pngBytes)
+	}))
+	defer mockCDN.Close()
+
+	srv, _ := setupTestServer(t, "")
+	h := srv.Handler()
+
+	// 1. GET /api/galleries/packs lists the 3 RuiC-PoseAtlas packs with Gitee default & localOnly.
+	rrPacks := doReq(t, h, srv.Token, "GET", "/api/galleries/packs", nil)
+	if rrPacks.Code != 200 {
+		t.Fatalf("GET /api/galleries/packs failed: %d %s", rrPacks.Code, rrPacks.Body.String())
+	}
+	body := rrPacks.Body.String()
+	for _, want := range []string{`"ruic-poses"`, `"ruic-costumes"`, `"ruic-faces"`, `"defaultMirror":"gitee"`, `"localOnly":true`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("GET /api/galleries/packs missing %s: %s", want, body)
+		}
+	}
+
+	// 2. Write a 5-angle pose gallery file pointing at our mock CDN to test image caching, materialize, and prompt cues.
+	galDir := appdir.Galleries()
+	poseJSON := `{
+		"id": "ruic-poses",
+		"name": "姿态图鉴",
+		"nameEn": "RuiC PoseAtlas",
+		"promptRole": "pose",
+		"supportsRefImage": true,
+		"localOnly": true,
+		"multiVariant": true,
+		"mirror": "gitee",
+		"items": [
+			{
+				"id": "POSE-001",
+				"name": "优雅叉腰站姿",
+				"category": "站姿",
+				"categoryZh": "站姿",
+				"traits": "标准全身 · 站姿",
+				"meta": {"series": "full_std", "seriesZh": "标准全身"},
+				"image": "ruic-poseatlas/img/p1_front.png",
+				"thumb": "ruic-poseatlas/thumbs/p1_front.jpg",
+				"remoteImage": "` + mockCDN.URL + `/img/p1_front.png",
+				"remoteThumb": "` + mockCDN.URL + `/thumbs/p1_front.jpg",
+				"variants": [
+					{"key":"front","label":"正面","image":"ruic-poseatlas/img/p1_front.png","thumb":"ruic-poseatlas/thumbs/p1_front.jpg","remoteImage":"` + mockCDN.URL + `/img/p1_front.png","remoteThumb":"` + mockCDN.URL + `/thumbs/p1_front.jpg"},
+					{"key":"high","label":"俯视","image":"ruic-poseatlas/img/p1_high.png","thumb":"ruic-poseatlas/thumbs/p1_high.jpg","remoteImage":"` + mockCDN.URL + `/img/p1_high.png","remoteThumb":"` + mockCDN.URL + `/thumbs/p1_high.jpg"}
+				]
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(galDir, "ruic-poses.json"), []byte(poseJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Query with series filter returns the 5-angle pose and its variant URLs.
+	rrItems := doReq(t, h, srv.Token, "GET", "/api/galleries/ruic-poses/items?series=full_std", nil)
+	if rrItems.Code != 200 || !strings.Contains(rrItems.Body.String(), `"key":"high"`) {
+		t.Fatalf("GET ruic-poses items failed: %d %s", rrItems.Code, rrItems.Body.String())
+	}
+
+	// 4. Image endpoint downloads on demand & caches locally (second request hits disk).
+	rrImg1 := doReq(t, h, srv.Token, "GET", "/api/galleries/ruic-poses/items/POSE-001/image?variant=high&size=thumb", nil)
+	if rrImg1.Code != 200 || rrImg1.Body.Len() != len(pngBytes) {
+		t.Fatalf("GET pose variant thumb failed: %d len=%d", rrImg1.Code, rrImg1.Body.Len())
+	}
+	rrImg2 := doReq(t, h, srv.Token, "GET", "/api/galleries/ruic-poses/items/POSE-001/image?variant=high&size=thumb", nil)
+	if rrImg2.Code != 200 || hits != 1 {
+		t.Fatalf("expected second thumb fetch to serve from local cache (hits=%d)", hits)
+	}
+
+	// 5. Materialize endpoint caches full-res variant locally and returns a path readable via /api/local-image.
+	rrMat := doReq(t, h, srv.Token, "POST", "/api/galleries/ruic-poses/items/POSE-001/materialize", map[string]any{
+		"variant": "high",
+	})
+	if rrMat.Code != 200 {
+		t.Fatalf("POST materialize failed: %d %s", rrMat.Code, rrMat.Body.String())
+	}
+	var matOut struct {
+		OK           bool   `json:"ok"`
+		Path         string `json:"path"`
+		Variant      string `json:"variant"`
+		VariantLabel string `json:"variantLabel"`
+		LocalOnly    bool   `json:"localOnly"`
+	}
+	if err := json.Unmarshal(rrMat.Body.Bytes(), &matOut); err != nil {
+		t.Fatal(err)
+	}
+	if !matOut.OK || matOut.Path == "" || matOut.Variant != "high" || !matOut.LocalOnly {
+		t.Fatalf("unexpected materialize output: %+v", matOut)
+	}
+	if _, err := os.Stat(matOut.Path); err != nil {
+		t.Fatalf("materialized file missing on disk: %v", err)
+	}
+
+	// 6. Prompt compilation includes the chosen angle ("俯视视角").
+	rrPrompt := doReq(t, h, srv.Token, "POST", "/api/prompt", map[string]any{
+		"style":       "FA-001",
+		"theme":       "街头时尚女孩",
+		"galleryRefs": []map[string]any{{"kind": "ruic-poses", "id": "POSE-001", "variant": "high"}},
+	})
+	if rrPrompt.Code != 200 {
+		t.Fatalf("POST /api/prompt with pose variant failed: %d %s", rrPrompt.Code, rrPrompt.Body.String())
+	}
+	if !strings.Contains(rrPrompt.Body.String(), "俯视") {
+		t.Fatalf("expected 俯视 angle cue in compiled prompt: %s", rrPrompt.Body.String())
+	}
+
+	// 7. Uninstall removes gallery JSON and local image cache.
+	rrUn := doReq(t, h, srv.Token, "POST", "/api/galleries/packs/ruic-poses/uninstall", nil)
+	if rrUn.Code != 200 {
+		t.Fatalf("POST uninstall failed: %d %s", rrUn.Code, rrUn.Body.String())
+	}
+	if _, err := os.Stat(matOut.Path); !os.IsNotExist(err) {
+		t.Fatalf("expected materialized cache file to be purged on uninstall")
+	}
+}

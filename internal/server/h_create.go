@@ -41,7 +41,7 @@ func (s *Server) buildPrompt(w http.ResponseWriter, r *http.Request) (any, error
 	}
 	in := body.Input
 	if len(body.GalleryRefs) > 0 {
-		gctx := s.resolveGalleryRefs(body.GalleryRefs)
+		gctx := s.resolveGalleryRefs(r.Context(), body.GalleryRefs)
 		if in.Style == "" && gctx.Style != "" {
 			in.Style = gctx.Style
 		}
@@ -602,10 +602,14 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 
 	// Resolve extensible gallery references (e.g. hairstyles, poses) into prompt cues and reference images (#48).
 	var galCtx resolvedGalleryContext
-	if !body.DirectPrompt {
-		galCtx = s.resolveGalleryRefs(body.GalleryRefs)
+	if len(body.GalleryRefs) > 0 {
+		galCtx = s.resolveGalleryRefs(r.Context(), body.GalleryRefs)
 		if len(galCtx.RefImages) > 0 {
 			body.Refs = append(body.Refs, galCtx.RefImages...)
+		}
+		if body.DirectPrompt {
+			// In direct-prompt mode keep the user's prompt untouched, only attach reference images.
+			galCtx.PromptCues = nil
 		}
 	}
 

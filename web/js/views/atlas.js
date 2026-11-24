@@ -128,9 +128,20 @@ export async function renderAtlas(root, ctx, params = {}) {
     timer = setTimeout(() => { state.q = searchInput.value; drawContent(); }, 180);
   });
 
+  const managePacksBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    dataset: { role: "open-ext-packs" },
+    title: "一键安装或管理第三方扩展图库（如 RuiC-PoseAtlas 姿态/衣装/人像，仅存本机不同步）",
+    onClick: () => openExternalPacksModal(() => renderAtlas(root, ctx), (installedId) => {
+      if (installedId) state.tab = installedId;
+      renderAtlas(root, ctx);
+    }),
+  }, extraGalleries.some((g) => g.localOnly) ? "📦 扩展图库" : "📦 安装扩展图库");
+
   root.appendChild(el("div", { class: "page-head atlas-head" },
     el("h1", { class: "page-title" }, "风格画廊"),
-    el("div", { class: "row atlas-toolbar" }, tabBar, searchInput)
+    el("div", { class: "row atlas-toolbar" }, tabBar, managePacksBtn, searchInput)
   ));
 
   const stage = el("div");
@@ -138,13 +149,24 @@ export async function renderAtlas(root, ctx, params = {}) {
 
   async function drawContent() {
     clear(stage);
-    if (state.tab === "styles") await drawStyles(stage, summary.groups || [], ctx);
-    else if (state.tab === "layouts") await drawLayouts(stage, ctx);
-    else if (state.tab === "colors") await drawColors(stage, ctx);
-    else if (state.tab === "tones") await drawTones(stage, ctx);
-    else if (state.tab === "assets") await drawAssets(stage, ctx);
-    else if (extraById.has(state.tab)) await drawExtensionGallery(stage, extraById.get(state.tab), ctx);
-    else if (state.tab === "dice") await drawDice(stage, ctx);
+    try {
+      if (state.tab === "styles") await drawStyles(stage, summary.groups || [], ctx);
+      else if (state.tab === "layouts") await drawLayouts(stage, ctx);
+      else if (state.tab === "colors") await drawColors(stage, ctx);
+      else if (state.tab === "tones") await drawTones(stage, ctx);
+      else if (state.tab === "assets") await drawAssets(stage, ctx);
+      else if (extraById.has(state.tab)) await drawExtensionGallery(stage, extraById.get(state.tab), ctx);
+      else if (state.tab === "dice") await drawDice(stage, ctx);
+    } catch (e) {
+      clear(stage);
+      stage.appendChild(el("div", { class: "card col", style: { gap: "8px", marginTop: "8px" } },
+        el("strong", null, "该分类暂时无法加载"),
+        el("span", { class: "muted" }, e?.message || String(e)),
+        el("div", { class: "row" },
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => drawContent() }, "重试")
+        )
+      ));
+    }
   }
 
   await drawContent();
@@ -1537,108 +1559,652 @@ async function drawDice(stage, ctx) {
   ));
 }
 
-function gallerySourceBadge(source) {
+function gallerySourceBadge(source, localOnly = false) {
+  if (localOnly || source === "third-party") return el("span", { class: "badge", title: "第三方开源图库，仅保存在本机，不会同步或上传至网站" }, "🔒 仅本机");
   if (!source || source === "official") return null;
   if (source.startsWith("plugin:")) return el("span", { class: "badge badge-accent" }, "插件");
-  if (source === "user") return el("span", { class: "badge" }, "本地");
+  if (source === "user" || source === "personal") return el("span", { class: "badge" }, "本地");
   return el("span", { class: "badge" }, source);
+}
+
+function formatCacheSize(bytes) {
+  const n = Number(bytes || 0);
+  if (!n) return "0 KB";
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export async function openExternalPacksModal(onChanged, onOpenPack) {
+  let packs = [];
+  let mirror = "gitee";
+  let busyId = "";
+
+  const host = el("div", { class: "col", style: { gap: "12px" } },
+    el("p", { class: "muted", style: { margin: 0 } }, "正在加载扩展图库列表…")
+  );
+
+  const renderModalBody = () => {
+    clear(host);
+    const mirrorBar = el("div", { class: "row ext-mirror-bar", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+      el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
+        el("span", { style: { fontSize: "12.5px", fontWeight: "700" } }, "下载源："),
+        el("button", {
+          type: "button",
+          class: "pill-btn" + (mirror === "gitee" ? " pill-accent" : ""),
+          disabled: Boolean(busyId),
+          onClick: () => { mirror = "gitee"; renderModalBody(); },
+        }, "🇨🇳 Gitee 国内镜像（推荐）"),
+        el("button", {
+          type: "button",
+          class: "pill-btn" + (mirror === "github" ? " pill-accent" : ""),
+          disabled: Boolean(busyId),
+          onClick: () => { mirror = "github"; renderModalBody(); },
+        }, "GitHub 原仓")
+      ),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        disabled: Boolean(busyId) || packs.every((p) => p.installed),
+        onClick: async () => {
+          const targets = packs.filter((p) => !p.installed).map((p) => p.id);
+          if (!targets.length) return;
+          busyId = "__all__";
+          renderModalBody();
+          try {
+            const res = await api("POST", "/api/galleries/packs/install", { ids: targets, mirror });
+            packs = res.packs || packs;
+            toast(`已一键安装 ${(res.installed || []).length} 套扩展图库（索引就绪，图片按需缓存）`);
+            onChanged?.();
+          } catch (e) {
+            toast(e?.message || "安装失败");
+          } finally {
+            busyId = "";
+            renderModalBody();
+          }
+        },
+      }, busyId === "__all__" ? "正在安装全部…" : (packs.every((p) => p.installed) ? "✓ 全部已安装" : "⚡ 一键安装全部 3 套"))
+    );
+
+    const notice = el("div", { class: "card", style: { padding: "10px 12px", background: "var(--paper)", fontSize: "12px", lineHeight: "1.6" } },
+      el("div", null,
+        el("strong", null, "RuiC-PoseAtlas 开源视觉图鉴（MIT 协议）"),
+        " · 由客户端直接从 ",
+        el("a", {
+          href: mirror === "gitee" ? "https://gitee.com/mingtian2018/RuiC-PoseAtlas" : "https://github.com/HRuiCcc/RuiC-PoseAtlas",
+          onClick: (e) => { e.preventDefault(); openURL(mirror === "gitee" ? "https://gitee.com/mingtian2018/RuiC-PoseAtlas" : "https://github.com/HRuiCcc/RuiC-PoseAtlas"); },
+        }, mirror === "gitee" ? "Gitee 镜像" : "GitHub 原仓"),
+        " 安装索引（仅 ~1 MB，秒装完成），浏览或选用时自动按需缓存到本机。",
+      ),
+      el("div", { class: "muted", style: { marginTop: "3px" } }, "🔒 严格仅限本机使用：图库文件与缓存不会同步或上传至手绘风网站，网站也不托管这些第三方图库。")
+    );
+
+    const list = el("div", { class: "col", style: { gap: "10px" } });
+    packs.forEach((p) => {
+      const isBusy = busyId === p.id || busyId === "__all__";
+      const statsText = p.installed
+        ? `已安装 · ${p.itemCount || 0} 条 · 本地已缓存 ${p.cachedFiles || 0} 张 (${formatCacheSize(p.cachedBytes)}) · 源：${p.mirror === "github" ? "GitHub" : "Gitee"}`
+        : "未安装";
+      const actions = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } });
+      if (p.installed) {
+        actions.append(
+          el("button", {
+            type: "button",
+            class: "btn btn-sm btn-primary",
+            disabled: isBusy,
+            onClick: () => {
+              closeModal();
+              onOpenPack?.(p.id);
+            },
+          }, "去浏览"),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm",
+            disabled: isBusy,
+            onClick: async () => {
+              busyId = p.id;
+              renderModalBody();
+              try {
+                const res = await api("POST", "/api/galleries/packs/install", { id: p.id, mirror });
+                packs = res.packs || packs;
+                toast(`已更新「${p.name}」索引`);
+                onChanged?.();
+              } catch (e) {
+                toast(e?.message || "更新失败");
+              } finally {
+                busyId = "";
+                renderModalBody();
+              }
+            },
+          }, isBusy ? "更新中…" : "更新 / 切源"),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm",
+            disabled: isBusy,
+            onClick: async () => {
+              if (!window.confirm(`卸载「${p.name}」并清理本地图片缓存（${formatCacheSize(p.cachedBytes)}）？`)) return;
+              busyId = p.id;
+              renderModalBody();
+              try {
+                const res = await api("POST", `/api/galleries/packs/${encodeURIComponent(p.id)}/uninstall`, { purgeCache: true });
+                packs = res.packs || packs;
+                toast(`已卸载「${p.name}」并清理缓存`);
+                onChanged?.();
+              } catch (e) {
+                toast(e?.message || "卸载失败");
+              } finally {
+                busyId = "";
+                renderModalBody();
+              }
+            },
+          }, "卸载")
+        );
+      } else {
+        actions.append(
+          el("button", {
+            type: "button",
+            class: "btn btn-sm btn-primary",
+            disabled: isBusy,
+            onClick: async () => {
+              busyId = p.id;
+              renderModalBody();
+              try {
+                const res = await api("POST", "/api/galleries/packs/install", { id: p.id, mirror });
+                packs = res.packs || packs;
+                toast(`已安装「${p.name}」，可立即在画廊和生图参考图中使用`);
+                onChanged?.();
+              } catch (e) {
+                toast(e?.message || "安装失败");
+              } finally {
+                busyId = "";
+                renderModalBody();
+              }
+            },
+          }, isBusy ? "正在安装…" : "一键安装")
+        );
+      }
+
+      list.appendChild(el("div", { class: "card ext-pack-card" },
+        el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "flex-start", gap: "10px", flexWrap: "wrap" } },
+          el("div", { class: "col", style: { gap: "4px", flex: "1", minWidth: "220px" } },
+            el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
+              el("strong", { style: { fontSize: "14.5px" } }, p.name),
+              el("span", { class: "badge badge-accent" }, p.badge),
+              p.multiVariant ? el("span", { class: "badge" }, "5 视角可选") : null,
+              el("span", { class: "badge" }, "🔒 仅本机")
+            ),
+            el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px", lineHeight: "1.5" } }, p.description),
+            el("span", { class: "muted", style: { fontSize: "11.5px" } }, statsText)
+          ),
+          actions
+        )
+      ));
+    });
+
+    host.append(notice, mirrorBar, list);
+  };
+
+  showModal("扩展视觉图库（仅本机安装）", host, [
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
+  ], { className: "modal-ext-packs" });
+
+  try {
+    const res = await api("GET", "/api/galleries/packs");
+    packs = res.packs || [];
+    if (res.defaultMirror) mirror = res.defaultMirror;
+    renderModalBody();
+  } catch (e) {
+    clear(host);
+    host.appendChild(el("p", { class: "muted" }, `加载失败：${e?.message || e}`));
+  }
+}
+
+function pickItemVariant(item, preferredKey) {
+  const vars = Array.isArray(item?.variants) ? item.variants : [];
+  if (!vars.length) return null;
+  if (preferredKey) {
+    const hit = vars.find((v) => v.key === preferredKey);
+    if (hit) return hit;
+  }
+  return vars[0];
 }
 
 async function drawExtensionGallery(stage, meta, ctx) {
   const res = await api("GET", `/api/galleries/${encodeURIComponent(meta.id)}/items`).catch(() => ({ items: [] }));
-  const items = res.items || [];
+  const allItems = res.items || [];
   if (state.groups[meta.id] === undefined) state.groups[meta.id] = "";
+  const seriesStateKey = `${meta.id}__series`;
+  const angleStateKey = `${meta.id}__angle`;
+  if (state.groups[seriesStateKey] === undefined) state.groups[seriesStateKey] = "";
+  if (state.groups[angleStateKey] === undefined) state.groups[angleStateKey] = "front";
 
-  const headerNote = meta.description
-    ? el("div", { class: "row", style: { justifyContent: "space-between", marginBottom: "10px" } },
-      el("span", { class: "muted" }, meta.description),
-      gallerySourceBadge(meta.source)
-    )
+  const isMultiVariant = Boolean(meta.multiVariant || allItems.some((it) => Array.isArray(it.variants) && it.variants.length > 1));
+
+  // Collect series list (e.g. 性感全身 / 标准全身 / 上半身 / 双人 for RuiC Poses)
+  const seriesMap = new Map();
+  allItems.forEach((it) => {
+    const sk = it.meta?.series;
+    if (!sk) return;
+    if (!seriesMap.has(sk)) {
+      seriesMap.set(sk, { key: sk, label: it.meta?.seriesShort || it.meta?.seriesName || sk, count: 0 });
+    }
+    seriesMap.get(sk).count++;
+  });
+
+  // Collect canonical angle options for multi-variant galleries
+  const angleOptions = [];
+  if (isMultiVariant) {
+    const seenAngle = new Set();
+    for (const it of allItems) {
+      for (const v of (it.variants || [])) {
+        if (!v?.key || seenAngle.has(v.key)) continue;
+        seenAngle.add(v.key);
+        angleOptions.push({ key: v.key, label: v.label || v.key });
+      }
+      if (angleOptions.length >= 5) break;
+    }
+    if (angleOptions.length && !angleOptions.some((a) => a.key === state.groups[angleStateKey])) {
+      state.groups[angleStateKey] = angleOptions[0].key;
+    }
+  }
+
+  // Categories sidebar
+  const catMap = new Map();
+  allItems.forEach((it) => {
+    const ck = it.category || "other";
+    if (!catMap.has(ck)) catMap.set(ck, { key: ck, label: it.categoryName || it.category || "其他", count: 0 });
+    catMap.get(ck).count++;
+  });
+  if (state.groups[meta.id] && !catMap.has(state.groups[meta.id])) state.groups[meta.id] = "";
+
+  const nav = el("div", { class: "atlas-groups", role: "group", "aria-label": `${meta.name || meta.id}分类` });
+  const right = el("div");
+  const filterStrip = el("div", { class: "col", style: { gap: "8px", marginBottom: "10px" } });
+  const grid = masonry();
+  const sentinel = el("div", { style: { height: "24px" } });
+  let io = null;
+
+  const headerNote = el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px", marginBottom: "8px" } },
+    el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
+      meta.description ? el("span", { class: "muted", style: { fontSize: "12.5px" } }, meta.description) : null,
+      gallerySourceBadge(meta.source, meta.localOnly)
+    ),
+    meta.localOnly
+      ? el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => openExternalPacksModal(() => drawExtensionGallery(stage, meta, ctx)),
+        }, "管理扩展图库")
+      : null
+  );
+
+  right.append(headerNote, filterStrip, grid, sentinel);
+  if (catMap.size > 1) stage.appendChild(el("div", { class: "atlas-wrap" }, nav, right));
+  else stage.appendChild(right);
+
+  const rebuildNav = () => {
+    clear(nav);
+    const activeSeries = state.groups[seriesStateKey];
+    const seriesItems = activeSeries ? allItems.filter((x) => (x.meta?.series || "") === activeSeries) : allItems;
+    const localCats = new Map();
+    seriesItems.forEach((it) => {
+      const ck = it.category || "other";
+      if (!localCats.has(ck)) localCats.set(ck, { key: ck, label: it.categoryName || it.category || "其他", count: 0 });
+      localCats.get(ck).count++;
+    });
+    if (state.groups[meta.id] && !localCats.has(state.groups[meta.id])) state.groups[meta.id] = "";
+
+    [{ key: "", label: `全部${meta.name || meta.id}`, count: seriesItems.length }, ...localCats.values()].forEach((g) => {
+      const active = state.groups[meta.id] === g.key;
+      nav.appendChild(el("button", {
+        type: "button",
+        class: "group-btn" + (active ? " active" : ""),
+        "aria-pressed": String(active),
+        onClick: () => { state.groups[meta.id] = g.key; rebuildNav(); paint(); },
+      }, el("span", null, categoryName(g.label)), el("span", { class: "muted" }, String(g.count))));
+    });
+  };
+
+  const rebuildFilters = () => {
+    clear(filterStrip);
+    if (seriesMap.size > 1) {
+      const sRow = el("div", { class: "row pose-angle-bar", role: "group", "aria-label": "系列筛选" },
+        el("span", { class: "muted", style: { fontSize: "12px", marginRight: "2px" } }, "系列："),
+        ...[{ key: "", label: "全部", count: allItems.length }, ...seriesMap.values()].map((s) =>
+          el("button", {
+            type: "button",
+            class: "pill-btn" + (state.groups[seriesStateKey] === s.key ? " pill-accent" : ""),
+            onClick: () => {
+              state.groups[seriesStateKey] = s.key;
+              rebuildFilters();
+              rebuildNav();
+              paint();
+            },
+          }, `${s.label} (${s.count})`)
+        )
+      );
+      filterStrip.appendChild(sRow);
+    }
+    if (isMultiVariant && angleOptions.length > 1) {
+      const aRow = el("div", { class: "row pose-angle-bar", role: "group", "aria-label": "全局预览视角" },
+        el("span", { class: "muted", style: { fontSize: "12px", marginRight: "2px" } }, "统一预览视角："),
+        ...angleOptions.map((a) =>
+          el("button", {
+            type: "button",
+            class: "pill-btn" + (state.groups[angleStateKey] === a.key ? " pill-accent" : ""),
+            dataset: { globalAngle: a.key },
+            onClick: () => {
+              state.groups[angleStateKey] = a.key;
+              rebuildFilters();
+              paint();
+            },
+          }, a.label)
+        ),
+        el("span", { class: "muted", style: { fontSize: "11.5px", marginLeft: "4px" } }, "点卡片下方角度标签可单独切换，点「用于创作」将带入当前所选视角")
+      );
+      filterStrip.appendChild(aRow);
+    }
+  };
+
+  const renderCard = (item) => {
+    const displayName = item.name || item.nameEn || item.id;
+    const snippet = item.traits || item.promptZh || item.promptEn || (item.tags || []).join(" · ");
+    const variants = Array.isArray(item.variants) ? item.variants : [];
+    let activeVar = pickItemVariant(item, state.groups[angleStateKey]);
+
+    const currentThumbUrl = () => {
+      if (activeVar) return galleryImg(activeVar.thumbUrl || activeVar.imageUrl || "");
+      return item.thumbUrl || item.imageUrl ? galleryImg(item.thumbUrl || item.imageUrl) : "/img/logo.svg";
+    };
+
+    const imgEl = el("img", {
+      class: "style-thumb",
+      src: currentThumbUrl(),
+      alt: displayName,
+      loading: "lazy",
+      decoding: "async",
+      onClick: () => openExtensionItemDetail(meta, item, ctx, activeVar?.key || ""),
+    });
+    const angleBadgeEl = activeVar
+      ? el("span", { class: "pose-card-angle-badge" }, `${variants.length}视角 · ${activeVar.label}`)
+      : null;
+
+    const thumbWrap = el("div", { class: "pose-card-thumb-wrap" }, imgEl, angleBadgeEl);
+
+    let angleChipsBar = null;
+    if (variants.length > 1) {
+      angleChipsBar = el("div", { class: "pose-card-angles", role: "group", "aria-label": `${displayName} 视角切换` });
+      variants.forEach((v) => {
+        const chip = el("button", {
+          type: "button",
+          class: "pose-angle-chip" + (activeVar && activeVar.key === v.key ? " is-active" : ""),
+          dataset: { angleKey: v.key },
+          onClick: (e) => {
+            e.stopPropagation();
+            activeVar = v;
+            imgEl.src = currentThumbUrl();
+            if (angleBadgeEl) angleBadgeEl.textContent = `${variants.length}视角 · ${v.label}`;
+            angleChipsBar.querySelectorAll(".pose-angle-chip").forEach((b) => {
+              b.classList.toggle("is-active", b.dataset.angleKey === v.key);
+            });
+            useBtn.textContent = `用「${v.label}」创作`;
+          },
+        }, v.label);
+        angleChipsBar.appendChild(chip);
+      });
+    }
+
+    const useInCreate = () => ctx.go("create", {
+      galleryRef: {
+        kind: meta.id,
+        galleryName: meta.name || meta.id,
+        id: item.id,
+        variant: activeVar?.key || "",
+        name: activeVar ? `${displayName} · ${activeVar.label}` : displayName,
+        imageUrl: activeVar ? (activeVar.thumbUrl || activeVar.imageUrl || "") : (item.thumbUrl || item.imageUrl || ""),
+      },
+    });
+
+    const useBtn = el("button", {
+      type: "button",
+      class: "btn btn-sm btn-primary",
+      onClick: useInCreate,
+    }, activeVar ? `用「${activeVar.label}」创作` : "用于创作");
+
+    return el("div", { class: "style-card" + (variants.length > 1 ? " is-pose-card" : ""), dataset: { extItemId: item.id } },
+      thumbWrap,
+      angleChipsBar,
+      el("div", { class: "style-body", onClick: () => openExtensionItemDetail(meta, item, ctx, activeVar?.key || "") },
+        el("div", { class: "row", style: { justifyContent: "space-between" } },
+          el("span", { class: "style-code" }, item.meta?.no || item.id),
+          gallerySourceBadge(item.source || meta.source, meta.localOnly)
+        ),
+        el("div", { class: "style-name" }, displayName),
+        snippet ? el("div", { class: "style-traits" }, snippet) : null
+      ),
+      el("div", { class: "style-actions" },
+        useBtn,
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => openExtensionItemDetail(meta, item, ctx, activeVar?.key || "") }, variants.length > 1 ? "5视角对比" : "详情")
+      )
+    );
+  };
+
+  function paint() {
+    if (io) { io.disconnect(); io = null; }
+    clear(grid);
+    const query = state.q.trim().toLowerCase();
+    const selCat = state.groups[meta.id];
+    const selSeries = state.groups[seriesStateKey];
+
+    const visible = allItems.filter((item) => {
+      if (selSeries && (item.meta?.series || "") !== selSeries) return false;
+      if (selCat && (item.category || "other") !== selCat) return false;
+      if (!query) return true;
+      const hay = `${item.id || ""} ${item.name || ""} ${item.nameEn || ""} ${item.categoryName || ""} ${item.traits || ""} ${(item.tags || []).join(" ")}`.toLowerCase();
+      return hay.includes(query);
+    });
+
+    if (!visible.length) {
+      sentinel.classList.add("hidden");
+      grid.appendChild(el("div", { class: "card muted" }, query ? "没有找到匹配的图库条目" : `「${meta.name || meta.id}」当前分类暂时没有条目`));
+      return;
+    }
+
+    let offset = 0;
+    const batchSize = 48;
+    sentinel.classList.remove("hidden");
+    const appendBatch = () => {
+      const slice = visible.slice(offset, offset + batchSize);
+      offset += slice.length;
+      slice.forEach((item) => grid.appendChild(renderCard(item)));
+      if (offset >= visible.length) {
+        sentinel.classList.add("hidden");
+        if (io) { io.disconnect(); io = null; }
+      }
+    };
+    appendBatch();
+    if (offset < visible.length) {
+      io = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting)) appendBatch();
+      }, { rootMargin: "360px" });
+      io.observe(sentinel);
+    }
+  }
+
+  rebuildFilters();
+  rebuildNav();
+  paint();
+}
+
+function openExtensionItemDetail(meta, item, ctx, initialVariantKey = "") {
+  const displayName = item.name || item.nameEn || item.id;
+  const variants = Array.isArray(item.variants) ? item.variants : [];
+  let activeVar = pickItemVariant(item, initialVariantKey);
+  const pickedKeys = new Set(activeVar ? [activeVar.key] : []);
+
+  const stageImg = el("img", {
+    src: activeVar
+      ? galleryImg(activeVar.thumbUrl || activeVar.imageUrl || "")
+      : (item.thumbUrl || item.imageUrl ? galleryImg(item.thumbUrl || item.imageUrl) : ""),
+    alt: displayName,
+    style: { width: "100%", height: "320px", maxHeight: "360px", objectFit: "contain", borderRadius: "10px", background: "#fff", border: "1px solid var(--line)" },
+  });
+  let stageLoadSeq = 0;
+  const loadStageVar = (v) => {
+    if (!v) return;
+    const seq = ++stageLoadSeq;
+    const thumb = galleryImg(v.thumbUrl || v.imageUrl || "");
+    const full = galleryImg(v.imageUrl || v.thumbUrl || "");
+    if (thumb) stageImg.src = thumb;
+    if (full && full !== thumb) {
+      const pre = new Image();
+      pre.onload = () => { if (seq === stageLoadSeq) stageImg.src = full; };
+      pre.src = full;
+    }
+  };
+  if (activeVar) loadStageVar(activeVar);
+
+  const activeAngleTitle = activeVar
+    ? el("span", { class: "badge badge-accent" }, `当前视角：${activeVar.label}`)
     : null;
 
-  drawCatalog(stage, {
-    kind: meta.id,
-    title: meta.name || meta.id,
-    allLabel: `全部${meta.name || meta.id}`,
-    items,
-    groupKey: (x) => x.category || "other",
-    groupLabel: (x) => x.categoryZh || x.category || "其他",
-    before: headerNote,
-    empty: `「${meta.name || meta.id}」画廊暂时没有条目`,
-    card: (item) => {
-      const displayName = item.name || item.nameEn || item.id;
-      const snippet = item.traits || item.promptZh || item.promptEn || (item.tags || []).join(" · ");
-      const imgSrc = item.imageUrl ? galleryImg(item.imageUrl) : "/img/logo.svg";
-      const useInCreate = () => ctx.go("create", {
+  let primaryCtaBtn = null;
+  let multiCtaBtn = null;
+  let filmstripEl = null;
+
+  const syncModalState = () => {
+    if (activeVar) {
+      loadStageVar(activeVar);
+      if (activeAngleTitle) activeAngleTitle.textContent = `当前视角：${activeVar.label}`;
+      if (primaryCtaBtn) primaryCtaBtn.textContent = `用「${activeVar.label}」去生图`;
+    }
+    if (multiCtaBtn) {
+      multiCtaBtn.classList.toggle("hidden", pickedKeys.size < 2);
+      multiCtaBtn.textContent = `带入已勾选 ${pickedKeys.size} 个视角去生图`;
+    }
+    if (filmstripEl) {
+      filmstripEl.querySelectorAll(".pose-film-item").forEach((card) => {
+        const k = card.dataset.variantKey;
+        card.classList.toggle("is-active", activeVar && activeVar.key === k);
+        const chk = card.querySelector("input[type=checkbox]");
+        if (chk) chk.checked = pickedKeys.has(k);
+      });
+    }
+  };
+
+  if (variants.length > 1) {
+    filmstripEl = el("div", { class: "pose-filmstrip", role: "listbox", "aria-label": "5 视角对比切换" });
+    variants.forEach((v) => {
+      const chk = el("input", {
+        type: "checkbox",
+        checked: pickedKeys.has(v.key),
+        title: `多选：同时带入 ${v.label} 视角`,
+        onClick: (e) => e.stopPropagation(),
+        onChange: () => {
+          if (chk.checked) pickedKeys.add(v.key);
+          else pickedKeys.delete(v.key);
+          syncModalState();
+        },
+      });
+      const tile = el("div", {
+        class: "pose-film-item" + (activeVar && activeVar.key === v.key ? " is-active" : ""),
+        dataset: { variantKey: v.key },
+        onClick: () => {
+          activeVar = v;
+          if (pickedKeys.size <= 1) {
+            pickedKeys.clear();
+            pickedKeys.add(v.key);
+          }
+          syncModalState();
+        },
+      },
+        el("img", { src: galleryImg(v.thumbUrl || v.imageUrl || ""), alt: v.label, loading: "lazy" }),
+        el("div", { class: "pose-film-foot" },
+          el("span", null, v.label),
+          chk
+        )
+      );
+      filmstripEl.appendChild(tile);
+    });
+  }
+
+  const onKeyNav = (e) => {
+    if (!variants.length) return;
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const idx = variants.findIndex((v) => v.key === activeVar?.key);
+    if (idx < 0) return;
+    e.preventDefault();
+    const nextIdx = e.key === "ArrowRight" ? (idx + 1) % variants.length : (idx - 1 + variants.length) % variants.length;
+    activeVar = variants[nextIdx];
+    syncModalState();
+  };
+  document.addEventListener("keydown", onKeyNav);
+
+  const body = el("div", { class: "col", style: { gap: "10px" } },
+    stageImg.getAttribute("src") ? stageImg : null,
+    filmstripEl ? el("div", { class: "col", style: { gap: "6px" } },
+      el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" } },
+        el("strong", { style: { fontSize: "12.5px" } }, `全部 ${variants.length} 个视角（点击预览，可按 ← / → 切换，右下勾选可多角度同选）`),
+        activeAngleTitle
+      ),
+      filmstripEl
+    ) : null,
+    el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } },
+      el("span", { class: "badge badge-accent" }, item.meta?.no || item.id),
+      el("span", { class: "badge" }, meta.name || meta.id),
+      item.categoryName || item.category ? el("span", { class: "badge" }, item.categoryName || item.category) : null,
+      gallerySourceBadge(item.source || meta.source, meta.localOnly),
+      ...(item.tags || []).slice(0, 6).map((t) => el("span", { class: "badge" }, t))
+    ),
+    item.traits ? el("p", { style: { margin: "2px 0" } }, item.traits) : null,
+    item.promptZh && item.promptZh !== item.traits ? el("p", { style: { margin: "2px 0", fontSize: "13px" } }, item.promptZh) : null,
+    item.promptEn ? el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, item.promptEn) : null
+  );
+
+  multiCtaBtn = variants.length > 1
+    ? el("button", {
+        type: "button",
+        class: "btn hidden",
+        onClick: () => {
+          const chosen = variants.filter((v) => pickedKeys.has(v.key));
+          if (!chosen.length) return;
+          closeModal();
+          ctx.go("create", {
+            galleryRefs: chosen.map((v) => ({
+              kind: meta.id,
+              galleryName: meta.name || meta.id,
+              id: item.id,
+              variant: v.key,
+              name: `${displayName} · ${v.label}`,
+              imageUrl: v.thumbUrl || v.imageUrl || "",
+            })),
+          });
+        },
+      }, "带入多视角去生图")
+    : null;
+
+  primaryCtaBtn = el("button", {
+    type: "button",
+    class: "btn btn-primary",
+    onClick: () => {
+      closeModal();
+      ctx.go("create", {
         galleryRef: {
           kind: meta.id,
           galleryName: meta.name || meta.id,
           id: item.id,
-          name: displayName,
-          imageUrl: item.imageUrl || "",
+          variant: activeVar?.key || "",
+          name: activeVar ? `${displayName} · ${activeVar.label}` : displayName,
+          imageUrl: activeVar ? (activeVar.thumbUrl || activeVar.imageUrl || "") : (item.thumbUrl || item.imageUrl || ""),
         },
       });
-      return el("div", { class: "style-card" },
-        el("img", {
-          class: "style-thumb",
-          src: imgSrc,
-          alt: displayName,
-          loading: "lazy",
-          onClick: () => openExtensionItemDetail(meta, item, ctx),
-        }),
-        el("div", { class: "style-body", onClick: () => openExtensionItemDetail(meta, item, ctx) },
-          el("div", { class: "row", style: { justifyContent: "space-between" } },
-            el("span", { class: "style-code" }, item.id),
-            gallerySourceBadge(item.source || meta.source)
-          ),
-          el("div", { class: "style-name" }, displayName),
-          snippet ? el("div", { class: "style-traits" }, snippet) : null
-        ),
-        el("div", { class: "style-actions" },
-          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: useInCreate }, "用于创作"),
-          el("button", { type: "button", class: "btn btn-sm", onClick: () => openExtensionItemDetail(meta, item, ctx) }, "详情")
-        )
-      );
     },
-  });
-}
+  }, activeVar ? `用「${activeVar.label}」去生图` : "去生图");
 
-function openExtensionItemDetail(meta, item, ctx) {
-  const displayName = item.name || item.nameEn || item.id;
-  const imgSrc = item.imageUrl ? galleryImg(item.imageUrl) : "";
-  const body = el("div", { class: "col" },
-    imgSrc ? el("img", {
-      src: imgSrc,
-      alt: displayName,
-      style: { width: "100%", maxHeight: "340px", objectFit: "contain", borderRadius: "10px", background: "var(--surface-2)" },
-    }) : null,
-    el("div", { class: "row", style: { flexWrap: "wrap" } },
-      el("span", { class: "badge badge-accent" }, item.id),
-      el("span", { class: "badge" }, meta.name || meta.id),
-      item.categoryZh || item.category ? el("span", { class: "badge" }, item.categoryZh || item.category) : null,
-      gallerySourceBadge(item.source || meta.source),
-      ...(item.tags || []).slice(0, 6).map((t) => el("span", { class: "badge" }, t))
-    ),
-    item.traits ? el("p", { style: { margin: "4px 0" } }, item.traits) : null,
-    item.promptZh && item.promptZh !== item.traits ? el("p", { style: { margin: "4px 0" } }, item.promptZh) : null,
-    item.promptEn ? el("p", { class: "muted", style: { margin: 0 } }, item.promptEn) : null
-  );
-  showModal(`${item.id} · ${displayName}`, body, [
-    el("button", {
-      type: "button",
-      class: "btn btn-primary",
-      onClick: () => {
-        closeModal();
-        ctx.go("create", {
-          galleryRef: {
-            kind: meta.id,
-            galleryName: meta.name || meta.id,
-            id: item.id,
-            name: displayName,
-            imageUrl: item.imageUrl || "",
-          },
-        });
-      },
-    }, "去生图"),
-  ]);
+  showModal(`${item.meta?.no || item.id} · ${displayName}`, body, [
+    multiCtaBtn,
+    primaryCtaBtn,
+  ].filter(Boolean), {
+    className: variants.length > 1 ? "modal-pose-detail" : "",
+    onClose: () => document.removeEventListener("keydown", onKeyNav),
+  });
 }

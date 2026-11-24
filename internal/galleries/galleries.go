@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yang0/handraw-client/internal/resources"
 )
@@ -29,16 +30,35 @@ type Category struct {
 	Count  int    `json:"count"`
 }
 
+type Variant struct {
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	LabelEn     string `json:"labelEn,omitempty"`
+	Image       string `json:"image,omitempty"`
+	Thumb       string `json:"thumb,omitempty"`
+	RemoteImage string `json:"remoteImage,omitempty"`
+	RemoteThumb string `json:"remoteThumb,omitempty"`
+	ImageURL    string `json:"imageUrl,omitempty"`
+	ThumbURL    string `json:"thumbUrl,omitempty"`
+	ImagePath   string `json:"-"`
+	ThumbPath   string `json:"-"`
+}
+
 type Meta struct {
 	ID               string     `json:"id"`
 	Name             string     `json:"name"`
 	NameEn           string     `json:"nameEn,omitempty"`
 	Description      string     `json:"description,omitempty"`
 	Icon             string     `json:"icon,omitempty"`
-	Source           string     `json:"source"` // official | pack | personal | plugin:<id>
+	Source           string     `json:"source"` // official | pack | personal | third-party | plugin:<id>
 	PromptRole       string     `json:"promptRole,omitempty"`
 	SupportsRefImage bool       `json:"supportsRefImage"`
 	Builtin          bool       `json:"builtin"`
+	LocalOnly        bool       `json:"localOnly,omitempty"`
+	MultiVariant     bool       `json:"multiVariant,omitempty"`
+	UpstreamURL      string     `json:"upstreamUrl,omitempty"`
+	Mirror           string     `json:"mirror,omitempty"`
+	License          string     `json:"license,omitempty"`
 	Count            int        `json:"count"`
 	Categories       []Category `json:"categories,omitempty"`
 }
@@ -55,18 +75,25 @@ type Item struct {
 	PromptZh     string         `json:"promptZh,omitempty"`
 	PromptEn     string         `json:"promptEn,omitempty"`
 	Image        string         `json:"image,omitempty"`
+	Thumb        string         `json:"thumb,omitempty"`
+	RemoteImage  string         `json:"remoteImage,omitempty"`
+	RemoteThumb  string         `json:"remoteThumb,omitempty"`
 	ImageURL     string         `json:"imageUrl,omitempty"`
 	ThumbURL     string         `json:"thumbUrl,omitempty"`
+	Variants     []Variant      `json:"variants,omitempty"`
 	Source       string         `json:"source,omitempty"`
 	Author       string         `json:"author,omitempty"`
 	Meta         map[string]any `json:"meta,omitempty"`
 	ImagePath    string         `json:"-"`
+	ThumbPath    string         `json:"-"`
+	ImageRoot    string         `json:"-"`
 }
 
 type Query struct {
 	Q        string
 	Category string
 	Source   string
+	Series   string
 	Limit    int
 	Offset   int
 }
@@ -82,6 +109,11 @@ type Registration struct {
 	Owner            string `json:"-"` // plugin id when dynamically registered
 	PromptRole       string `json:"promptRole,omitempty"`
 	SupportsRefImage *bool  `json:"supportsRefImage,omitempty"`
+	LocalOnly        bool   `json:"localOnly,omitempty"`
+	MultiVariant     bool   `json:"multiVariant,omitempty"`
+	UpstreamURL      string `json:"upstreamUrl,omitempty"`
+	Mirror           string `json:"mirror,omitempty"`
+	License          string `json:"license,omitempty"`
 	ImageRoot        string `json:"-"`
 	Items            []Item `json:"items"`
 }
@@ -92,15 +124,25 @@ type galleryEntry struct {
 	items []Item
 }
 
+type cachedFileEntry struct {
+	modTime time.Time
+	size    int64
+	entry   galleryEntry
+}
+
 type Registry struct {
-	mu       sync.RWMutex
-	dynamic  map[string]galleryEntry
-	order    []string
-	OnChange func()
+	mu        sync.RWMutex
+	dynamic   map[string]galleryEntry
+	order     []string
+	fileCache map[string]cachedFileEntry
+	OnChange  func()
 }
 
 func New() *Registry {
-	return &Registry{dynamic: map[string]galleryEntry{}}
+	return &Registry{
+		dynamic:   map[string]galleryEntry{},
+		fileCache: map[string]cachedFileEntry{},
+	}
 }
 
 func ValidKind(kind string) bool {
@@ -109,6 +151,21 @@ func ValidKind(kind string) bool {
 
 func itemImageURL(kind, id string) string {
 	return "/api/galleries/" + url.PathEscape(kind) + "/items/" + url.PathEscape(id) + "/image"
+}
+
+func itemVariantImageURL(kind, id, variant string, thumb bool) string {
+	base := itemImageURL(kind, id)
+	q := url.Values{}
+	if variant != "" {
+		q.Set("variant", variant)
+	}
+	if thumb {
+		q.Set("size", "thumb")
+	}
+	if len(q) == 0 {
+		return base
+	}
+	return base + "?" + q.Encode()
 }
 
 // Register adds or updates a runtime gallery (e.g., contributed by a plugin).
@@ -214,6 +271,7 @@ func (r *Registry) Items(pack *resources.Pack, kind string, q Query, extraDirs .
 	qStr := strings.ToLower(strings.TrimSpace(q.Q))
 	cat := strings.TrimSpace(q.Category)
 	src := strings.TrimSpace(q.Source)
+	series := strings.TrimSpace(q.Series)
 
 	matched := make([]Item, 0, len(entry.items))
 	for _, it := range entry.items {
@@ -222,6 +280,12 @@ func (r *Registry) Items(pack *resources.Pack, kind string, q Query, extraDirs .
 		}
 		if src != "" && !strings.EqualFold(it.Source, src) {
 			continue
+		}
+		if series != "" {
+			itSeries, _ := it.Meta["series"].(string)
+			if !strings.EqualFold(strings.TrimSpace(itSeries), series) {
+				continue
+			}
 		}
 		if qStr != "" && !itemMatches(it, qStr) {
 			continue
@@ -258,17 +322,115 @@ func (r *Registry) Item(pack *resources.Pack, kind, id string, extraDirs ...stri
 	return Item{}, false
 }
 
+// ImageTarget describes where a gallery item's image lives locally (or should
+// be cached on disk) and what upstream URL(s) can supply it on demand.
+type ImageTarget struct {
+	LocalPath  string   // non-empty if already present on disk
+	CachePath  string   // verified target path inside gallery ImageRoot for on-demand caching
+	RemoteURLs []string // ordered upstream URLs (e.g., Gitee mirror -> GitHub fallback)
+}
+
 // ResolveImage returns a verified local file path for a gallery item's image.
 func (r *Registry) ResolveImage(pack *resources.Pack, kind, id string, extraDirs ...string) (string, bool) {
+	t, ok := r.ResolveImageTarget(pack, kind, id, "", false, extraDirs...)
+	if !ok || t.LocalPath == "" {
+		return "", false
+	}
+	return t.LocalPath, true
+}
+
+// ResolveImageTarget resolves an item (and optional variant key + thumb/full)
+// to an existing local file or an on-demand cache target + upstream remote URLs.
+func (r *Registry) ResolveImageTarget(pack *resources.Pack, kind, id, variantKey string, wantThumb bool, extraDirs ...string) (ImageTarget, bool) {
 	it, ok := r.Item(pack, kind, id, extraDirs...)
-	if !ok || it.ImagePath == "" {
-		return "", false
+	if !ok {
+		return ImageTarget{}, false
 	}
-	st, err := os.Stat(it.ImagePath)
-	if err != nil || st.IsDir() {
-		return "", false
+
+	relLocal := it.Image
+	existingPath := it.ImagePath
+	primaryRemote := it.RemoteImage
+	fallbackRemote := it.RemoteThumb
+	if wantThumb {
+		if it.Thumb != "" {
+			relLocal = it.Thumb
+		}
+		if it.ThumbPath != "" {
+			existingPath = it.ThumbPath
+		}
+		if it.RemoteThumb != "" {
+			primaryRemote = it.RemoteThumb
+			fallbackRemote = it.RemoteImage
+		}
 	}
-	return it.ImagePath, true
+
+	if len(it.Variants) > 0 {
+		var chosen *Variant
+		vWant := strings.TrimSpace(variantKey)
+		if vWant != "" {
+			for i := range it.Variants {
+				if strings.EqualFold(it.Variants[i].Key, vWant) {
+					chosen = &it.Variants[i]
+					break
+				}
+			}
+		}
+		if chosen == nil {
+			chosen = &it.Variants[0]
+		}
+		if wantThumb {
+			relLocal = firstNonEmpty(chosen.Thumb, chosen.Image, relLocal)
+			existingPath = firstNonEmpty(chosen.ThumbPath, chosen.ImagePath)
+			primaryRemote = firstNonEmpty(chosen.RemoteThumb, chosen.RemoteImage)
+			fallbackRemote = chosen.RemoteImage
+		} else {
+			relLocal = firstNonEmpty(chosen.Image, chosen.Thumb, relLocal)
+			existingPath = firstNonEmpty(chosen.ImagePath, chosen.ThumbPath)
+			primaryRemote = firstNonEmpty(chosen.RemoteImage, chosen.RemoteThumb)
+			fallbackRemote = chosen.RemoteThumb
+		}
+	}
+
+	var out ImageTarget
+	if existingPath != "" {
+		if st, err := os.Stat(existingPath); err == nil && !st.IsDir() {
+			out.LocalPath = existingPath
+		}
+	}
+	if out.LocalPath == "" && it.ImageRoot != "" && relLocal != "" {
+		if p := resolveSafeTarget(it.ImageRoot, relLocal); p != "" {
+			out.CachePath = p
+			if st, err := os.Stat(p); err == nil && !st.IsDir() {
+				out.LocalPath = p
+			}
+		}
+	}
+
+	addRemote := func(u string) {
+		u = strings.TrimSpace(u)
+		if !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
+			return
+		}
+		for _, prev := range out.RemoteURLs {
+			if prev == u {
+				return
+			}
+		}
+		out.RemoteURLs = append(out.RemoteURLs, u)
+	}
+	addRemote(primaryRemote)
+	for _, alt := range mirrorFallbacks(primaryRemote) {
+		addRemote(alt)
+	}
+	addRemote(fallbackRemote)
+	for _, alt := range mirrorFallbacks(fallbackRemote) {
+		addRemote(alt)
+	}
+
+	if out.LocalPath == "" && len(out.RemoteURLs) == 0 {
+		return ImageTarget{}, false
+	}
+	return out, true
 }
 
 func (r *Registry) findEntry(pack *resources.Pack, kind string, extraDirs ...string) (galleryEntry, bool) {
@@ -302,7 +464,7 @@ func (r *Registry) snapshot(pack *resources.Pack, extraDirs ...string) []gallery
 		}
 		// 2. Declarative extension galleries in <packDir>/references/galleries/*.json.
 		packGalDir := filepath.Join(pack.Dir, "references", "galleries")
-		for _, e := range loadDirGalleries(packGalDir, pack.ImageRoot, "official") {
+		for _, e := range r.loadDirGalleries(packGalDir, pack.ImageRoot, "official") {
 			add(e)
 		}
 	}
@@ -312,7 +474,7 @@ func (r *Registry) snapshot(pack *resources.Pack, extraDirs ...string) []gallery
 		if strings.TrimSpace(dir) == "" {
 			continue
 		}
-		for _, e := range loadDirGalleries(dir, dir, "personal") {
+		for _, e := range r.loadDirGalleries(dir, dir, "personal") {
 			add(e)
 		}
 	}
@@ -547,7 +709,7 @@ func builtinEntries(p *resources.Pack) []galleryEntry {
 	return out
 }
 
-func loadDirGalleries(dir, imageRoot, defaultSource string) []galleryEntry {
+func (r *Registry) loadDirGalleries(dir, imageRoot, defaultSource string) []galleryEntry {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -557,7 +719,21 @@ func loadDirGalleries(dir, imageRoot, defaultSource string) []galleryEntry {
 		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		fullPath := filepath.Join(dir, e.Name())
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if r != nil {
+			r.mu.RLock()
+			cached, ok := r.fileCache[fullPath]
+			r.mu.RUnlock()
+			if ok && cached.size == info.Size() && cached.modTime.Equal(info.ModTime()) {
+				out = append(out, cached.entry)
+				continue
+			}
+		}
+		raw, err := os.ReadFile(fullPath)
 		if err != nil {
 			continue
 		}
@@ -576,7 +752,16 @@ func loadDirGalleries(dir, imageRoot, defaultSource string) []galleryEntry {
 			reg.Source = defaultSource
 		}
 		reg.ImageRoot = imageRoot
-		out = append(out, buildEntry(kind, reg, false))
+		built := buildEntry(kind, reg, false)
+		if r != nil {
+			r.mu.Lock()
+			if r.fileCache == nil {
+				r.fileCache = map[string]cachedFileEntry{}
+			}
+			r.fileCache[fullPath] = cachedFileEntry{modTime: info.ModTime(), size: info.Size(), entry: built}
+			r.mu.Unlock()
+		}
+		out = append(out, built)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].meta.ID < out[j].meta.ID })
 	return out
@@ -591,6 +776,7 @@ func buildEntry(kind string, reg Registration, builtin bool) galleryEntry {
 	if reg.Owner != "" && reg.Source == "" {
 		src = "plugin:" + reg.Owner
 	}
+	hasAnyVariants := reg.MultiVariant
 	items := make([]Item, 0, len(reg.Items))
 	for _, raw := range reg.Items {
 		it := raw
@@ -599,6 +785,7 @@ func buildEntry(kind string, reg Registration, builtin bool) galleryEntry {
 			continue
 		}
 		it.Kind = kind
+		it.ImageRoot = reg.ImageRoot
 		if it.Name == "" {
 			it.Name = firstNonEmpty(it.NameEn, it.ID)
 		}
@@ -608,9 +795,53 @@ func buildEntry(kind string, reg Registration, builtin bool) galleryEntry {
 		if it.ImagePath == "" && it.Image != "" {
 			it.ImagePath = resolveSafeImage(reg.ImageRoot, it.Image)
 		}
-		if it.ImagePath != "" {
-			it.ImageURL = itemImageURL(kind, it.ID)
-			it.ThumbURL = it.ImageURL
+		if it.ThumbPath == "" && it.Thumb != "" {
+			it.ThumbPath = resolveSafeImage(reg.ImageRoot, it.Thumb)
+		}
+		if len(it.Variants) > 0 {
+			hasAnyVariants = true
+			vars := make([]Variant, 0, len(it.Variants))
+			for _, v := range it.Variants {
+				v.Key = strings.TrimSpace(v.Key)
+				if v.Key == "" {
+					continue
+				}
+				if v.Label == "" {
+					v.Label = firstNonEmpty(v.LabelEn, v.Key)
+				}
+				if v.ImagePath == "" && v.Image != "" {
+					v.ImagePath = resolveSafeImage(reg.ImageRoot, v.Image)
+				}
+				if v.ThumbPath == "" && v.Thumb != "" {
+					v.ThumbPath = resolveSafeImage(reg.ImageRoot, v.Thumb)
+				}
+				if v.ImagePath != "" || v.RemoteImage != "" || v.ThumbPath != "" || v.RemoteThumb != "" {
+					v.ImageURL = itemVariantImageURL(kind, it.ID, v.Key, false)
+					v.ThumbURL = itemVariantImageURL(kind, it.ID, v.Key, true)
+				}
+				vars = append(vars, v)
+			}
+			it.Variants = vars
+			if len(vars) > 0 {
+				if it.ImageURL == "" {
+					it.ImageURL = vars[0].ImageURL
+				}
+				if it.ThumbURL == "" {
+					it.ThumbURL = vars[0].ThumbURL
+				}
+				if it.ImagePath == "" {
+					it.ImagePath = vars[0].ImagePath
+				}
+			}
+		} else {
+			if it.ImagePath != "" || it.RemoteImage != "" || it.ThumbPath != "" || it.RemoteThumb != "" {
+				it.ImageURL = itemImageURL(kind, it.ID)
+				if it.Thumb != "" || it.RemoteThumb != "" {
+					it.ThumbURL = itemVariantImageURL(kind, it.ID, "", true)
+				} else {
+					it.ThumbURL = it.ImageURL
+				}
+			}
 		}
 		items = append(items, it)
 	}
@@ -626,6 +857,11 @@ func buildEntry(kind string, reg Registration, builtin bool) galleryEntry {
 			PromptRole:       firstNonEmpty(reg.PromptRole, "custom"),
 			SupportsRefImage: supportsRef,
 			Builtin:          builtin,
+			LocalOnly:        reg.LocalOnly,
+			MultiVariant:     hasAnyVariants,
+			UpstreamURL:      reg.UpstreamURL,
+			Mirror:           reg.Mirror,
+			License:          reg.License,
 			Count:            len(items),
 			Categories:       computeCategories(items),
 		},
@@ -686,6 +922,40 @@ func resolveSafeImage(root, rel string) string {
 		return candidate
 	}
 	return ""
+}
+
+// resolveSafeTarget resolves a relative path inside root without requiring the
+// file to exist yet (used as the on-demand cache target path).
+func resolveSafeTarget(root, rel string) string {
+	rel = strings.TrimSpace(rel)
+	if rel == "" || root == "" || filepath.IsAbs(rel) || strings.Contains(rel, "..") {
+		return ""
+	}
+	cleanRoot, err := filepath.Abs(root)
+	if err != nil {
+		return ""
+	}
+	candidate := filepath.Join(cleanRoot, filepath.FromSlash(rel))
+	if !isWithin(cleanRoot, candidate) {
+		return ""
+	}
+	return candidate
+}
+
+// mirrorFallbacks maps between Gitee mirror and GitHub raw URLs for RuiC-PoseAtlas
+// so on-demand image caching automatically falls back if one mirror is unreachable.
+func mirrorFallbacks(rawURL string) []string {
+	const (
+		giteePrefix  = "https://gitee.com/mingtian2018/RuiC-PoseAtlas/raw/main/"
+		githubPrefix = "https://raw.githubusercontent.com/HRuiCcc/RuiC-PoseAtlas/main/"
+	)
+	if strings.HasPrefix(rawURL, giteePrefix) {
+		return []string{githubPrefix + strings.TrimPrefix(rawURL, giteePrefix)}
+	}
+	if strings.HasPrefix(rawURL, githubPrefix) {
+		return []string{giteePrefix + strings.TrimPrefix(rawURL, githubPrefix)}
+	}
+	return nil
 }
 
 func isWithin(root, target string) bool {

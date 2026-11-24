@@ -285,7 +285,7 @@ export async function renderCreate(root, ctx, params = {}) {
       state.galleryRefs = [...params.galleryRefs];
     } else if (params.galleryRef && params.galleryRef.kind && params.galleryRef.id) {
       const list = Array.isArray(state.galleryRefs) ? state.galleryRefs : [];
-      const exists = list.some((g) => g.kind === params.galleryRef.kind && g.id === params.galleryRef.id);
+      const exists = list.some((g) => g.kind === params.galleryRef.kind && g.id === params.galleryRef.id && (g.variant || "") === (params.galleryRef.variant || ""));
       state.galleryRefs = exists ? list : [...list, params.galleryRef];
     }
     if (params.theme) {
@@ -1923,7 +1923,11 @@ export async function renderCreate(root, ctx, params = {}) {
 
     let payloadItems;
     let payloadRecipe;
-    let payloadGalleryRefs = [];
+    const payloadGalleryRefs = (state.galleryRefs || []).map((g) => ({
+      kind: g.kind,
+      id: g.id,
+      ...(g.variant ? { variant: g.variant } : {}),
+    }));
     if (isDirect) {
       payloadItems = targetItems.map((it) => {
         const rawP = String(it.subject || turn.userMessage || "").trim();
@@ -1942,7 +1946,6 @@ export async function renderCreate(root, ctx, params = {}) {
       const effectiveColor = state.color || (common.colors?.[0] || "");
       const effectiveTone = state.tone || (common.tones?.[0] || "");
       const baseExtra = extraInstructions(state);
-      payloadGalleryRefs = (state.galleryRefs || []).map((g) => ({ kind: g.kind, id: g.id }));
       payloadItems = targetItems.map((it) => {
         const mergedMood = [state.mood, it.mood].filter(Boolean).join("，");
         return {
