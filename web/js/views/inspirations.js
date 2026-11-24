@@ -12,12 +12,15 @@ const SOURCE_LABELS = {
   import: "手动收集",
 };
 
+const UNGROUPED_FOLDER = "__ungrouped__";
+const FOLDER_PRESET_SUGGESTIONS = ["小红书封面", "公众号配图", "海报排版", "插画参考", "角色设定", "场景氛围"];
+
 const viewState = {
   tab: "vault", // vault | plaza | earnings
   userPickedTab: false,
   q: "",
-  category: "",
-  tag: "",
+  folder: "", // "" = all | "__ungrouped__" | custom folder name
+  tags: [], // multi-select tag intersection filter
   plazaFilter: "all:latest", // all:latest | all:popular | unlocked:latest | mine:latest
   plazaQ: "",
   batchMode: false,
@@ -197,7 +200,7 @@ export function openClipperSetupModal(meta = {}) {
 }
 
 export async function renderInspirations(root, ctx, params = {}) {
-  let latestVaultMeta = { clipToken: "", clipEndpoint: "", clipExtensionDir: "", clipExtensionExists: false, siteBase: "" };
+  let latestVaultMeta = { clipToken: "", clipEndpoint: "", clipExtensionDir: "", clipExtensionExists: false, siteBase: "", folders: [] };
   let prefetchedVaultRes = null;
 
   if (params.tab && ["vault", "plaza", "earnings"].includes(params.tab)) {
@@ -213,13 +216,14 @@ export async function renderInspirations(root, ctx, params = {}) {
         clipExtensionDir: probe.clipExtensionDir || "",
         clipExtensionExists: probe.clipExtensionExists,
         siteBase: probe.siteBase || "",
+        folders: Array.isArray(probe.folders) ? probe.folders : [],
       };
       const totalLocal = Number(probe.totalCount ?? (probe.items || []).length);
       if (totalLocal === 0) {
         viewState.tab = "plaza";
       } else {
         viewState.tab = "vault";
-        if (!viewState.q && !viewState.category && !viewState.tag) {
+        if (!viewState.q && !viewState.folder && viewState.tags.length === 0) {
           prefetchedVaultRes = probe;
         }
       }
@@ -277,7 +281,10 @@ export async function renderInspirations(root, ctx, params = {}) {
           drawTabs();
         }
         drawBody();
-      }, latestVaultMeta),
+      }, {
+        ...latestVaultMeta,
+        defaultFolder: (viewState.folder && viewState.folder !== UNGROUPED_FOLDER) ? viewState.folder : "",
+      }),
     }, "＋ 收集新灵感"),
     sizeSwitcher.el
   );
@@ -293,12 +300,15 @@ export async function renderInspirations(root, ctx, params = {}) {
   const stage = el("div", { class: "col", style: { gap: "14px" } });
   root.appendChild(stage);
 
+  let vaultHandle = null;
+
   async function drawBody() {
     clear(stage);
+    vaultHandle = null;
     if (viewState.tab === "vault") {
       const initialRes = prefetchedVaultRes;
       prefetchedVaultRes = null;
-      await renderVaultTab(stage, ctx, (meta) => { latestVaultMeta = meta; }, initialRes);
+      vaultHandle = await renderVaultTab(stage, ctx, (meta) => { latestVaultMeta = meta; }, initialRes);
     } else if (viewState.tab === "plaza") {
       await renderPlazaTab(stage, ctx);
     } else {
@@ -324,7 +334,11 @@ export async function renderInspirations(root, ctx, params = {}) {
         viewState.pendingRefresh = true;
         return;
       }
-      drawBody();
+      if (vaultHandle) {
+        vaultHandle.reload();
+      } else {
+        drawBody();
+      }
     }
   });
 
@@ -702,6 +716,22 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
     return "";
   };
 
+  const availFolders = Array.isArray(clipMeta.folders) ? clipMeta.folders.filter(Boolean) : [];
+  const initFolder = (clipMeta.defaultFolder && clipMeta.defaultFolder !== UNGROUPED_FOLDER) ? clipMeta.defaultFolder : "";
+  const folderOpts = Array.from(new Set(initFolder ? [initFolder, ...availFolders] : availFolders));
+  const folderSel = el("select", { class: "input insp-create-folder-sel", "aria-label": "所属分组" },
+    el("option", { value: "" }, "📁 未分组"),
+    ...folderOpts.map((f) => el("option", { value: f, selected: f === initFolder }, `📁 ${f}`))
+  );
+  if (initFolder) folderSel.value = initFolder;
+
+  const titleAndFolderRow = folderOpts.length > 0
+    ? el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+        el("div", { style: { flex: "1 1 220px", minWidth: 0 } }, titleIn),
+        folderSel
+      )
+    : titleIn;
+
   const body = el("div", { class: "col insp-create-form", style: { gap: "12px" } },
     el("div", { class: "col", style: { gap: "8px" } },
       dropZone,
@@ -717,7 +747,7 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
       fetchStatusEl
     ),
     sourceUrlIn,
-    titleIn,
+    titleAndFolderRow,
     el("label", { class: "row", style: { cursor: "pointer", fontSize: "12.5px", alignItems: "center" } },
       autoOrgChk,
       el("span", null, "✨ 保存后用 AI 自动整理（去杂讯、中文翻译、提炼变量与标签）")
@@ -749,6 +779,7 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
           || (/x\.com|twitter\.com/i.test(effectiveSrc) ? "x" : (/xiaohongshu\.com|xhslink\.com/i.test(effectiveSrc) ? "xiaohongshu" : "import"));
         const res = await api("POST", "/api/inspirations", {
           title: titleIn.value.trim(),
+          folder: folderSel.value || "",
           imageDataUrl,
           imageUrl: imageDataUrl ? "" : remoteImageUrl,
           rawText: rawTxt,
@@ -775,8 +806,289 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
   ], { className: "modal-create-insp", onClose: cleanup });
 }
 
-function openLocalInspirationDetail(item, ctx, onChanged) {
+function openCreateFolderModal(existingFolders, onCreated) {
+  const existingSet = new Set(Array.isArray(existingFolders) ? existingFolders : []);
+  const nameIn = el("input", {
+    class: "input",
+    placeholder: "输入分组名，例如：小红书封面、茶饮提案、水彩参考",
+    maxlength: "40",
+  });
+  const suggestions = FOLDER_PRESET_SUGGESTIONS.filter((s) => !existingSet.has(s));
+
+  const submit = async () => {
+    const name = nameIn.value.trim();
+    if (!name) {
+      toast("请输入分组名称");
+      nameIn.focus();
+      return;
+    }
+    saveBtn.disabled = true;
+    saveBtn.textContent = "创建中…";
+    try {
+      const res = await api("POST", "/api/inspirations/folders", { name });
+      closeModal();
+      toast(`已新建分组「${res.name || name}」`);
+      onCreated?.(res.name || name);
+    } catch (e) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "创建分组";
+      toast(e?.message || "创建分组失败");
+    }
+  };
+
+  nameIn.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submit();
+    }
+  });
+
+  const saveBtn = el("button", { type: "button", class: "btn btn-primary", onClick: submit }, "创建分组");
+  const body = el("div", { class: "col", style: { gap: "12px" } },
+    el("div", { class: "field" },
+      el("label", null, "分组名称"),
+      nameIn
+    ),
+    suggestions.length
+      ? el("div", { class: "col", style: { gap: "6px" } },
+          el("span", { class: "muted", style: { fontSize: "12px" } }, "常用灵感分组（点击快捷填入）："),
+          el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+            ...suggestions.map((s) => el("button", {
+              type: "button",
+              class: "pill-btn",
+              onClick: () => {
+                nameIn.value = s;
+                nameIn.focus();
+              },
+            }, `＋ ${s}`))
+          )
+        )
+      : null
+  );
+
+  showModal("新建分组", body, [
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+    saveBtn,
+  ], { className: "modal-folder-manage" });
+  setTimeout(() => nameIn.focus(), 30);
+}
+
+function openManageFoldersModal(initialFolderItems, onChanged) {
+  let items = Array.isArray(initialFolderItems) ? initialFolderItems.map((x) => ({ ...x })) : [];
+  let editingName = "";
+
+  const newIn = el("input", {
+    class: "input",
+    placeholder: "新建分组名称…",
+    maxlength: "40",
+    style: { flex: "1", minWidth: "0" },
+  });
+  const listEl = el("div", { class: "col insp-folder-mgr-list" });
+
+  const addFolder = async () => {
+    const name = newIn.value.trim();
+    if (!name) return;
+    addBtn.disabled = true;
+    try {
+      const res = await api("POST", "/api/inspirations/folders", { name });
+      newIn.value = "";
+      items.push({ name: res.name || name, count: 0 });
+      renderList();
+      onChanged?.();
+      toast(`已新建分组「${res.name || name}」`);
+    } catch (e) {
+      toast(e?.message || "创建失败");
+    } finally {
+      addBtn.disabled = false;
+    }
+  };
+
+  newIn.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addFolder();
+    }
+  });
+  const addBtn = el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: addFolder }, "＋ 新建");
+
+  const renderList = () => {
+    clear(listEl);
+    if (!items.length) {
+      listEl.appendChild(el("div", { class: "muted", style: { padding: "18px 8px", textAlign: "center" } }, "还没有自定义分组，可以在上方新建一个。"));
+      return;
+    }
+    items.forEach((f) => {
+      if (editingName === f.name) {
+        const editIn = el("input", { class: "input", value: f.name, maxlength: "40", style: { flex: "1", minWidth: "0" } });
+        const doSave = async () => {
+          const next = editIn.value.trim();
+          if (!next || next === f.name) {
+            editingName = "";
+            renderList();
+            return;
+          }
+          try {
+            const res = await api("PATCH", "/api/inspirations/folders", { oldName: f.name, newName: next });
+            const renamed = res.newName || next;
+            if (viewState.folder === f.name) viewState.folder = renamed;
+            f.name = renamed;
+            editingName = "";
+            renderList();
+            onChanged?.();
+            toast(`已重命名为「${renamed}」`);
+          } catch (e) {
+            toast(e?.message || "重命名失败");
+          }
+        };
+        editIn.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); doSave(); }
+          if (e.key === "Escape") { editingName = ""; renderList(); }
+        });
+        listEl.appendChild(el("div", { class: "insp-folder-mgr-row", dataset: { folder: f.name } },
+          editIn,
+          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: doSave }, "保存"),
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => { editingName = ""; renderList(); } }, "取消")
+        ));
+        setTimeout(() => { editIn.focus(); editIn.select(); }, 20);
+        return;
+      }
+
+      listEl.appendChild(el("div", { class: "insp-folder-mgr-row", dataset: { folder: f.name } },
+        el("div", { class: "row", style: { gap: "8px", flex: "1", minWidth: "0", alignItems: "center" } },
+          el("span", { class: "insp-folder-mgr-name", title: f.name }, `📁 ${f.name}`),
+          el("span", { class: "muted", style: { fontSize: "12px", flexShrink: "0" } }, `${f.count || 0} 条`)
+        ),
+        el("div", { class: "row", style: { gap: "6px", flexShrink: "0" } },
+          el("button", {
+            type: "button",
+            class: "btn btn-sm",
+            dataset: { role: "folder-rename-btn" },
+            onClick: () => {
+              editingName = f.name;
+              renderList();
+            },
+          }, "重命名"),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm insp-drop-remove-btn",
+            dataset: { role: "folder-delete-btn" },
+            onClick: async () => {
+              try {
+                await api("DELETE", `/api/inspirations/folders?name=${encodeURIComponent(f.name)}`);
+                if (viewState.folder === f.name) viewState.folder = "";
+                items = items.filter((x) => x.name !== f.name);
+                renderList();
+                onChanged?.();
+                toast(`已删除分组「${f.name}」，原有灵感已移回未分组`);
+              } catch (e) {
+                toast(e?.message || "删除分组失败");
+              }
+            },
+          }, "删除")
+        )
+      ));
+    });
+  };
+  renderList();
+
+  const body = el("div", { class: "col", style: { gap: "12px" } },
+    el("div", { class: "row", style: { gap: "8px" } }, newIn, addBtn),
+    el("span", { class: "muted", style: { fontSize: "12px" } }, "删除分组不会删除里面的图片和提示词，它们会自动回到「未分组」。"),
+    listEl
+  );
+
+  showModal("管理分组", body, [
+    el("button", { type: "button", class: "btn btn-primary", onClick: closeModal }, "完成"),
+  ], { className: "modal-folder-manage" });
+}
+
+function openBatchMoveFolderModal(ids, folderItems, onMoved) {
+  if (!Array.isArray(ids) || !ids.length) return;
+  let picked = "";
+  const list = Array.isArray(folderItems) ? folderItems : [];
+  const newFolderIn = el("input", {
+    class: "input",
+    placeholder: "或直接输入新分组名称（自动创建并移入）",
+    maxlength: "40",
+  });
+
+  const optButtons = [];
+  const syncSelection = () => {
+    optButtons.forEach(({ val, btn }) => {
+      btn.classList.toggle("is-active", !newFolderIn.value.trim() && picked === val);
+    });
+  };
+  newFolderIn.addEventListener("input", syncSelection);
+
+  const optsWrap = el("div", { class: "col insp-folder-mgr-list" });
+  const addOpt = (val, label, countText) => {
+    const btn = el("button", {
+      type: "button",
+      class: "insp-folder-pick-btn",
+      dataset: { folder: val },
+      onClick: () => {
+        newFolderIn.value = "";
+        picked = val;
+        syncSelection();
+      },
+    },
+      el("span", null, label),
+      countText ? el("span", { class: "muted", style: { fontSize: "12px" } }, countText) : null
+    );
+    optButtons.push({ val, btn });
+    optsWrap.appendChild(btn);
+  };
+
+  addOpt("", "未分组（移除所属分组）", "");
+  list.forEach((f) => addOpt(f.name, `📁 ${f.name}`, `${f.count || 0} 条`));
+  if (list.length > 0) picked = list[0].name;
+  syncSelection();
+
+  const submitBtn = el("button", {
+    type: "button",
+    class: "btn btn-primary",
+    dataset: { role: "batch-move-confirm" },
+    onClick: async () => {
+      const targetFolder = newFolderIn.value.trim() || picked;
+      submitBtn.disabled = true;
+      submitBtn.textContent = "移动中…";
+      try {
+        const res = await api("POST", "/api/inspirations/batch-folder", {
+          ids,
+          folder: targetFolder,
+        });
+        closeModal();
+        toast(targetFolder
+          ? `已将 ${res.updatedCount || ids.length} 项移入「${targetFolder}」`
+          : `已将 ${res.updatedCount || ids.length} 项移回未分组`);
+        onMoved?.(targetFolder);
+      } catch (e) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "确认移入";
+        toast(e?.message || "移动失败");
+      }
+    },
+  }, "确认移入");
+
+  const body = el("div", { class: "col", style: { gap: "10px" } },
+    el("span", { class: "muted", style: { fontSize: "12.5px" } }, `为已选的 ${ids.length} 条灵感选择目标分组：`),
+    optsWrap,
+    el("div", { class: "field" },
+      el("label", null, "或新建分组并移入"),
+      newFolderIn
+    )
+  );
+
+  showModal(`移入分组 (${ids.length} 项)`, body, [
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+    submitBtn,
+  ], { className: "modal-folder-manage" });
+}
+
+function openLocalInspirationDetail(item, ctx, onChanged, availableFolders = []) {
   let cur = { ...item };
+  let foldersList = Array.isArray(availableFolders) ? [...availableFolders] : [];
+  if (cur.folder && !foldersList.includes(cur.folder)) foldersList.push(cur.folder);
   let showZh = false;
 
   const renderModal = () => {
@@ -845,6 +1157,115 @@ function openLocalInspirationDetail(item, ctx, onChanged) {
         )
       : null;
 
+    // Interactive Folder selector + Tag editor (#99)
+    const folderSel = el("select", {
+      class: "input insp-detail-folder-select",
+      dataset: { role: "detail-folder-select" },
+      "aria-label": "所属分组",
+    },
+      el("option", { value: "" }, "📁 未分组"),
+      ...foldersList.map((f) => el("option", { value: f, selected: cur.folder === f }, `📁 ${f}`)),
+      el("option", { value: "__new__" }, "＋ 新建分组…")
+    );
+    folderSel.value = cur.folder || "";
+
+    const newFolderRow = el("div", { class: "row hidden", style: { gap: "6px", flex: "1", minWidth: "180px" } });
+    const newFolderIn = el("input", { class: "input", placeholder: "输入新分组名…", maxlength: "40", style: { flex: "1", minWidth: "0" } });
+    const createAndAssignFolder = async () => {
+      const name = newFolderIn.value.trim();
+      if (!name) return;
+      try {
+        const r = await api("PATCH", `/api/inspirations/${encodeURIComponent(cur.id)}`, { folder: name });
+        if (r.item) {
+          cur = r.item;
+          if (!foldersList.includes(cur.folder)) foldersList.push(cur.folder);
+          toast(`已移入分组「${cur.folder}」`);
+          onChanged?.();
+          renderModal();
+        }
+      } catch (e) { toast(e?.message || "分组保存失败"); }
+    };
+    newFolderIn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); createAndAssignFolder(); }
+      if (e.key === "Escape") { newFolderRow.classList.add("hidden"); folderSel.value = cur.folder || ""; }
+    });
+    newFolderRow.append(
+      newFolderIn,
+      el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: createAndAssignFolder }, "确定"),
+      el("button", { type: "button", class: "btn btn-sm", onClick: () => { newFolderRow.classList.add("hidden"); folderSel.value = cur.folder || ""; } }, "取消")
+    );
+
+    folderSel.addEventListener("change", async () => {
+      if (folderSel.value === "__new__") {
+        newFolderRow.classList.remove("hidden");
+        newFolderIn.value = "";
+        newFolderIn.focus();
+        return;
+      }
+      newFolderRow.classList.add("hidden");
+      const nextFolder = folderSel.value;
+      try {
+        const r = await api("PATCH", `/api/inspirations/${encodeURIComponent(cur.id)}`, { folder: nextFolder });
+        if (r.item) {
+          cur = r.item;
+          toast(nextFolder ? `已移入「${nextFolder}」` : "已移回未分组");
+          onChanged?.();
+        }
+      } catch (e) {
+        folderSel.value = cur.folder || "";
+        toast(e?.message || "修改分组失败");
+      }
+    });
+
+    const addTagIn = el("input", {
+      class: "input insp-detail-tag-input",
+      placeholder: "＋ 加标签，回车添加",
+      dataset: { role: "detail-tag-input" },
+    });
+    const saveTags = async (nextTags) => {
+      try {
+        const r = await api("PATCH", `/api/inspirations/${encodeURIComponent(cur.id)}`, { tags: nextTags });
+        if (r.item) {
+          cur = r.item;
+          onChanged?.();
+          renderModal();
+        }
+      } catch (e) { toast(e?.message || "更新标签失败"); }
+    };
+    addTagIn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const raw = addTagIn.value.trim();
+        if (!raw) return;
+        const added = raw.split(/[,，、\s]+/).map((s) => s.replace(/^#/, "").trim()).filter(Boolean);
+        if (!added.length) return;
+        const merged = [...(cur.tags || []), ...added];
+        saveTags(merged);
+      }
+    });
+
+    const organizeBar = el("div", { class: "insp-detail-org-box col" },
+      el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
+        el("span", { class: "muted", style: { fontSize: "12px", flexShrink: "0" } }, "分组"),
+        folderSel,
+        newFolderRow
+      ),
+      el("div", { class: "row", style: { gap: "5px", flexWrap: "wrap", alignItems: "center" } },
+        el("span", { class: "muted", style: { fontSize: "12px", flexShrink: "0" } }, "标签"),
+        ...(cur.tags || []).map((t) => el("span", { class: "badge insp-detail-tag-chip" },
+          `#${t}`,
+          el("button", {
+            type: "button",
+            class: "insp-detail-tag-del",
+            title: `移除 #${t}`,
+            "aria-label": `移除标签 ${t}`,
+            onClick: () => saveTags((cur.tags || []).filter((x) => x !== t)),
+          }, "×")
+        )),
+        addTagIn
+      )
+    );
+
     const body = el("div", { class: "insp-modal-layout" },
       el("div", { class: "insp-modal-media" },
         imgSrc ? el("img", { src: imgSrc, alt: cur.title || "", class: "insp-modal-img" }) : el("div", { class: "muted" }, "纯文字提示词灵感")
@@ -863,9 +1284,7 @@ function openLocalInspirationDetail(item, ctx, onChanged) {
           ),
           cur.sourceUrl ? el("button", { type: "button", class: "btn btn-sm", onClick: () => openURL(cur.sourceUrl) }, "原帖 ↗") : null
         ),
-        (cur.tags || []).length ? el("div", { class: "row", style: { gap: "5px", flexWrap: "wrap" } },
-          ...cur.tags.map((t) => el("span", { class: "badge" }, `#${t}`))
-        ) : null,
+        organizeBar,
         el("div", { class: "insp-prompt-box" },
           el("div", { class: "row", style: { justifyContent: "space-between", marginBottom: "6px", flexWrap: "wrap", gap: "6px" } },
             el("strong", { style: { fontSize: "12.5px" } }, "提示词内容"),
@@ -1002,11 +1421,11 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
   const tagPopover = el("div", {
     class: "insp-tag-popover hidden",
     role: "dialog",
-    "aria-label": "按细粒度标签筛选",
+    "aria-label": "按多维标签筛选",
     dataset: { role: "tag-popover" },
   },
     el("div", { class: "insp-tag-popover-head" },
-      el("strong", null, "全部标签"),
+      el("strong", null, "全部标签（可多选）"),
       el("span", { class: "muted", dataset: { role: "tag-popover-total" } }, "")
     ),
     tagSearchIn,
@@ -1015,7 +1434,18 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
   const tagPickerWrap = el("div", { class: "insp-tag-picker" }, tagTriggerBtn, tagPopover);
 
   let allFineTags = [];
+  let folderItems = [];
+  let totalVaultCount = 0;
   let tagPopoverOpen = false;
+
+  const hasSelectedTag = (tag) => viewState.tags.some((t) => t.toLowerCase() === String(tag).toLowerCase());
+  const toggleSelectedTag = (tag) => {
+    if (hasSelectedTag(tag)) {
+      viewState.tags = viewState.tags.filter((t) => t.toLowerCase() !== String(tag).toLowerCase());
+    } else {
+      viewState.tags = [...viewState.tags, tag];
+    }
+  };
 
   const setTagPopoverOpen = (open) => {
     tagPopoverOpen = Boolean(open);
@@ -1032,20 +1462,29 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
   const renderFineTagList = (filterText) => {
     clear(tagListWrap);
     const needle = String(filterText || "").trim().toLowerCase();
+    // Ensure currently selected tags remain visible in the list so they can always be toggled off
+    const mergedTags = [...allFineTags];
+    const seenKeys = new Set(mergedTags.map((x) => x.tag.toLowerCase()));
+    viewState.tags.forEach((t) => {
+      if (!seenKeys.has(t.toLowerCase())) {
+        mergedTags.unshift({ tag: t, count: 0 });
+        seenKeys.add(t.toLowerCase());
+      }
+    });
     const matched = needle
-      ? allFineTags.filter(({ tag }) => tag.toLowerCase().includes(needle))
-      : allFineTags;
+      ? mergedTags.filter(({ tag }) => tag.toLowerCase().includes(needle))
+      : mergedTags;
 
-    if (viewState.tag) {
+    if (viewState.tags.length > 0) {
       tagListWrap.appendChild(el("button", {
         type: "button",
         class: "insp-tag-chip is-clear",
         onClick: () => {
-          viewState.tag = "";
-          setTagPopoverOpen(false);
+          viewState.tags = [];
+          renderFineTagList(tagSearchIn.value);
           loadVault();
         },
-      }, "✕ 清除当前标签筛选"));
+      }, `✕ 清除全部已选标签 (${viewState.tags.length})`));
     }
 
     if (!matched.length) {
@@ -1054,17 +1493,18 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
     }
 
     matched.forEach(({ tag, count }) => {
-      const active = tag === viewState.tag;
+      const active = hasSelectedTag(tag);
       tagListWrap.appendChild(el("button", {
         type: "button",
         class: "insp-tag-chip" + (active ? " is-active" : ""),
+        dataset: { tag },
         onClick: () => {
-          viewState.tag = active ? "" : tag;
-          setTagPopoverOpen(false);
+          toggleSelectedTag(tag);
+          renderFineTagList(tagSearchIn.value);
           loadVault();
         },
       },
-        el("span", null, `#${tag}`),
+        el("span", null, `${active ? "✓ " : ""}#${tag}`),
         el("span", { class: "insp-tag-chip-cnt" }, String(count))
       ));
     });
@@ -1074,6 +1514,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
     e.stopPropagation();
     setTagPopoverOpen(!tagPopoverOpen);
   });
+  tagPopover.addEventListener("click", (e) => e.stopPropagation());
   tagSearchIn.addEventListener("input", () => renderFineTagList(tagSearchIn.value));
 
   const onDocClick = (e) => {
@@ -1100,9 +1541,9 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
   document.addEventListener("click", onDocClick);
   document.addEventListener("keydown", onDocKey);
 
-  // Beautified Batch Share button (#95)
+  // Batch Manage button (supports both Batch Move Folder & Batch Share #89, #99)
   const batchIconSlot = createSvgEl(BATCH_SHARE_ICON_SVG);
-  const batchLabelEl = el("span", { class: "insp-batch-toggle-label" }, "批量分享");
+  const batchLabelEl = el("span", { class: "insp-batch-toggle-label" }, "批量管理");
   const batchBadgeEl = el("span", { class: "insp-batch-toggle-badge hidden" }, "");
   const batchToggleBtn = el("button", {
     type: "button",
@@ -1110,7 +1551,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
     dataset: { role: "batch-toggle" },
     onClick: () => {
       if (!currentItems.length && !viewState.batchMode) {
-        toast("当前灵感库还没有可分享的条目");
+        toast("当前视图没有可操作的灵感条目");
         return;
       }
       viewState.batchMode = !viewState.batchMode;
@@ -1121,12 +1562,13 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
     },
   }, batchIconSlot, batchLabelEl, batchBadgeEl);
 
-  const categoryBar = el("div", { class: "insp-category-bar", role: "tablist", "aria-label": "灵感分类筛选", dataset: { role: "category-bar" } });
+  const folderBar = el("div", { class: "insp-category-bar", role: "tablist", "aria-label": "灵感自定义分组", dataset: { role: "folder-bar" } });
+  const activeTagsBar = el("div", { class: "row insp-active-tags-bar hidden", dataset: { role: "active-tags-bar" } });
   const batchBar = el("div", { class: "card insp-batch-bar hidden", dataset: { role: "batch-bar" } });
   const gridWrap = el("div");
 
   let currentItems = [];
-  let latestRes = { clipToken: "", clipEndpoint: "" };
+  let latestRes = { clipToken: "", clipEndpoint: "", folders: [] };
   const cardRefs = new Map();
 
   let debounce = null;
@@ -1145,23 +1587,27 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
       batchToggleBtn
     )
   ));
-  stage.appendChild(categoryBar);
+  stage.appendChild(folderBar);
+  stage.appendChild(activeTagsBar);
   stage.appendChild(batchBar);
   stage.appendChild(gridWrap);
 
   const syncBatchUI = () => {
+    const visibleIdSet = new Set(currentItems.map((it) => it.id));
+    for (const id of Array.from(viewState.selectedIds)) {
+      if (!visibleIdSet.has(id)) viewState.selectedIds.delete(id);
+    }
+
     const eligibleItems = currentItems.filter((it) => getShareEligibility(it).ok);
     const unpubEligible = eligibleItems.filter((it) => !it.publishedId);
-    const eligibleIdSet = new Set(eligibleItems.map((it) => it.id));
-    for (const id of Array.from(viewState.selectedIds)) {
-      if (!eligibleIdSet.has(id)) viewState.selectedIds.delete(id);
-    }
+    const selectedItems = currentItems.filter((it) => viewState.selectedIds.has(it.id));
+    const selectedShareEligible = selectedItems.filter((it) => getShareEligibility(it).ok);
 
     const active = viewState.batchMode && currentItems.length > 0;
     batchToggleBtn.classList.toggle("is-active", active);
     batchToggleBtn.setAttribute("aria-pressed", active ? "true" : "false");
     batchIconSlot.innerHTML = active ? CLOSE_BATCH_ICON_SVG : BATCH_SHARE_ICON_SVG;
-    batchLabelEl.textContent = active ? "退出批量选择" : "批量分享";
+    batchLabelEl.textContent = active ? "退出批量" : "批量管理";
     if (!active && unpubEligible.length > 0) {
       batchBadgeEl.textContent = `${unpubEligible.length} 待分享`;
       batchBadgeEl.classList.remove("hidden");
@@ -1179,10 +1625,14 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
         ref.checkBtn.setAttribute("aria-checked", checked ? "true" : "false");
         ref.checkBtn.textContent = checked ? "✓" : "";
       }
-      if (ref.footHint && ref.elig.ok) {
-        ref.footHint.textContent = checked
-          ? "✓ 已选中"
-          : (ref.elig.published ? "点击选中（更新分享）" : "点击卡片选中");
+      if (ref.footHint) {
+        if (checked) {
+          ref.footHint.textContent = ref.elig.ok ? "✓ 已选中" : "✓ 已选中（仅移入分组）";
+        } else {
+          ref.footHint.textContent = ref.elig.ok
+            ? (ref.elig.published ? "点击选中（移分组/更新分享）" : "点击卡片选中")
+            : `点击选中（移入分组 · ${ref.elig.reason}）`;
+        }
       }
     });
 
@@ -1192,22 +1642,22 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
       return;
     }
 
-    const selectedCount = viewState.selectedIds.size;
+    const selectedCount = selectedItems.length;
+    const shareCount = selectedShareEligible.length;
     batchBar.classList.remove("hidden");
     clear(batchBar);
     batchBar.appendChild(el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
-      el("span", { class: "badge badge-accent" }, "批量分享模式"),
+      el("span", { class: "badge badge-accent" }, "批量管理模式"),
       el("strong", { style: { fontSize: "13px" }, dataset: { role: "batch-count" } }, `已选 ${selectedCount} 项`),
-      el("span", { class: "muted", style: { fontSize: "12px" } }, `当前可分享 ${eligibleItems.length} 项（未分享 ${unpubEligible.length} 项）`)
+      el("span", { class: "muted", style: { fontSize: "12px" } }, `共 ${currentItems.length} 项 · 其中可分享 ${eligibleItems.length} 项（未分享 ${unpubEligible.length} 项）`)
     ));
 
-    const openBatchModal = () => {
-      const picked = currentItems.filter((it) => viewState.selectedIds.has(it.id) && getShareEligibility(it).ok);
-      if (!picked.length) {
-        toast("请先勾选至少一张可分享的灵感图片");
+    const openBatchShareModal = () => {
+      if (!selectedShareEligible.length) {
+        toast("所选条目中没有可分享的图片+提示词灵感");
         return;
       }
-      openBatchShareInspirationsModal(picked, ctx, {
+      openBatchShareInspirationsModal(selectedShareEligible, ctx, {
         onStart: () => {
           viewState.batchPublishing = true;
         },
@@ -1233,6 +1683,22 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
       });
     };
 
+    const openBatchMoveModal = () => {
+      if (!selectedCount) {
+        toast("请先勾选要移入分组的灵感");
+        return;
+      }
+      openBatchMoveFolderModal(
+        selectedItems.map((it) => it.id),
+        folderItems,
+        () => {
+          viewState.batchMode = false;
+          viewState.selectedIds.clear();
+          loadVault();
+        }
+      );
+    };
+
     batchBar.appendChild(el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } },
       el("button", {
         type: "button",
@@ -1249,12 +1715,12 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
         type: "button",
         class: "btn btn-sm",
         dataset: { role: "batch-select-all" },
-        disabled: eligibleItems.length === 0,
+        disabled: currentItems.length === 0,
         onClick: () => {
-          eligibleItems.forEach((it) => viewState.selectedIds.add(it.id));
+          currentItems.forEach((it) => viewState.selectedIds.add(it.id));
           syncBatchUI();
         },
-      }, `全选当前 (${eligibleItems.length})`),
+      }, `全选当前 (${currentItems.length})`),
       el("button", {
         type: "button",
         class: "btn btn-sm",
@@ -1267,11 +1733,18 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
       }, "清空"),
       el("button", {
         type: "button",
+        class: "btn btn-sm",
+        dataset: { role: "batch-move-folder" },
+        disabled: selectedCount === 0,
+        onClick: openBatchMoveModal,
+      }, `📁 移入分组 (${selectedCount})`),
+      el("button", {
+        type: "button",
         class: "btn btn-sm btn-primary",
         dataset: { role: "batch-share-submit" },
-        disabled: selectedCount === 0,
-        onClick: openBatchModal,
-      }, `☁ 批量分享到社区 (${selectedCount})`)
+        disabled: shareCount === 0,
+        onClick: openBatchShareModal,
+      }, `☁ 批量分享 (${shareCount})`)
     ));
   };
 
@@ -1286,6 +1759,51 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
         viewState.selectedIds.clear();
       }
       syncBatchUI();
+
+      // Contextual empty state: distinguish filtered/empty-folder vs truly empty vault (#99)
+      if (totalVaultCount > 0) {
+        const inNamedFolder = viewState.folder && viewState.folder !== UNGROUPED_FOLDER && !viewState.q && viewState.tags.length === 0;
+        const inUngrouped = viewState.folder === UNGROUPED_FOLDER && !viewState.q && viewState.tags.length === 0;
+        gridWrap.appendChild(el("div", { class: "card col insp-empty" },
+          el("h3", { style: { margin: 0 } },
+            inNamedFolder
+              ? `📁 分组「${viewState.folder}」里还没有灵感`
+              : (inUngrouped ? "✨ 所有灵感都已归入自定义分组" : "没有符合当前筛选条件的灵感")
+          ),
+          el("p", { class: "muted", style: { margin: "4px 0 8px", maxWidth: "500px" } },
+            inNamedFolder
+              ? "你可以直接在这里收集新灵感，或切换到「全部」后用「批量管理 → 移入分组」把已有灵感整理进来。"
+              : "试试清除部分标签或切换其他分组查看。"
+          ),
+          el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+            inNamedFolder ? el("button", {
+              type: "button",
+              class: "btn btn-primary",
+              onClick: () => openCreateInspirationModal(ctx, loadVault, {
+                clipToken: latestRes.clipToken,
+                clipEndpoint: latestRes.clipEndpoint,
+                clipExtensionDir: latestRes.clipExtensionDir,
+                clipExtensionExists: latestRes.clipExtensionExists,
+                folders: latestRes.folders || [],
+                defaultFolder: viewState.folder,
+              }),
+            }, `＋ 收集灵感并放入「${viewState.folder}」`) : null,
+            el("button", {
+              type: "button",
+              class: "btn",
+              onClick: () => {
+                viewState.folder = "";
+                viewState.tags = [];
+                viewState.q = "";
+                searchIn.value = "";
+                loadVault();
+              },
+            }, "查看全部灵感")
+          )
+        ));
+        return;
+      }
+
       gridWrap.appendChild(el("div", { class: "card col insp-empty" },
         el("h3", { style: { margin: 0 } }, "💡 你的个人灵感库还是空的"),
         el("p", { class: "muted", style: { margin: "4px 0 8px", maxWidth: "520px" } },
@@ -1300,6 +1818,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
               clipEndpoint: latestRes.clipEndpoint,
               clipExtensionDir: latestRes.clipExtensionDir,
               clipExtensionExists: latestRes.clipExtensionExists,
+              folders: latestRes.folders || [],
             }),
           }, "＋ 粘贴第一条灵感 / 推文"),
           el("button", {
@@ -1327,13 +1846,9 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
       const imgSrc = item.imagePath ? localImg(item.imagePath) : (item.imageUrl ? remoteThumb(item.imageUrl, 480) : "");
       const excerpt = (item.promptZh || item.prompt || item.rawText || "").replace(/\s+/g, " ").trim().slice(0, 88);
       const elig = getShareEligibility(item);
-      const selected = inBatch && elig.ok && viewState.selectedIds.has(item.id);
+      const selected = inBatch && viewState.selectedIds.has(item.id);
 
       const toggleSelect = () => {
-        if (!elig.ok) {
-          toast(`该条目暂不可分享：${elig.reason}`);
-          return;
-        }
         if (viewState.selectedIds.has(item.id)) {
           viewState.selectedIds.delete(item.id);
         } else {
@@ -1345,31 +1860,34 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
       let checkBtn = null;
       let cornerOverlay = null;
       if (inBatch) {
-        if (elig.ok) {
-          checkBtn = el("button", {
-            type: "button",
-            role: "checkbox",
-            "aria-checked": selected ? "true" : "false",
-            "aria-label": `选择 ${item.title || "灵感"}`,
-            class: "insp-batch-check" + (selected ? " is-checked" : ""),
-            onClick: (e) => {
-              e.stopPropagation();
-              toggleSelect();
-            },
-          }, selected ? "✓" : "");
-          cornerOverlay = checkBtn;
-        } else {
-          cornerOverlay = el("span", { class: "insp-batch-ineligible-tag" }, `不可分享 · ${elig.reason}`);
-        }
+        checkBtn = el("button", {
+          type: "button",
+          role: "checkbox",
+          "aria-checked": selected ? "true" : "false",
+          "aria-label": `选择 ${item.title || "灵感"}`,
+          class: "insp-batch-check" + (selected ? " is-checked" : ""),
+          onClick: (e) => {
+            e.stopPropagation();
+            toggleSelect();
+          },
+        }, selected ? "✓" : "");
+        cornerOverlay = elig.ok
+          ? checkBtn
+          : el("div", { class: "insp-batch-corner-group" },
+              checkBtn,
+              el("span", { class: "insp-batch-ineligible-tag insp-batch-inline-note" }, `不可分享 · ${elig.reason}`)
+            );
       }
 
       let footHint = null;
       const footerEl = inBatch
         ? el("footer", { class: "insp-card-foot insp-card-foot-batch" },
             (footHint = el("span", { class: "muted", style: { fontSize: "11.5px", flex: "1" } },
-              elig.ok
-                ? (selected ? "✓ 已选中" : (elig.published ? "点击选中（更新分享）" : "点击卡片选中"))
-                : `不可分享：${elig.reason}`
+              selected
+                ? (elig.ok ? "✓ 已选中" : "✓ 已选中（仅移入分组）")
+                : (elig.ok
+                    ? (elig.published ? "点击选中（移分组/更新分享）" : "点击卡片选中")
+                    : `点击选中（移入分组 · ${elig.reason}）`)
             )),
             el("button", {
               type: "button",
@@ -1377,7 +1895,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
               style: { flex: "0 0 auto" },
               onClick: (e) => {
                 e.stopPropagation();
-                openLocalInspirationDetail(item, ctx, loadVault);
+                openLocalInspirationDetail(item, ctx, loadVault, latestRes.folders || []);
               },
             }, "详情")
           )
@@ -1407,8 +1925,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
       const cardEl = el("article", {
         class: "style-card insp-card"
           + (inBatch ? " is-batch" : "")
-          + (selected ? " is-selected" : "")
-          + (inBatch && !elig.ok ? " is-ineligible" : ""),
+          + (selected ? " is-selected" : ""),
         dataset: { id: item.id },
       },
         cornerOverlay,
@@ -1418,7 +1935,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
             if (inBatch) {
               toggleSelect();
             } else {
-              openLocalInspirationDetail(item, ctx, loadVault);
+              openLocalInspirationDetail(item, ctx, loadVault, latestRes.folders || []);
             }
           },
         },
@@ -1427,7 +1944,11 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
             : el("div", { class: "insp-text-cover" }, excerpt || item.title),
           el("div", { class: "style-body" },
             el("div", { class: "row", style: { justifyContent: "space-between", gap: "4px", flexWrap: "wrap" } },
-              el("span", { class: "badge" }, SOURCE_LABELS[item.source] || item.source || "灵感"),
+              el("div", { class: "row", style: { gap: "4px", flexWrap: "wrap" } },
+                item.folder
+                  ? el("span", { class: "badge insp-card-folder-badge", title: `分组：${item.folder}` }, `📁 ${item.folder}`)
+                  : el("span", { class: "badge" }, SOURCE_LABELS[item.source] || item.source || "灵感")
+              ),
               item.publishedId
                 ? el("span", { class: "badge badge-ok" }, item.publishedPrice > 0 ? `🔒 ${item.publishedPrice} 积分` : "已分享")
                 : (item.aiOrganized ? el("span", { class: "badge badge-accent" }, "✨ 已整理") : null)
@@ -1436,7 +1957,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
             imgSrc && excerpt ? el("p", { class: "style-traits insp-excerpt" }, excerpt) : null,
             (item.tags || []).length
               ? el("div", { class: "row insp-card-tags" },
-                  ...item.tags.slice(0, 2).map((t) => el("span", { class: "muted", style: { fontSize: "11px" } }, `#${t}`))
+                  ...item.tags.slice(0, 3).map((t) => el("span", { class: "muted", style: { fontSize: "11px" } }, `#${t}`))
                 )
               : null
           )
@@ -1452,16 +1973,20 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
     syncBatchUI();
   }
 
+  let loadSeq = 0;
+
   async function loadVault() {
+    const mySeq = ++loadSeq;
     const qs = new URLSearchParams();
     if (viewState.q) qs.set("q", viewState.q);
-    if (viewState.category) qs.set("category", viewState.category);
-    if (viewState.tag) qs.set("tag", viewState.tag);
-    const usePrefetched = Boolean(initialRes) && !viewState.q && !viewState.category && !viewState.tag;
+    if (viewState.folder) qs.set("folder", viewState.folder);
+    if (viewState.tags.length > 0) qs.set("tags", viewState.tags.join(","));
+    const usePrefetched = Boolean(initialRes) && !viewState.q && !viewState.folder && viewState.tags.length === 0;
     const res = usePrefetched
       ? initialRes
-      : await api("GET", `/api/inspirations?${qs.toString()}`).catch(() => ({ items: [], tags: [], categories: [], totalCount: 0 }));
+      : await api("GET", `/api/inspirations?${qs.toString()}`).catch(() => ({ items: [], tags: [], folderItems: [], folders: [], totalCount: 0, ungroupedCount: 0 }));
     initialRes = null;
+    if (mySeq !== loadSeq) return;
     latestRes = res;
     onMeta?.({
       clipToken: res.clipToken || "",
@@ -1469,60 +1994,116 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
       clipExtensionDir: res.clipExtensionDir || "",
       clipExtensionExists: res.clipExtensionExists,
       siteBase: res.siteBase || "",
+      folders: Array.isArray(res.folders) ? res.folders : [],
     });
 
     allFineTags = Array.isArray(res.tags) ? res.tags : [];
-    const categories = Array.isArray(res.categories) ? res.categories : [];
-    const totalCount = Number(res.totalCount ?? (res.items || []).length);
+    folderItems = Array.isArray(res.folderItems) ? res.folderItems : [];
+    totalVaultCount = Number(res.totalCount ?? (res.items || []).length);
+    const ungroupedCount = Number(res.ungroupedCount ?? 0);
 
-    // Sync fine-tag popover trigger
-    tagTriggerBtn.classList.toggle("hidden", allFineTags.length === 0 && !viewState.tag);
-    tagTriggerBtn.classList.toggle("is-filtered", Boolean(viewState.tag));
-    tagTriggerLabel.textContent = viewState.tag ? `#${viewState.tag}` : "标签";
-    tagTriggerCount.textContent = String(allFineTags.length);
-    tagTriggerCount.classList.toggle("hidden", Boolean(viewState.tag));
+    // If active custom folder was deleted externally, reset to all
+    if (viewState.folder && viewState.folder !== UNGROUPED_FOLDER && !folderItems.some((f) => f.name === viewState.folder)) {
+      viewState.folder = "";
+    }
+
+    // Sync multi-select tag popover trigger
+    tagTriggerBtn.classList.toggle("hidden", allFineTags.length === 0 && viewState.tags.length === 0);
+    tagTriggerBtn.classList.toggle("is-filtered", viewState.tags.length > 0);
+    if (viewState.tags.length === 0) {
+      tagTriggerLabel.textContent = "标签";
+      tagTriggerCount.textContent = String(allFineTags.length);
+      tagTriggerCount.classList.remove("hidden");
+    } else if (viewState.tags.length === 1) {
+      tagTriggerLabel.textContent = `#${viewState.tags[0]}`;
+      tagTriggerCount.classList.add("hidden");
+    } else {
+      tagTriggerLabel.textContent = `标签 · ${viewState.tags.length}`;
+      tagTriggerCount.classList.add("hidden");
+    }
     const popTotal = tagPopover.querySelector('[data-role="tag-popover-total"]');
     if (popTotal) popTotal.textContent = `共 ${allFineTags.length} 个`;
     if (tagPopoverOpen) renderFineTagList(tagSearchIn.value);
 
-    // Render clean single-row canonical category strip (#95)
-    clear(categoryBar);
-    const showCategoryBar = categories.length > 0 || Boolean(viewState.tag);
-    categoryBar.classList.toggle("hidden", !showCategoryBar);
-    if (showCategoryBar) {
-      const makeCatPill = (catKey, label, count) => {
-        const active = viewState.category === catKey && !viewState.tag;
+    // Render extensible user Custom Folder Strip (#99)
+    clear(folderBar);
+    const showFolderBar = totalVaultCount > 0 || folderItems.length > 0;
+    folderBar.classList.toggle("hidden", !showFolderBar);
+    if (showFolderBar) {
+      const makeFolderPill = (folderKey, label, count, extraClass = "") => {
+        const active = viewState.folder === folderKey;
         return el("button", {
           type: "button",
           role: "tab",
           "aria-selected": active ? "true" : "false",
-          class: "insp-cat-pill" + (active ? " is-active" : ""),
+          dataset: { folder: folderKey },
+          class: "insp-cat-pill" + (active ? " is-active" : "") + (extraClass ? " " + extraClass : ""),
           onClick: () => {
-            viewState.category = catKey;
-            viewState.tag = "";
+            viewState.folder = folderKey;
             loadVault();
           },
         },
           el("span", null, label),
-          count > 0 ? el("span", { class: "insp-cat-count" }, String(count)) : null
+          typeof count === "number" ? el("span", { class: "insp-cat-count" }, String(count)) : null
         );
       };
 
-      categoryBar.appendChild(makeCatPill("", "全部", totalCount));
-      categories.forEach(({ category, count }) => {
-        categoryBar.appendChild(makeCatPill(category, category, count));
+      folderBar.appendChild(makeFolderPill("", "全部", totalVaultCount));
+      folderItems.forEach(({ name, count }) => {
+        folderBar.appendChild(makeFolderPill(name, `📁 ${name}`, count));
       });
+      if (folderItems.length > 0 && ungroupedCount > 0) {
+        folderBar.appendChild(makeFolderPill(UNGROUPED_FOLDER, "未分组", ungroupedCount));
+      }
 
-      if (viewState.tag) {
-        categoryBar.appendChild(el("button", {
+      folderBar.appendChild(el("button", {
+        type: "button",
+        class: "insp-cat-pill insp-folder-add-pill",
+        dataset: { role: "folder-create-btn" },
+        onClick: () => openCreateFolderModal(
+          folderItems.map((f) => f.name),
+          (createdName) => {
+            if (createdName) viewState.folder = createdName;
+            loadVault();
+          }
+        ),
+      }, "＋ 新建分组"));
+
+      if (folderItems.length > 0) {
+        folderBar.appendChild(el("button", {
+          type: "button",
+          class: "insp-cat-pill insp-folder-mgr-pill",
+          dataset: { role: "folder-manage-btn" },
+          onClick: () => openManageFoldersModal(folderItems, () => loadVault()),
+        }, "管理分组"));
+      }
+    }
+
+    // Render active multi-tag chips bar when 1+ tags are selected
+    clear(activeTagsBar);
+    activeTagsBar.classList.toggle("hidden", viewState.tags.length === 0);
+    if (viewState.tags.length > 0) {
+      activeTagsBar.appendChild(el("span", { class: "muted", style: { fontSize: "12px" } }, "已选标签（交集）："));
+      viewState.tags.forEach((t) => {
+        activeTagsBar.appendChild(el("button", {
           type: "button",
           class: "insp-cat-pill is-tag-active",
-          title: "点击清除此标签筛选",
+          title: `移除 #${t}`,
           onClick: () => {
-            viewState.tag = "";
+            toggleSelectedTag(t);
             loadVault();
           },
-        }, `#${viewState.tag} ✕`));
+        }, `#${t} ✕`));
+      });
+      if (viewState.tags.length > 1) {
+        activeTagsBar.appendChild(el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => {
+            viewState.tags = [];
+            loadVault();
+          },
+        }, "清空标签"));
       }
     }
 
@@ -1530,6 +2111,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
   }
 
   await loadVault();
+  return { reload: loadVault };
 }
 
 async function renderPlazaTab(stage, ctx) {

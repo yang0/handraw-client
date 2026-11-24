@@ -132,7 +132,7 @@ func inferInspirationCategory(data inspirationData) string {
 }
 
 func normalizeInspirationTags(raw []string) []string {
-	out := make([]string, 0, 3)
+	out := make([]string, 0, 6)
 	seen := map[string]bool{}
 	for _, t := range raw {
 		clean := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(t), "#"))
@@ -145,11 +145,79 @@ func normalizeInspirationTags(raw []string) []string {
 		}
 		seen[key] = true
 		out = append(out, clean)
-		if len(out) >= 3 {
+		if len(out) >= 12 {
 			break
 		}
 	}
 	return out
+}
+
+const (
+	inspirationFoldersKVKey   = "inspiration_folders"
+	inspirationUngroupedToken = "__ungrouped__"
+)
+
+func cleanInspirationFolderName(raw string) (string, error) {
+	name := strings.Join(strings.Fields(strings.TrimSpace(raw)), " ")
+	if name == "" {
+		return "", bad("分组名称不能为空")
+	}
+	if name == inspirationUngroupedToken || name == "全部" || name == "未分组" {
+		return "", bad("「" + name + "」为系统保留名称，请换一个分组名")
+	}
+	if len([]rune(name)) > 40 {
+		return "", bad("分组名称最多 40 个字")
+	}
+	return name, nil
+}
+
+func (s *Server) loadSavedInspirationFolders() []string {
+	var raw []string
+	if err := s.DB.GetKV(inspirationFoldersKVKey, &raw); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	seen := map[string]bool{}
+	for _, f := range raw {
+		clean, err := cleanInspirationFolderName(f)
+		if err != nil || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		out = append(out, clean)
+	}
+	return out
+}
+
+func (s *Server) saveInspirationFolders(folders []string) ([]string, error) {
+	out := make([]string, 0, len(folders))
+	seen := map[string]bool{}
+	for _, f := range folders {
+		clean, err := cleanInspirationFolderName(f)
+		if err != nil || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		out = append(out, clean)
+	}
+	if err := s.DB.SetKV(inspirationFoldersKVKey, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Server) ensureInspirationFolder(name string) {
+	clean, err := cleanInspirationFolderName(name)
+	if err != nil {
+		return
+	}
+	existing := s.loadSavedInspirationFolders()
+	for _, f := range existing {
+		if f == clean {
+			return
+		}
+	}
+	_, _ = s.saveInspirationFolders(append(existing, clean))
 }
 
 func inspirationImageDir() string {
@@ -327,9 +395,31 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 	srcFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
 	folderFilter := strings.TrimSpace(r.URL.Query().Get("folder"))
 	categoryFilter := strings.TrimSpace(r.URL.Query().Get("category"))
-	tagFilter := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("tag")), "#")
+	var tagFilters []string
+	seenTagFilter := map[string]bool{}
+	addTagFilter := func(raw string) {
+		clean := strings.TrimPrefix(strings.TrimSpace(raw), "#")
+		if clean == "" {
+			return
+		}
+		k := strings.ToLower(clean)
+		if seenTagFilter[k] {
+			return
+		}
+		seenTagFilter[k] = true
+		tagFilters = append(tagFilters, clean)
+	}
+	if rawTags := strings.TrimSpace(r.URL.Query().Get("tags")); rawTags != "" {
+		for _, part := range strings.Split(rawTags, ",") {
+			addTagFilter(part)
+		}
+	}
+	if rawSingle := strings.TrimSpace(r.URL.Query().Get("tag")); rawSingle != "" {
+		addTagFilter(rawSingle)
+	}
 
-	foldersSet := map[string]bool{}
+	folderCounts := map[string]int{}
+	ungroupedCount := 0
 	tagsSet := map[string]int{}
 	catsSet := map[string]int{}
 	totalCount := 0
@@ -341,17 +431,30 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 		if data.Title == "" {
 			data.Title = d.Name
 		}
+		data.Folder = strings.TrimSpace(data.Folder)
 		totalCount++
 		cat := inferInspirationCategory(data)
 		catsSet[cat]++
-		if data.Folder != "" {
-			foldersSet[data.Folder] = true
+		if data.Folder == "" {
+			ungroupedCount++
+		} else {
+			folderCounts[data.Folder]++
 		}
-		for _, t := range data.Tags {
-			if strings.TrimSpace(t) != "" {
-				tagsSet[strings.TrimSpace(t)]++
+
+		matchesFolder := true
+		if folderFilter == inspirationUngroupedToken {
+			matchesFolder = data.Folder == ""
+		} else if folderFilter != "" {
+			matchesFolder = data.Folder == folderFilter
+		}
+		if matchesFolder {
+			for _, t := range data.Tags {
+				if clean := strings.TrimSpace(t); clean != "" {
+					tagsSet[clean]++
+				}
 			}
 		}
+
 		if srcFilter != "" && srcFilter != "all" {
 			if srcFilter == "web_clip" {
 				if data.Source != "x" && data.Source != "chrome" && data.Source != "web" {
@@ -361,28 +464,35 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 				continue
 			}
 		}
-		if folderFilter != "" && data.Folder != folderFilter {
+		if !matchesFolder {
 			continue
 		}
 		if categoryFilter != "" && categoryFilter != "all" && cat != categoryFilter {
 			continue
 		}
-		if tagFilter != "" {
-			matched := false
-			for _, t := range data.Tags {
-				if strings.EqualFold(t, tagFilter) {
-					matched = true
+		if len(tagFilters) > 0 {
+			allMatched := true
+			for _, want := range tagFilters {
+				found := false
+				for _, t := range data.Tags {
+					if strings.EqualFold(strings.TrimSpace(t), want) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					allMatched = false
 					break
 				}
 			}
-			if !matched {
+			if !allMatched {
 				continue
 			}
 		}
 		if q != "" {
 			hay := strings.ToLower(strings.Join([]string{
 				data.Title, data.Prompt, data.PromptZh, data.RawText, data.Notes,
-				data.SourceAuthor, data.SuggestedStyle, cat, strings.Join(data.Tags, " "),
+				data.SourceAuthor, data.SuggestedStyle, data.Folder, cat, strings.Join(data.Tags, " "),
 			}, " "))
 			if !strings.Contains(hay, q) {
 				continue
@@ -397,11 +507,30 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 		})
 	}
 
-	folders := make([]string, 0, len(foldersSet))
-	for f := range foldersSet {
+	type folderCount struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+	}
+	savedFolders := s.loadSavedInspirationFolders()
+	folderSeen := map[string]bool{}
+	folderItems := make([]folderCount, 0, len(savedFolders)+len(folderCounts))
+	folders := make([]string, 0, len(savedFolders)+len(folderCounts))
+	for _, f := range savedFolders {
+		folderSeen[f] = true
+		folderItems = append(folderItems, folderCount{Name: f, Count: folderCounts[f]})
 		folders = append(folders, f)
 	}
-	sort.Strings(folders)
+	var extraFolders []string
+	for f := range folderCounts {
+		if !folderSeen[f] {
+			extraFolders = append(extraFolders, f)
+		}
+	}
+	sort.Strings(extraFolders)
+	for _, f := range extraFolders {
+		folderItems = append(folderItems, folderCount{Name: f, Count: folderCounts[f]})
+		folders = append(folders, f)
+	}
 
 	type categoryCount struct {
 		Category string `json:"category"`
@@ -438,6 +567,8 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 		"ok":                  true,
 		"items":               items,
 		"totalCount":          totalCount,
+		"ungroupedCount":      ungroupedCount,
+		"folderItems":         folderItems,
 		"categories":          categories,
 		"folders":             folders,
 		"tags":                tags,
@@ -446,6 +577,194 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 		"clipExtensionDir":    clipExtDir,
 		"clipExtensionExists": clipExtExists,
 		"siteBase":            s.Site.Base(),
+	}, nil
+}
+
+func (s *Server) inspirationsFolderCreate(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	name, err := cleanInspirationFolderName(body.Name)
+	if err != nil {
+		return nil, err
+	}
+	existing := s.loadSavedInspirationFolders()
+	for _, f := range existing {
+		if f == name {
+			return nil, bad("分组「" + name + "」已存在")
+		}
+	}
+	saved, err := s.saveInspirationFolders(append(existing, name))
+	if err != nil {
+		return nil, err
+	}
+	s.Emit("inspirations", map[string]any{"updated": true, "folders": true})
+	return map[string]any{"ok": true, "name": name, "folders": saved}, nil
+}
+
+func (s *Server) inspirationsFolderRename(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		OldName string `json:"oldName"`
+		NewName string `json:"newName"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	oldName := strings.TrimSpace(body.OldName)
+	if oldName == "" {
+		return nil, bad("缺少原分组名称")
+	}
+	newName, err := cleanInspirationFolderName(body.NewName)
+	if err != nil {
+		return nil, err
+	}
+	existing := s.loadSavedInspirationFolders()
+	if oldName != newName {
+		for _, f := range existing {
+			if f == newName {
+				return nil, bad("分组「" + newName + "」已存在")
+			}
+		}
+	}
+	replaced := false
+	next := make([]string, 0, len(existing)+1)
+	for _, f := range existing {
+		if f == oldName {
+			next = append(next, newName)
+			replaced = true
+		} else {
+			next = append(next, f)
+		}
+	}
+	if !replaced {
+		next = append(next, newName)
+	}
+	saved, err := s.saveInspirationFolders(next)
+	if err != nil {
+		return nil, err
+	}
+
+	docs, err := s.DB.ListDocs("inspiration", false)
+	if err != nil {
+		return nil, err
+	}
+	updatedCount := 0
+	for _, d := range docs {
+		var data inspirationData
+		_ = json.Unmarshal(d.Data, &data)
+		if strings.TrimSpace(data.Folder) == oldName {
+			data.Folder = newName
+			if _, sErr := s.saveInspiration(d.ID, data); sErr == nil {
+				updatedCount++
+			}
+		}
+	}
+	s.Emit("inspirations", map[string]any{"updated": true, "folders": true})
+	return map[string]any{
+		"ok":           true,
+		"oldName":      oldName,
+		"newName":      newName,
+		"updatedCount": updatedCount,
+		"folders":      saved,
+	}, nil
+}
+
+func (s *Server) inspirationsFolderDelete(w http.ResponseWriter, r *http.Request) (any, error) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" && r.Body != nil {
+		var body struct {
+			Name string `json:"name"`
+		}
+		_ = decode(r, &body)
+		name = strings.TrimSpace(body.Name)
+	}
+	if name == "" {
+		return nil, bad("缺少要删除的分组名称")
+	}
+	existing := s.loadSavedInspirationFolders()
+	next := make([]string, 0, len(existing))
+	for _, f := range existing {
+		if f != name {
+			next = append(next, f)
+		}
+	}
+	saved, err := s.saveInspirationFolders(next)
+	if err != nil {
+		return nil, err
+	}
+
+	docs, err := s.DB.ListDocs("inspiration", false)
+	if err != nil {
+		return nil, err
+	}
+	moved := 0
+	for _, d := range docs {
+		var data inspirationData
+		_ = json.Unmarshal(d.Data, &data)
+		if strings.TrimSpace(data.Folder) == name {
+			data.Folder = ""
+			if _, sErr := s.saveInspiration(d.ID, data); sErr == nil {
+				moved++
+			}
+		}
+	}
+	s.Emit("inspirations", map[string]any{"updated": true, "folders": true})
+	return map[string]any{
+		"ok":               true,
+		"name":             name,
+		"movedToUngrouped": moved,
+		"folders":          saved,
+	}, nil
+}
+
+func (s *Server) inspirationsBatchFolder(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		IDs    []string `json:"ids"`
+		Folder string   `json:"folder"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	if len(body.IDs) == 0 {
+		return nil, bad("请先选择至少一条灵感")
+	}
+	targetFolder := strings.TrimSpace(body.Folder)
+	if targetFolder == inspirationUngroupedToken {
+		targetFolder = ""
+	}
+	if targetFolder != "" {
+		clean, err := cleanInspirationFolderName(targetFolder)
+		if err != nil {
+			return nil, err
+		}
+		targetFolder = clean
+		s.ensureInspirationFolder(targetFolder)
+	}
+
+	updatedCount := 0
+	for _, rawID := range body.IDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		cur, err := s.readInspiration(id)
+		if err != nil {
+			continue
+		}
+		d := cur.inspirationData
+		d.Folder = targetFolder
+		if _, err := s.saveInspiration(id, d); err == nil {
+			updatedCount++
+		}
+	}
+	s.Emit("inspirations", map[string]any{"updated": true, "folders": true})
+	return map[string]any{
+		"ok":           true,
+		"folder":       targetFolder,
+		"updatedCount": updatedCount,
 	}, nil
 }
 
@@ -619,6 +938,16 @@ func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any
 		return nil, bad("请至少提供图片或提示词内容")
 	}
 
+	folderVal := strings.TrimSpace(body.Folder)
+	if folderVal == inspirationUngroupedToken {
+		folderVal = ""
+	}
+	if folderVal != "" {
+		if clean, fErr := cleanInspirationFolderName(folderVal); fErr == nil {
+			folderVal = clean
+			s.ensureInspirationFolder(folderVal)
+		}
+	}
 	data := inspirationData{
 		Title:          strings.TrimSpace(body.Title),
 		ImagePath:      imgPath,
@@ -627,8 +956,8 @@ func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any
 		PromptZh:       strings.TrimSpace(body.PromptZh),
 		RawText:        strings.TrimSpace(body.RawText),
 		Slots:          body.Slots,
-		Tags:           body.Tags,
-		Folder:         strings.TrimSpace(body.Folder),
+		Tags:           normalizeInspirationTags(body.Tags),
+		Folder:         folderVal,
 		Notes:          strings.TrimSpace(body.Notes),
 		Source:         firstStr(strings.TrimSpace(body.Source), "import"),
 		SourceURL:      strings.TrimSpace(body.SourceURL),
@@ -693,10 +1022,22 @@ func (s *Server) inspirationsPatch(w http.ResponseWriter, r *http.Request) (any,
 		d.Notes = strings.TrimSpace(*body.Notes)
 	}
 	if body.Folder != nil {
-		d.Folder = strings.TrimSpace(*body.Folder)
+		fv := strings.TrimSpace(*body.Folder)
+		if fv == inspirationUngroupedToken {
+			fv = ""
+		}
+		if fv != "" {
+			clean, fErr := cleanInspirationFolderName(fv)
+			if fErr != nil {
+				return nil, fErr
+			}
+			fv = clean
+			s.ensureInspirationFolder(fv)
+		}
+		d.Folder = fv
 	}
 	if body.Tags != nil {
-		d.Tags = *body.Tags
+		d.Tags = normalizeInspirationTags(*body.Tags)
 	}
 	if body.Slots != nil {
 		d.Slots = *body.Slots
@@ -920,6 +1261,12 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
 		styleHint = "\n部分可选手绘风画风编号参考：" + strings.Join(sample, " | ")
 	}
 
+	existingFolders := s.loadSavedInspirationFolders()
+	folderHint := ""
+	if len(existingFolders) > 0 {
+		folderHint = "\n用户现有自定义分组列表（仅当高度匹配时从以下名称中精确选 1 个填入 folder 字段，不确定请留空 \"\"，严禁自造新分组名）：" + strings.Join(existingFolders, "、")
+	}
+
 	sysPrompt := `你是手绘风「灵感库」的 AI 提示词整理专家。
 用户会粘贴一段从 X (Twitter)、小红书或网页抓取的真实内容（可能含英文推文、emoji、话题标签、求赞废话、中英混杂的生图提示词；有时主推文只发了效果图和「提示词在评论区 / Prompt below 👇」等引导语，真正的提示词在【作者评论区补充】中）。
 请严格忠实于原始内容（严禁凭空编造原文中不存在的场景或主体），若包含【作者评论区补充】，优先提取作者评论区中的完整生图提示词作为 prompt 并剥离主推文引导废话；输出合法 JSON（不要 markdown 代码块，不要解释文字），包含以下字段：
@@ -931,10 +1278,11 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
     {"key": "subject", "label": "主体", "defaultValue": "原提示词中的主体"},
     {"key": "scene", "label": "场景/氛围", "defaultValue": "原场景"}
   ],
-  "tags": ["主分类", "子标签1"],
+  "folder": "",
+  "tags": ["标签1", "标签2", "标签3"],
   "suggestedStyle": "仅当原提示词明确属于手绘/水彩/插画且高度匹配下方编号时才填写如 FA-013；若原提示词为 3D/写实摄影/电影/通用外部风格，请务必留空字符串 \"\""
 }
-要求：slots 提炼 1~4 个最值得用户「做同款」时替换的关键变量；tags 严格控制为 2~3 个简洁中文标签（不带#），第 1 个标签必须从以下 7 个标准主分类中精确选 1 个：人物写真、海报排版、插画绘本、科普信息图、角色设定、场景氛围、创意脑洞；其余 1~2 个为可复用高频子标签（2~4 字），避免造生僻词。` + styleHint
+要求：slots 提炼 1~4 个最值得用户「做同款」时替换的关键变量；tags 提炼 2~4 个简洁可复用的中文多维标签（如画风/题材/用途，2~5 字，不带#），避免造生僻词；folder 仅在提供了用户现有分组列表且高度匹配时填写精确分组名，否则留空字符串 ""。` + folderHint + styleHint
 
 	userPrompt := fmt.Sprintf("来源：%s\n作者：%s\n原标题：%s\n原始内容：\n%s",
 		firstStr(item.Source, "web"),
@@ -987,6 +1335,7 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
 		Prompt         string            `json:"prompt"`
 		PromptZh       string            `json:"promptZh"`
 		Slots          []inspirationSlot `json:"slots"`
+		Folder         string            `json:"folder"`
 		Tags           []string          `json:"tags"`
 		SuggestedStyle string            `json:"suggestedStyle"`
 	}
@@ -1009,6 +1358,15 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
 	}
 	if len(parsed.Tags) > 0 {
 		d.Tags = normalizeInspirationTags(parsed.Tags)
+	}
+	if d.Folder == "" && strings.TrimSpace(parsed.Folder) != "" && len(existingFolders) > 0 {
+		want := strings.TrimSpace(parsed.Folder)
+		for _, f := range existingFolders {
+			if f == want {
+				d.Folder = f
+				break
+			}
+		}
 	}
 	if strings.TrimSpace(parsed.SuggestedStyle) != "" {
 		d.SuggestedStyle = strings.TrimSpace(parsed.SuggestedStyle)

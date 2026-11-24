@@ -454,8 +454,8 @@ func TestInspirationCategoryTaxonomyAndFilter(t *testing.T) {
 		}
 	}
 
-	norm := normalizeInspirationTags([]string{"#人物写真", "人物写真", " #古风 ", "汉服", "多余第四个"})
-	if len(norm) != 3 || norm[0] != "人物写真" || norm[1] != "古风" || norm[2] != "汉服" {
+	norm := normalizeInspirationTags([]string{"#人物写真", "人物写真", " #古风 ", "汉服", "多维标签"})
+	if len(norm) != 4 || norm[0] != "人物写真" || norm[1] != "古风" || norm[2] != "汉服" || norm[3] != "多维标签" {
 		t.Fatalf("unexpected normalizeInspirationTags output: %v", norm)
 	}
 
@@ -532,5 +532,150 @@ func TestDefaultBridgePortAndCleanClipEndpoint(t *testing.T) {
 	_ = json.Unmarshal(settRec.Body.Bytes(), &settResp)
 	if settResp.ClipEndpoint != addr {
 		t.Fatalf("expected /api/settings clipEndpoint %q, got %q", addr, settResp.ClipEndpoint)
+	}
+}
+
+func TestInspirationCustomFoldersBatchMoveAndMultiTagFilter(t *testing.T) {
+	mockSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/ai/chat" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"content": `{
+					"title": "秋日茶饮海报",
+					"prompt": "Warm hand-drawn tea shop poster",
+					"promptZh": "暖纸手绘茶饮海报",
+					"folder": "茶饮客户",
+					"tags": ["水彩", "封面", "茶饮"],
+					"slots": []
+				}`,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "items": []any{}})
+	}))
+	defer mockSite.Close()
+
+	srv, cancel := setupTestServer(t, mockSite.URL)
+	defer cancel()
+	h := srv.Handler()
+	_ = secrets.Set(secrets.SiteToken, "hwt_folders_test")
+
+	// 1. Create custom folders + verify reserved/duplicate names are rejected
+	rec := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/folders", map[string]any{"name": "茶饮客户"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create folder failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec2 := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/folders", map[string]any{"name": "空分组测试"})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("create second folder failed: %d %s", rec2.Code, rec2.Body.String())
+	}
+	dupRec := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/folders", map[string]any{"name": "茶饮客户"})
+	if dupRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on duplicate folder, got %d", dupRec.Code)
+	}
+	resvRec := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/folders", map[string]any{"name": "未分组"})
+	if resvRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on reserved folder name, got %d", resvRec.Code)
+	}
+
+	// 2. Seed 3 items: 1 in 茶饮客户 (tags 水彩, 封面), 1 in 茶饮客户 (tags 水彩), 1 ungrouped (tags 封面)
+	it1, err := srv.saveInspiration("", inspirationData{Title: "A-水彩封面", Folder: "茶饮客户", Tags: []string{"水彩", "封面"}, Prompt: "p1", Source: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	it2, err := srv.saveInspiration("", inspirationData{Title: "B-仅水彩", Folder: "茶饮客户", Tags: []string{"水彩"}, Prompt: "p2", Source: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	it3, err := srv.saveInspiration("", inspirationData{Title: "C-未分组", Folder: "", Tags: []string{"封面"}, Prompt: "p3", Source: "import"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. List all: verify empty folder 空分组测试 persists in folderItems with count=0, and ungroupedCount=1
+	listRec := doReq(t, h, srv.Token, http.MethodGet, "/api/inspirations", nil)
+	var listResp struct {
+		TotalCount     int `json:"totalCount"`
+		UngroupedCount int `json:"ungroupedCount"`
+		FolderItems    []struct {
+			Name  string `json:"name"`
+			Count int    `json:"count"`
+		} `json:"folderItems"`
+		Items []inspirationItem `json:"items"`
+	}
+	_ = json.Unmarshal(listRec.Body.Bytes(), &listResp)
+	if listResp.TotalCount != 3 || listResp.UngroupedCount != 1 {
+		t.Fatalf("unexpected counts: total=%d ungrouped=%d", listResp.TotalCount, listResp.UngroupedCount)
+	}
+	if len(listResp.FolderItems) != 2 || listResp.FolderItems[0].Name != "茶饮客户" || listResp.FolderItems[0].Count != 2 || listResp.FolderItems[1].Name != "空分组测试" || listResp.FolderItems[1].Count != 0 {
+		t.Fatalf("unexpected folderItems: %+v", listResp.FolderItems)
+	}
+
+	// 4. Filter by folder + multi-tag intersection (tags=水彩,封面 -> only it1)
+	multiRec := doReq(t, h, srv.Token, http.MethodGet, "/api/inspirations?folder="+url.QueryEscape("茶饮客户")+"&tags="+url.QueryEscape("水彩,封面"), nil)
+	var multiResp struct {
+		Items []inspirationItem `json:"items"`
+	}
+	_ = json.Unmarshal(multiRec.Body.Bytes(), &multiResp)
+	if len(multiResp.Items) != 1 || multiResp.Items[0].ID != it1.ID {
+		t.Fatalf("expected only it1 for folder+multi-tag intersection, got %+v", multiResp.Items)
+	}
+
+	// 5. Filter by __ungrouped__ -> only it3
+	ungRec := doReq(t, h, srv.Token, http.MethodGet, "/api/inspirations?folder=__ungrouped__", nil)
+	var ungResp struct {
+		Items []inspirationItem `json:"items"`
+	}
+	_ = json.Unmarshal(ungRec.Body.Bytes(), &ungResp)
+	if len(ungResp.Items) != 1 || ungResp.Items[0].ID != it3.ID {
+		t.Fatalf("expected only it3 for __ungrouped__, got %+v", ungResp.Items)
+	}
+
+	// 6. AI organize on ungrouped item recommends existing folder 茶饮客户 without inventing new ones
+	orgRec := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/"+it3.ID+"/organize", map[string]any{})
+	if orgRec.Code != http.StatusOK {
+		t.Fatalf("organize failed: %d %s", orgRec.Code, orgRec.Body.String())
+	}
+	got3, _ := srv.readInspiration(it3.ID)
+	if got3.Folder != "茶饮客户" {
+		t.Fatalf("expected AI organize to assign existing folder 茶饮客户, got %q", got3.Folder)
+	}
+
+	// 7. Batch move it2 + it3 into a new folder 新提案分组
+	bmRec := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/batch-folder", map[string]any{
+		"ids":    []string{it2.ID, it3.ID},
+		"folder": "新提案分组",
+	})
+	if bmRec.Code != http.StatusOK {
+		t.Fatalf("batch-folder failed: %d %s", bmRec.Code, bmRec.Body.String())
+	}
+	got2, _ := srv.readInspiration(it2.ID)
+	got3, _ = srv.readInspiration(it3.ID)
+	if got2.Folder != "新提案分组" || got3.Folder != "新提案分组" {
+		t.Fatalf("expected batch moved items in 新提案分组, got %q / %q", got2.Folder, got3.Folder)
+	}
+
+	// 8. Rename folder 新提案分组 -> 正式提案 and verify items updated
+	renRec := doReq(t, h, srv.Token, http.MethodPatch, "/api/inspirations/folders", map[string]any{
+		"oldName": "新提案分组",
+		"newName": "正式提案",
+	})
+	if renRec.Code != http.StatusOK {
+		t.Fatalf("rename folder failed: %d %s", renRec.Code, renRec.Body.String())
+	}
+	got2, _ = srv.readInspiration(it2.ID)
+	if got2.Folder != "正式提案" {
+		t.Fatalf("expected renamed folder 正式提案 on it2, got %q", got2.Folder)
+	}
+
+	// 9. Delete folder 正式提案 -> items safely move back to ungrouped (Folder=="") and are NOT deleted
+	delRec := doReq(t, h, srv.Token, http.MethodDelete, "/api/inspirations/folders?name="+url.QueryEscape("正式提案"), nil)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("delete folder failed: %d %s", delRec.Code, delRec.Body.String())
+	}
+	got2, err = srv.readInspiration(it2.ID)
+	if err != nil || got2.Folder != "" {
+		t.Fatalf("expected it2 preserved and moved to ungrouped, err=%v folder=%q", err, got2.Folder)
 	}
 }
