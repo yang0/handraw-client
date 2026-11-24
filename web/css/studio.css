@@ -3784,10 +3784,222 @@ dialog.modal-picker .modal-body {
   .pc-drawer { inset: auto 8px 8px; width: auto; max-height: 75vh; }
   .studio-duo-row { grid-template-columns: 1fr; }
 }
+/* Reference Image Picker Modal (#103) */
+dialog.modal-ref-picker:modal {
+  overscroll-behavior: contain;
+}
+dialog.modal-ref-picker::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+.ref-picker-body {
+  gap: 10px;
+}
+.ref-picker-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.ref-picker-tabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ref-picker-search-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+.ref-picker-search-row .input {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+.ref-picker-count {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ref-picker-card {
+  position: relative;
+}
+.ref-picker-card.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  background: var(--accent-soft, rgba(209, 75, 40, 0.06));
+}
+.ref-picker-card.is-just-added {
+  box-shadow: 0 0 0 3px var(--accent), 0 6px 16px rgba(209, 75, 40, 0.22);
+}
+.ref-picker-check {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.ref-picker-card.is-selected .ref-picker-check {
+  opacity: 1;
+}
+.ref-picker-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 36px 20px;
+  text-align: center;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.ref-picker-empty p {
+  max-width: 420px;
+  margin: 0;
+  font-size: 13px;
+}
+.ref-picker-upload-host {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+}
+.ref-picker-upload-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.ref-picker-save-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ref-picker-upload-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ref-picker-upload-meta .input {
+  flex: 1 1 240px;
+  max-width: 420px;
+}
+.ref-picker-field-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+.ref-picker-cat-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ref-picker-cat-fieldset legend {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-muted);
+  padding: 0;
+}
+.ref-picker-cat-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ref-picker-cat-pill {
+  position: relative;
+  cursor: pointer;
+  user-select: none;
+}
+.ref-picker-cat-pill .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.ref-picker-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 16px;
+  border: 1.5px dashed var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  text-align: center;
+  transition: border-color 0.14s ease, background-color 0.14s ease;
+}
+.ref-picker-dropzone.is-dragover {
+  border-color: var(--accent);
+  background: var(--accent-soft, rgba(209, 75, 40, 0.06));
+}
+.ref-picker-dropzone-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.ref-picker-selected-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  flex: 0 0 auto;
+  overflow-x: auto;
+}
+.ref-picker-selected-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+.ref-picker-selected-thumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px 2px;
+}
+.ref-picker-selected-thumbs .make-image-ref-thumb {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .studio-choice span,
   .make-image-picker-card,
   .studio-resource-option,
+  .ref-picker-check,
+  .ref-picker-dropzone,
   .ic-hist-art-item,
   .hw-article-summary-meter > span,
   .make-image-composer,

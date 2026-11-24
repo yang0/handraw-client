@@ -1,6 +1,7 @@
 import { api, clear, closeModal, el, galleryImg, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
 import { openRecipeEditor, openRecipeManagerModal } from "./recipes.js";
 import { mountSlotPanels } from "../plugins-host.js";
+import { bindPageImagePaste, importTempReferenceFile, MAX_REF_IMAGES, openReferencePickerModal } from "./ref-picker.js";
 import {
   RATIOS,
   choices,
@@ -679,15 +680,22 @@ export async function renderCreate(root, ctx, params = {}) {
 
   async function importReferenceFile(file) {
     if (!file) return;
-    const fd = new FormData();
-    fd.append("file", file);
+    const current = Array.isArray(state.refs) ? state.refs : [];
+    if (current.length >= MAX_REF_IMAGES) {
+      toast(`参考图最多 ${MAX_REF_IMAGES} 张，请先移除一张`);
+      return;
+    }
     try {
-      const res = await api("POST", "/api/images/import", fd);
-      if (res.path) {
-        state.refs = [...(state.refs || []), res.path];
-        renderRefs();
-        session.persist();
-        toast("已添加参考图");
+      const path = await importTempReferenceFile(file);
+      if (path) {
+        if (!current.includes(path)) {
+          state.refs = [...current, path];
+          renderRefs();
+          session.persist();
+          toast("已添加参考图");
+        } else {
+          toast("该参考图已在当前列表里");
+        }
       }
     } catch (e) { toast(e.message); }
   }
@@ -807,18 +815,6 @@ export async function renderCreate(root, ctx, params = {}) {
     autoResizeTextarea();
   });
 
-  subjectInput.addEventListener("paste", async (e) => {
-    const items = Array.from(e.clipboardData?.items || []);
-    const imgItem = items.find((it) => it.type && it.type.startsWith("image/"));
-    if (imgItem) {
-      const f = imgItem.getAsFile();
-      if (f) {
-        e.preventDefault();
-        await importReferenceFile(f);
-      }
-    }
-  });
-
   subjectInput.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && state.composerExpanded) {
       e.preventDefault();
@@ -835,9 +831,18 @@ export async function renderCreate(root, ctx, params = {}) {
   const addRefBtn = el("button", {
     type: "button",
     class: "make-image-add-reference",
-    title: "添加参考图（也可直接粘贴或拖拽图片）",
+    title: "从自建图库选择、上传或粘贴参考图（也支持直接 Ctrl/⌘ + V 粘贴）",
     "aria-label": "添加参考图",
-    onClick: () => fileInput.click(),
+    onClick: () => openReferencePickerModal({
+      currentRefs: state.refs || [],
+      maxCount: MAX_REF_IMAGES,
+      title: "选择参考图（自建图库 / 本地上传 / 粘贴）",
+      onConfirm: (nextRefs) => {
+        state.refs = nextRefs;
+        renderRefs();
+        session.persist();
+      },
+    }),
   }, "+");
 
   const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
@@ -894,6 +899,9 @@ export async function renderCreate(root, ctx, params = {}) {
   composer.addEventListener("submit", (e) => {
     e.preventDefault();
     handleComposerSubmit();
+  });
+  bindPageImagePaste(composer, async (files) => {
+    for (const f of files) await importReferenceFile(f);
   });
   composer.addEventListener("dragover", (e) => {
     if (e.dataTransfer?.types?.includes("Files")) {
