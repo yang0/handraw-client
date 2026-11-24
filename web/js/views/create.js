@@ -346,9 +346,10 @@ export async function renderCreate(root, ctx, params = {}) {
   const recSel = el("select", { class: "select select-sm", style: { flex: "1", minWidth: "0" }, "aria-label": "快速套用配方" });
   function renderRecipeOptions() {
     clear(recSel);
-    recSel.appendChild(el("option", { value: "" }, "— 套用常用配方 —"));
+    recSel.appendChild(el("option", { value: "" }, recipes.length ? `— 套用个人配方 (${recipes.length}) —` : "— 暂无个人配方 —"));
     recipes.forEach((r) => {
-      recSel.appendChild(el("option", { value: r.id }, `${r.name} (${(r.styleIds || []).join("+")})`));
+      const stylePart = (r.styleIds || []).length ? ` (${r.styleIds.join("+")})` : "";
+      recSel.appendChild(el("option", { value: r.id }, `${r.name}${stylePart}`));
     });
     if (state.recipeId && recipes.some((x) => x.id === state.recipeId)) {
       recSel.value = state.recipeId;
@@ -365,7 +366,8 @@ export async function renderCreate(root, ctx, params = {}) {
     state.layout = r.layoutId || "";
     state.color = r.colors?.[0] || "";
     state.tone = r.tones?.[0] || "";
-    state.mood = r.mood || "";
+    state.mood = (Array.isArray(r.moods) && r.moods[0]) || r.mood || "";
+    if (r.whitespace !== undefined) state.whitespace = r.whitespace || "";
     state.ratio = r.ratio || state.ratio;
     state.mode = r.mode || state.mode;
     recSel.value = state.recipeId;
@@ -383,6 +385,7 @@ export async function renderCreate(root, ctx, params = {}) {
   function openRecipesManager() {
     openRecipeManagerModal({
       activeRecipeId: state.recipeId,
+      catalog: { styles, layouts, colors, tones },
       onApply: (rec) => {
         applyRecipeObj(rec);
         toast(`已套用配方：${rec.name}`);
@@ -391,6 +394,12 @@ export async function renderCreate(root, ctx, params = {}) {
     });
   }
   renderRecipeOptions();
+  // Silently sync cloud recipes on Studio open if logged in.
+  if (modRes.loggedIn) {
+    api("POST", "/api/mine/recipes/sync").then((res) => {
+      if (res && (res.pulled || res.pushed || res.conflictForks)) reloadRecipes();
+    }).catch(() => {});
+  }
   recSel.addEventListener("change", () => {
     const r = recipes.find((x) => x.id === recSel.value);
     if (!r) return;
@@ -1666,19 +1675,18 @@ export async function renderCreate(root, ctx, params = {}) {
   function saveCurrentRecipe() {
     const stCode = state.style || currentTurn()?.common?.style1 || "";
     openRecipeEditor({
-      name: `${stCode || "手绘配方"}${state.layout ? " + " + state.layout : ""}`,
+      name: "",
       styleIds: [stCode, state.fusion ? state.style2 : ""].filter(Boolean),
       layoutId: state.layout,
       colors: state.color ? [state.color] : [],
       tones: state.tone ? [state.tone] : [],
-      mood: state.mood,
+      moods: state.mood ? [state.mood] : [],
+      whitespace: state.whitespace || "",
       ratio: state.ratio,
       mode: state.mode,
     }, async () => {
-      const r = await api("GET", "/api/mine/recipes").catch(() => ({ items: [] }));
-      recipes = r.items || [];
-      renderRecipeOptions();
-    });
+      await reloadRecipes();
+    }, null, { catalog: { styles, layouts, colors, tones } });
   }
 
   async function exportTurnRun(runId, format) {

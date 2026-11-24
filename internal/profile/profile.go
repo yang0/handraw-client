@@ -348,6 +348,7 @@ type Recipe struct {
 	Model            string                     `json:"model,omitempty"`
 	Notes            string                     `json:"notes,omitempty"`
 	Remote           *RecipeRemote              `json:"remote,omitempty"`
+	SyncStatus       string                     `json:"syncStatus,omitempty"`
 	Builtin          bool                       `json:"builtin,omitempty"`
 	CreatedAt        string                     `json:"createdAt"`
 	UpdatedAt        string                     `json:"updatedAt"`
@@ -477,21 +478,6 @@ func DeleteRecipe(id string) error {
 		return nil
 	}
 	return err
-}
-
-// BuiltinRecipes returns curated starter recipes using verified pack IDs.
-func BuiltinRecipes() []Recipe {
-	ts := "2026-11-17T00:00:00Z"
-	return []Recipe{
-		{SchemaVersion: 1, ID: "rcp_builtin_gzh_cover", Name: "公众号横版封面", Kind: "single", StyleIDs: []string{"FA-013"}, LayoutID: "SC-001", Colors: []string{"C-15"}, Tones: []string{"T-01"}, Moods: []string{"温暖", "编辑感"}, Whitespace: "留白透气", Ratio: "2.35:1", Mode: "graphic-text", Notes: "适合深度长文封面，标题突出、线条松弛有趣", Builtin: true, CreatedAt: ts, UpdatedAt: ts},
-		{SchemaVersion: 1, ID: "rcp_builtin_xhs_card", Name: "小红书 3:4 干货图", Kind: "batch", StyleIDs: []string{"FA-001"}, LayoutID: "SC-008", Colors: []string{"C-01"}, Tones: []string{"T-13"}, Moods: []string{"轻快", "通透"}, Whitespace: "适中", Ratio: "3:4", Mode: "graphic-text", Notes: "图上文下留白卡，多图系列风格稳定", Builtin: true, CreatedAt: ts, UpdatedAt: ts},
-		{SchemaVersion: 1, ID: "rcp_builtin_infographic", Name: "知识金字塔信息图", Kind: "single", StyleIDs: []string{"FB-001"}, LayoutID: "IG-001", Colors: []string{"C-05"}, Tones: []string{"T-01"}, Moods: []string{"清晰", "书卷气"}, Whitespace: "留白透气", Ratio: "3:4", Mode: "graphic-text", Notes: "水彩淡彩配结构化图表", Builtin: true, CreatedAt: ts, UpdatedAt: ts},
-		{SchemaVersion: 1, ID: "rcp_builtin_comic4", Name: "漫画四格故事", Kind: "single", StyleIDs: []string{"FA-001"}, LayoutID: "SB-001", Colors: []string{"C-03"}, Tones: []string{"T-02"}, Moods: []string{"幽默", "日常"}, Whitespace: "紧凑", Ratio: "1:1", Mode: "graphic-text", Notes: "规则网格四格故事分镜", Builtin: true, CreatedAt: ts, UpdatedAt: ts},
-		{SchemaVersion: 1, ID: "rcp_builtin_poster", Name: "竖版活动海报", Kind: "single", StyleIDs: []string{"FD-001"}, LayoutID: "IG-010", Colors: []string{"C-16"}, Tones: []string{"T-06"}, Moods: []string{"张力", "醒目"}, Whitespace: "适中", Ratio: "9:16", Mode: "graphic-text", Notes: "东方动态笔触配高反差中国红", Builtin: true, CreatedAt: ts, UpdatedAt: ts},
-		{SchemaVersion: 1, ID: "rcp_builtin_article_wide", Name: "文章宽幅叙事插图", Kind: "article_card", StyleIDs: []string{"FE-001"}, Colors: []string{"C-08"}, Tones: []string{"T-13"}, Moods: []string{"温柔", "绘本感"}, Whitespace: "大留白", Ratio: "16:9", Mode: "pure-image", Notes: "柔和自然绘本风格，适合散文或深度文章插画", Builtin: true, CreatedAt: ts, UpdatedAt: ts},
-		{SchemaVersion: 1, ID: "rcp_builtin_ecom", Name: "手绘产品展示卡", Kind: "single", StyleIDs: []string{"FI-001"}, LayoutID: "EC-001", Colors: []string{"C-01"}, Tones: []string{"T-01"}, Moods: []string{"克制", "高级"}, Whitespace: "大留白", Ratio: "1:1", Mode: "pure-image", Notes: "极简商业产品质感展示", Builtin: true, CreatedAt: ts, UpdatedAt: ts},
-		{SchemaVersion: 1, ID: "rcp_builtin_fusion", Name: "手绘角色 × 实景融合", Kind: "single", StyleIDs: []string{"FA-013", "FI-001"}, Colors: []string{"C-15"}, Tones: []string{"T-14"}, Moods: []string{"跨媒介", "电影感"}, Whitespace: "适中", Ratio: "4:3", Mode: "pure-image", Notes: "双画风跨媒介融合示例", Builtin: true, CreatedAt: ts, UpdatedAt: ts},
-	}
 }
 
 // ---------- Custom tuku_dir assets (<home>/config.json) ----------

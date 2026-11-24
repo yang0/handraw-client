@@ -65,6 +65,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/mine/{kind}", s.h(s.minePut))
 	m.HandleFunc("DELETE /api/mine/{kind}/{id}", s.h(s.mineDelete))
 	m.HandleFunc("POST /api/mine/sync", s.h(s.mineSync))
+	m.HandleFunc("POST /api/mine/recipes/sync", s.h(s.mineRecipesSync))
 	m.HandleFunc("POST /api/mine/{kind}/{id}/publish", s.h(s.minePublish))
 	m.HandleFunc("POST /api/mine/analyze", s.h(s.mineAnalyze))
 	m.HandleFunc("POST /api/mine/upload", s.h(s.uploadImage))

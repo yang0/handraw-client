@@ -13,7 +13,9 @@ async function startQuick() {
 
   if (settRes.settings?.theme) setColorScheme(settRes.settings.theme);
 
-  const recipes = recRes.items || [{ id: "default", name: "水彩手绘插画", styleIds: ["FA-013"], ratio: "3:4", mode: "graphic-text" }];
+  const recipes = (Array.isArray(recRes.items) && recRes.items.length)
+    ? recRes.items
+    : [{ id: "default", name: "默认画风", styleIds: ["FA-013"], ratio: "3:4", mode: "graphic-text" }];
   let recipeIdx = 0;
   let activeRunId = "";
 

@@ -75,10 +75,44 @@ func (s *Server) mineList(w http.ResponseWriter, r *http.Request) (any, error) {
 		return map[string]any{"items": items, "total": len(items)}, nil
 
 	case "recipe":
-		var out []profile.Recipe
+		out := []profile.Recipe{}
 		seen := map[string]bool{}
+		docMeta := map[string]store.Doc{}
+		if docs, err := s.DB.ListDocs("recipe", true); err == nil {
+			for _, d := range docs {
+				docMeta[d.ID] = d
+			}
+		}
+		enrichSync := func(rec *profile.Recipe) {
+			rec.Builtin = false
+			if d, ok := docMeta[rec.ID]; ok {
+				if d.RemoteID != "" {
+					rec.Remote = &profile.RecipeRemote{ID: d.RemoteID, Revision: d.RemoteRev}
+					if d.Dirty {
+						rec.SyncStatus = "pending"
+					} else {
+						rec.SyncStatus = "synced"
+					}
+				} else if d.Dirty {
+					rec.SyncStatus = "pending"
+				} else {
+					rec.SyncStatus = "local"
+				}
+			} else if rec.Remote != nil && rec.Remote.ID != "" {
+				rec.SyncStatus = "synced"
+			} else {
+				rec.SyncStatus = "local"
+			}
+		}
 		if list, err := profile.ListRecipes(); err == nil {
 			for _, rec := range list {
+				if rec.Builtin || strings.HasPrefix(rec.ID, "rcp_builtin_") {
+					continue
+				}
+				if d, ok := docMeta[rec.ID]; ok && d.Deleted {
+					continue
+				}
+				enrichSync(&rec)
 				seen[rec.ID] = true
 				out = append(out, rec)
 			}
@@ -86,15 +120,11 @@ func (s *Server) mineList(w http.ResponseWriter, r *http.Request) (any, error) {
 		if docs, err := s.DB.ListDocs("recipe", false); err == nil {
 			for _, d := range docs {
 				var rec profile.Recipe
-				if json.Unmarshal(d.Data, &rec) == nil && rec.ID != "" && !seen[rec.ID] {
+				if json.Unmarshal(d.Data, &rec) == nil && rec.ID != "" && !rec.Builtin && !strings.HasPrefix(rec.ID, "rcp_builtin_") && !seen[rec.ID] {
+					enrichSync(&rec)
 					seen[rec.ID] = true
 					out = append(out, rec)
 				}
-			}
-		}
-		for _, rec := range profile.BuiltinRecipes() {
-			if !seen[rec.ID] {
-				out = append(out, rec)
 			}
 		}
 		return map[string]any{"items": out, "total": len(out)}, nil
@@ -404,18 +434,51 @@ func (s *Server) putRecipe(r *http.Request) (any, error) {
 	if err := decode(r, &rec); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(rec.Name) == "" {
-		rec.Name = "未命名配方"
+	rec.Name = strings.TrimSpace(rec.Name)
+	if rec.Name == "" {
+		return nil, bad("请填写配方名称")
 	}
-	if rec.ID == "" || strings.HasPrefix(rec.ID, "rcp_builtin_") {
-		rec.ID = "rcp_local_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
-		rec.Builtin = false
+	if len([]rune(rec.Name)) > 60 {
+		return nil, bad("配方名称不能超过 60 个字符")
 	}
+	rec.Builtin = false
+	rec.References = []string{} // never store/sync local reference image paths
+	oldID := strings.TrimSpace(rec.ID)
+	if oldID == "" || strings.HasPrefix(oldID, "rcp_builtin_") {
+		rec.ID = uuid.NewString()
+	} else if _, err := uuid.Parse(oldID); err != nil {
+		// Upgrade legacy non-UUID recipe ID (e.g. rcp_local_xxx) to UUID for cloud sync.
+		rec.ID = uuid.NewString()
+		_ = profile.DeleteRecipe(oldID)
+		_ = s.DB.DeleteDocHard("recipe", oldID)
+	}
+	var remoteID string
+	var remoteRev int
+	if existing, err := s.DB.GetDoc("recipe", rec.ID); err == nil {
+		remoteID = existing.RemoteID
+		remoteRev = existing.RemoteRev
+	}
+	if remoteID != "" {
+		rec.Remote = &profile.RecipeRemote{ID: remoteID, Revision: remoteRev}
+	}
+	rec.SyncStatus = "pending"
 	if err := profile.SaveRecipe(&rec); err != nil {
 		return nil, bad(err.Error())
 	}
 	b, _ := json.Marshal(rec)
-	_ = s.DB.PutDoc(&store.Doc{Kind: "recipe", ID: rec.ID, Name: rec.Name, Data: b, Dirty: true})
+	_ = s.DB.PutDoc(&store.Doc{
+		Kind:      "recipe",
+		ID:        rec.ID,
+		Name:      rec.Name,
+		Data:      b,
+		RemoteID:  remoteID,
+		RemoteRev: remoteRev,
+		Dirty:     true,
+		Deleted:   false,
+	})
+	if s.Site.LoggedIn() && settings.Get().AutoSyncResources {
+		go func() { _, _ = s.syncRecipesInternal(context.Background()) }()
+	}
 	return map[string]any{"recipe": rec}, nil
 }
 
@@ -629,7 +692,16 @@ func (s *Server) mineDelete(w http.ResponseWriter, r *http.Request) (any, error)
 	id := r.PathValue("id")
 	if kind == "recipe" {
 		_ = profile.DeleteRecipe(id)
-		_ = s.DB.DeleteDocHard("recipe", id)
+		if doc, err := s.DB.GetDoc("recipe", id); err == nil && doc.RemoteID != "" {
+			doc.Deleted = true
+			doc.Dirty = true
+			_ = s.DB.PutDoc(&doc)
+			if s.Site.LoggedIn() && settings.Get().AutoSyncResources {
+				go func() { _, _ = s.syncRecipesInternal(context.Background()) }()
+			}
+		} else {
+			_ = s.DB.DeleteDocHard("recipe", id)
+		}
 		return okv, nil
 	}
 	if doc, err := s.DB.GetDoc(kind, id); err == nil {
@@ -813,6 +885,14 @@ func (s *Server) syncResourcesInternal(ctx context.Context) (map[string]any, err
 		}
 	}
 	_ = profile.WriteSyncState(username, syncState)
+	if rRes, rErr := s.syncRecipesInternal(ctx); rErr == nil {
+		if rp, ok := rRes["pushed"].(int); ok {
+			pushed += rp
+		}
+		if rpl, ok := rRes["pulled"].(int); ok {
+			pulled += rpl
+		}
+	}
 	return map[string]any{"ok": true, "pushed": pushed, "pulled": pulled, "conflicts": conflicts}, nil
 }
 

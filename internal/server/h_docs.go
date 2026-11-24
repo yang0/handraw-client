@@ -23,7 +23,7 @@ func builtinTemplates() []workflowTemplate {
 		{
 			ID: "tpl_xhs_6", Name: "小红书 6 图干货套图", Desc: "1 个配方 × 6 个分节主题自动展开生成 6 张 3:4 图文卡",
 			Nodes: []any{
-				map[string]any{"id": "n1", "type": "recipe", "x": 80, "y": 140, "data": map[string]any{"recipeId": "rcp_builtin_xhs_card", "label": "小红书 3:4 干货图"}},
+				map[string]any{"id": "n1", "type": "recipe", "x": 80, "y": 140, "data": map[string]any{"style": "FA-001", "layout": "SC-008", "ratio": "3:4", "label": "小红书 3:4 干货图"}},
 				map[string]any{"id": "n2", "type": "themes", "x": 80, "y": 320, "data": map[string]any{"label": "6 张分节主题", "items": []string{"封面：晨间手冲咖啡指南", "1. 挑选新鲜浅烘豆", "2. 磨豆粗细度对比", "3. 92度水温控制", "4. 三段式注水节奏", "5. 常见萃取翻车避坑"}}},
 				map[string]any{"id": "n3", "type": "generate", "x": 420, "y": 210, "data": map[string]any{"label": "批量生成 6 张", "count": 1}},
 				map[string]any{"id": "n4", "type": "export", "x": 740, "y": 210, "data": map[string]any{"label": "小红书格式导出", "format": "xiaohongshu"}},

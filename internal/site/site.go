@@ -61,6 +61,7 @@ type APIError struct {
 	Status  int    `json:"status"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	Raw     []byte `json:"-"`
 }
 
 func (e *APIError) Error() string {
@@ -154,6 +155,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, aut
 				ae.Message = firstNonEmpty(e.Message, e.Detail)
 			}
 		}
+		ae.Raw = append([]byte(nil), data...)
 		if ae.Message == "" {
 			ae.Message = fmt.Sprintf("网站返回 %d", resp.StatusCode)
 		}
