@@ -317,3 +317,84 @@ func TestMergeAndResolveHistoricalRunRecipeAndExportReveal(t *testing.T) {
 		t.Fatalf("reveal zip failed: code=%d opened=%q want=%q body=%s", rrRev.Code, recHost.openedPath, expResp.Path, rrRev.Body.String())
 	}
 }
+
+func TestSiteRunReconcilesAutoPublishedWorkAndPreventsDuplicatePublish(t *testing.T) {
+	var mu sync.Mutex
+	var genPublishCalls int
+
+	mockSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/studio/tasks":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"genId":     "gen_site_86",
+				"taskId":    "req_site_86",
+				"status":    "success",
+				"workId":    "work_auto_86",
+				"workUrl":   "https://forum.handraw-style.com/t/work-work_auto_86",
+				"workPrice": 2,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/me/generations":
+			mu.Lock()
+			genPublishCalls++
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "workId": "work_dup_bad"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockSite.Close()
+
+	srv, cancel := setupTestServer(t, mockSite.URL)
+	defer cancel()
+	_ = secrets.Set(secrets.SiteToken, "hwt_test_token")
+	h := srv.Handler()
+
+	imgPath := filepath.Join(t.TempDir(), "site_gen.png")
+	writePNG(t, imgPath, 120, 160)
+	run := &store.Run{
+		ID:              "run_site_auto_86",
+		Mode:            "single",
+		Title:           "网站模型已自动发布测试",
+		OriginalRequest: "测试网站生图去重",
+		Source:          "site",
+		Model:           "site:gpt-image-2.5",
+		Status:          "done",
+	}
+	if err := srv.DB.InsertRun(run, []store.Image{{
+		ID:           "img_site_86",
+		RunID:        run.ID,
+		Idx:          0,
+		Status:       "done",
+		Path:         imgPath,
+		Width:        120,
+		Height:       160,
+		RemoteTaskID: "req_site_86",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Opening work detail reconciles and backfills publishedWorkId from /api/studio/tasks
+	rrGet := doReq(t, h, srv.Token, http.MethodGet, "/api/works/"+run.ID, nil)
+	if rrGet.Code != http.StatusOK {
+		t.Fatalf("GET work failed: %d %s", rrGet.Code, rrGet.Body.String())
+	}
+	if !strings.Contains(rrGet.Body.String(), `"publishedWorkId":"work_auto_86"`) {
+		t.Fatalf("expected reconciled publishedWorkId in GET /api/works, got: %s", rrGet.Body.String())
+	}
+
+	// 2. Attempting to publish again returns deduped without hitting /api/v1/me/generations
+	rrPub := doReq(t, h, srv.Token, http.MethodPost, "/api/works/"+run.ID+"/publish", map[string]any{"title": "重复发布测试", "price": 5})
+	if rrPub.Code != http.StatusOK {
+		t.Fatalf("publish dedup failed: %d %s", rrPub.Code, rrPub.Body.String())
+	}
+	if !strings.Contains(rrPub.Body.String(), `"alreadyPublished":true`) || !strings.Contains(rrPub.Body.String(), `"work_auto_86"`) {
+		t.Fatalf("expected alreadyPublished dedup response, got: %s", rrPub.Body.String())
+	}
+	mu.Lock()
+	calls := genPublishCalls
+	mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("expected 0 duplicate /api/v1/me/generations calls, got %d", calls)
+	}
+}

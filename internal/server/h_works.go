@@ -3,6 +3,7 @@ package server
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/yang0/handraw-client/internal/jobs"
@@ -73,8 +75,95 @@ func (s *Server) work(w http.ResponseWriter, r *http.Request) (any, error) {
 			versions = append(versions, cand)
 		}
 	}
+	s.reconcileSitePublishedWork(r.Context(), &run)
 	resolved := s.resolveRunRecipe(run, versions)
 	return map[string]any{"run": run, "versions": versions, "resolvedRecipe": resolved}, nil
+}
+
+// collectRunSiteRefs returns task/request/generation IDs linking a local run
+// back to website studio_generations rows (#86).
+func collectRunSiteRefs(run store.Run) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	add(run.RemoteRunID)
+	for _, im := range run.Images {
+		add(im.RemoteTaskID)
+		if len(im.Meta) > 0 {
+			var spec jobs.Spec
+			if json.Unmarshal(im.Meta, &spec) == nil {
+				add(spec.RequestID)
+			}
+		}
+	}
+	return out
+}
+
+// reconcileSitePublishedWork checks whether a site-generated run already has an
+// auto-published work on the website and backfills local published_work_id (#86).
+func (s *Server) reconcileSitePublishedWork(ctx context.Context, run *store.Run) {
+	if run == nil || run.PublishedWorkID != "" || run.Source != "site" || s.Site == nil || !s.Site.LoggedIn() {
+		return
+	}
+	type probe struct{ taskID, reqID string }
+	var probes []probe
+	seen := map[string]bool{}
+	addProbe := func(tid, rid string) {
+		tid, rid = strings.TrimSpace(tid), strings.TrimSpace(rid)
+		if tid == "" && rid == "" {
+			return
+		}
+		k := tid + "|" + rid
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		probes = append(probes, probe{tid, rid})
+	}
+	for _, im := range run.Images {
+		var spec jobs.Spec
+		if len(im.Meta) > 0 {
+			_ = json.Unmarshal(im.Meta, &spec)
+		}
+		addProbe(im.RemoteTaskID, spec.RequestID)
+	}
+	if run.RemoteRunID != "" {
+		addProbe(run.RemoteRunID, "")
+	}
+	if len(probes) == 0 {
+		return
+	}
+	qctx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+	for _, pr := range probes {
+		res, err := s.Site.Task(qctx, pr.taskID, pr.reqID)
+		if err != nil {
+			continue
+		}
+		if res.WorkID != "" {
+			workURL := firstStr(res.WorkURL, strings.TrimRight(s.Site.Base(), "/")+"/t/work-"+res.WorkID)
+			fields := map[string]any{
+				"published_work_id": res.WorkID,
+				"published_url":     workURL,
+			}
+			if res.GenID != "" && run.RemoteRunID == "" {
+				fields["remote_run_id"] = res.GenID
+				run.RemoteRunID = res.GenID
+			}
+			_ = s.DB.UpdateRun(run.ID, fields)
+			_ = jobs.WriteRunJSON(s.DB, run.ID)
+			run.PublishedWorkID = res.WorkID
+			run.PublishedURL = workURL
+			s.Emit("work_published", map[string]any{"runId": run.ID, "workId": res.WorkID, "url": workURL, "auto": true})
+			return
+		}
+	}
 }
 
 func (s *Server) workPatch(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -130,12 +219,14 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 	if err != nil {
 		return nil, err
 	}
+	s.reconcileSitePublishedWork(r.Context(), &run)
 	if run.PublishedWorkID != "" {
 		return map[string]any{
-			"ok":      true,
-			"workId":  run.PublishedWorkID,
-			"url":     run.PublishedURL,
-			"deduped": true,
+			"ok":               true,
+			"workId":           run.PublishedWorkID,
+			"url":              run.PublishedURL,
+			"deduped":          true,
+			"alreadyPublished": true,
 		}, nil
 	}
 	var body struct {
@@ -219,6 +310,12 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 	}
 	if body.Notes != "" {
 		payload["notes"] = body.Notes
+	}
+	if run.RemoteRunID != "" {
+		payload["remoteRunId"] = run.RemoteRunID
+	}
+	if refs := collectRunSiteRefs(run); len(refs) > 0 {
+		payload["sourceTaskIds"] = refs
 	}
 	rawResp, err := s.Site.Send(r.Context(), "POST", "/api/v1/me/generations", payload)
 	if err != nil {

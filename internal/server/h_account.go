@@ -561,6 +561,8 @@ func (s *Server) siteHistoryDownload(w http.ResponseWriter, r *http.Request) (an
 		Model   string   `json:"model"`
 		Images  []string `json:"images"`
 		SiteRun string   `json:"siteRunId"`
+		WorkID  string   `json:"workId"`
+		WorkURL string   `json:"workUrl"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -572,6 +574,11 @@ func (s *Server) siteHistoryDownload(w http.ResponseWriter, r *http.Request) (an
 	dir := jobs.RunDir(runID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
+	}
+	pubWID := strings.TrimSpace(body.WorkID)
+	pubURL := strings.TrimSpace(body.WorkURL)
+	if pubWID != "" && pubURL == "" && s.Site != nil {
+		pubURL = strings.TrimRight(s.Site.Base(), "/") + "/t/work-" + pubWID
 	}
 	run := &store.Run{
 		ID:              runID,
@@ -585,6 +592,8 @@ func (s *Server) siteHistoryDownload(w http.ResponseWriter, r *http.Request) (an
 		Status:          "done",
 		Dir:             dir,
 		RemoteRunID:     firstStr(body.SiteRun, r.PathValue("id")),
+		PublishedWorkID: pubWID,
+		PublishedURL:    pubURL,
 	}
 	var imgs []store.Image
 	for i, imgURL := range body.Images {

@@ -344,6 +344,9 @@ type GenerateResult struct {
 	AmountCents        int      `json:"amountCents"`
 	FreeQuotaRemaining int      `json:"freeQuotaRemaining"`
 	Idempotent         bool     `json:"idempotent"`
+	WorkID             string   `json:"workId"`
+	WorkURL            string   `json:"workUrl"`
+	WorkPrice          int      `json:"workPrice"`
 }
 
 // Generate submits one image. body follows the site's studio contract; the

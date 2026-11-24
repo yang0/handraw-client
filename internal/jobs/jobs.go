@@ -546,6 +546,14 @@ func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byt
 		}
 		if r2.Status != "" {
 			res.Status, res.Images, res.Error = r2.Status, r2.Images, r2.Error
+			if r2.GenID != "" {
+				res.GenID = r2.GenID
+			}
+			if r2.WorkID != "" {
+				res.WorkID = r2.WorkID
+				res.WorkURL = r2.WorkURL
+				res.WorkPrice = r2.WorkPrice
+			}
 		}
 	}
 	if !success(res.Status) || len(res.Images) == 0 {
@@ -561,6 +569,23 @@ func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byt
 	}
 	if res.FinalPrompt != "" {
 		_ = m.DB.UpdateImage(im.ID, map[string]any{"prompt": res.FinalPrompt})
+	}
+	runFields := map[string]any{}
+	if rem := firstNonEmptyStr(res.GenID, res.TaskID); rem != "" {
+		runFields["remote_run_id"] = rem
+	}
+	if res.WorkID != "" {
+		workURL := firstNonEmptyStr(res.WorkURL, strings.TrimRight(m.Site.Base(), "/")+"/t/work-"+res.WorkID)
+		runFields["published_work_id"] = res.WorkID
+		runFields["published_url"] = workURL
+		defer func(rid string) {
+			if m.Emit != nil {
+				m.Emit(Event{Type: "work_published", RunID: rid, Status: "published"})
+			}
+		}(im.RunID)
+	}
+	if len(runFields) > 0 {
+		_ = m.DB.UpdateRun(im.RunID, runFields)
 	}
 	return data, res.AmountCents, nil
 }

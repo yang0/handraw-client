@@ -793,9 +793,14 @@ async function openRunDetail(runId, ctx, onChanged) {
 
     if (publishMode === "work") {
       if (run.publishedWorkId) {
-        pubWrap.appendChild(renderPublishedReceipt("社区作品", run.publishedUrl, run._publishedPrice || 0));
+        const autoLabel = run.source === "site"
+          ? "网站作品栏作品（网站模型生图已自动发布，无需重复发布）"
+          : "社区作品";
+        pubWrap.appendChild(renderPublishedReceipt(autoLabel, run.publishedUrl, run._publishedPrice || 0));
         pubWrap.appendChild(el("span", { class: "muted", style: { fontSize: "12px" } },
-          "如需将「Skill 解析后的完整提示词」另行上架赚积分，可点上方右侧切换为「发布为灵感库」。"
+          run.source === "site"
+            ? "使用网站模型生成的公开图片已自动同步到网站作品栏，客户端不会重复发布；如需分享「Skill 解析后的完整提示词」赚积分，可切换到右侧「发布为灵感库」。"
+            : "如需将「Skill 解析后的完整提示词」另行上架赚积分，可点上方右侧切换为「发布为灵感库」。"
         ));
         pane.appendChild(pubWrap);
         inspectorFoot.hidden = true;
@@ -1035,6 +1040,8 @@ async function drawSiteHistory(stage, ctx) {
                   model: it.model || "site",
                   images: urls.map((u) => (u.startsWith("http") ? u : base + u)),
                   siteRunId: it.id || "",
+                  workId: it.workId || it.publishedWorkId || "",
+                  workUrl: (it.workId || it.publishedWorkId) ? pageURL : "",
                 });
                 toast("已保存到本地作品库");
                 state.tab = "local";
