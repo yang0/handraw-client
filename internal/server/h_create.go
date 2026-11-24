@@ -210,10 +210,24 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) (any, error) {
 		if !p.Enabled {
 			continue
 		}
-		if isTextOrVisionPurpose(p.Purpose) {
-			txtProvs = append(txtProvs, p)
-		} else {
-			imgProvs = append(imgProvs, p)
+		imgs := p.ImageModels()
+		txts := p.TextModels()
+		if len(imgs) > 0 {
+			cp := p
+			cp.Models = imgs
+			imgProvs = append(imgProvs, cp)
+		}
+		if len(txts) > 0 {
+			cp := p
+			cp.Models = txts
+			txtProvs = append(txtProvs, cp)
+		}
+		if len(imgs) == 0 && len(txts) == 0 {
+			if isTextOrVisionPurpose(p.Purpose) {
+				txtProvs = append(txtProvs, p)
+			} else if p.Purpose == "image" {
+				imgProvs = append(imgProvs, p)
+			}
 		}
 	}
 	for _, p := range s.CommunityProviders() {

@@ -152,11 +152,44 @@ func (s *Server) providerPut(w http.ResponseWriter, r *http.Request) (any, error
 	if body.Kind == "" {
 		body.Kind = "openai"
 	}
-	if body.Purpose == "" {
-		body.Purpose = "text"
-	}
 	if body.Models == nil {
 		body.Models = []settings.Model{}
+	}
+	hasImg, hasTxt := false, false
+	for i := range body.Models {
+		k := strings.ToLower(strings.TrimSpace(body.Models[i].Kind))
+		if k == "vision" {
+			k = "text"
+		}
+		if k != "image" && k != "text" {
+			switch strings.ToLower(strings.TrimSpace(body.Purpose)) {
+			case "image":
+				k = "image"
+			case "text", "vision":
+				k = "text"
+			default:
+				if providers.LooksImage(body.Models[i].ID) {
+					k = "image"
+				} else {
+					k = "text"
+				}
+			}
+		}
+		body.Models[i].Kind = k
+		if k == "image" {
+			hasImg = true
+		} else {
+			hasTxt = true
+		}
+	}
+	if hasImg && hasTxt {
+		body.Purpose = "all"
+	} else if hasImg && !hasTxt {
+		body.Purpose = "image"
+	} else if hasTxt && !hasImg {
+		body.Purpose = "text"
+	} else if body.Purpose == "" {
+		body.Purpose = "all"
 	}
 	if strings.TrimSpace(body.APIKey) != "" {
 		if err := secrets.Set(secrets.ProviderKey(body.ID), strings.TrimSpace(body.APIKey)); err != nil {
@@ -245,6 +278,7 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) (any, erro
 	}
 	var body struct {
 		Model  string `json:"model"`
+		Kind   string `json:"kind"`
 		Vision bool   `json:"vision"`
 	}
 	_ = decode(r, &body)
@@ -257,15 +291,43 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) (any, erro
 		}
 		return map[string]any{"ok": true, "latencyMs": ms, "modelsCount": len(models)}, nil
 	}
-	if p.Purpose == "text" || p.Purpose == "vision" {
+
+	effectiveKind := strings.ToLower(strings.TrimSpace(body.Kind))
+	if effectiveKind == "vision" {
+		effectiveKind = "text"
+	}
+	if effectiveKind != "image" && effectiveKind != "text" {
+		if body.Vision {
+			effectiveKind = "text"
+		} else {
+			for _, m := range p.Models {
+				if m.ID == strings.TrimSpace(body.Model) {
+					effectiveKind = p.EffectiveModelKind(m)
+					break
+				}
+			}
+		}
+	}
+	if effectiveKind != "image" && effectiveKind != "text" {
+		if isTextOrVisionPurpose(p.Purpose) {
+			effectiveKind = "text"
+		} else {
+			effectiveKind = "image"
+		}
+	}
+
+	if effectiveKind == "text" {
 		modelID := strings.TrimSpace(body.Model)
-		if modelID == "" && len(p.Models) > 0 {
-			modelID = p.Models[0].ID
-			if body.Vision {
-				for _, m := range p.Models {
-					if m.CanVision || providers.LooksVision(m.ID) {
-						modelID = m.ID
-						break
+		if modelID == "" {
+			txts := p.TextModels()
+			if len(txts) > 0 {
+				modelID = txts[0].ID
+				if body.Vision {
+					for _, m := range txts {
+						if m.CanVision || providers.LooksVision(m.ID) {
+							modelID = m.ID
+							break
+						}
 					}
 				}
 			}

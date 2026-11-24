@@ -2940,3 +2940,44 @@ dialog::backdrop {
   background: var(--accent);
   color: #fff;
 }
+
+/* ---------- Unified Multi-Capability Provider Modal (#81) ---------- */
+.provider-manual-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.provider-kind-switch {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  gap: 2px;
+}
+.provider-kind-btn {
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.provider-kind-btn:hover {
+  color: var(--ink);
+}
+.provider-kind-btn.is-active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.model-tag-kind.is-img {
+  color: var(--accent);
+}

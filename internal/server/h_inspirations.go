@@ -623,23 +623,14 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
 		rawReply, callErr = res.Content, err
 	} else {
 		// Fall back to configured third-party OpenAI text provider
-		st := settings.Get()
-		var tp settings.Provider
-		var modelID string
-		for _, p := range st.Providers {
-			if p.Enabled && (p.Purpose == "text" || p.Purpose == "vision") && len(p.Models) > 0 {
-				tp = p
-				modelID = p.Models[0].ID
-				break
-			}
-		}
-		if tp.ID == "" {
+		if tp, modelID, ok := findTextProviderFor("text"); !ok {
 			return item, bad("请先登录手绘风账号，或在「设置 → 第三方接口」配置文本模型以使用 AI 整理")
+		} else {
+			rawReply, callErr = providers.Chat(ctx, tp, modelID, []providers.ChatMessage{
+				{Role: "system", Content: sysPrompt},
+				{Role: "user", Content: userPrompt},
+			}, true)
 		}
-		rawReply, callErr = providers.Chat(ctx, tp, modelID, []providers.ChatMessage{
-			{Role: "system", Content: sysPrompt},
-			{Role: "user", Content: userPrompt},
-		}, true)
 	}
 	if callErr != nil {
 		return item, callErr

@@ -63,10 +63,10 @@ func findTextProviderFor(capability string) (settings.Provider, string, bool) {
 	provs := settings.Get().Providers
 	if capability == "vision" {
 		for _, p := range provs {
-			if !p.Enabled || !isTextOrVisionPurpose(p.Purpose) {
+			if !p.Enabled {
 				continue
 			}
-			for _, m := range p.Models {
+			for _, m := range p.TextModels() {
 				if m.CanVision || providers.LooksVision(m.ID) {
 					return p, m.ID, true
 				}
@@ -74,8 +74,11 @@ func findTextProviderFor(capability string) (settings.Provider, string, bool) {
 		}
 	}
 	for _, p := range provs {
-		if p.Enabled && isTextOrVisionPurpose(p.Purpose) && len(p.Models) > 0 {
-			return p, p.Models[0].ID, true
+		if !p.Enabled {
+			continue
+		}
+		if txts := p.TextModels(); len(txts) > 0 {
+			return p, txts[0].ID, true
 		}
 	}
 	return settings.Provider{}, "", false

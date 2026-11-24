@@ -552,31 +552,45 @@ export async function renderSettings(root, ctx, params = {}) {
     provList.appendChild(el("div", { class: "settings-empty muted" }, "尚未添加第三方接口。点击右上角「+ 添加第三方接口」，填入地址与密钥后拉取模型并勾选启用。"));
   } else {
     providers.forEach((p) => {
-      const isTextProv = p.purpose === "text" || p.purpose === "vision";
       const modelList = p.models || [];
+      const imgModels = modelList.filter((m) => resolveModelKind(p, m) === "image");
+      const txtModels = modelList.filter((m) => resolveModelKind(p, m) === "text");
       const previewChips = modelList.length ? el("div", { class: "provider-model-preview" },
-        ...modelList.slice(0, 8).map((m) => el("span", { class: "provider-model-pill" }, m.id)),
+        ...modelList.slice(0, 8).map((m) => {
+          const isImg = resolveModelKind(p, m) === "image";
+          const prefix = isImg ? "🎨 " : (m.canVision || looksVisionModelId(m.id) ? "👁 " : "💬 ");
+          return el("span", { class: "provider-model-pill", title: isImg ? "生图模型" : (m.canVision ? "文字 + 视觉识图" : "文字模型") }, `${prefix}${m.id}`);
+        }),
         modelList.length > 8 ? el("span", { class: "provider-model-pill" }, `+${modelList.length - 8}`) : null
       ) : null;
 
       provList.appendChild(el("div", { class: "settings-subcard row", style: { justifyContent: "space-between", alignItems: "flex-start" } },
         el("div", { class: "col", style: { gap: "3px", minWidth: 0, flex: "1 1 280px" } },
-          el("div", { class: "row" },
+          el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } },
             el("strong", null, p.name),
-            el("span", { class: "badge" }, isTextProv ? "文字与视觉解析" : "生图接口"),
+            imgModels.length ? el("span", { class: "badge badge-accent" }, `🎨 生图 ${imgModels.length}`) : null,
+            txtModels.length ? el("span", { class: "badge" }, `💬 文字/视觉 ${txtModels.length}`) : null,
+            !imgModels.length && !txtModels.length ? el("span", { class: "badge" }, "综合接口") : null,
             p.hasKey ? el("span", { class: "badge badge-ok" }, "已存密钥") : el("span", { class: "badge badge-warn" }, "未填密钥")
           ),
-          el("span", { class: "muted mono", style: { overflowWrap: "anywhere" } }, `${p.baseUrl} · 已勾选 ${modelList.length} 个模型`),
+          el("span", { class: "muted mono", style: { overflowWrap: "anywhere" } }, `${p.baseUrl} · 共启用 ${modelList.length} 个模型`),
           previewChips
         ),
         el("div", { class: "row", style: { flexShrink: 0 } },
           el("button", {
             type: "button",
             class: "btn btn-sm",
-            onClick: async () => {
-              const firstModel = p.models?.[0]?.id || "";
-              const t = await api("POST", `/api/providers/${encodeURIComponent(p.id)}/test`, { model: firstModel }).catch((e) => ({ ok: false, error: e.message }));
-              toast(t.ok ? `连通正常（${t.latencyMs}ms）` : `测试失败：${t.error}`);
+            onClick: async (ev) => {
+              const btn = ev.currentTarget;
+              btn.disabled = true;
+              btn.textContent = "检测中…";
+              try {
+                const t = await api("POST", `/api/providers/${encodeURIComponent(p.id)}/test`, {}).catch((e) => ({ ok: false, error: e.message }));
+                toast(t.ok ? `连通正常 · 发现 ${t.modelsCount ?? 0} 个模型（${t.latencyMs}ms）` : `测试失败：${t.error}`);
+              } finally {
+                btn.disabled = false;
+                btn.textContent = "测试连通";
+              }
             },
           }, "测试连通"),
           el("button", {
@@ -1127,24 +1141,46 @@ export async function renderSettings(root, ctx, params = {}) {
   root._settingsCleanup = cleanup;
 }
 
+function looksImageModelId(id) {
+  const s = String(id || "").toLowerCase();
+  if (!s) return false;
+  return /(image|dall-e|dalle|flux|seedream|jimeng|kolors|imagen|midjourney|ideogram|recraft|nano-banana|sdxl|sd3|stable-diffusion|wanx|cogview)/.test(s);
+}
+
 function looksVisionModelId(id) {
   const s = String(id || "").toLowerCase();
   if (!s) return false;
-  if (/(image|dall-e|dalle|flux|seedream|jimeng|kolors|imagen|midjourney|ideogram|recraft|nano-banana)/.test(s)) return false;
+  if (looksImageModelId(s)) return false;
   return /(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-4-turbo|gpt-4-vision|gpt-5|claude-3|claude-4|claude-sonnet-4|claude-opus-4|claude-haiku-4|gemini-1\.5|gemini-2|gemini-3|qwen.*vl|qvq|glm-4.*v|doubao.*vision|kimi-vl|internvl|minicpm-v|pixtral|llama-4|grok-2-vision|grok-4|vision|-vl|_vl|multimodal)/.test(s);
+}
+
+function resolveModelKind(prov, model) {
+  const k = String(model?.kind || "").toLowerCase().trim();
+  if (k === "image") return "image";
+  if (k === "text" || k === "vision") return "text";
+  const purp = String(prov?.purpose || "").toLowerCase().trim();
+  if (purp === "image") return "image";
+  if (purp === "text" || purp === "vision") return "text";
+  return looksImageModelId(model?.id) ? "image" : "text";
 }
 
 function openProviderModal(existing, onSaved) {
   const isNew = !existing;
-  const prov = existing ? structuredClone(existing) : { id: "", name: "", kind: "openai", purpose: "image", baseUrl: "", enabled: true, models: [] };
-  if (prov.purpose === "vision") prov.purpose = "text";
+  const prov = existing ? structuredClone(existing) : { id: "", name: "", kind: "openai", purpose: "all", baseUrl: "", enabled: true, models: [] };
   if (!Array.isArray(prov.models)) prov.models = [];
+  // Normalize existing models so each carries explicit kind ("image" | "text")
+  prov.models = prov.models.map((m) => {
+    const kind = resolveModelKind(prov, m);
+    return {
+      ...m,
+      kind,
+      canVision: kind === "text" ? Boolean(m.canVision) : false,
+      canRefImage: kind === "image" ? Boolean(m.canRefImage) : false,
+      canEdit: kind === "image" ? Boolean(m.canEdit) : false,
+    };
+  });
 
-  const nameIn = el("input", { class: "input", value: prov.name || "", placeholder: "例如：火山方舟 / OpenRouter / 本地号池" });
-  const purposeSel = el("select", { class: "select" },
-    el("option", { value: "image", selected: prov.purpose !== "text" }, "生图接口"),
-    el("option", { value: "text", selected: prov.purpose === "text" }, "文字与视觉解析接口")
-  );
+  const nameIn = el("input", { class: "input", value: prov.name || "", placeholder: "例如：OpenRouter / OneAPI / 火山方舟" });
   const urlIn = el("input", { class: "input", value: prov.baseUrl || "", placeholder: "https://api.example.com/v1", autocorrect: "off", autocapitalize: "none", spellcheck: "false" });
   const keyIn = el("input", { class: "input", type: "password", autocomplete: "new-password", placeholder: prov.hasKey ? "留空则保留现有密钥" : "输入 API Key（存入系统凭据库）" });
 
@@ -1160,14 +1196,54 @@ function openProviderModal(existing, onSaved) {
   const tagGrid = el("div", { class: "model-tag-grid" });
   const tagHint = el("div", { class: "muted", style: { fontSize: "12px" } });
   const tagToolbar = el("div", { class: "provider-tag-toolbar hidden" }, tagSearchIn, filterPillsWrap);
-  const tagPanel = el("div", { class: "provider-tag-panel" }, tagToolbar, tagGrid, tagHint);
+
+  // Manual model quick-add row (handles unlisted custom/private model IDs)
+  const manualIdIn = el("input", {
+    class: "input",
+    placeholder: "手动添加未列出的模型 ID（如 gpt-image-1 / gemini-2.5-pro）…",
+    autocorrect: "off",
+    autocapitalize: "none",
+    spellcheck: "false",
+    style: { flex: "1", minWidth: "180px" },
+  });
+  const manualKindSel = el("select", { class: "select select-sm", "aria-label": "手动添加模型类型" },
+    el("option", { value: "auto" }, "自动识别类型"),
+    el("option", { value: "image" }, "🎨 生图模型"),
+    el("option", { value: "text" }, "💬 文字/视觉模型")
+  );
+  const addManualModel = () => {
+    const id = manualIdIn.value.trim();
+    if (!id) return;
+    const picked = manualKindSel.value;
+    const kind = picked === "auto" ? (looksImageModelId(id) ? "image" : "text") : picked;
+    if (addModelEntry(id, { kind, isImage: kind === "image", canVision: kind === "text" && looksVisionModelId(id) })) {
+      manualIdIn.value = "";
+      syncModelSelectionUI();
+      toast(`已添加 ${kind === "image" ? "生图" : "文字/视觉"} 模型：${id}`);
+    } else {
+      toast("该模型已在勾选列表中");
+    }
+  };
+  manualIdIn.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addManualModel();
+    }
+  });
+  const manualRow = el("div", { class: "provider-manual-row" },
+    manualIdIn,
+    manualKindSel,
+    el("button", { type: "button", class: "btn btn-sm", onClick: addManualModel }, "+ 手动添加")
+  );
+
+  const tagPanel = el("div", { class: "provider-tag-panel" }, tagToolbar, tagGrid, tagHint, manualRow);
 
   const selectedHead = el("div", { class: "provider-selected-head hidden" });
-  const modelsWrap = el("div", { class: "col", style: { gap: "6px", maxHeight: "170px", overflowY: "auto" } });
+  const modelsWrap = el("div", { class: "col", style: { gap: "6px", maxHeight: "220px", overflowY: "auto" } });
 
   let fetchedModels = [];
   let fetchQuery = "";
-  let activeFilter = "all"; // all | recommended | selected
+  let activeFilter = "all"; // all | image | text | vision | selected
   let fetching = false;
   const testStates = new Map();
   const testViews = new Map();
@@ -1218,14 +1294,23 @@ function openProviderModal(existing, onSaved) {
       throw new Error("请填写 Base URL");
     }
     if (!(prov.models || []).length) {
-      throw new Error("请先拉取模型并勾选至少一个模型");
+      throw new Error("请先拉取模型并勾选至少一个模型（或手动添加模型 ID）");
     }
+  }
+
+  function derivePurpose() {
+    const hasImg = (prov.models || []).some((m) => m.kind === "image");
+    const hasTxt = (prov.models || []).some((m) => m.kind !== "image");
+    if (hasImg && hasTxt) return "all";
+    if (hasImg) return "image";
+    if (hasTxt) return "text";
+    return "all";
   }
 
   async function saveProviderPayload() {
     validateBeforeSave();
     prov.name = nameIn.value.trim();
-    prov.purpose = purposeSel.value;
+    prov.purpose = derivePurpose();
     prov.baseUrl = urlIn.value.trim();
     const res = await api("POST", "/api/providers", { ...prov, apiKey: keyIn.value.trim() });
     const latest = (res.providers || []).find((x) => x.name === prov.name && x.baseUrl === prov.baseUrl) || (res.providers || []).slice(-1)[0];
@@ -1233,8 +1318,9 @@ function openProviderModal(existing, onSaved) {
     return res;
   }
 
-  async function testModel(model, isText) {
+  async function testModel(model) {
     if (hasRunningTest()) return;
+    const isText = model.kind !== "image";
     const vision = isText && Boolean(model.canVision);
     const mode = vision ? "视觉识图" : isText ? "文字模型" : "生图模型";
     const test = { running: true, startedAt: performance.now(), message: "正在准备测试…", detail: "" };
@@ -1253,6 +1339,7 @@ function openProviderModal(existing, onSaved) {
       updateTestViews();
       const result = await api("POST", `/api/providers/${encodeURIComponent(prov.id)}/test`, {
         model: model.id,
+        kind: isText ? "text" : "image",
         vision,
       });
       test.ok = Boolean(result.ok);
@@ -1278,10 +1365,14 @@ function openProviderModal(existing, onSaved) {
     const cleanId = String(id || "").trim();
     if (!cleanId) return false;
     if ((prov.models || []).some((m) => m.id === cleanId)) return false;
-    const isText = purposeSel.value === "text";
+    const kind = meta.kind === "image" || meta.kind === "text"
+      ? meta.kind
+      : (meta.isImage || looksImageModelId(cleanId) ? "image" : "text");
+    const isText = kind === "text";
     prov.models.push({
       id: cleanId,
       label: cleanId,
+      kind,
       canRefImage: !isText && Boolean(meta.canRefImage),
       canEdit: !isText && Boolean(meta.canEdit),
       canVision: isText ? (meta.canVision !== undefined ? Boolean(meta.canVision) : looksVisionModelId(cleanId)) : false,
@@ -1302,7 +1393,7 @@ function openProviderModal(existing, onSaved) {
     if (exists) {
       removeModelEntry(item.id);
     } else {
-      addModelEntry(item.id, { canVision: item.isVision });
+      addModelEntry(item.id, { isImage: item.isImage, canVision: item.isVision });
     }
     syncModelSelectionUI();
   }
@@ -1313,11 +1404,12 @@ function openProviderModal(existing, onSaved) {
       map.set(item.id, item);
     }
     for (const m of prov.models || []) {
+      const isImg = m.kind === "image";
       if (!map.has(m.id)) {
         map.set(m.id, {
           id: m.id,
-          isImage: purposeSel.value !== "text" && !looksVisionModelId(m.id),
-          isVision: Boolean(m.canVision) || looksVisionModelId(m.id),
+          isImage: isImg,
+          isVision: !isImg && (Boolean(m.canVision) || looksVisionModelId(m.id)),
         });
       }
     }
@@ -1325,32 +1417,45 @@ function openProviderModal(existing, onSaved) {
   }
 
   function updateSelectedCount() {
-    const count = (prov.models || []).length;
-    selectedCountBadge.textContent = `已勾选 ${count} 个`;
-    selectedCountBadge.className = count > 0 ? "badge badge-ok" : "badge";
+    const list = prov.models || [];
+    const imgCnt = list.filter((m) => m.kind === "image").length;
+    const txtCnt = list.length - imgCnt;
+    if (list.length === 0) {
+      selectedCountBadge.textContent = "未勾选模型";
+      selectedCountBadge.className = "badge";
+    } else {
+      const parts = [];
+      if (imgCnt > 0) parts.push(`生图 ${imgCnt}`);
+      if (txtCnt > 0) parts.push(`文字/视觉 ${txtCnt}`);
+      selectedCountBadge.textContent = `已选 ${list.length}（${parts.join(" · ")}）`;
+      selectedCountBadge.className = "badge badge-ok";
+    }
   }
 
   function renderTagGrid() {
     clear(filterPillsWrap);
     clear(tagGrid);
 
-    const isText = purposeSel.value === "text";
-    const selectedSet = new Set((prov.models || []).map((m) => m.id));
+    const selectedById = new Map((prov.models || []).map((m) => [m.id, m]));
     const catalog = buildCatalog();
 
     if (!catalog.length) {
       tagToolbar.classList.add("hidden");
-      tagHint.textContent = "请先填写 Base URL 与 API Key，点击「🔍 拉取模型」后在模型标签上直接打勾选择。";
+      tagHint.textContent = "填好 Base URL 与 API Key 后点击「🔍 拉取模型」，即可在同一接口下同时勾选生图模型与文字/视觉解析模型。";
       return;
     }
 
     tagToolbar.classList.remove("hidden");
 
-    const recList = catalog.filter((m) => (isText ? m.isVision && !m.isImage : m.isImage));
+    const imgList = catalog.filter((m) => m.isImage);
+    const txtList = catalog.filter((m) => !m.isImage);
+    const visList = catalog.filter((m) => !m.isImage && m.isVision);
     const filterItems = [
       { id: "all", label: `全部 (${catalog.length})` },
-      ...(recList.length ? [{ id: "recommended", label: isText ? `识图推荐 (${recList.length})` : `生图推荐 (${recList.length})` }] : []),
-      { id: "selected", label: `已勾选 (${selectedSet.size})` },
+      ...(imgList.length ? [{ id: "image", label: `🎨 生图 (${imgList.length})` }] : []),
+      ...(txtList.length ? [{ id: "text", label: `💬 文字 (${txtList.length})` }] : []),
+      ...(visList.length ? [{ id: "vision", label: `👁 视觉识图 (${visList.length})` }] : []),
+      { id: "selected", label: `已勾选 (${selectedById.size})` },
     ];
     if (!filterItems.some((f) => f.id === activeFilter)) activeFilter = "all";
 
@@ -1365,7 +1470,7 @@ function openProviderModal(existing, onSaved) {
       }, f.label));
     });
 
-    if (selectedSet.size > 0) {
+    if (selectedById.size > 0) {
       filterPillsWrap.appendChild(el("button", {
         type: "button",
         class: "provider-filter-pill",
@@ -1379,20 +1484,25 @@ function openProviderModal(existing, onSaved) {
 
     const q = fetchQuery.trim().toLowerCase();
     let visible = catalog.filter((m) => !q || m.id.toLowerCase().includes(q));
-    if (activeFilter === "recommended") {
-      visible = visible.filter((m) => (isText ? m.isVision && !m.isImage : m.isImage));
+    if (activeFilter === "image") {
+      visible = visible.filter((m) => m.isImage);
+    } else if (activeFilter === "text") {
+      visible = visible.filter((m) => !m.isImage);
+    } else if (activeFilter === "vision") {
+      visible = visible.filter((m) => !m.isImage && m.isVision);
     } else if (activeFilter === "selected") {
-      visible = visible.filter((m) => selectedSet.has(m.id));
+      visible = visible.filter((m) => selectedById.has(m.id));
     }
 
-    // Show checked tags first only when viewing "all" without active search? Keep stable order so chips don't jump under cursor!
     const shown = visible.slice(0, 120);
     if (!shown.length) {
-      tagGrid.appendChild(el("span", { class: "muted", style: { fontSize: "12px", padding: "4px 2px" } }, "没有匹配的模型标签"));
+      tagGrid.appendChild(el("span", { class: "muted", style: { fontSize: "12px", padding: "4px 2px" } }, "没有匹配的模型标签，可在下方手动输入模型 ID 添加"));
     } else {
       shown.forEach((m) => {
-        const checked = selectedSet.has(m.id);
-        const kindLabel = m.isImage ? "生图" : (m.isVision ? "识图" : "");
+        const picked = selectedById.get(m.id);
+        const checked = Boolean(picked);
+        const effImg = picked ? picked.kind === "image" : m.isImage;
+        const kindLabel = effImg ? "生图" : (m.isVision ? "识图" : "文字");
         tagGrid.appendChild(el("button", {
           type: "button",
           class: "model-tag-chip" + (checked ? " is-checked" : ""),
@@ -1402,49 +1512,78 @@ function openProviderModal(existing, onSaved) {
         },
           el("span", { class: "model-tag-check", "aria-hidden": "true" }, checked ? "✓" : ""),
           el("span", { class: "model-tag-id mono" }, m.id),
-          kindLabel ? el("span", { class: "model-tag-kind" }, kindLabel) : null
+          el("span", { class: "model-tag-kind" + (effImg ? " is-img" : "") }, kindLabel)
         ));
       });
     }
 
     if (!fetchedModels.length) {
-      tagHint.textContent = "当前展示已勾选模型；点击「🔍 拉取模型」可刷新远端列表并增减勾选。";
+      tagHint.textContent = "当前展示已勾选模型；点击「🔍 拉取模型」可刷新远端列表并同时勾选生图与文字/视觉模型。";
     } else if (visible.length > 120) {
-      tagHint.textContent = `当前展示前 120 个标签（共匹配 ${visible.length} 个），请输入关键词继续筛选。点击标签直接打勾即可选择。`;
+      tagHint.textContent = `当前展示前 120 个标签（共匹配 ${visible.length} 个），请输入关键词筛选；勾选后可在下方随时切换「生图 / 文字」归类。`;
     } else {
-      tagHint.textContent = "点击模型标签即可打勾选中或取消选中。";
+      tagHint.textContent = "点击标签打勾选择，系统会自动识别生图或文字/视觉类型；如识别有误可在下方一键切换。";
     }
   }
 
   function renderSelectedModels() {
     clear(modelsWrap);
     testViews.clear();
-    const isText = purposeSel.value === "text";
     const list = prov.models || [];
     if (!list.length) {
       selectedHead.classList.add("hidden");
       return;
     }
+    const imgCnt = list.filter((m) => m.kind === "image").length;
+    const txtCnt = list.length - imgCnt;
     selectedHead.classList.remove("hidden");
-    selectedHead.textContent = `已勾选模型能力配置与测试（${list.length}）`;
+    selectedHead.textContent = `已勾选模型能力配置与实测（共 ${list.length} 个：生图 ${imgCnt} · 文字/视觉 ${txtCnt}）`;
 
     list.forEach((m) => {
-      const controls = el("div", { class: "row" });
+      const isText = m.kind !== "image";
+      const kindSwitch = el("div", { class: "provider-kind-switch", role: "group", "aria-label": `${m.id} 类型` },
+        el("button", {
+          type: "button",
+          class: "provider-kind-btn" + (!isText ? " is-active" : ""),
+          "aria-pressed": String(!isText),
+          onClick: () => {
+            if (m.kind === "image") return;
+            m.kind = "image";
+            m.canVision = false;
+            syncModelSelectionUI();
+          },
+        }, "🎨 生图"),
+        el("button", {
+          type: "button",
+          class: "provider-kind-btn" + (isText ? " is-active" : ""),
+          "aria-pressed": String(isText),
+          onClick: () => {
+            if (m.kind === "text") return;
+            m.kind = "text";
+            m.canRefImage = false;
+            m.canEdit = false;
+            m.canVision = looksVisionModelId(m.id);
+            syncModelSelectionUI();
+          },
+        }, "💬 文字")
+      );
+
+      const controls = el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } }, kindSwitch);
       if (isText) {
         const visChk = el("input", { type: "checkbox", checked: Boolean(m.canVision) });
         visChk.addEventListener("change", () => { m.canVision = visChk.checked; });
-        controls.appendChild(el("label", { class: "row", style: { fontSize: "11.5px" } }, visChk, "视觉识图"));
+        controls.appendChild(el("label", { class: "row", style: { fontSize: "11.5px", cursor: "pointer" } }, visChk, "视觉识图"));
       } else {
         const refChk = el("input", { type: "checkbox", checked: Boolean(m.canRefImage) });
         refChk.addEventListener("change", () => { m.canRefImage = refChk.checked; });
         const editChk = el("input", { type: "checkbox", checked: Boolean(m.canEdit) });
         editChk.addEventListener("change", () => { m.canEdit = editChk.checked; });
         controls.append(
-          el("label", { class: "row", style: { fontSize: "11.5px" } }, refChk, "垫图"),
-          el("label", { class: "row", style: { fontSize: "11.5px" } }, editChk, "编辑")
+          el("label", { class: "row", style: { fontSize: "11.5px", cursor: "pointer" } }, refChk, "垫图"),
+          el("label", { class: "row", style: { fontSize: "11.5px", cursor: "pointer" } }, editChk, "编辑")
         );
       }
-      const testButton = el("button", { type: "button", class: "btn btn-sm", onClick: () => testModel(m, isText) }, "测试");
+      const testButton = el("button", { type: "button", class: "btn btn-sm", onClick: () => testModel(m) }, "测试");
       const removeButton = el("button", {
         type: "button",
         class: "btn btn-sm btn-danger",
@@ -1464,9 +1603,9 @@ function openProviderModal(existing, onSaved) {
         detail
       );
       testViews.set(m.id, { button: testButton, remove: removeButton, progress, message, elapsed, detail, feedback });
-      modelsWrap.appendChild(el("div", { class: "col provider-model-entry", style: { gap: "6px", background: "var(--paper)", padding: "6px 8px", borderRadius: "6px", minWidth: 0 } },
-        el("div", { class: "row", style: { justifyContent: "space-between" } },
-          el("span", { class: "mono", style: { fontSize: "12px", overflowWrap: "anywhere" } }, m.id),
+      modelsWrap.appendChild(el("div", { class: "col provider-model-entry", style: { gap: "6px", background: "var(--paper)", padding: "7px 9px", borderRadius: "8px", minWidth: 0, border: "1px solid var(--line)" } },
+        el("div", { class: "row", style: { justifyContent: "space-between", gap: "8px", flexWrap: "wrap" } },
+          el("span", { class: "mono", style: { fontSize: "12px", fontWeight: "600", overflowWrap: "anywhere" } }, m.id),
           controls
         ),
         feedback
@@ -1484,10 +1623,6 @@ function openProviderModal(existing, onSaved) {
   tagSearchIn.addEventListener("input", () => {
     fetchQuery = tagSearchIn.value;
     renderTagGrid();
-  });
-
-  purposeSel.addEventListener("change", () => {
-    syncModelSelectionUI();
   });
 
   syncModelSelectionUI();
@@ -1513,15 +1648,15 @@ function openProviderModal(existing, onSaved) {
           apiKey: keyIn.value.trim(),
         });
         fetchedModels = (r.models || []).map((item) => (typeof item === "string"
-          ? { id: item, isImage: false, isVision: looksVisionModelId(item) }
-          : { id: item.id, owned_by: item.owned_by || "", isImage: Boolean(item.isImage), isVision: Boolean(item.isVision) || looksVisionModelId(item.id) }
+          ? { id: item, isImage: looksImageModelId(item), isVision: looksVisionModelId(item) }
+          : { id: item.id, owned_by: item.owned_by || "", isImage: Boolean(item.isImage) || looksImageModelId(item.id), isVision: Boolean(item.isVision) || looksVisionModelId(item.id) }
         )).filter((m) => m.id);
         activeFilter = "all";
         syncModelSelectionUI();
         if (fetchedModels.length) {
-          toast(`已拉取 ${fetchedModels.length} 个模型，请点击标签打勾选择`);
+          toast(`已拉取 ${fetchedModels.length} 个模型，可同时勾选生图与文字/视觉模型`);
         } else {
-          toast("接口未返回任何可用模型");
+          toast("接口未返回任何可用模型，可在下方手动添加模型 ID");
         }
       } catch (e) {
         toast(e.message || "拉取模型失败");
@@ -1534,16 +1669,23 @@ function openProviderModal(existing, onSaved) {
   }, "🔍 拉取模型");
 
   const dialog = showModal(isNew ? "添加第三方接口" : "编辑第三方接口", el("div", { class: "col", style: { gap: "10px" } },
-    el("div", { class: "field" }, el("label", null, "接口名称"), nameIn),
-    el("div", { class: "field" }, el("label", null, "接口用途"), purposeSel),
-    el("div", { class: "field" }, el("label", null, "Base URL"), urlIn),
-    el("div", { class: "field" }, el("label", null, "API Key"), keyIn),
-    el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", marginTop: "4px" } },
+    el("p", { class: "muted", style: { margin: 0 } }, "同一个中转站或官方接口只需添加一次，即可同时勾选里面的生图模型与文字/视觉解析模型。"),
+    el("div", { class: "split" },
+      el("div", { class: "field" }, el("label", null, "接口名称"), nameIn),
+      el("div", { class: "field" }, el("label", null, "API Key"), keyIn)
+    ),
+    el("div", { class: "field" },
+      el("label", null, "Base URL"),
       el("div", { class: "row", style: { gap: "8px" } },
-        el("strong", null, "模型选择"),
+        el("div", { style: { flex: "1", minWidth: "200px" } }, urlIn),
+        fetchBtn
+      )
+    ),
+    el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", marginTop: "2px" } },
+      el("div", { class: "row", style: { gap: "8px" } },
+        el("strong", null, "选择模型"),
         selectedCountBadge
-      ),
-      fetchBtn
+      )
     ),
     tagPanel,
     selectedHead,

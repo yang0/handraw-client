@@ -15,12 +15,12 @@ import (
 	"github.com/yang0/handraw-client/internal/appdir"
 )
 
-// Provider is a user-configured image or text/vision API. Its key lives in the keyring.
+// Provider is a user-configured image and/or text/vision API. Its key lives in the keyring.
 type Provider struct {
 	ID      string  `json:"id"`
 	Name    string  `json:"name"`
 	Kind    string  `json:"kind"`    // "openai" (OpenAI compatible)
-	Purpose string  `json:"purpose"` // "image" or "text" (text + vision)
+	Purpose string  `json:"purpose"` // "all" (mixed), "image", or "text" (legacy)
 	BaseURL string  `json:"baseUrl"`
 	Models  []Model `json:"models"`
 	Enabled bool    `json:"enabled"`
@@ -30,11 +30,54 @@ type Provider struct {
 type Model struct {
 	ID          string   `json:"id"`
 	Label       string   `json:"label"`
+	Kind        string   `json:"kind,omitempty"` // "image" | "text" (empty falls back to Provider.Purpose)
 	Sizes       []string `json:"sizes,omitempty"` // e.g. 1024x1024
 	PriceCents  int      `json:"priceCents,omitempty"`
 	CanEdit     bool     `json:"canEdit"`
 	CanRefImage bool     `json:"canRefImage"`
 	CanVision   bool     `json:"canVision,omitempty"`
+}
+
+// EffectiveModelKind returns "image" or "text" for a model under provider p,
+// remaining backward-compatible with legacy provider-level Purpose settings.
+func (p Provider) EffectiveModelKind(m Model) string {
+	k := strings.ToLower(strings.TrimSpace(m.Kind))
+	if k == "image" {
+		return "image"
+	}
+	if k == "text" || k == "vision" {
+		return "text"
+	}
+	purp := strings.ToLower(strings.TrimSpace(p.Purpose))
+	if purp == "text" || purp == "vision" {
+		return "text"
+	}
+	if purp == "image" {
+		return "image"
+	}
+	return "text"
+}
+
+// ImageModels returns the subset of models configured for image generation.
+func (p Provider) ImageModels() []Model {
+	out := []Model{}
+	for _, m := range p.Models {
+		if p.EffectiveModelKind(m) == "image" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// TextModels returns the subset of models configured for text / vision chat.
+func (p Provider) TextModels() []Model {
+	out := []Model{}
+	for _, m := range p.Models {
+		if p.EffectiveModelKind(m) == "text" {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // PluginMarketSource is one subscribed DSH Format 1 plugin market index.json URL.
