@@ -193,7 +193,7 @@ export async function renderCreate(root, ctx, params = {}) {
     api("GET", "/api/mine/recipes").catch(() => ({ items: [] })),
     api("GET", "/api/models").catch(() => ({ site: [], providers: [] })),
     api("GET", "/api/settings").catch(() => ({ settings: {} })),
-    api("GET", "/api/works?limit=12").catch(() => ({ items: [] })),
+    api("GET", "/api/works?limit=12&hasImages=1").catch(() => ({ items: [] })),
   ]);
   if (!host.isConnected) return;
 

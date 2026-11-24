@@ -147,7 +147,7 @@ export async function renderHome(container, ctx) {
   const [recRes, sumRes, worksRes, settRes] = await Promise.all([
     api("GET", "/api/mine/recipes").catch(() => ({ items: [] })),
     api("GET", "/api/resources/summary").catch(() => ({ counts: {} })),
-    api("GET", "/api/works?limit=6").catch(() => ({ items: [] })),
+    api("GET", "/api/works?limit=6&hasImages=1").catch(() => ({ items: [] })),
     api("GET", "/api/settings").catch(() => ({ settings: {} })),
   ]);
 
@@ -209,8 +209,8 @@ export async function renderHome(container, ctx) {
     root.appendChild(guide);
   }
 
-  // Recent works
-  const recentWorks = worksRes.items || [];
+  // Recent works (only completed works with real images, #80)
+  const recentWorks = (worksRes.items || []).filter((run) => (run.images || []).some((i) => i.status === "done" && i.path));
   const secRecent = el("section", { style: { marginBottom: "22px" } },
     el("div", { class: "page-head" },
       el("h2", { style: { margin: 0, fontSize: "16px" } }, "最近创作"),
@@ -227,13 +227,14 @@ export async function renderHome(container, ctx) {
   } else {
     const grid = masonry();
     recentWorks.forEach((run) => {
-      const im = run.images?.[0];
-      const src = im?.thumb ? localImg(im.thumb) : (im?.path ? localImg(im.path) : "/img/logo.svg");
+      const doneImgs = (run.images || []).filter((i) => i.status === "done" && i.path);
+      const im = doneImgs[0];
+      const src = im.thumb ? localImg(im.thumb) : localImg(im.path);
       grid.appendChild(el("div", { class: "style-card", onClick: () => ctx.go("works", { openRun: run.id }) },
         el("img", { class: "style-thumb", src, alt: run.title, loading: "lazy" }),
         el("div", { class: "style-body" },
           el("div", { class: "style-name" }, run.title || "未命名作品"),
-          el("div", { class: "muted" }, `${run.modelLabel || run.model} · ${(run.images || []).length} 张`)
+          el("div", { class: "muted" }, `${run.modelLabel || run.model} · ${doneImgs.length} 张`)
         )
       ));
     });
