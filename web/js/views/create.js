@@ -1774,12 +1774,14 @@ export async function renderCreate(root, ctx, params = {}) {
         recipe: {
           id: state.recipeId,
           styleIds: [effectiveStyle, effectiveStyle2].filter(Boolean),
-          layoutId: state.layout,
-          color: effectiveColor,
-          tone: effectiveTone,
-          mood: state.mood,
-          ratio: state.ratio,
-          mode: effectiveMode,
+          layoutId: state.layout || payloadItems[0]?.layout || "",
+          color: effectiveColor || payloadItems[0]?.color || "",
+          tone: effectiveTone || payloadItems[0]?.tone || "",
+          mood: state.mood || payloadItems[0]?.mood || "",
+          ratio: state.ratio || payloadItems[0]?.ratio || "",
+          mode: effectiveMode || payloadItems[0]?.mode || "",
+          resolution: state.resolution || "",
+          quality: state.quality || "",
         },
       });
 

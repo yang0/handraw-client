@@ -3323,6 +3323,40 @@ dialog::backdrop {
   background: var(--surface);
   flex-shrink: 0;
 }
+.wd-export-banner[hidden] {
+  display: none !important;
+}
+.wd-export-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+  border-top: 1px solid color-mix(in srgb, #286e49 32%, var(--line));
+  background: color-mix(in srgb, #eaf5ee 75%, var(--surface));
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.wd-export-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.wd-export-path {
+  font-size: 11px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wd-export-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
 .wd-dock-group {
   display: flex;
   align-items: center;

@@ -173,10 +173,21 @@ function modeLabel(mode) {
     series: "系列",
     article: "文章配图",
     canvas: "画布",
+    poster: "海报",
+    edit: "局部改图",
     "graphic-text": "图文模式",
     "pure-image": "纯图模式",
   };
   return m[mode] || mode;
+}
+
+function formatRecipeItemLabel(item) {
+  if (!item) return "";
+  if (typeof item === "string") return item;
+  const id = String(item.id || "").trim();
+  const name = String(item.name || "").trim();
+  if (id && name && id.toLowerCase() !== name.toLowerCase()) return `${id} · ${name}`;
+  return id || name;
 }
 
 async function openRunDetail(runId, ctx, onChanged) {
@@ -191,7 +202,50 @@ async function openRunDetail(runId, ctx, onChanged) {
   const versions = detail.versions || [];
   const doneImages = (run.images || []).filter((i) => i.status === "done" && i.path);
   const doneVersions = versions.filter((v) => v.id === run.id || v.status === "done");
-  const parsedRec = parseRunRecipe(run);
+  const fallbackRec = parseRunRecipe(run);
+  const rr = detail.resolvedRecipe || {};
+  const styleLabels = Array.isArray(rr.styles) && rr.styles.length
+    ? rr.styles.map(formatRecipeItemLabel).filter(Boolean)
+    : fallbackRec.styleIds;
+  const layoutLabel = rr.layout ? formatRecipeItemLabel(rr.layout) : (rr.layoutId || fallbackRec.layoutId);
+  const colorLabels = Array.isArray(rr.colorItems) && rr.colorItems.length
+    ? rr.colorItems.map(formatRecipeItemLabel).filter(Boolean)
+    : (Array.isArray(rr.colors) && rr.colors.length ? rr.colors : fallbackRec.colors);
+  const toneLabels = Array.isArray(rr.toneItems) && rr.toneItems.length
+    ? rr.toneItems.map(formatRecipeItemLabel).filter(Boolean)
+    : (Array.isArray(rr.tones) && rr.tones.length ? rr.tones : fallbackRec.tones);
+  const parsedRec = {
+    raw: {
+      ...fallbackRec.raw,
+      styleIds: (Array.isArray(rr.styleIds) && rr.styleIds.length ? rr.styleIds : fallbackRec.styleIds),
+      layoutId: rr.layoutId || fallbackRec.layoutId || "",
+      colors: (Array.isArray(rr.colors) && rr.colors.length ? rr.colors : fallbackRec.colors),
+      tones: (Array.isArray(rr.tones) && rr.tones.length ? rr.tones : fallbackRec.tones),
+      mood: rr.mood || fallbackRec.mood || "",
+      ratio: rr.ratio || fallbackRec.ratio || "",
+      mode: rr.mode || fallbackRec.mode || "",
+      resolution: rr.resolution || "",
+      quality: rr.quality || fallbackRec.quality || "",
+    },
+    styleIds: (Array.isArray(rr.styleIds) && rr.styleIds.length ? rr.styleIds : fallbackRec.styleIds),
+    styleLabels,
+    layoutId: rr.layoutId || fallbackRec.layoutId || "",
+    layoutLabel,
+    colors: (Array.isArray(rr.colors) && rr.colors.length ? rr.colors : fallbackRec.colors),
+    colorLabels,
+    tones: (Array.isArray(rr.tones) && rr.tones.length ? rr.tones : fallbackRec.tones),
+    toneLabels,
+    mood: rr.mood || fallbackRec.mood || "",
+    ratio: rr.ratio || fallbackRec.ratio || "",
+    mode: rr.mode || fallbackRec.mode || "",
+    resolution: rr.resolution || "",
+    quality: rr.quality || fallbackRec.quality || "",
+    text: rr.text || "",
+    extra: rr.extra || "",
+    redraw: Boolean(rr.redraw),
+    shootType: rr.shootType || fallbackRec.shootType || "",
+    sc021Type: rr.sc021Type || fallbackRec.sc021Type || "",
+  };
   const expandedInfo = extractExpandedPrompts(run, doneImages);
   const originalReqText = String(run.originalRequest || "").trim();
 
@@ -259,17 +313,64 @@ async function openRunDetail(runId, ctx, onChanged) {
       });
     },
   }, "✨ 同配方再画");
+  const exportBanner = el("div", { class: "wd-export-banner", hidden: true });
+  const showExportBanner = (info) => {
+    clear(exportBanner);
+    const fullPath = String(info?.path || "");
+    const fileName = String(info?.fileName || fullPath.split(/[\\/]/).pop() || "作品导出.zip");
+    exportBanner.appendChild(el("div", { class: "wd-export-info" },
+      el("strong", { style: { color: "#1e5638" } }, `✓ 已导出 ZIP：${fileName}`),
+      el("span", { class: "wd-export-path mono", title: fullPath }, fullPath)
+    ));
+    exportBanner.appendChild(el("div", { class: "wd-export-actions" },
+      el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        onClick: async () => {
+          try {
+            await api("POST", `/api/works/${encodeURIComponent(run.id)}/reveal`, { path: fullPath });
+          } catch (e) {
+            toast(e.message || "打开目录失败");
+          }
+        },
+      }, "📂 打开 ZIP 所在目录"),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: async () => toast((await copyText(fullPath)) ? "已复制 ZIP 完整路径" : "复制失败"),
+      }, "📋 复制路径"),
+      el("button", {
+        type: "button",
+        class: "wd-ico-btn",
+        "aria-label": "关闭导出提示",
+        onClick: () => { exportBanner.hidden = true; },
+      }, "✕")
+    ));
+    exportBanner.hidden = false;
+  };
+
   const revealBtn = el("button", {
     type: "button",
     class: "btn btn-sm",
-    onClick: () => api("POST", `/api/works/${encodeURIComponent(run.id)}/reveal`),
-  }, "📂 文件夹");
+    title: "打开作品原图所在目录",
+    onClick: () => api("POST", `/api/works/${encodeURIComponent(run.id)}/reveal`, {}),
+  }, "📂 原图目录");
   const exportBtn = el("button", {
     type: "button",
     class: "btn btn-sm",
+    title: "打包本作品所有图片与配方记录为 ZIP，并在文件管理器中定位",
     onClick: async () => {
-      const r = await api("POST", `/api/works/${encodeURIComponent(run.id)}/export`, { format: "zip" });
-      toast("已导出：" + r.path);
+      exportBtn.disabled = true;
+      exportBtn.textContent = "打包中…";
+      try {
+        const r = await api("POST", `/api/works/${encodeURIComponent(run.id)}/export`, { format: "zip", reveal: true });
+        showExportBanner(r);
+      } catch (e) {
+        toast(e.message || "导出失败");
+      } finally {
+        exportBtn.disabled = false;
+        exportBtn.textContent = "📦 导出 ZIP";
+      }
     },
   }, "📦 导出 ZIP");
 
@@ -299,6 +400,7 @@ async function openRunDetail(runId, ctx, onChanged) {
     stageTop,
     canvasWrap,
     doneImages.length > 1 ? filmstripEl : null,
+    exportBanner,
     stageDock
   );
 
@@ -426,16 +528,20 @@ async function openRunDetail(runId, ctx, onChanged) {
     if (!v) return;
     recipeChips.push(el("span", { class: "work-recipe-chip" }, el("span", { class: "k" }, k), el("strong", null, v)));
   };
-  if (parsedRec.styleIds.length) pushChip("画风", parsedRec.styleIds.join(" + "));
-  if (parsedRec.layoutId) pushChip("图型", parsedRec.layoutId);
-  if (parsedRec.colors.length) pushChip("主题色", parsedRec.colors.join(" / "));
-  if (parsedRec.tones.length) pushChip("影调", parsedRec.tones.join(" / "));
+  if (parsedRec.styleLabels.length) pushChip("画风", parsedRec.styleLabels.join(" + "));
+  if (parsedRec.layoutLabel) pushChip("图型", parsedRec.layoutLabel);
+  if (parsedRec.colorLabels.length) pushChip("主题色", parsedRec.colorLabels.join(" / "));
+  if (parsedRec.toneLabels.length) pushChip("影调", parsedRec.toneLabels.join(" / "));
   if (parsedRec.mood) pushChip("情绪", parsedRec.mood);
   if (parsedRec.ratio) pushChip("比例", parsedRec.ratio);
   if (parsedRec.mode) pushChip("模式", modeLabel(parsedRec.mode));
+  if (parsedRec.resolution) pushChip("分辨率", parsedRec.resolution);
   if (parsedRec.quality) pushChip("规格", parsedRec.quality);
   if (parsedRec.shootType) pushChip("景别", parsedRec.shootType);
   if (parsedRec.sc021Type) pushChip("版式", parsedRec.sc021Type);
+  if (parsedRec.redraw) pushChip("重绘", "开启");
+  if (parsedRec.text) pushChip("画面文案", parsedRec.text);
+  if (parsedRec.extra) pushChip("补充要求", parsedRec.extra);
   if (run.modelLabel || run.model) pushChip("生图模型", run.modelLabel || run.model);
 
   const preSkillCard = el("div", { class: "work-info-card", "data-work-section": "pre-skill" },

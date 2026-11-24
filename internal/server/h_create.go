@@ -743,6 +743,32 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		src = "site"
 	}
 	firstRes := built[0]
+	var parentRecipe json.RawMessage
+	if body.ParentID != "" {
+		if parentRun, pErr := s.DB.GetRun(body.ParentID); pErr == nil {
+			parentRecipe = parentRun.Recipe
+		}
+	}
+	firstIt := body.Items[0]
+	persistedRecipe := mergePersistedRecipe(
+		body.Recipe,
+		parentRecipe,
+		prompt.Input{
+			Style:  firstStr(firstIt.Style, firstRes.StyleID, galCtx.Style),
+			Style2: firstIt.Style2,
+			Layout: firstStr(firstIt.Layout, firstRes.LayoutID, galCtx.Layout),
+			Color:  firstStr(firstIt.Color, firstRes.ColorID, galCtx.Color),
+			Tone:   firstStr(firstIt.Tone, galCtx.Tone),
+			Mood:   firstIt.Mood,
+			Ratio:  firstIt.Ratio,
+			Mode:   firstIt.Mode,
+			Text:   firstIt.Text,
+			Redraw: firstIt.Redraw,
+			Extra:  firstIt.Extra,
+		},
+		body.Resolution,
+		body.Quality,
+	)
 	run := &store.Run{
 		ID:              runID,
 		Mode:            body.Mode,
@@ -750,7 +776,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		OriginalRequest: firstStr(itemThemes[0], body.Input.Theme),
 		PromptZh:        firstStr(firstRes.Zh, itemPrompts[0]),
 		PromptEn:        firstRes.En,
-		Recipe:          body.Recipe,
+		Recipe:          persistedRecipe,
 		Model:           body.ModelRef,
 		ModelLabel:      rawModel,
 		Source:          src,

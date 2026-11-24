@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/yang0/handraw-client/internal/prompt"
 	"github.com/yang0/handraw-client/internal/secrets"
 	"github.com/yang0/handraw-client/internal/store"
 )
@@ -212,4 +213,107 @@ func TestWorkPublishRequiresPaidPriceAndProxiesWorkUnlockAndInspirationComments(
 		t.Fatalf("unexpected comment payload: %+v", capturedComment)
 	}
 	mu.Unlock()
+}
+
+type recordingHost struct {
+	nopHost
+	openedPath string
+}
+
+func (h *recordingHost) OpenPath(p string) error {
+	h.openedPath = p
+	return nil
+}
+
+func TestMergeAndResolveHistoricalRunRecipeAndExportReveal(t *testing.T) {
+	// 1. mergePersistedRecipe combines item fields + parent recipe + resolution/quality
+	parent := []byte(`{"styleIds":["FE-052"],"layoutId":"SC-001","colors":["C-01"],"mood":"温暖"}`)
+	merged := mergePersistedRecipe(
+		[]byte(`{"mode":"poster","ratio":"3:4"}`),
+		parent,
+		prompt.Input{Tone: "T-02", Extra: "留白多一些"},
+		"2K",
+		"high",
+	)
+	var m map[string]any
+	if err := json.Unmarshal(merged, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["layoutId"] != "SC-001" || m["color"] != "C-01" || m["tone"] != "T-02" || m["mood"] != "温暖" || m["resolution"] != "2K" {
+		t.Fatalf("unexpected merged recipe: %+v", m)
+	}
+
+	// 2. Historical run missing layout/color in Recipe recovers them from PromptZh
+	srv, cancel := setupTestServer(t, "")
+	defer cancel()
+	recHost := &recordingHost{}
+	srv.Host = recHost
+	h := srv.Handler()
+	imgPath := filepath.Join(t.TempDir(), "winter.png")
+	writePNG(t, imgPath, 120, 160)
+	histRun := &store.Run{
+		ID:              "run_hist_winter",
+		Mode:            "single",
+		Title:           "冬至 · 海报",
+		OriginalRequest: "冬至节气海报：青花碗汤圆与饺子",
+		PromptZh:        "图型：广告主视觉 / Hero / KV。主题色：中国红（Chinese Red）。影调：柔和自然光。情绪：温馨治愈。主题：冬至节气海报",
+		Recipe:          []byte(`{"mode":"poster","ratio":"3:4","styleIds":["FE-052"]}`),
+		Status:          "done",
+	}
+	if err := srv.DB.InsertRun(histRun, []store.Image{{ID: "img_w1", RunID: histRun.ID, Idx: 0, Status: "done", Path: imgPath, Width: 120, Height: 160}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rrGet := doReq(t, h, srv.Token, http.MethodGet, "/api/works/"+histRun.ID, nil)
+	if rrGet.Code != http.StatusOK {
+		t.Fatalf("GET work failed: %d %s", rrGet.Code, rrGet.Body.String())
+	}
+	var detail struct {
+		ResolvedRecipe struct {
+			StyleIDs   []string            `json:"styleIds"`
+			Layout     map[string]string   `json:"layout"`
+			ColorItems []map[string]string `json:"colorItems"`
+			ToneItems  []map[string]string `json:"toneItems"`
+			Mood       string              `json:"mood"`
+		} `json:"resolvedRecipe"`
+	}
+	if err := json.Unmarshal(rrGet.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.ResolvedRecipe.Layout["name"] == "" || !strings.Contains(detail.ResolvedRecipe.Layout["name"], "广告主视觉") {
+		t.Fatalf("expected layout recovered from promptZh, got %+v", detail.ResolvedRecipe.Layout)
+	}
+	if len(detail.ResolvedRecipe.ColorItems) == 0 || !strings.Contains(detail.ResolvedRecipe.ColorItems[0]["name"], "中国红") {
+		t.Fatalf("expected color recovered from promptZh, got %+v", detail.ResolvedRecipe.ColorItems)
+	}
+	if len(detail.ResolvedRecipe.ToneItems) == 0 || detail.ResolvedRecipe.Mood != "温馨治愈" {
+		t.Fatalf("expected tone & mood recovered, got tones=%+v mood=%q", detail.ResolvedRecipe.ToneItems, detail.ResolvedRecipe.Mood)
+	}
+
+	// 3. Export ZIP returns path/dir/fileName and reveal highlights the exact .zip
+	rrExp := doReq(t, h, srv.Token, http.MethodPost, "/api/works/"+histRun.ID+"/export", map[string]any{"format": "zip", "reveal": true})
+	if rrExp.Code != http.StatusOK {
+		t.Fatalf("export failed: %d %s", rrExp.Code, rrExp.Body.String())
+	}
+	var expResp struct {
+		OK       bool   `json:"ok"`
+		Path     string `json:"path"`
+		Dir      string `json:"dir"`
+		FileName string `json:"fileName"`
+	}
+	_ = json.Unmarshal(rrExp.Body.Bytes(), &expResp)
+	if !expResp.OK || expResp.Path == "" || expResp.Dir == "" || !strings.HasSuffix(expResp.FileName, ".zip") {
+		t.Fatalf("unexpected export response: %+v", expResp)
+	}
+	if _, err := os.Stat(expResp.Path); err != nil {
+		t.Fatalf("exported zip not written: %v", err)
+	}
+	if recHost.openedPath != expResp.Path {
+		t.Fatalf("expected export(reveal=true) to open %q, got %q", expResp.Path, recHost.openedPath)
+	}
+	recHost.openedPath = ""
+	rrRev := doReq(t, h, srv.Token, http.MethodPost, "/api/works/"+histRun.ID+"/reveal", map[string]any{"path": expResp.Path})
+	if rrRev.Code != http.StatusOK || recHost.openedPath != expResp.Path {
+		t.Fatalf("reveal zip failed: code=%d opened=%q want=%q body=%s", rrRev.Code, recHost.openedPath, expResp.Path, rrRev.Body.String())
+	}
 }

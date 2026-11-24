@@ -73,7 +73,8 @@ func (s *Server) work(w http.ResponseWriter, r *http.Request) (any, error) {
 			versions = append(versions, cand)
 		}
 	}
-	return map[string]any{"run": run, "versions": versions}, nil
+	resolved := s.resolveRunRecipe(run, versions)
+	return map[string]any{"run": run, "versions": versions, "resolvedRecipe": resolved}, nil
 }
 
 func (s *Server) workPatch(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -424,6 +425,7 @@ func (s *Server) workExport(w http.ResponseWriter, r *http.Request) (any, error)
 	var body struct {
 		Format string `json:"format"` // zip | xiaohongshu | png | jpg | webp
 		Dest   string `json:"dest"`
+		Reveal bool   `json:"reveal"`
 	}
 	_ = decode(r, &body)
 	if body.Format == "" {
@@ -473,7 +475,15 @@ func (s *Server) workExport(w http.ResponseWriter, r *http.Request) (any, error)
 		if err := os.WriteFile(outPath, buf.Bytes(), 0o644); err != nil {
 			return nil, err
 		}
-		return map[string]any{"ok": true, "path": outPath}, nil
+		if body.Reveal && s.Host != nil {
+			_ = s.Host.OpenPath(outPath)
+		}
+		return map[string]any{
+			"ok":       true,
+			"path":     outPath,
+			"dir":      exportDir,
+			"fileName": filepath.Base(outPath),
+		}, nil
 	}
 
 	raw, err := os.ReadFile(done[0].Path)
@@ -487,7 +497,15 @@ func (s *Server) workExport(w http.ResponseWriter, r *http.Request) (any, error)
 	if err := os.WriteFile(outPath, raw, 0o644); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "path": outPath}, nil
+	if body.Reveal && s.Host != nil {
+		_ = s.Host.OpenPath(outPath)
+	}
+	return map[string]any{
+		"ok":       true,
+		"path":     outPath,
+		"dir":      exportDir,
+		"fileName": filepath.Base(outPath),
+	}, nil
 }
 
 func fitRatio34JPEG(raw []byte) ([]byte, error) {
@@ -535,7 +553,22 @@ func (s *Server) workReveal(w http.ResponseWriter, r *http.Request) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	return okv, s.Host.OpenPath(run.Dir)
+	var body struct {
+		Path string `json:"path"`
+	}
+	_ = decode(r, &body)
+	target := run.Dir
+	if p := strings.TrimSpace(body.Path); p != "" {
+		clean := filepath.Clean(p)
+		worksRoot := filepath.Clean(settings.Get().WorksDir)
+		rel, rErr := filepath.Rel(worksRoot, clean)
+		if rErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			if _, stErr := os.Stat(clean); stErr == nil {
+				target = clean
+			}
+		}
+	}
+	return map[string]any{"ok": true, "path": target}, s.Host.OpenPath(target)
 }
 
 func (s *Server) imageRetry(w http.ResponseWriter, r *http.Request) (any, error) {
