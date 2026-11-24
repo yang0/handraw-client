@@ -824,21 +824,30 @@ func (s *Server) articleVaultRename(w http.ResponseWriter, r *http.Request) (any
 	if err := os.Rename(fromAbs, toAbs); err != nil {
 		return nil, bad("重命名失败：" + err.Error())
 	}
+	var renamedPairs []renamedNotePair
 	if info.IsDir() {
 		for _, subRel := range movedMDs {
 			oldFile := filepath.Join(fromAbs, subRel)
 			newFile := filepath.Join(toAbs, subRel)
-			s.migrateVaultMeta(oldFile, newFile, filepath.ToSlash(filepath.Join(toRel, subRel)))
+			newSubRel := filepath.ToSlash(filepath.Join(toRel, subRel))
+			oldSubRel := filepath.ToSlash(filepath.Join(fromRel, subRel))
+			s.migrateVaultMeta(oldFile, newFile, newSubRel)
+			renamedPairs = append(renamedPairs, renamedNotePair{OldRel: oldSubRel, NewRel: newSubRel})
 		}
 	} else {
 		s.migrateVaultMeta(fromAbs, toAbs, toRel)
+		if isMarkdownExt(fromRel) && isMarkdownExt(toRel) {
+			renamedPairs = append(renamedPairs, renamedNotePair{OldRel: fromRel, NewRel: toRel})
+		}
 	}
+	updatedLinkFiles := rewriteVaultLinksOnRename(dir, renamedPairs)
 	return map[string]any{
-		"ok":    true,
-		"from":  fromRel,
-		"to":    toRel,
-		"name":  filepath.Base(toAbs),
-		"isDir": info.IsDir(),
+		"ok":               true,
+		"from":             fromRel,
+		"to":               toRel,
+		"name":             filepath.Base(toAbs),
+		"isDir":            info.IsDir(),
+		"updatedLinkFiles": updatedLinkFiles,
 	}, nil
 }
 

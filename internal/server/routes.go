@@ -52,6 +52,7 @@ func (s *Server) routes() {
 
 	m.HandleFunc("GET /files/pack/", s.filePack)
 	m.HandleFunc("GET /files/local", s.fileLocal)
+	m.HandleFunc("GET /files/vault-asset", s.fileVaultAsset)
 	m.HandleFunc("GET /files/remote", s.fileRemote)
 	m.HandleFunc("GET /files/plugin/{id}/", s.filePlugin)
 	m.HandleFunc("GET /files/dsh-client/{id}", s.dshClientFile)
@@ -105,6 +106,8 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/article/vault/duplicate", s.h(s.articleVaultDuplicate))
 	m.HandleFunc("DELETE /api/article/vault/dir", s.h(s.articleVaultDeleteDir))
 	m.HandleFunc("POST /api/article/vault/reveal", s.h(s.articleVaultReveal))
+	m.HandleFunc("GET /api/article/vault/links", s.h(s.articleVaultLinks))
+	m.HandleFunc("POST /api/article/vault/links/linkify", s.h(s.articleVaultLinkify))
 
 	// article Obsidian plugin compatibility runtime & installer (#115)
 	m.HandleFunc("GET /api/article/obsidian/plugins", s.h(s.articleObsidianPlugins))

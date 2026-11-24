@@ -1,6 +1,7 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
 import { buildTextModelSelect, openSharedSkillPickerModal } from "../skills-ui.js";
 import { computeParagraphDiff, mergeAcceptedHunks, renderCopilotMarkdown, renderInlineWordDiff } from "./article-diff.js";
+import { createArticleLinksController } from "./article-links.js";
 import { createArticleObsidianController } from "./article-obsidian.js";
 import { buildGroupedModelSelect } from "./create.js";
 import {
@@ -390,6 +391,13 @@ export async function renderArticle(root, ctx, params = {}) {
     vaultSwitcherCount
   );
 
+  const sidebarGraphBtn = el("button", {
+    type: "button",
+    class: "ic-vault-ico-btn",
+    title: "打开知识库关系图谱 (Graph View)",
+    "aria-label": "打开知识库关系图谱",
+    onClick: () => { closeVaultPopover(); linksCtrl.openGraphModal("global"); },
+  }, "🕸");
   const sidebarObsidianBtn = el("button", {
     type: "button",
     class: "ic-vault-ico-btn",
@@ -401,6 +409,7 @@ export async function renderArticle(root, ctx, params = {}) {
   const vaultFooter = el("div", { class: "ic-vault-footer" },
     vaultSwitcherBtn,
     el("div", { class: "ic-vault-footer-actions" },
+      sidebarGraphBtn,
       sidebarObsidianBtn,
       el("button", {
         type: "button",
@@ -910,7 +919,7 @@ export async function renderArticle(root, ctx, params = {}) {
     onClick: () => toggleAiDrawer(false),
   });
 
-  // Obsidian plugin sandbox controller (#115)
+  // Obsidian plugin sandbox & bidirectional links controllers (#115, #116)
   const drawerTabAiBtn = el("button", {
     type: "button",
     class: "ic-obs-drawer-tab is-active",
@@ -920,6 +929,16 @@ export async function renderArticle(root, ctx, params = {}) {
       session.persist();
     },
   }, "✨ AI 助手");
+  const drawerTabLinksBtn = el("button", {
+    type: "button",
+    class: "ic-obs-drawer-tab",
+    onClick: () => {
+      state.rightDrawerTab = "links";
+      renderStageMode();
+      linksCtrl.refresh(state.activeFile || "");
+      session.persist();
+    },
+  }, "🔗 双链");
   const drawerTabObsBtn = el("button", {
     type: "button",
     class: "ic-obs-drawer-tab",
@@ -928,7 +947,38 @@ export async function renderArticle(root, ctx, params = {}) {
       renderStageMode();
       session.persist();
     },
-  }, "🧩 插件视图");
+  }, "🧩 插件");
+
+  const linksCtrl = createArticleLinksController({
+    getActivePath: () => state.activeFile || "",
+    getActiveContent: () => state.content || "",
+    openNote: (relPath) => openVaultFile(relPath),
+    createAndOpenNote: async (targetName) => {
+      const clean = String(targetName || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      if (!clean) return;
+      const baseDir = clean.includes("/") ? "" : parentDirOf(state.activeFile || "");
+      const rel = baseDir ? `${baseDir}/${clean}` : clean;
+      const mdPath = /\.(md|markdown)$/i.test(rel) ? rel : `${rel}.md`;
+      const baseTitle = clean.split("/").pop().replace(/\.(md|markdown)$/i, "");
+      try {
+        const res = await api("PUT", "/api/article/vault/file", {
+          path: mdPath,
+          title: baseTitle,
+          content: `# ${baseTitle}\n\n`,
+        });
+        await refreshVaultTree();
+        await openVaultFile(res.path || mdPath);
+        toast(`已新建双链笔记：${baseTitle}`);
+      } catch (err) {
+        toast(err.message || "创建笔记失败");
+      }
+    },
+    onCloseDrawer: () => toggleAiDrawer(false),
+    onLinksUpdated: (d) => {
+      const cnt = (d.backlinks?.length || 0) + (d.outgoing || []).filter((x) => !x.isImage).length;
+      drawerTabLinksBtn.textContent = cnt > 0 ? `🔗 双链 (${cnt})` : "🔗 双链";
+    },
+  });
 
   function computeActiveDocSnapshot() {
     let selStart = 0;
@@ -1036,12 +1086,16 @@ export async function renderArticle(root, ctx, params = {}) {
     obsPaneSlot
   );
 
+  const linksPaneBody = el("div", { class: "ic-obs-drawer-pane hidden" }, linksCtrl.panelEl);
+
   const aiDrawer = el("aside", { class: "ic-art-copilot hidden", "aria-label": "右侧工具与插件面板" },
     el("div", { class: "ic-obs-drawer-tabs", role: "tablist" },
       drawerTabAiBtn,
+      drawerTabLinksBtn,
       drawerTabObsBtn
     ),
     aiPaneBody,
+    linksPaneBody,
     obsPaneBody
   );
 
@@ -1621,6 +1675,7 @@ export async function renderArticle(root, ctx, params = {}) {
       renderSidebar();
       if (!state.editorActive) renderWelcome();
       obsidianCtrl.syncVault();
+      linksCtrl.refresh(state.activeFile || "");
     } catch (e) {
       toast(e.message || "刷新目录失败");
     }
@@ -2119,7 +2174,7 @@ export async function renderArticle(root, ctx, params = {}) {
           to: toPath,
         });
         closeModal();
-        const nextPath = res.path || toPath;
+        const nextPath = res.to || res.path || toPath;
         if (isFile) {
           if (state.activeFile === target.path) {
             state.activeFile = nextPath;
@@ -2140,8 +2195,13 @@ export async function renderArticle(root, ctx, params = {}) {
           }
         }
         await refreshVaultTree();
+        if (res.updatedLinkFiles > 0 && state.activeFile && !state.dirty) {
+          await openVaultFile(state.activeFile);
+        }
         session.persist();
-        toast(`已重命名为 ${nextPath}`);
+        toast(res.updatedLinkFiles > 0
+          ? `已重命名为 ${nextPath}（已同步更新 ${res.updatedLinkFiles} 篇关联文档双链）`
+          : `已重命名为 ${nextPath}`);
       } catch (e) { toast(e.message); }
     };
 
@@ -2468,6 +2528,7 @@ export async function renderArticle(root, ctx, params = {}) {
       planNotice.textContent = "";
       renderAll();
       obsidianCtrl.syncDoc(true);
+      linksCtrl.refresh(state.activeFile || "");
       session.persist();
     } catch (e) {
       toast(e.message || "打开 Markdown 文件失败");
@@ -3125,6 +3186,7 @@ export async function renderArticle(root, ctx, params = {}) {
         }
       });
       segTextareas.push(ta);
+      linksCtrl.attachTextarea(ta);
       flowBox.appendChild(ta);
     };
 
@@ -3195,7 +3257,8 @@ export async function renderArticle(root, ctx, params = {}) {
     );
     previewStageBox.appendChild(previewActions);
 
-    const paras = paragraphBlocks().map((b) => b.trimmed);
+    const previewSource = (state.content || "").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+    const paras = previewSource.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     const coverSlot = state.slots.find((s) => s.role === "cover");
 
     if (state.previewKind === "markdown") {
@@ -3224,9 +3287,7 @@ export async function renderArticle(root, ctx, params = {}) {
         : el("div", { class: "badge badge-accent" }, `封面配图位：${coverSlot.theme || coverSlot.title || "待生成"}`));
     }
     paras.forEach((p) => {
-      sheet.appendChild(p.startsWith("#")
-        ? el("h3", { style: { margin: "10px 0 2px" } }, p.replace(/^#+\s*/, ""))
-        : el("p", { style: { margin: "0", lineHeight: "1.8" } }, p));
+      linksCtrl.renderPreviewBlock(sheet, p, state.activeFile || "");
       state.slots.forEach((sl) => {
         if (sl.role !== "cover" && sl.anchor && p.includes(sl.anchor)) {
           sheet.appendChild(sl.imagePath
@@ -3272,10 +3333,13 @@ export async function renderArticle(root, ctx, params = {}) {
 
     aiDrawer.classList.toggle("hidden", !drawerOpen);
     copilotBackdrop.classList.toggle("hidden", !drawerOpen);
-    drawerTabAiBtn.classList.toggle("is-active", state.rightDrawerTab !== "obsidian");
-    drawerTabObsBtn.classList.toggle("is-active", state.rightDrawerTab === "obsidian");
-    aiPaneBody.classList.toggle("hidden", state.rightDrawerTab === "obsidian");
-    obsPaneBody.classList.toggle("hidden", state.rightDrawerTab !== "obsidian");
+    const tab = state.rightDrawerTab || "ai";
+    drawerTabAiBtn.classList.toggle("is-active", tab === "ai");
+    drawerTabLinksBtn.classList.toggle("is-active", tab === "links");
+    drawerTabObsBtn.classList.toggle("is-active", tab === "obsidian");
+    aiPaneBody.classList.toggle("hidden", tab !== "ai");
+    linksPaneBody.classList.toggle("hidden", tab !== "links");
+    obsPaneBody.classList.toggle("hidden", tab !== "obsidian");
     obsidianCtrl.updateHostVisibility(showingObs);
     renderCopilotPanel();
     if (isReviewing) renderInlineDiffReview();
@@ -3657,6 +3721,7 @@ export async function renderArticle(root, ctx, params = {}) {
       closeTreeContextMenu();
       closeSelectionBubble();
       obsidianCtrl.dispose();
+      linksCtrl.dispose();
       unsub();
       return;
     }
@@ -3676,6 +3741,7 @@ export async function renderArticle(root, ctx, params = {}) {
   });
 
   renderAll();
+  linksCtrl.refresh(state.activeFile || "");
   refreshRun().catch(() => {});
   if (params.docId) await loadDraft(params.docId);
 }
