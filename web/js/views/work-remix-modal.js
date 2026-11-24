@@ -899,7 +899,7 @@ export async function openWorkRemixModal(workId, ctx, opts = {}) {
                 prompt: `帮我参考作品《${title}》${styleId ? `（画风 ${styleId}）` : ""}做一张同款：${promptTxt ? `\n原提示词：${promptTxt}` : ""}\n我想把主题改成：`,
               });
             },
-          }, "💬 带入会话让 AI 改写同款"),
+          }, "💬 带入聊天让 AI 改写同款"),
           el("div", { class: "row", style: { justifyContent: "space-between", marginTop: "4px" } },
             saveBtn,
             el("span", { class: "muted", style: { fontSize: "11.5px" } }, "做同款将为原作者带来 +2 积分激励")
@@ -1159,7 +1159,7 @@ export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
                     : finalPrompt,
                 });
               },
-            }, "💬 带入会话改写"),
+            }, "💬 带入聊天改写"),
             saveBtn
           )
         )

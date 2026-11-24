@@ -1335,7 +1335,7 @@ function openLocalInspirationDetail(item, ctx, onChanged, availableFolders = [])
                     : finalPrompt,
                 });
               },
-            }, "💬 带入会话改写"),
+            }, "💬 带入聊天改写"),
             el("button", {
               type: "button",
               class: "btn btn-accent-soft",

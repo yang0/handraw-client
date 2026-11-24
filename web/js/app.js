@@ -29,9 +29,9 @@ const VIEWS = {
 
 const CORE_NAV = [
   { id: "home", ico: "🏠", label: "首页" },
-  { id: "atlas", ico: "🎨", label: "画册" },
+  { id: "atlas", ico: "🎨", label: "画廊" },
   { id: "create", ico: "✨", label: "生图" },
-  { id: "chat", ico: "💬", label: "会话" },
+  { id: "chat", ico: "💬", label: "聊天" },
   { id: "article", ico: "📰", label: "文章", plugin: "article" },
   { id: "canvas", ico: "🧩", label: "画布", plugin: "canvas" },
   { id: "works", ico: "🖼", label: "作品" },

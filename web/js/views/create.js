@@ -338,7 +338,7 @@ export async function renderCreate(root, ctx, params = {}) {
     el("div", { class: "row" },
       rollDiceBtn,
       saveRecipeBtn,
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("atlas") }, "📖 逛画册")
+      el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("atlas") }, "📖 逛画廊")
     )
   ));
 

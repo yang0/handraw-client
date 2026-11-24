@@ -152,7 +152,7 @@ export async function renderChat(root, ctx, params = {}) {
     } catch {}
     return {
       id: d.id,
-      name: d.name || "新会话",
+      name: d.name || "新聊天",
       updatedAt: d.updatedAt || data.updatedAt || Date.now(),
       data: {
         messages: Array.isArray(data.messages) ? data.messages : [],
@@ -167,7 +167,7 @@ export async function renderChat(root, ctx, params = {}) {
 
   const makeBlankSession = () => ({
     id: uid("chat"),
-    name: "新会话",
+    name: "新聊天",
     updatedAt: Date.now(),
     persisted: false,
     data: {
@@ -206,11 +206,11 @@ export async function renderChat(root, ctx, params = {}) {
   }
 
   // ---------- Left Sidebar (clean thread list only) ----------
-  const threadList = el("div", { class: "chat-thread-list", role: "listbox", "aria-label": "会话列表" });
+  const threadList = el("div", { class: "chat-thread-list", role: "listbox", "aria-label": "聊天列表" });
 
-  const sidebar = el("aside", { class: "chat-sidebar", "aria-label": "会话列表" },
+  const sidebar = el("aside", { class: "chat-sidebar", "aria-label": "聊天列表" },
     el("div", { class: "chat-sidebar-head" },
-      el("h1", { class: "chat-sidebar-title" }, "会话"),
+      el("h1", { class: "chat-sidebar-title" }, "聊天"),
       el("button", {
         type: "button",
         class: "btn btn-sm btn-primary",
@@ -223,7 +223,7 @@ export async function renderChat(root, ctx, params = {}) {
           renderAll();
           inputEl.focus();
         },
-      }, "＋ 新会话")
+      }, "＋ 新聊天")
     ),
     threadList
   );
@@ -534,7 +534,7 @@ export async function renderChat(root, ctx, params = {}) {
     sessions.forEach((sess) => {
       const isAct = sess.id === activeId;
       const cnt = sess.data.messages.length;
-      const sub = cnt > 0 ? `${cnt} 条消息 · ${fmtTime(sess.updatedAt)}` : "空会话";
+      const sub = cnt > 0 ? `${cnt} 条消息 · ${fmtTime(sess.updatedAt)}` : "空聊天";
       const row = el("div", {
         class: "chat-thread-item" + (isAct ? " is-active" : ""),
         role: "option",
@@ -546,15 +546,15 @@ export async function renderChat(root, ctx, params = {}) {
         },
       },
         el("div", { class: "chat-thread-meta" },
-          el("span", { class: "chat-thread-name", title: sess.name }, sess.name || "新会话"),
+          el("span", { class: "chat-thread-name", title: sess.name }, sess.name || "新聊天"),
           el("span", { class: "chat-thread-sub" }, sub)
         ),
         sessions.length > 1
           ? el("button", {
               type: "button",
               class: "chat-thread-del",
-              title: "删除会话",
-              "aria-label": `删除会话 ${sess.name}`,
+              title: "删除聊天",
+              "aria-label": `删除聊天 ${sess.name}`,
               onClick: async (e) => {
                 e.stopPropagation();
                 if (sess.persisted) {
@@ -733,7 +733,7 @@ export async function renderChat(root, ctx, params = {}) {
     if (!sess.data.messages.length && !isSending) {
       messagesBox.appendChild(el("div", { class: "chat-empty" },
         el("div", { class: "chat-empty-badge", "aria-hidden": "true" }, "💬"),
-        el("h2", null, "手绘风 AI 会话工作台"),
+        el("h2", null, "手绘风 AI 聊天工作台"),
         el("p", null, "像 Codex / DSH 一样自由对话：可随时切换文本模型与生图模型，在发送旁选择自定义 Skill，直接在聊天中生图、装 Skill 或安装插件。"),
         el("div", { class: "chat-starters" },
           ...STARTERS.map((st) => el("button", {
@@ -1131,7 +1131,7 @@ export async function renderChat(root, ctx, params = {}) {
     if (!text) return;
     const sess = activeSession();
     if (sess.data.messages.length === 0) {
-      sess.name = text.replace(/^\/\S+\s*/, "").slice(0, 22) || "新会话";
+      sess.name = text.replace(/^\/\S+\s*/, "").slice(0, 22) || "新聊天";
     }
     const isDirect = Boolean(sess.data.directPrompt);
     const byID = new Map(skillsList.map((sk) => [sk.id, sk]));

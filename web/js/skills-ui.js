@@ -141,7 +141,7 @@ export function openHarnessSkillImportModal({ onImported, onClose } = {}) {
 
     summaryEl.append(
       el("span", { class: "muted", style: { fontSize: "12.5px" } },
-        `已检测到 ${clients.length} 个本机 AI 客户端，共发现 ${totalSkills} 个 Skill（导入后可在会话、文章和插件中统一调用）`
+        `已检测到 ${clients.length} 个本机 AI 客户端，共发现 ${totalSkills} 个 Skill（导入后可在聊天、文章和插件中统一调用）`
       ),
       el("div", { class: "row", style: { gap: "6px" } },
         el("button", {
@@ -284,7 +284,7 @@ export function openHarnessSkillImportModal({ onImported, onClose } = {}) {
       if (failN > 0) {
         toast(`已导入 ${okN} 个 Skill，${failN} 个失败：${res.failed[0]?.error || ""}`);
       } else {
-        toast(`已导入 ${okN} 个 Skill，可在会话、文章和插件中直接调用`);
+        toast(`已导入 ${okN} 个 Skill，可在聊天、文章和插件中直接调用`);
       }
       if (onImported) await onImported(res);
       closeModal();

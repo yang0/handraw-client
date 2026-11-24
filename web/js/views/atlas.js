@@ -121,7 +121,7 @@ export async function renderAtlas(root, ctx, params = {}) {
   });
 
   root.appendChild(el("div", { class: "page-head atlas-head" },
-    el("h1", { class: "page-title" }, "风格画册"),
+    el("h1", { class: "page-title" }, "风格画廊"),
     el("div", { class: "row atlas-toolbar" }, tabBar, searchInput)
   ));
 

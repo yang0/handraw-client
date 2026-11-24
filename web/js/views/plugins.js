@@ -1101,7 +1101,7 @@ function renderSkillsTab(stage, root, ctx, initialSkills) {
         el("span", { class: "badge" }, formatSkillSourceLabel(sk)),
         sk.version ? el("span", { class: "badge" }, `v${sk.version}`) : null
       ),
-      el("span", { class: "muted", style: { fontSize: "12px" } }, "可在「会话」、「文章 AI 改稿」及兼容插件中通过 Skill 选择器或 /" + sk.id + " 直接调用。"),
+      el("span", { class: "muted", style: { fontSize: "12px" } }, "可在「聊天」、「文章 AI 改稿」及兼容插件中通过 Skill 选择器或 /" + sk.id + " 直接调用。"),
       editor
     ), [
       el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
@@ -1225,7 +1225,7 @@ function renderSkillsTab(stage, root, ctx, initialSkills) {
     el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
       el("div", { class: "col", style: { gap: "2px" } },
         el("strong", null, "共享 Skills 技能库"),
-        el("span", { class: "muted", style: { fontSize: "12px" } }, "导入或安装的 Skill 可在「会话」、「文章 AI 改稿」以及兼容插件中统一调用")
+        el("span", { class: "muted", style: { fontSize: "12px" } }, "导入或安装的 Skill 可在「聊天」、「文章 AI 改稿」以及兼容插件中统一调用")
       ),
       el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
         el("button", {

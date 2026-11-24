@@ -195,7 +195,7 @@ export async function renderHome(container, ctx) {
     el("div", { class: "row" },
       el("div", { style: { flex: "1", minWidth: "240px" } }, themeInput),
       el("button", { type: "button", class: "btn btn-primary", onClick: submitQuick }, "带入生图工作台"),
-      el("button", { type: "button", class: "btn", onClick: () => ctx.go("atlas") }, "先翻风格画册")
+      el("button", { type: "button", class: "btn", onClick: () => ctx.go("atlas") }, "先翻风格画廊")
     ),
     recipeStrip
   );
@@ -209,7 +209,7 @@ export async function renderHome(container, ctx) {
         el("button", { type: "button", class: "btn btn-sm", onClick: async () => { await api("PATCH", "/api/settings", { onboarded: true }); guide.remove(); } }, "知道了")
       ),
       el("div", { class: "row", style: { marginTop: "8px", gap: "16px" } },
-        el("span", { class: "badge badge-accent" }, "1. 在「画册」挑一个手绘画风"),
+        el("span", { class: "badge badge-accent" }, "1. 在「画廊」挑一个手绘画风"),
         el("span", { class: "badge badge-accent" }, "2. 输入主题并在左侧零费用预览"),
         el("span", { class: "badge badge-accent" }, "3. 点生成，默认存本地、按需发布")
       )
@@ -231,7 +231,7 @@ export async function renderHome(container, ctx) {
     )
   );
   if (recentWorks.length === 0) {
-    secRecent.appendChild(el("div", { class: "card muted" }, "还没有本地生图记录。在上方输入主题，或点击「风格画册」挑选一种画风开始第一张创作吧。"));
+    secRecent.appendChild(el("div", { class: "card muted" }, "还没有本地生图记录。在上方输入主题，或点击「风格画廊」挑选一种画风开始第一张创作吧。"));
   } else {
     const grid = masonry();
     recentWorks.forEach((run) => {
