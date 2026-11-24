@@ -168,36 +168,212 @@ async function showPageToast(tabId, message, isError = false) {
   } catch {}
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function mergeMainAndReplies(mainText, replyTexts) {
+  const cleanMain = String(mainText || "").trim();
+  const cleanReplies = (replyTexts || []).map((t) => String(t || "").trim()).filter(Boolean);
+  if (!cleanReplies.length) return cleanMain;
+  if (!cleanMain) return cleanReplies.join("\n\n");
+  return `[主推文]\n${cleanMain}\n\n[作者评论区补充]\n${cleanReplies.join("\n\n")}`;
+}
+
+async function fetchTweetAndAuthorRepliesViaBgTab(sourceUrl, expectedAuthor) {
+  if (!/^https:\/\/(?:x|twitter)\.com\/[^/]+\/status\/\d+/i.test(String(sourceUrl || ""))) {
+    return null;
+  }
+  const statusIdMatch = String(sourceUrl).match(/\/status\/(\d+)/i);
+  const statusId = statusIdMatch ? statusIdMatch[1] : "";
+  let bgTab = null;
+  try {
+    bgTab = await chrome.tabs.create({ url: sourceUrl, active: false });
+    if (!bgTab?.id) return null;
+
+    const deadline = Date.now() + 6500;
+    let firstMainSeenAt = 0;
+    let lastSnapshot = null;
+
+    while (Date.now() < deadline) {
+      await sleep(450);
+      let execRes = null;
+      try {
+        execRes = await chrome.scripting.executeScript({
+          target: { tabId: bgTab.id },
+          args: [statusId, String(expectedAuthor || "")],
+          func: async (targetId, wantAuthor) => {
+            const showMoreRe = /^(显示更多|Show more|もっと見る|もっと表示|Mostrar más|Voir plus|Mehr anzeigen)$/i;
+            const normHandle = (h) => String(h || "").trim().toLowerCase().replace(/^@/, "");
+            const getHandle = (art) => {
+              const box = art.querySelector('[data-testid="User-Name"]');
+              if (box) {
+                const m = (box.innerText || "").match(/@[A-Za-z0-9_]+/);
+                if (m) return m[0];
+              }
+              return "";
+            };
+            const readText = (art) => Array.from(art.querySelectorAll('[data-testid="tweetText"]'))
+              .map((n) => (n.innerText || n.textContent || "").trim())
+              .filter(Boolean)
+              .join("\n\n");
+            const expandSafe = (art) => {
+              const ctrl = art.querySelector('[data-testid="tweet-text-show-more-link"]') ||
+                Array.from(art.querySelectorAll('button, [role="button"]')).find((el) => showMoreRe.test((el.textContent || "").trim()));
+              if (ctrl && !(ctrl.tagName === "A" && ctrl.getAttribute("href")) && !ctrl.closest("a[href]")) {
+                ctrl.click();
+                return true;
+              }
+              return false;
+            };
+
+            const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+            if (!articles.length) return { ready: false, count: 0 };
+
+            let mainIdx = 0;
+            if (targetId) {
+              const foundIdx = articles.findIndex((a) => Boolean(a.querySelector(`a[href*="/status/${targetId}"]`)));
+              if (foundIdx >= 0) mainIdx = foundIdx;
+            }
+            const mainArt = articles[mainIdx];
+            const authorHandle = getHandle(mainArt) || wantAuthor;
+            const wantNorm = normHandle(authorHandle || wantAuthor);
+
+            let clickedExpand = expandSafe(mainArt);
+            const authorReplyArts = [];
+            for (let i = mainIdx + 1; i < articles.length && i <= mainIdx + 8; i++) {
+              const cand = articles[i];
+              const h = getHandle(cand);
+              if (wantNorm && normHandle(h) === wantNorm) {
+                if (expandSafe(cand)) clickedExpand = true;
+                authorReplyArts.push(cand);
+                if (authorReplyArts.length >= 3) break;
+              }
+            }
+            if (clickedExpand) {
+              await new Promise((r) => setTimeout(r, 550));
+            }
+
+            const mainText = readText(mainArt);
+            const seen = new Set([mainText]);
+            const replyTexts = [];
+            for (const ra of authorReplyArts) {
+              const t = readText(ra);
+              if (t && t.length >= 6 && !seen.has(t)) {
+                seen.add(t);
+                replyTexts.push(t);
+              }
+            }
+            const imgEl = mainArt.querySelector('img[src*="pbs.twimg.com/media"]');
+            let imageUrl = imgEl ? imgEl.src : "";
+            try {
+              if (imageUrl) {
+                const u = new URL(imageUrl);
+                if (u.hostname.includes("pbs.twimg.com")) u.searchParams.set("name", "large");
+                imageUrl = u.toString();
+              }
+            } catch {}
+            return {
+              ready: Boolean(mainText || imageUrl),
+              count: articles.length,
+              mainText,
+              replyTexts,
+              imageUrl,
+              author: authorHandle,
+            };
+          },
+        });
+      } catch {
+        // Tab still loading / navigating — retry on next poll tick.
+        continue;
+      }
+
+      const snap = execRes?.[0]?.result;
+      if (!snap || !snap.ready) continue;
+      lastSnapshot = snap;
+      if (!firstMainSeenAt) firstMainSeenAt = Date.now();
+      // Exit early as soon as author self-replies are found, or once other replies loaded and settled.
+      if (snap.replyTexts && snap.replyTexts.length > 0) {
+        return snap;
+      }
+      if (snap.count >= 3 && Date.now() - firstMainSeenAt >= 900) {
+        return snap;
+      }
+      if (Date.now() - firstMainSeenAt >= 2200) {
+        return snap;
+      }
+    }
+    return lastSnapshot;
+  } catch {
+    return null;
+  } finally {
+    if (bgTab?.id) {
+      await chrome.tabs.remove(bgTab.id).catch(() => {});
+    }
+  }
+}
+
 async function deliverClip(payload, tabId = null) {
+  const nextPayload = { ...(payload || {}) };
+  let repliesFound = Array.isArray(nextPayload.replyTexts) ? nextPayload.replyTexts.length : 0;
+
+  if (nextPayload.checkReplies && nextPayload.sourceUrl && repliesFound === 0) {
+    const bg = await fetchTweetAndAuthorRepliesViaBgTab(nextPayload.sourceUrl, nextPayload.sourceAuthor);
+    if (bg) {
+      const baseMain = String(nextPayload.rawText || nextPayload.prompt || "");
+      const betterMain = (bg.mainText && bg.mainText.length > baseMain.length) ? bg.mainText : baseMain;
+      const bgReplies = Array.isArray(bg.replyTexts) ? bg.replyTexts.filter(Boolean) : [];
+      if (bgReplies.length > 0 || betterMain.length > baseMain.length) {
+        const merged = mergeMainAndReplies(betterMain, bgReplies);
+        nextPayload.rawText = merged;
+        nextPayload.prompt = merged;
+        nextPayload.replyTexts = bgReplies;
+        if (bgReplies.length > 0) {
+          repliesFound = bgReplies.length;
+        }
+      }
+      if (!nextPayload.imageUrl && bg.imageUrl) {
+        nextPayload.imageUrl = bg.imageUrl;
+      }
+      if (!nextPayload.sourceAuthor && bg.author) {
+        nextPayload.sourceAuthor = bg.author;
+      }
+      if (bg.mainText && bg.mainText.length > baseMain.length) {
+        nextPayload.truncated = false;
+      }
+    }
+  }
+
   const cfg = await loadConfig();
-  let res = await sendToLocalClient(cfg, payload);
+  let res = await sendToLocalClient(cfg, nextPayload);
   if (!res.ok && cfg.siteToken) {
-    const cloud = await sendToCloudFallback(cfg, payload);
+    const cloud = await sendToCloudFallback(cfg, nextPayload);
     if (cloud.ok) {
       res = cloud;
     }
   }
-  const title = payload.title || (payload.rawText || payload.prompt || "网页灵感").slice(0, 28);
+  const title = nextPayload.title || (nextPayload.rawText || nextPayload.prompt || "网页灵感").slice(0, 28);
   await recordClip({
     title,
-    sourceUrl: payload.sourceUrl || "",
-    sourceAuthor: payload.sourceAuthor || "",
-    imageUrl: payload.imageUrl || "",
+    sourceUrl: nextPayload.sourceUrl || "",
+    sourceAuthor: nextPayload.sourceAuthor || "",
+    imageUrl: nextPayload.imageUrl || "",
     channel: res.ok ? res.channel : "failed",
     error: res.ok ? "" : res.error,
     ts: Date.now(),
   });
   await flashBadge(res.ok);
   if (tabId) {
+    const replyHint = repliesFound > 0 ? "（含作者评论区提示词）" : "";
     await showPageToast(
       tabId,
       res.ok
-        ? (res.channel === "cloud" ? "☁ 已存入云端灵感暂存箱，打开客户端后自动同步" : "✓ 已收进手绘风灵感库，AI 正在整理")
+        ? (res.channel === "cloud" ? `☁ 已存入云端灵感暂存箱${replyHint}，打开客户端后自动同步` : `✓ 已收进手绘风灵感库${replyHint}，AI 正在整理`)
         : `收集失败：${res.error}`,
       !res.ok
     );
   }
-  return res;
+  return { ...res, repliesFound };
 }
 
 chrome.runtime.onInstalled.addListener(() => {

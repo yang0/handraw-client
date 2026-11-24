@@ -301,4 +301,31 @@ func TestInspirationsClip_EnrichesTruncatedXNoteTweet(t *testing.T) {
 	if !strings.Contains(resp.Item.Prompt, "完整后半段提示词") {
 		t.Fatalf("expected truncated X clip to be upgraded to full Note Tweet, got %q", resp.Item.Prompt)
 	}
+
+	// Verify replyTexts from author's comment section are merged cleanly (#100).
+	replyBody, _ := json.Marshal(map[string]any{
+		"title":        "提示词在评论区",
+		"rawText":      "Prompt in the reply below 👇",
+		"replyTexts":   []string{"Full cinematic portrait prompt, warm film grain, 85mm lens"},
+		"sourceUrl":    "https://x.com/azed_ai/status/2116121954382139842",
+		"sourceAuthor": "@azed_ai",
+		"autoOrganize": false,
+	})
+	req2 := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/inspirations/clip", strings.NewReader(string(replyBody)))
+	req2.Host = "127.0.0.1:8787"
+	req2.Header.Set("Origin", "chrome-extension://abcdefghijklmnop")
+	req2.Header.Set("X-Handraw-Clip-Token", settResp.ClipToken)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("replyTexts clip failed: %d %s", rec2.Code, rec2.Body.String())
+	}
+	var resp2 struct {
+		OK   bool            `json:"ok"`
+		Item inspirationItem `json:"item"`
+	}
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	if !strings.Contains(resp2.Item.Prompt, "[作者评论区补充]") || !strings.Contains(resp2.Item.Prompt, "Full cinematic portrait prompt") {
+		t.Fatalf("expected author reply prompt merged, got %q", resp2.Item.Prompt)
+	}
 }

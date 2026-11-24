@@ -744,6 +744,7 @@ func (s *Server) inspirationsClip(w http.ResponseWriter, r *http.Request) (any, 
 		RawText       string   `json:"rawText"`
 		Text          string   `json:"text"`
 		Prompt        string   `json:"prompt"`
+		ReplyTexts    []string `json:"replyTexts"`
 		SourceURL     string   `json:"sourceUrl"`
 		SourceAuthor  string   `json:"sourceAuthor"`
 		SourceChannel string   `json:"sourceChannel"`
@@ -756,6 +757,24 @@ func (s *Server) inspirationsClip(w http.ResponseWriter, r *http.Request) (any, 
 	}
 	rawTxt := strings.TrimSpace(firstStr(body.RawText, body.Text))
 	prm := strings.TrimSpace(firstStr(body.Prompt, rawTxt))
+	if len(body.ReplyTexts) > 0 {
+		var extra []string
+		for _, rt := range body.ReplyTexts {
+			c := strings.TrimSpace(rt)
+			if c != "" && !strings.Contains(rawTxt, c) {
+				extra = append(extra, c)
+			}
+		}
+		if len(extra) > 0 {
+			joined := strings.Join(extra, "\n\n")
+			if rawTxt == "" {
+				rawTxt = joined
+			} else {
+				rawTxt = "[主推文]\n" + rawTxt + "\n\n[作者评论区补充]\n" + joined
+			}
+			prm = rawTxt
+		}
+	}
 	if strings.TrimSpace(body.SourceURL) == "" {
 		body.SourceURL = extractFirstNetworkURL(rawTxt, prm)
 	}
@@ -764,7 +783,8 @@ func (s *Server) inspirationsClip(w http.ResponseWriter, r *http.Request) (any, 
 	// behind a "Show more" / "显示更多" link. When clipped from X and truncated (or long
 	// enough to be a collapsed Note Tweet), enrich via FxTwitter/VxTwitter so the full
 	// prompt is captured automatically without manually expanding (#96).
-	if isXStatusURL(body.SourceURL) && (body.Truncated || looksLikeTruncatedXClip(rawTxt)) {
+	hasAuthorReplies := len(body.ReplyTexts) > 0 || strings.Contains(rawTxt, "[作者评论区补充]")
+	if !hasAuthorReplies && isXStatusURL(body.SourceURL) && (body.Truncated || looksLikeTruncatedXClip(rawTxt)) {
 		fetchCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		ext, err := s.extractInspirationFromURL(fetchCtx, strings.TrimSpace(body.SourceURL))
 		cancel()
@@ -901,8 +921,8 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
 	}
 
 	sysPrompt := `你是手绘风「灵感库」的 AI 提示词整理专家。
-用户会粘贴一段从 X (Twitter)、小红书或网页抓取的真实内容（可能含英文推文、emoji、话题标签、求赞废话、中英混杂的生图提示词）。
-请严格忠实于原始内容（严禁凭空编造原文中不存在的场景或主体），输出合法 JSON（不要 markdown 代码块，不要解释文字），包含以下字段：
+用户会粘贴一段从 X (Twitter)、小红书或网页抓取的真实内容（可能含英文推文、emoji、话题标签、求赞废话、中英混杂的生图提示词；有时主推文只发了效果图和「提示词在评论区 / Prompt below 👇」等引导语，真正的提示词在【作者评论区补充】中）。
+请严格忠实于原始内容（严禁凭空编造原文中不存在的场景或主体），若包含【作者评论区补充】，优先提取作者评论区中的完整生图提示词作为 prompt 并剥离主推文引导废话；输出合法 JSON（不要 markdown 代码块，不要解释文字），包含以下字段：
 {
   "title": "不超过22字的精准中文灵感标题",
   "prompt": "剥离推文废话/emoji/hashtag后的纯净可执行生图提示词（若是英文提示词保留高质量英文；若本为中文保留高质量中文；尽量保留原文的 [变量] 或核心指令）",
