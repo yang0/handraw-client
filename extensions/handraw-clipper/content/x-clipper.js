@@ -1,6 +1,8 @@
 (() => {
   const MARK_ATTR = "data-handraw-clipper-bound";
 
+  const SHOW_MORE_TEXT_RE = /^(显示更多|Show more|もっと見る|もっと表示|Mostrar más|Voir plus|Mehr anzeigen)$/i;
+
   function normalizeTwimgUrl(rawUrl) {
     try {
       const u = new URL(rawUrl);
@@ -13,19 +15,92 @@
     }
   }
 
-  function extractTweetPayload(article) {
+  function extractCanonicalStatusUrl(article) {
+    const timeEl = article.querySelector("time");
+    const timeLink = timeEl ? timeEl.closest('a[href*="/status/"]') : null;
+    const fallbackLink = article.querySelector('a[href*="/status/"]');
+    const rawHref = (timeLink && timeLink.href) || (fallbackLink && fallbackLink.href) || location.href;
+    try {
+      const u = new URL(rawHref);
+      const m = u.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+      if (m) {
+        return `https://x.com/${m[1]}/status/${m[2]}`;
+      }
+      return u.toString();
+    } catch {
+      return rawHref;
+    }
+  }
+
+  function readTweetText(article) {
     const textNodes = article.querySelectorAll('[data-testid="tweetText"]');
-    const rawText = Array.from(textNodes)
+    return Array.from(textNodes)
       .map((n) => (n.innerText || n.textContent || "").trim())
       .filter(Boolean)
       .join("\n\n");
+  }
+
+  function findShowMoreControl(article) {
+    const byTestId = article.querySelector('[data-testid="tweet-text-show-more-link"]');
+    if (byTestId) return byTestId;
+    const candidates = article.querySelectorAll('button, [role="button"], a');
+    for (const el of candidates) {
+      const txt = (el.textContent || "").trim();
+      if (SHOW_MORE_TEXT_RE.test(txt)) return el;
+    }
+    return null;
+  }
+
+  function isSafeInlineExpandControl(ctrl) {
+    if (!ctrl) return false;
+    // Never click an <a href="..."> that would navigate the timeline tab away.
+    if (ctrl.tagName === "A" && ctrl.getAttribute("href")) return false;
+    const parentLink = ctrl.closest("a[href]");
+    if (parentLink && parentLink.getAttribute("href")) return false;
+    return true;
+  }
+
+  async function tryExpandTweetInline(article) {
+    const ctrl = findShowMoreControl(article);
+    if (!ctrl) return { expanded: false, stillTruncated: false };
+    if (!isSafeInlineExpandControl(ctrl)) {
+      return { expanded: false, stillTruncated: true };
+    }
+    const beforeLen = readTweetText(article).length;
+    ctrl.click();
+    const expanded = await new Promise((resolve) => {
+      let done = false;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        obs.disconnect();
+        resolve(ok);
+      };
+      const check = () => {
+        const afterLen = readTweetText(article).length;
+        const stillHasCtrl = Boolean(findShowMoreControl(article));
+        if (afterLen > beforeLen || !stillHasCtrl) {
+          finish(true);
+        }
+      };
+      const obs = new MutationObserver(check);
+      obs.observe(article, { childList: true, subtree: true, characterData: true });
+      const timer = setTimeout(() => finish(readTweetText(article).length > beforeLen), 1800);
+      check();
+    });
+    const stillTruncated = Boolean(findShowMoreControl(article)) || !expanded;
+    return { expanded, stillTruncated };
+  }
+
+  function extractTweetPayload(article, { truncated = false } = {}) {
+    const rawText = readTweetText(article);
 
     const imgs = Array.from(article.querySelectorAll('img[src*="pbs.twimg.com/media"]'))
       .map((img) => normalizeTwimgUrl(img.src))
       .filter(Boolean);
 
-    const statusLink = article.querySelector('a[href*="/status/"]');
-    const sourceUrl = statusLink ? statusLink.href : location.href;
+    const sourceUrl = extractCanonicalStatusUrl(article);
 
     let sourceAuthor = "";
     const userNameBox = article.querySelector('[data-testid="User-Name"]');
@@ -46,6 +121,7 @@
       sourceUrl,
       sourceAuthor,
       sourceChannel: "x",
+      truncated: Boolean(truncated || findShowMoreControl(article)),
     };
   }
 
@@ -83,7 +159,8 @@
       if (btn.disabled) return;
       btn.disabled = true;
       btn.textContent = "收藏中…";
-      const payload = extractTweetPayload(article);
+      const expandRes = await tryExpandTweetInline(article);
+      const payload = extractTweetPayload(article, { truncated: expandRes.stillTruncated });
       try {
         const res = await chrome.runtime.sendMessage({
           type: "clip",

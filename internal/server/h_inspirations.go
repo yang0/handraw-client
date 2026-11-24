@@ -752,18 +752,45 @@ func (s *Server) inspirationsClip(w http.ResponseWriter, r *http.Request) (any, 
 		SourceChannel string   `json:"sourceChannel"`
 		Tags          []string `json:"tags"`
 		AutoOrganize  *bool    `json:"autoOrganize"`
+		Truncated     bool     `json:"truncated"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
 	rawTxt := strings.TrimSpace(firstStr(body.RawText, body.Text))
 	prm := strings.TrimSpace(firstStr(body.Prompt, rawTxt))
-	if strings.TrimSpace(body.ImageDataURL) == "" && strings.TrimSpace(body.ImageURL) == "" && prm == "" {
-		return nil, bad("剪藏内容至少需要包含图片或文字")
-	}
-
 	if strings.TrimSpace(body.SourceURL) == "" {
 		body.SourceURL = extractFirstNetworkURL(rawTxt, prm)
+	}
+
+	// X timeline/list views truncate long Note Tweets (~140 CJK / ~250 ASCII chars)
+	// behind a "Show more" / "显示更多" link. When clipped from X and truncated (or long
+	// enough to be a collapsed Note Tweet), enrich via FxTwitter/VxTwitter so the full
+	// prompt is captured automatically without manually expanding (#96).
+	if isXStatusURL(body.SourceURL) && (body.Truncated || looksLikeTruncatedXClip(rawTxt)) {
+		fetchCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		ext, err := s.extractInspirationFromURL(fetchCtx, strings.TrimSpace(body.SourceURL))
+		cancel()
+		if err == nil {
+			extText := strings.TrimSpace(ext.Text)
+			if len([]rune(extText)) > len([]rune(rawTxt)) {
+				rawTxt = extText
+				prm = extText
+			}
+			if strings.TrimSpace(body.ImageURL) == "" && strings.TrimSpace(body.ImageDataURL) == "" && len(ext.Images) > 0 {
+				body.ImageURL = ext.Images[0]
+			}
+			if strings.TrimSpace(body.SourceAuthor) == "" && strings.TrimSpace(ext.Author) != "" {
+				body.SourceAuthor = strings.TrimSpace(ext.Author)
+			}
+			if strings.TrimSpace(ext.SourceURL) != "" {
+				body.SourceURL = strings.TrimSpace(ext.SourceURL)
+			}
+		}
+	}
+
+	if strings.TrimSpace(body.ImageDataURL) == "" && strings.TrimSpace(body.ImageURL) == "" && prm == "" {
+		return nil, bad("剪藏内容至少需要包含图片或文字")
 	}
 
 	id := jobs.NewID("insp")
@@ -1278,6 +1305,36 @@ func (s *Server) siteCollectionsToggle(w http.ResponseWriter, r *http.Request) (
 		return nil, err
 	}
 	return json.RawMessage(raw), nil
+}
+
+func isXStatusURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u == nil {
+		return false
+	}
+	return (xPlatformAdapter{}).Match(u) && reXStatusPath.MatchString(u.Path)
+}
+
+func looksLikeTruncatedXClip(text string) bool {
+	s := strings.TrimSpace(text)
+	if s == "" {
+		return true
+	}
+	if strings.HasSuffix(s, "…") || strings.HasSuffix(s, "...") ||
+		strings.HasSuffix(s, "显示更多") || strings.HasSuffix(strings.ToLower(s), "show more") {
+		return true
+	}
+	// X weights CJK/non-ASCII runes as 2 chars and truncates timeline previews around
+	// 250-280 weighted chars (~125-140 CJK chars). Enrich anything at or above 220.
+	weighted := 0
+	for _, r := range s {
+		if r > 0x7f {
+			weighted += 2
+		} else {
+			weighted++
+		}
+	}
+	return weighted >= 220
 }
 
 var reNetworkURL = regexp.MustCompile(`https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+`)

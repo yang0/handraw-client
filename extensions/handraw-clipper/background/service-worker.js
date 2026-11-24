@@ -61,7 +61,7 @@ async function sendToLocalClient(cfg, payload) {
     return { ok: false, error: "未配置本机客户端地址或配对 Token" };
   }
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12000);
+  const timer = setTimeout(() => ctrl.abort(), 20000);
   try {
     const resp = await fetch(`${base}/api/inspirations/clip`, {
       method: "POST",

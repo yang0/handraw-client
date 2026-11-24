@@ -226,3 +226,79 @@ func TestExtractFirstNetworkURLAndPreserveOnCreate(t *testing.T) {
 		t.Fatalf("expected sourceUrl preserved, got %q", resp.Item.SourceURL)
 	}
 }
+
+func TestInspirationsClip_EnrichesTruncatedXNoteTweet(t *testing.T) {
+	if looksLikeTruncatedXClip("Short prompt on X") {
+		t.Fatalf("short ASCII tweet should not be flagged as truncated")
+	}
+	if !looksLikeTruncatedXClip("这是一段被X时间线列表页截断的提示词…") {
+		t.Fatalf("ellipsis tweet should be flagged as truncated")
+	}
+	cjkPreview := strings.Repeat("宋制汉服工笔人物画细劲勾线", 10) // 130 CJK chars = 260 weighted chars
+	if !looksLikeTruncatedXClip(cjkPreview) {
+		t.Fatalf("130 CJK char timeline preview should be flagged as possibly truncated")
+	}
+
+	fullNotePrompt := cjkPreview + "\n完整后半段提示词：9:16竖版，青绿庭园，留白题字，朱文印章。"
+	mockFx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 200,
+			"tweet": map[string]any{
+				"id":   "2116121954382139842",
+				"url":  "https://x.com/azed_ai/status/2116121954382139842",
+				"text": fullNotePrompt,
+				"author": map[string]any{
+					"name":        "Azed",
+					"screen_name": "azed_ai",
+				},
+			},
+		})
+	}))
+	defer mockFx.Close()
+
+	prevFx := fxTwitterAPIBase
+	fxTwitterAPIBase = mockFx.URL
+	t.Cleanup(func() { fxTwitterAPIBase = prevFx })
+
+	srv, cancel := setupTestServer(t, "http://127.0.0.1:1")
+	defer cancel()
+	h := srv.Handler()
+	clipTok := srv.Token // clip route checks X-Handraw-Clip-Token; fetch token via settings or use doReq helper below
+	_ = clipTok
+	// Grab actual clip token from settings endpoint
+	settRR := doReq(t, h, srv.Token, http.MethodGet, "/api/settings", nil)
+	var settResp struct {
+		ClipToken string `json:"clipToken"`
+	}
+	_ = json.Unmarshal(settRR.Body.Bytes(), &settResp)
+	if settResp.ClipToken == "" {
+		t.Fatalf("missing clipToken from /api/settings: %s", settRR.Body.String())
+	}
+
+	clipBody, _ := json.Marshal(map[string]any{
+		"title":        "宋制汉服",
+		"rawText":      cjkPreview,
+		"prompt":       cjkPreview,
+		"sourceUrl":    "https://x.com/azed_ai/status/2116121954382139842",
+		"sourceAuthor": "@azed_ai",
+		"truncated":    true,
+		"autoOrganize": false,
+	})
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/inspirations/clip", strings.NewReader(string(clipBody)))
+	req.Host = "127.0.0.1:8787"
+	req.Header.Set("Origin", "chrome-extension://abcdefghijklmnop")
+	req.Header.Set("X-Handraw-Clip-Token", settResp.ClipToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clip failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		OK   bool            `json:"ok"`
+		Item inspirationItem `json:"item"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp.Item.Prompt, "完整后半段提示词") {
+		t.Fatalf("expected truncated X clip to be upgraded to full Note Tweet, got %q", resp.Item.Prompt)
+	}
+}
