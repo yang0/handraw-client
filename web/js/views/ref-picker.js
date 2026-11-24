@@ -966,6 +966,38 @@ export function openReferencePickerModal({
       seriesMap.get(sk).count++;
     });
 
+    const basePool = extSeries ? items.filter((it) => (it.meta?.series || "") === extSeries) : items;
+    const cMap = new Map();
+    basePool.forEach((it) => {
+      const ck = it.category || "other";
+      if (!cMap.has(ck)) cMap.set(ck, { key: ck, label: it.categoryName || ck, count: 0 });
+      cMap.get(ck).count++;
+    });
+    if (activeCategory !== "ALL" && !cMap.has(activeCategory)) activeCategory = "ALL";
+
+    const useCatSelect = cMap.size > 6;
+    let catSelectWrap = null;
+    if (useCatSelect) {
+      const sel = el("select", {
+        class: "select ref-picker-cat-select",
+        "aria-label": "按分类筛选",
+        onChange: () => {
+          activeCategory = sel.value;
+          extPageLimit = 48;
+          renderExtGrid();
+        },
+      },
+        el("option", { value: "ALL", selected: activeCategory === "ALL" }, `全部分类 (${basePool.length})`),
+        ...Array.from(cMap.values()).map((c) =>
+          el("option", { value: c.key, selected: activeCategory === c.key }, `${c.label} (${c.count})`)
+        )
+      );
+      catSelectWrap = el("label", { class: "ref-picker-cat-select-wrap" },
+        el("span", { class: "muted", style: { fontSize: "11.5px" } }, "细分："),
+        sel
+      );
+    }
+
     if (gal.multiVariant) {
       const angles = [];
       const seen = new Set();
@@ -979,14 +1011,16 @@ export function openReferencePickerModal({
       }
       if (angles.length) {
         if (!angles.some((a) => a.key === extAngle)) extAngle = angles[0].key;
-        catWrap.appendChild(el("div", { class: "studio-cat-tabs", role: "group", "aria-label": "默认预览视角" },
-          el("span", { class: "muted", style: { fontSize: "11.5px", alignSelf: "center", marginRight: "4px" } }, "默认视角："),
+        catWrap.appendChild(el("div", { class: "studio-cat-tabs ref-picker-ext-toprow", role: "group", "aria-label": "默认预览视角与分类" },
+          el("span", { class: "muted", style: { fontSize: "11.5px", alignSelf: "center", marginRight: "2px" } }, "默认视角："),
           ...angles.map((a) => el("button", {
             type: "button",
             class: "btn btn-sm" + (extAngle === a.key ? " btn-primary" : ""),
             onClick: () => { extAngle = a.key; renderExtCategoriesAndAngles(gal); renderExtGrid(); },
-          }, a.label))
+          }, a.label)),
+          catSelectWrap
         ));
+        catSelectWrap = null;
       }
     }
 
@@ -998,20 +1032,16 @@ export function openReferencePickerModal({
             class: "btn btn-sm" + (extSeries === s.key ? " btn-primary" : ""),
             onClick: () => { extSeries = s.key; activeCategory = "ALL"; extPageLimit = 48; renderExtCategoriesAndAngles(gal); renderExtGrid(); },
           }, s.label)
-        )
+        ),
+        catSelectWrap
       ));
+      catSelectWrap = null;
     }
 
-    const basePool = extSeries ? items.filter((it) => (it.meta?.series || "") === extSeries) : items;
-    const cMap = new Map();
-    basePool.forEach((it) => {
-      const ck = it.category || "other";
-      if (!cMap.has(ck)) cMap.set(ck, { key: ck, label: it.categoryName || ck, count: 0 });
-      cMap.get(ck).count++;
-    });
-    if (activeCategory !== "ALL" && !cMap.has(activeCategory)) activeCategory = "ALL";
-    if (cMap.size > 1) {
-      const pills = el("div", { class: "studio-cat-tabs" + (cMap.size > 7 ? " is-scroll-row" : ""), role: "group", "aria-label": "分类筛选" });
+    if (catSelectWrap) {
+      catWrap.appendChild(el("div", { class: "studio-cat-tabs" }, catSelectWrap));
+    } else if (!useCatSelect && cMap.size > 1) {
+      const pills = el("div", { class: "studio-cat-tabs", role: "group", "aria-label": "分类筛选" });
       [{ key: "ALL", label: `全部 (${basePool.length})` }, ...Array.from(cMap.values()).map((c) => ({ key: c.key, label: `${c.label} (${c.count})` }))].forEach((g) => {
         pills.appendChild(el("button", {
           type: "button",
@@ -1080,14 +1110,17 @@ export function openReferencePickerModal({
 
       const badgeText = isSel
         ? (pickedAngles.length ? `✓ ${pickedAngles.map((v) => v.label).join("/")}` : "✓ 已选")
-        : (vars.length > 1 ? `${vars.length}视角` : "");
+        : "";
       const checkBadge = el("span", { class: "ref-picker-check", "aria-hidden": "true" }, badgeText);
-      wrap.append(img, checkBadge);
+      const anglePill = (!isSel && vars.length > 1)
+        ? el("span", { class: "ref-picker-angle-pill", "aria-hidden": "true" }, `${vars.length}视角`)
+        : null;
+      wrap.append(img, anglePill, checkBadge);
 
       const isBusy = materializingKey === `${gal.id}:${it.id}:${activeVar?.key || ""}`;
       const card = el("button", {
         type: "button",
-        class: "studio-resource-option ref-picker-card" + (isSel ? " is-selected" : "") + (focusedPoseItem?.id === it.id ? " is-focused-pose" : ""),
+        class: "studio-resource-option ref-picker-card is-ext-card" + (isSel ? " is-selected" : "") + (focusedPoseItem?.id === it.id ? " is-focused-pose" : ""),
         "aria-pressed": String(isSel),
         dataset: { extKind: gal.id, assetId: it.id || "" },
         onClick: () => {
