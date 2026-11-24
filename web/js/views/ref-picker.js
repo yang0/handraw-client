@@ -2,16 +2,38 @@ import { api, clear, closeModal, el, localImg, showModal, toast } from "../api.j
 
 export const MAX_REF_IMAGES = 6;
 
-const ASSET_CATEGORIES = [
-  { key: "character", label: "角色" },
-  { key: "prop", label: "道具" },
-  { key: "scene", label: "场景" },
+export const BUILTIN_ASSET_CATEGORIES = [
+  { key: "character", label: "角色", builtin: true },
+  { key: "prop", label: "道具", builtin: true },
+  { key: "scene", label: "场景", builtin: true },
+  { key: "other", label: "其他", builtin: true },
 ];
 
-const ASSET_CATEGORY_LABELS = Object.fromEntries(ASSET_CATEGORIES.map((c) => [c.key, c.label]));
+export async function fetchAssetCategories() {
+  try {
+    const res = await api("GET", "/api/mine/asset-categories");
+    if (Array.isArray(res?.items) && res.items.length) {
+      return res.items;
+    }
+  } catch {}
+  return BUILTIN_ASSET_CATEGORIES.map((c) => ({ ...c }));
+}
 
-function categoryLabel(kind) {
-  return ASSET_CATEGORY_LABELS[kind] || "其他";
+export async function saveAssetCategory({ key = "", label = "" } = {}) {
+  return api("POST", "/api/mine/asset-categories", { key, label });
+}
+
+export async function deleteAssetCategory(key) {
+  return api("DELETE", `/api/mine/asset-categories/${encodeURIComponent(key)}`);
+}
+
+export function assetCategoryLabel(kind, categories = BUILTIN_ASSET_CATEGORIES) {
+  const k = String(kind || "").trim();
+  const hit = (categories || []).find((c) => c.key === k);
+  if (hit) return hit.label;
+  const fallback = BUILTIN_ASSET_CATEGORIES.find((c) => c.key === k);
+  if (fallback) return fallback.label;
+  return k || "其他";
 }
 
 function defaultPasteName(idx = 0) {
@@ -21,7 +43,7 @@ function defaultPasteName(idx = 0) {
   return idx > 0 ? `粘贴参考图 ${stamp}-${idx + 1}` : `粘贴参考图 ${stamp}`;
 }
 
-function fileDisplayName(file, customName, idx, total) {
+export function fileDisplayName(file, customName, idx, total) {
   const cleanCustom = String(customName || "").trim();
   if (cleanCustom) {
     return total > 1 ? `${cleanCustom} ${idx + 1}` : cleanCustom;
@@ -33,7 +55,7 @@ function fileDisplayName(file, customName, idx, total) {
   return raw;
 }
 
-function fileToDataUrl(file) {
+export function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const rd = new FileReader();
     rd.onerror = () => reject(new Error("读取图片失败，请重试"));
@@ -94,7 +116,7 @@ export function bindPageImagePaste(scopeEl, onFiles) {
   return () => document.removeEventListener("paste", onDocPaste);
 }
 
-async function readClipboardImagesViaApi() {
+export async function readClipboardImagesViaApi() {
   if (!navigator.clipboard || typeof navigator.clipboard.read !== "function") {
     return { supported: false, files: [] };
   }
@@ -127,7 +149,7 @@ export async function importTempReferenceFile(file) {
 export async function saveReferenceToAssetLibrary(file, { kind = "character", name = "" } = {}) {
   const dataUrl = await fileToDataUrl(file);
   const res = await api("POST", "/api/mine/assets", {
-    kind: kind || "character",
+    kind: kind || "other",
     name: name || defaultPasteName(),
     dataUrl,
   });
@@ -139,6 +161,7 @@ export async function saveReferenceToAssetLibrary(file, { kind = "character", na
 /**
  * Unified Reference Image Picker Modal aligned with handraw-web:
  * - Pick from 自建图库 (/api/mine/assets, including ~/.handraw-style)
+ * - Dynamic custom asset categories (/api/mine/asset-categories) with inline creation
  * - Pick from 官方图库 (/api/resources/assets built-in pack assets, if present)
  * - Local upload (single or multi-file) with optional save-to-library + category pills
  * - Direct clipboard paste (Ctrl/⌘ + V anywhere in modal, clipboard button, or drag-and-drop)
@@ -156,6 +179,7 @@ export function openReferencePickerModal({
     if (p && !selectedRefs.includes(p)) selectedRefs.push(p);
   }
 
+  let categories = BUILTIN_ASSET_CATEGORIES.map((c) => ({ ...c }));
   let mineItems = [];
   let officialItems = [];
   const itemByPath = new Map();
@@ -163,6 +187,7 @@ export function openReferencePickerModal({
   let activeTab = "mine"; // "mine" | "official" | "upload"
   let activeCategory = "ALL";
   let uploadCategory = "character";
+  let showNewCatForm = false;
   let saveToLibrary = true;
   let isUploading = false;
   let searchQuery = "";
@@ -185,7 +210,7 @@ export function openReferencePickerModal({
   const countEl = el("span", { class: "muted ref-picker-count", role: "status" }, "正在加载自建图库…");
   const searchRow = el("div", { class: "ref-picker-search-row" }, searchInput, countEl);
 
-  const catBar = el("div", { class: "studio-cat-tabs", role: "group", "aria-label": "图库分类筛选" });
+  const catWrap = el("div", { class: "col", style: { gap: "6px", flex: "0 0 auto" } });
   const uploadHost = el("div", { class: "ref-picker-upload-host hidden" });
   const grid = el("div", { class: "studio-resource-grid ref-picker-grid" });
 
@@ -251,6 +276,52 @@ export function openReferencePickerModal({
     return mineItems;
   }
 
+  function createInlineCategoryForm({ onCreated, onCancel }) {
+    const nameIn = el("input", {
+      type: "text",
+      class: "input",
+      placeholder: "输入新分类名（如：角色IP、电商场景）",
+      maxlength: "24",
+      style: { width: "220px", padding: "5px 10px", fontSize: "12.5px" },
+    });
+    const createBtn = el("button", { type: "button", class: "btn btn-sm btn-primary" }, "创建");
+    const submit = async () => {
+      const label = nameIn.value.trim();
+      if (!label) return toast("请输入分类名称");
+      createBtn.disabled = true;
+      try {
+        const res = await saveAssetCategory({ label });
+        if (Array.isArray(res?.items) && res.items.length) {
+          categories = res.items;
+        }
+        const created = res?.category;
+        toast(`已创建分类「${label}」`);
+        onCreated?.(created);
+      } catch (e) {
+        createBtn.disabled = false;
+        toast(e?.message || "创建分类失败");
+      }
+    };
+    createBtn.addEventListener("click", submit);
+    nameIn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) {
+        e.preventDefault();
+        submit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel?.();
+      }
+    });
+    const row = el("div", { class: "ref-picker-new-cat-bar" },
+      el("span", { class: "ref-picker-field-label" }, "新建分类："),
+      nameIn,
+      createBtn,
+      el("button", { type: "button", class: "btn btn-sm", onClick: () => onCancel?.() }, "取消")
+    );
+    queueMicrotask(() => nameIn.focus());
+    return row;
+  }
+
   function renderTabs() {
     clear(topTabsWrap);
     const tabs = [
@@ -273,6 +344,10 @@ export function openReferencePickerModal({
         onClick: () => {
           if (activeTab === t.id) return;
           activeTab = t.id;
+          showNewCatForm = false;
+          if (activeTab === "upload" && activeCategory !== "ALL" && categories.some((c) => c.key === activeCategory)) {
+            uploadCategory = activeCategory;
+          }
           renderTabs();
           renderView();
         },
@@ -339,23 +414,28 @@ export function openReferencePickerModal({
 
   function renderCategoryPills() {
     const pool = currentPool();
-    clear(catBar);
+    clear(catWrap);
+    const knownKeys = new Set(categories.map((c) => c.key));
     const groups = [
       { key: "ALL", label: `全部 (${pool.length})` },
-      ...ASSET_CATEGORIES.map((c) => ({
+      ...categories.map((c) => ({
         key: c.key,
-        label: `${c.label} (${pool.filter((x) => x.kind === c.key).length})`,
+        label: `${c.label} (${pool.filter((x) => (x.kind || "other") === c.key).length})`,
       })),
     ];
-    const otherCount = pool.filter((x) => !ASSET_CATEGORY_LABELS[x.kind]).length;
-    if (otherCount > 0) {
-      groups.push({ key: "other", label: `其他 (${otherCount})` });
+    for (const it of pool) {
+      const k = it.kind || "other";
+      if (!knownKeys.has(k)) {
+        knownKeys.add(k);
+        groups.push({ key: k, label: `${k} (${pool.filter((x) => (x.kind || "other") === k).length})` });
+      }
     }
     if (!groups.some((g) => g.key === activeCategory)) activeCategory = "ALL";
 
+    const pillsRow = el("div", { class: "studio-cat-tabs", role: "group", "aria-label": "图库分类筛选" });
     groups.forEach((g) => {
       const active = activeCategory === g.key;
-      catBar.appendChild(el("button", {
+      pillsRow.appendChild(el("button", {
         type: "button",
         class: "btn btn-sm" + (active ? " btn-primary" : ""),
         "aria-pressed": String(active),
@@ -366,6 +446,36 @@ export function openReferencePickerModal({
         },
       }, g.label));
     });
+
+    if (activeTab === "mine") {
+      pillsRow.appendChild(el("button", {
+        type: "button",
+        class: "btn btn-sm ref-picker-add-cat-btn",
+        onClick: () => {
+          showNewCatForm = !showNewCatForm;
+          renderCategoryPills();
+        },
+      }, "＋ 新建分类"));
+    }
+
+    catWrap.appendChild(pillsRow);
+    if (showNewCatForm && activeTab === "mine") {
+      catWrap.appendChild(createInlineCategoryForm({
+        onCreated: (created) => {
+          showNewCatForm = false;
+          if (created?.key) {
+            activeCategory = created.key;
+            uploadCategory = created.key;
+          }
+          renderCategoryPills();
+          renderGrid();
+        },
+        onCancel: () => {
+          showNewCatForm = false;
+          renderCategoryPills();
+        },
+      }));
+    }
   }
 
   function renderGrid() {
@@ -378,13 +488,10 @@ export function openReferencePickerModal({
     const pool = currentPool();
     const q = searchQuery.trim().toLowerCase();
     const visible = pool.filter((it) => {
-      if (activeCategory === "other") {
-        if (ASSET_CATEGORY_LABELS[it.kind]) return false;
-      } else if (activeCategory !== "ALL" && it.kind !== activeCategory) {
-        return false;
-      }
+      const k = it.kind || "other";
+      if (activeCategory !== "ALL" && k !== activeCategory) return false;
       if (!q) return true;
-      const hay = `${it.id || ""} ${it.name || ""} ${it.nameEn || ""} ${categoryLabel(it.kind)} ${(it.tags || []).join(" ")}`.toLowerCase();
+      const hay = `${it.id || ""} ${it.name || ""} ${it.nameEn || ""} ${assetCategoryLabel(k, categories)} ${(it.tags || []).join(" ")}`.toLowerCase();
       return hay.includes(q);
     });
 
@@ -458,7 +565,7 @@ export function openReferencePickerModal({
         onClick: () => toggleSelectPath(it.image),
       },
         wrap,
-        el("small", { class: "mono" }, `${it.id || "本地"} · ${categoryLabel(it.kind)}`),
+        el("small", { class: "mono" }, `${it.id || "本地"} · ${assetCategoryLabel(it.kind, categories)}`),
         el("strong", null, it.name || it.id || "未命名参考图")
       );
       grid.appendChild(card);
@@ -478,6 +585,7 @@ export function openReferencePickerModal({
   let uploadCatFieldset = null;
   let uploadDropBtn = null;
   let uploadStatusText = null;
+  let showUploadNewCatForm = false;
 
   function syncUploadMetaVisibility() {
     if (uploadMetaRow) uploadMetaRow.classList.toggle("hidden", !saveToLibrary);
@@ -602,9 +710,12 @@ export function openReferencePickerModal({
 
   function renderUploadPanel() {
     clear(uploadHost);
+    if (!categories.some((c) => c.key === uploadCategory)) {
+      uploadCategory = "other";
+    }
     const catName = `ref-upload-cat-${Date.now()}`;
     const catPillsWrap = el("div", { class: "ref-picker-cat-pills" });
-    ASSET_CATEGORIES.forEach((c) => {
+    categories.forEach((c) => {
       const radio = el("input", {
         type: "radio",
         name: catName,
@@ -627,10 +738,31 @@ export function openReferencePickerModal({
       });
       catPillsWrap.appendChild(pill);
     });
+    catPillsWrap.appendChild(el("button", {
+      type: "button",
+      class: "btn btn-sm ref-picker-add-cat-btn",
+      onClick: () => {
+        showUploadNewCatForm = !showUploadNewCatForm;
+        renderUploadPanel();
+      },
+    }, "＋ 新建分类"));
 
     uploadCatFieldset = el("fieldset", { class: "ref-picker-cat-fieldset" },
       el("legend", null, "归入自建图库分类"),
-      catPillsWrap
+      catPillsWrap,
+      showUploadNewCatForm
+        ? createInlineCategoryForm({
+            onCreated: (created) => {
+              showUploadNewCatForm = false;
+              if (created?.key) uploadCategory = created.key;
+              renderUploadPanel();
+            },
+            onCancel: () => {
+              showUploadNewCatForm = false;
+              renderUploadPanel();
+            },
+          })
+        : null
     );
 
     uploadMetaRow = el("div", { class: "ref-picker-upload-meta" },
@@ -694,7 +826,7 @@ export function openReferencePickerModal({
   function renderView() {
     const isUpload = activeTab === "upload";
     searchRow.classList.toggle("hidden", isUpload);
-    catBar.classList.toggle("hidden", isUpload);
+    catWrap.classList.toggle("hidden", isUpload);
     grid.classList.toggle("hidden", isUpload);
     uploadHost.classList.toggle("hidden", !isUpload);
 
@@ -718,7 +850,7 @@ export function openReferencePickerModal({
     localFileInput,
     topBar,
     searchRow,
-    catBar,
+    catWrap,
     uploadHost,
     grid,
     selectedBar
@@ -744,11 +876,13 @@ export function openReferencePickerModal({
   renderTabs();
   renderView();
 
-  // Hydrate自建图库 & 官方图库 asynchronously without blocking modal open.
+  // Hydrate categories, 自建图库 & 官方图库 asynchronously without blocking modal open.
   Promise.all([
+    fetchAssetCategories(),
     api("GET", "/api/mine/assets").catch(() => ({ items: [] })),
     api("GET", "/api/resources/assets").catch(() => ({ items: [] })),
-  ]).then(([mineRes, packRes]) => {
+  ]).then(([cats, mineRes, packRes]) => {
+    if (Array.isArray(cats) && cats.length) categories = cats;
     const mMap = new Map();
     for (const a of (mineRes?.items || [])) {
       if (!a?.image) continue;

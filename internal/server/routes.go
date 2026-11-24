@@ -53,7 +53,10 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /files/dsh-client/{id}", s.dshClientFile)
 	m.HandleFunc("GET /files/market-icon", s.marketIcon)
 
-	// my styles / layouts / recipes
+	// my styles / layouts / recipes / custom asset categories
+	m.HandleFunc("GET /api/mine/asset-categories", s.h(s.mineAssetCategoriesList))
+	m.HandleFunc("POST /api/mine/asset-categories", s.h(s.mineAssetCategorySave))
+	m.HandleFunc("DELETE /api/mine/asset-categories/{key}", s.h(s.mineAssetCategoryDelete))
 	m.HandleFunc("GET /api/mine/{kind}", s.h(s.mineList))
 	m.HandleFunc("POST /api/mine/{kind}", s.h(s.minePut))
 	m.HandleFunc("DELETE /api/mine/{kind}/{id}", s.h(s.mineDelete))

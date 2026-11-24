@@ -1210,6 +1210,13 @@ export async function renderChat(root, ctx, params = {}) {
   if (params.directPrompt !== undefined) {
     activeSession().data.directPrompt = Boolean(params.directPrompt);
   }
+  if (Array.isArray(params.refs) && params.refs.length) {
+    const merged = [...draftRefs];
+    for (const rp of params.refs) {
+      if (rp && !merged.includes(rp) && merged.length < MAX_REF_IMAGES) merged.push(rp);
+    }
+    draftRefs = merged;
+  }
   if (params.prompt) {
     inputEl.value = params.prompt;
     autoResize();

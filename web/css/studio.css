@@ -3929,6 +3929,25 @@ dialog.modal-ref-picker::backdrop {
   flex-wrap: wrap;
   gap: 6px;
 }
+.ref-picker-add-cat-btn {
+  border-style: dashed !important;
+  color: var(--accent) !important;
+  border-color: var(--accent) !important;
+  background: transparent !important;
+}
+.ref-picker-add-cat-btn:hover {
+  background: var(--accent-soft, rgba(209, 75, 40, 0.08)) !important;
+}
+.ref-picker-new-cat-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+}
 .ref-picker-cat-pill {
   position: relative;
   cursor: pointer;

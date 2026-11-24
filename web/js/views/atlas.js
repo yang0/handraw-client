@@ -1,5 +1,16 @@
 import { api, clear, closeModal, copyText, el, galleryImg, localImg, openURL, packImg, showModal, toast, toWebp } from "../api.js";
 import { buildGroupedAIModelSelect } from "./create.js";
+import {
+  assetCategoryLabel,
+  bindPageImagePaste,
+  deleteAssetCategory,
+  extractClipboardImageFiles,
+  fetchAssetCategories,
+  fileDisplayName,
+  fileToDataUrl,
+  readClipboardImagesViaApi,
+  saveAssetCategory,
+} from "./ref-picker.js";
 import { masonry } from "../masonry.js";
 
 const BUILTIN_GALLERY_IDS = new Set(["styles", "layouts", "colors", "tones", "characters", "props", "scenes"]);
@@ -131,7 +142,7 @@ export async function renderAtlas(root, ctx, params = {}) {
     else if (state.tab === "layouts") await drawLayouts(stage, ctx);
     else if (state.tab === "colors") await drawColors(stage, ctx);
     else if (state.tab === "tones") await drawTones(stage, ctx);
-    else if (state.tab === "assets") await drawAssets(stage);
+    else if (state.tab === "assets") await drawAssets(stage, ctx);
     else if (extraById.has(state.tab)) await drawExtensionGallery(stage, extraById.get(state.tab), ctx);
     else if (state.tab === "dice") await drawDice(stage, ctx);
   }
@@ -362,74 +373,770 @@ async function drawTones(stage, ctx) {
   });
 }
 
-async function drawAssets(stage) {
-  const [packRes, mineRes] = await Promise.all([
+const ASSET_SIZE_KEY = "handraw:atlas:assetSize";
+const ASSET_SIZES = [
+  ["sm", "紧凑"],
+  ["md", "标准"],
+  ["lg", "大图"],
+];
+
+function getAssetGridSize() {
+  try {
+    const v = localStorage.getItem(ASSET_SIZE_KEY);
+    if (ASSET_SIZES.some(([k]) => k === v)) return v;
+  } catch {}
+  return "md";
+}
+
+function setAssetGridSize(size) {
+  try { localStorage.setItem(ASSET_SIZE_KEY, size); } catch {}
+}
+
+async function drawAssets(stage, ctx) {
+  const [categoriesList, packRes, mineRes] = await Promise.all([
+    fetchAssetCategories(),
     api("GET", "/api/resources/assets").catch(() => ({ items: [] })),
     api("GET", "/api/mine/assets").catch(() => ({ items: [] })),
   ]);
+  let categories = categoriesList;
+  const mineById = new Map();
+  for (const a of (mineRes.items || [])) {
+    if (!a?.id) continue;
+    mineById.set(a.id, { ...a, source: a.source || "local" });
+  }
   const map = new Map();
-  for (const a of [...(packRes.items || []), ...(mineRes.items || [])]) {
-    if (a.id) map.set(a.id, a);
+  for (const a of (packRes.items || [])) {
+    if (!a?.id) continue;
+    if (mineById.has(a.id)) {
+      map.set(a.id, mineById.get(a.id));
+    } else {
+      map.set(a.id, { ...a, source: a.source || "official" });
+    }
+  }
+  for (const [id, a] of mineById.entries()) {
+    if (!map.has(id)) map.set(id, a);
   }
   const items = Array.from(map.values());
-  const addBtn = el("button", {
-    type: "button",
-    class: "btn btn-primary btn-sm",
-    onClick: () => openAssetDialog(() => { clear(stage); drawAssets(stage); }),
-  }, "+ 添加角色/道具/场景参考图");
-  drawCatalog(stage, {
-    kind: "assets", title: "自建图库", allLabel: "全部图库", items,
-    groupKey: (a) => a.kind, groupLabel: (a) => assetNames[a.kind] || "其他",
-    groups: Object.entries(assetNames).map(([key, label]) => ({ key, label })),
-    before: el("div", { class: "row", style: { marginBottom: "12px", justifyContent: "space-between" } },
-      el("span", { class: "muted" }, "支持本地图库与 Skill ~/.handraw-style 图库同步读取"),
-      addBtn
-    ),
-    empty: "还没有参考图",
-    card: (a) => el("div", { class: "style-card" },
-      el("img", { class: "style-thumb", src: a.image ? localImg(a.image) : "/img/logo.svg", alt: a.name, loading: "lazy" }),
-      el("div", { class: "style-body" },
-        el("div", { class: "style-code" }, `${a.id} · ${a.kind}`),
-        el("div", { class: "style-name" }, a.name)
+
+  const reload = () => {
+    clear(stage);
+    drawAssets(stage, ctx);
+  };
+
+  let gridSize = getAssetGridSize();
+  let showNewCatForm = false;
+  let editingCatKey = "";
+
+  const validKeys = new Set(categories.map((c) => c.key));
+  for (const it of items) {
+    if (it.kind) validKeys.add(it.kind);
+  }
+  if (state.groups.assets && !validKeys.has(state.groups.assets)) {
+    state.groups.assets = "";
+  }
+
+  const sidebar = el("aside", { class: "atlas-groups asset-lib-sidebar", "aria-label": "自建图库分类" });
+  const mainArea = el("section", { class: "asset-lib-main", "aria-label": "自建图库列表" });
+  const toolbarHost = el("div", { class: "asset-lib-toolbar" });
+  const grid = el("div", { class: `asset-lib-grid is-size-${gridSize}` });
+  mainArea.append(toolbarHost, grid);
+
+  const wrap = el("div", { class: "atlas-wrap asset-lib-wrap" }, sidebar, mainArea);
+  stage.appendChild(wrap);
+
+  const countForCat = (key) => {
+    if (!key) return items.length;
+    return items.filter((a) => (a.kind || "other") === key).length;
+  };
+
+  const openQuickCreate = (initialFiles = []) => {
+    const defaultKind = state.groups.assets || "character";
+    openAssetDialog({
+      categories,
+      defaultKind,
+      initialFiles,
+      onCategoriesChanged: (next) => { categories = next; },
+      onSaved: reload,
+    });
+  };
+
+  const renderSidebar = () => {
+    clear(sidebar);
+    const makeNavItem = (cat, isAll = false) => {
+      const key = isAll ? "" : cat.key;
+      const label = isAll ? "全部图库" : cat.label;
+      const active = state.groups.assets === key;
+      const count = countForCat(key);
+
+      if (!isAll && !cat.builtin && editingCatKey === key) {
+        const renameIn = el("input", {
+          type: "text",
+          class: "input asset-cat-inline-input",
+          value: cat.label,
+          maxlength: "24",
+          "aria-label": `重命名分类 ${cat.label}`,
+        });
+        const saveRename = async () => {
+          const nextLabel = renameIn.value.trim();
+          if (!nextLabel) return toast("分类名称不能为空");
+          try {
+            const res = await saveAssetCategory({ key, label: nextLabel });
+            if (Array.isArray(res?.items)) categories = res.items;
+            editingCatKey = "";
+            toast(`已重命名为「${nextLabel}」`);
+            renderSidebar();
+            renderMain();
+          } catch (e) { toast(e?.message || "重命名失败"); }
+        };
+        renameIn.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); saveRename(); }
+          else if (e.key === "Escape") { e.preventDefault(); editingCatKey = ""; renderSidebar(); }
+        });
+        queueMicrotask(() => { renameIn.focus(); renameIn.select(); });
+        return el("div", { class: "asset-cat-edit-row" },
+          renameIn,
+          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: saveRename }, "存"),
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => { editingCatKey = ""; renderSidebar(); } }, "消")
+        );
+      }
+
+      const mainBtn = el("button", {
+        type: "button",
+        class: "group-btn asset-cat-btn" + (active ? " active" : ""),
+        dataset: { group: key },
+        "aria-pressed": String(active),
+        onClick: () => {
+          state.groups.assets = key;
+          renderSidebar();
+          renderMain();
+        },
+      },
+        el("span", { class: "asset-cat-name" }, label),
+        el("span", { class: "muted asset-cat-count" }, String(count))
+      );
+
+      if (isAll || cat.builtin) return mainBtn;
+
+      const actions = el("div", { class: "asset-cat-actions" },
+        el("button", {
+          type: "button",
+          class: "asset-cat-icon-btn",
+          title: `重命名分类「${cat.label}」`,
+          "aria-label": `重命名分类 ${cat.label}`,
+          onClick: (e) => {
+            e.stopPropagation();
+            editingCatKey = key;
+            renderSidebar();
+          },
+        }, "✎"),
+        el("button", {
+          type: "button",
+          class: "asset-cat-icon-btn is-danger",
+          title: `删除分类「${cat.label}」`,
+          "aria-label": `删除分类 ${cat.label}`,
+          onClick: async (e) => {
+            e.stopPropagation();
+            const msg = count > 0
+              ? `删除自定义分类「${cat.label}」？该分类下的 ${count} 张参考图将自动归入「其他」，不会删除图片。`
+              : `删除自定义分类「${cat.label}」？`;
+            if (!window.confirm(msg)) return;
+            try {
+              await deleteAssetCategory(key);
+              if (state.groups.assets === key) state.groups.assets = "";
+              toast(count > 0 ? `已删除分类「${cat.label}」，${count} 张图片已归入「其他」` : `已删除分类「${cat.label}」`);
+              reload();
+            } catch (err) { toast(err?.message || "删除分类失败"); }
+          },
+        }, "×")
+      );
+      return el("div", { class: "asset-cat-row" + (active ? " is-active" : "") }, mainBtn, actions);
+    };
+
+    sidebar.appendChild(makeNavItem(null, true));
+    const builtins = categories.filter((c) => c.builtin);
+    const customs = categories.filter((c) => !c.builtin);
+    builtins.forEach((c) => sidebar.appendChild(makeNavItem(c)));
+
+    if (customs.length) {
+      sidebar.appendChild(el("div", { class: "asset-cat-divider" }, "自定义分类"));
+      customs.forEach((c) => sidebar.appendChild(makeNavItem(c)));
+    }
+
+    if (showNewCatForm) {
+      const newIn = el("input", {
+        type: "text",
+        class: "input asset-cat-inline-input",
+        placeholder: "新分类名（如：角色IP）",
+        maxlength: "24",
+        "aria-label": "新建自建图库分类名称",
+      });
+      const submitNew = async () => {
+        const label = newIn.value.trim();
+        if (!label) return toast("请输入分类名称");
+        try {
+          const res = await saveAssetCategory({ label });
+          if (Array.isArray(res?.items)) categories = res.items;
+          showNewCatForm = false;
+          if (res?.category?.key) state.groups.assets = res.category.key;
+          toast(`已创建分类「${label}」`);
+          renderSidebar();
+          renderMain();
+        } catch (err) { toast(err?.message || "创建分类失败"); }
+      };
+      newIn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); submitNew(); }
+        else if (e.key === "Escape") { e.preventDefault(); showNewCatForm = false; renderSidebar(); }
+      });
+      queueMicrotask(() => newIn.focus());
+      sidebar.appendChild(el("div", { class: "asset-cat-create-box" },
+        newIn,
+        el("div", { class: "row", style: { gap: "6px", justifyContent: "flex-end" } },
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => { showNewCatForm = false; renderSidebar(); } }, "取消"),
+          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: submitNew }, "创建")
+        )
+      ));
+    } else {
+      sidebar.appendChild(el("button", {
+        type: "button",
+        class: "asset-cat-add-btn",
+        onClick: () => {
+          showNewCatForm = true;
+          renderSidebar();
+        },
+      }, "＋ 新建分类"));
+    }
+  };
+
+  const openDetail = (asset) => {
+    const catName = assetCategoryLabel(asset.kind, categories);
+    const isLocal = asset.source !== "skill" && asset.source !== "official";
+    const sourceLabel = asset.source === "skill" ? "Skill 图库 (~/.handraw-style)" : (asset.source === "official" ? "内置图库" : "本地自建");
+    const body = el("div", { class: "asset-lightbox" },
+      el("div", { class: "asset-lightbox-stage" },
+        el("img", { src: asset.image ? localImg(asset.image) : "/img/logo.svg", alt: asset.name })
+      ),
+      el("div", { class: "asset-lightbox-meta" },
+        el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+          el("span", { class: "badge badge-accent" }, catName),
+          el("span", { class: "badge mono" }, asset.id),
+          el("span", { class: "badge" }, sourceLabel)
+        ),
+        el("p", { class: "muted", style: { margin: "4px 0 0", fontSize: "12.5px" } }, "作为纯参考图（垫图）带入生图或会话，保持角色、道具与场景跨图特征一致。")
       )
-    ),
+    );
+    const footer = [
+      isLocal
+        ? el("button", {
+            type: "button",
+            class: "btn",
+            onClick: () => {
+              closeModal();
+              openAssetDialog({
+                initial: asset,
+                categories,
+                onCategoriesChanged: (next) => { categories = next; },
+                onSaved: reload,
+              });
+            },
+          }, "编辑")
+        : null,
+      isLocal
+        ? el("button", {
+            type: "button",
+            class: "btn",
+            style: { color: "var(--err, #b83227)" },
+            onClick: async () => {
+              if (!window.confirm(`删除参考图「${asset.name}」？`)) return;
+              try {
+                await api("DELETE", `/api/mine/assets/${encodeURIComponent(asset.id)}`);
+                closeModal();
+                toast("已删除参考图");
+                reload();
+              } catch (e) { toast(e?.message || "删除失败"); }
+            },
+          }, "删除")
+        : null,
+      el("button", {
+        type: "button",
+        class: "btn",
+        onClick: () => {
+          closeModal();
+          ctx.go("chat", { refs: [asset.image] });
+        },
+      }, "去会话"),
+      el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: () => {
+          closeModal();
+          ctx.go("create", { refs: [asset.image] });
+        },
+      }, "去生图"),
+    ].filter(Boolean);
+    showModal(asset.name || asset.id, body, footer, { className: "modal-asset-detail" });
+  };
+
+  const renderMain = () => {
+    const query = state.q.trim().toLowerCase();
+    const activeCat = state.groups.assets;
+    const activeTitle = activeCat ? assetCategoryLabel(activeCat, categories) : "全部自建图库";
+    const visible = items.filter((a) => {
+      const k = a.kind || "other";
+      if (activeCat && k !== activeCat) return false;
+      if (!query) return true;
+      const hay = `${a.id || ""} ${a.name || ""} ${a.nameEn || ""} ${assetCategoryLabel(k, categories)} ${(a.tags || []).join(" ")}`.toLowerCase();
+      return hay.includes(query);
+    });
+
+    clear(toolbarHost);
+    const sizeSwitch = el("div", { class: "asset-size-switch", role: "group", "aria-label": "图库卡片尺寸" },
+      ...ASSET_SIZES.map(([sz, lbl]) => el("button", {
+        type: "button",
+        class: "asset-size-btn" + (gridSize === sz ? " is-active" : ""),
+        "aria-pressed": String(gridSize === sz),
+        onClick: () => {
+          gridSize = sz;
+          setAssetGridSize(sz);
+          grid.className = `asset-lib-grid is-size-${gridSize}`;
+          sizeSwitch.querySelectorAll(".asset-size-btn").forEach((b, idx) => {
+            const on = ASSET_SIZES[idx][0] === sz;
+            b.classList.toggle("is-active", on);
+            b.setAttribute("aria-pressed", String(on));
+          });
+        },
+      }, lbl))
+    );
+
+    toolbarHost.append(
+      el("div", { class: "asset-lib-heading" },
+        el("div", { class: "row", style: { gap: "8px", alignItems: "baseline", flexWrap: "wrap" } },
+          el("h2", { class: "asset-lib-title" }, activeTitle),
+          el("span", { class: "badge" }, `${visible.length} 张`)
+        ),
+        el("span", { class: "muted asset-lib-hint" }, "支持拖拽图片至此或按 Ctrl/⌘ + V 快速入库，自动同步读取 ~/.handraw-style 图库")
+      ),
+      el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+        sizeSwitch,
+        el("button", {
+          type: "button",
+          class: "btn btn-primary btn-sm",
+          onClick: () => openQuickCreate(),
+        }, "＋ 上传 / 粘贴图片")
+      )
+    );
+
+    clear(grid);
+    grid.className = `asset-lib-grid is-size-${gridSize}`;
+
+    if (!visible.length) {
+      grid.appendChild(el("div", { class: "asset-lib-empty" },
+        el("div", { class: "asset-lib-empty-ico", "aria-hidden": "true" }, "🖼️"),
+        el("strong", null, query ? "没有找到匹配的参考图" : `「${activeTitle}」还没有参考图`),
+        el("p", { class: "muted" }, query
+          ? "可以换个关键词搜索，或切换左侧其他分类查看。"
+          : "把常用角色、道具、场景或品牌元素存进自建图库，在「生图」和「会话」中点击 + 即可随时垫图复用。"),
+        !query
+          ? el("div", { class: "row", style: { gap: "8px", justifyContent: "center", flexWrap: "wrap" } },
+              el("button", {
+                type: "button",
+                class: "btn btn-primary btn-sm",
+                onClick: () => openQuickCreate(),
+              }, "＋ 选择本地图片上传"),
+              el("button", {
+                type: "button",
+                class: "btn btn-sm",
+                onClick: async () => {
+                  try {
+                    const res = await readClipboardImagesViaApi();
+                    if (res.supported && res.files.length) {
+                      openQuickCreate(res.files);
+                      return;
+                    }
+                  } catch {}
+                  toast("请直接按 Ctrl/⌘ + V 粘贴剪贴板图片");
+                },
+              }, "📋 粘贴剪贴板图片")
+            )
+          : null
+      ));
+      return;
+    }
+
+    visible.forEach((a) => {
+      const catLabel = assetCategoryLabel(a.kind, categories);
+      const isLocal = a.source !== "skill" && a.source !== "official";
+      const srcBadge = a.source === "skill"
+        ? el("span", { class: "asset-card-src-badge" }, "Skill")
+        : (a.source === "official" ? el("span", { class: "asset-card-src-badge" }, "内置") : null);
+
+      const media = el("button", {
+        type: "button",
+        class: "asset-card-media",
+        "aria-label": `预览参考图 ${a.name || a.id}`,
+        onClick: () => openDetail(a),
+      },
+        el("img", {
+          src: a.image ? localImg(a.image) : "/img/logo.svg",
+          alt: a.name || a.id || "参考图",
+          loading: "lazy",
+        }),
+        el("span", { class: "asset-card-cat-badge" }, catLabel),
+        srcBadge
+      );
+
+      const actions = el("div", { class: "asset-card-actions" },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: () => ctx.go("create", { refs: [a.image] }),
+        }, "去生图"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => ctx.go("chat", { refs: [a.image] }),
+        }, "去会话"),
+        isLocal
+          ? el("button", {
+              type: "button",
+              class: "btn btn-sm asset-card-icon-act",
+              title: `编辑 ${a.name}`,
+              "aria-label": `编辑 ${a.name}`,
+              onClick: () => openAssetDialog({
+                initial: a,
+                categories,
+                onCategoriesChanged: (next) => { categories = next; },
+                onSaved: reload,
+              }),
+            }, "编辑")
+          : null,
+        isLocal
+          ? el("button", {
+              type: "button",
+              class: "btn btn-sm asset-card-icon-act is-danger",
+              title: `删除 ${a.name}`,
+              "aria-label": `删除 ${a.name}`,
+              onClick: async () => {
+                if (!window.confirm(`删除参考图「${a.name}」？`)) return;
+                try {
+                  await api("DELETE", `/api/mine/assets/${encodeURIComponent(a.id)}`);
+                  toast("已删除参考图");
+                  reload();
+                } catch (e) { toast(e?.message || "删除失败"); }
+              },
+            }, "删除")
+          : null
+      );
+
+      grid.appendChild(el("article", { class: "asset-card", dataset: { assetId: a.id || "" } },
+        media,
+        el("div", { class: "asset-card-body" },
+          el("div", { class: "asset-card-name", title: a.name }, a.name || "未命名参考图"),
+          el("div", { class: "asset-card-code mono" }, a.id)
+        ),
+        actions
+      ));
+    });
+  };
+
+  // Page-level drag-and-drop and Ctrl/⌘ + V paste directly into Self-Built Asset Library.
+  mainArea.addEventListener("dragover", (e) => {
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      mainArea.classList.add("is-dragover");
+    }
   });
+  mainArea.addEventListener("dragleave", (e) => {
+    if (!mainArea.contains(e.relatedTarget)) mainArea.classList.remove("is-dragover");
+  });
+  mainArea.addEventListener("drop", (e) => {
+    mainArea.classList.remove("is-dragover");
+    const files = Array.from(e.dataTransfer?.files || []).filter((f) => f.type.startsWith("image/"));
+    if (files.length) {
+      e.preventDefault();
+      openQuickCreate(files);
+    }
+  });
+  bindPageImagePaste(mainArea, (files) => {
+    openQuickCreate(files);
+  });
+
+  renderSidebar();
+  renderMain();
 }
 
-function openAssetDialog(onSaved) {
-  const nameIn = el("input", { class: "input", placeholder: "名称，例如：小橘猫店员" });
-  const kindSel = el("select", { class: "select" },
-    el("option", { value: "character" }, "角色"),
-    el("option", { value: "prop" }, "道具"),
-    el("option", { value: "scene" }, "场景")
-  );
-  const fileIn = el("input", { type: "file", accept: "image/*" });
-  let dataUrl = "";
-  fileIn.addEventListener("change", () => {
-    const f = fileIn.files?.[0];
-    if (!f) return;
-    const rd = new FileReader();
-    rd.onload = () => { dataUrl = rd.result; };
-    rd.readAsDataURL(f);
+function openAssetDialog({ initial = null, categories = [], defaultKind = "character", initialFiles = [], onCategoriesChanged, onSaved } = {}) {
+  const isEdit = Boolean(initial?.id);
+  let cats = categories.length ? [...categories] : [
+    { key: "character", label: "角色", builtin: true },
+    { key: "prop", label: "道具", builtin: true },
+    { key: "scene", label: "场景", builtin: true },
+    { key: "other", label: "其他", builtin: true },
+  ];
+  let chosenKind = initial?.kind || defaultKind || "character";
+  if (!cats.some((c) => c.key === chosenKind)) chosenKind = "other";
+
+  let queuedFiles = []; // [{ file, previewUrl, name }]
+  let showInlineNewCat = false;
+  let isSaving = false;
+
+  const nameIn = el("input", {
+    class: "input",
+    value: initial?.name || "",
+    placeholder: isEdit ? "资产名称" : "名称（选填，多图时作为统一前缀，留空默认用文件名）",
   });
-  showModal("新建自建图库资产", el("div", null,
-    el("div", { class: "field" }, el("label", null, "分类"), kindSel),
-    el("div", { class: "field" }, el("label", null, "名称"), nameIn),
-    el("div", { class: "field" }, el("label", null, "参考图片"), fileIn)
-  ), [
-    el("button", {
+  const fileIn = el("input", { type: "file", accept: "image/*", multiple: !isEdit, class: "hidden" });
+
+  const previewHost = el("div", { class: "asset-modal-previews" });
+  const catHost = el("div", { class: "col", style: { gap: "6px" } });
+
+  const addFiles = (files) => {
+    const imgs = Array.from(files || []).filter((f) => {
+      const t = String(f?.type || "").toLowerCase();
+      return t.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(f?.name || "");
+    });
+    if (!imgs.length) return;
+    if (isEdit) {
+      queuedFiles.forEach((q) => URL.revokeObjectURL(q.previewUrl));
+      queuedFiles = [{ file: imgs[0], previewUrl: URL.createObjectURL(imgs[0]), name: imgs[0].name }];
+    } else {
+      imgs.forEach((f) => {
+        queuedFiles.push({ file: f, previewUrl: URL.createObjectURL(f), name: f.name });
+      });
+    }
+    renderPreviews();
+  };
+
+  fileIn.addEventListener("change", () => {
+    addFiles(fileIn.files);
+    fileIn.value = "";
+  });
+
+  const renderPreviews = () => {
+    clear(previewHost);
+    if (queuedFiles.length) {
+      const strip = el("div", { class: "asset-modal-preview-grid" });
+      queuedFiles.forEach((q, idx) => {
+        strip.appendChild(el("div", { class: "asset-modal-preview-item" },
+          el("img", { src: q.previewUrl, alt: q.name || `预览 ${idx + 1}` }),
+          el("button", {
+            type: "button",
+            class: "asset-modal-preview-del",
+            "aria-label": `移除待上传图片 ${idx + 1}`,
+            onClick: () => {
+              URL.revokeObjectURL(q.previewUrl);
+              queuedFiles.splice(idx, 1);
+              renderPreviews();
+            },
+          }, "×")
+        ));
+      });
+      previewHost.appendChild(strip);
+      previewHost.appendChild(el("span", { class: "muted", style: { fontSize: "12px" } },
+        isEdit ? "已选择新图片，保存后将替换原参考图" : `已待上传 ${queuedFiles.length} 张图片，可继续添加或按 Ctrl/⌘ + V 粘贴`));
+    } else if (isEdit && initial?.image) {
+      previewHost.appendChild(el("div", { class: "asset-modal-preview-grid" },
+        el("div", { class: "asset-modal-preview-item" },
+          el("img", { src: localImg(initial.image), alt: initial.name || "当前参考图" })
+        )
+      ));
+      previewHost.appendChild(el("span", { class: "muted", style: { fontSize: "12px" } }, "保留当前参考图，也可点击上方按钮或粘贴新图替换"));
+    }
+  };
+
+  const renderCats = () => {
+    clear(catHost);
+    const groupName = `atlas-asset-cat-${Date.now()}`;
+    const pillsRow = el("div", { class: "ref-picker-cat-pills" });
+    cats.forEach((c) => {
+      const radio = el("input", {
+        type: "radio",
+        name: groupName,
+        value: c.key,
+        checked: chosenKind === c.key,
+        class: "sr-only",
+      });
+      const pill = el("label", {
+        class: "btn btn-sm ref-picker-cat-pill" + (chosenKind === c.key ? " btn-primary is-active" : ""),
+      }, radio, el("span", null, c.label));
+      radio.addEventListener("change", () => {
+        if (!radio.checked) return;
+        chosenKind = c.key;
+        renderCats();
+      });
+      pillsRow.appendChild(pill);
+    });
+    pillsRow.appendChild(el("button", {
       type: "button",
-      class: "btn btn-primary",
-      onClick: async () => {
-        try {
-          await api("POST", "/api/mine/assets", { kind: kindSel.value, name: nameIn.value, dataUrl });
-          closeModal();
-          toast("已添加到个人图库");
-          onSaved();
-        } catch (e) { toast(e.message); }
+      class: "btn btn-sm ref-picker-add-cat-btn",
+      onClick: () => {
+        showInlineNewCat = !showInlineNewCat;
+        renderCats();
       },
-    }, "保存"),
-  ]);
+    }, "＋ 新建分类"));
+
+    catHost.appendChild(el("fieldset", { class: "ref-picker-cat-fieldset" },
+      el("legend", null, "归入分类"),
+      pillsRow
+    ));
+
+    if (showInlineNewCat) {
+      const catIn = el("input", {
+        type: "text",
+        class: "input",
+        placeholder: "新分类名（如：角色IP、电商主图）",
+        maxlength: "24",
+        style: { width: "220px", padding: "5px 10px", fontSize: "12.5px" },
+      });
+      const doCreate = async () => {
+        const label = catIn.value.trim();
+        if (!label) return toast("请输入分类名称");
+        try {
+          const res = await saveAssetCategory({ label });
+          if (Array.isArray(res?.items)) {
+            cats = res.items;
+            onCategoriesChanged?.(cats);
+          }
+          if (res?.category?.key) chosenKind = res.category.key;
+          showInlineNewCat = false;
+          toast(`已创建分类「${label}」`);
+          renderCats();
+        } catch (e) { toast(e?.message || "创建分类失败"); }
+      };
+      catIn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); doCreate(); }
+        else if (e.key === "Escape") { e.preventDefault(); showInlineNewCat = false; renderCats(); }
+      });
+      queueMicrotask(() => catIn.focus());
+      catHost.appendChild(el("div", { class: "ref-picker-new-cat-bar" },
+        el("span", { class: "ref-picker-field-label" }, "新建分类："),
+        catIn,
+        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: doCreate }, "创建"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => { showInlineNewCat = false; renderCats(); } }, "取消")
+      ));
+    }
+  };
+
+  const dropzone = el("div", { class: "ref-picker-dropzone asset-modal-dropzone" },
+    el("div", { class: "ref-picker-dropzone-title" }, isEdit ? "点击更换图片、拖拽或 Ctrl/⌘ + V 粘贴替换" : "选择本地图片（可多选）、拖拽至此，或按 Ctrl/⌘ + V 粘贴"),
+    el("div", { class: "row", style: { gap: "8px", justifyContent: "center", flexWrap: "wrap" } },
+      el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => fileIn.click() }, isEdit ? "更换图片" : "＋ 选择本地图片"),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: async () => {
+          try {
+            const res = await readClipboardImagesViaApi();
+            if (res.supported && res.files.length) {
+              addFiles(res.files);
+              return;
+            }
+          } catch {}
+          toast("请直接按 Ctrl/⌘ + V 粘贴剪贴板图片");
+        },
+      }, "📋 读取剪贴板图片")
+    ),
+    previewHost
+  );
+  dropzone.addEventListener("dragover", (e) => {
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      dropzone.classList.add("is-dragover");
+    }
+  });
+  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("is-dragover"));
+  dropzone.addEventListener("drop", (e) => {
+    dropzone.classList.remove("is-dragover");
+    if (e.dataTransfer?.files?.length) {
+      e.preventDefault();
+      addFiles(e.dataTransfer.files);
+    }
+  });
+
+  const saveBtn = el("button", {
+    type: "button",
+    class: "btn btn-primary",
+    onClick: async () => {
+      if (isSaving) return;
+      if (isEdit) {
+        const finalName = nameIn.value.trim();
+        if (!finalName) return toast("名称不能为空");
+        isSaving = true;
+        saveBtn.disabled = true;
+        saveBtn.textContent = "保存中…";
+        try {
+          const payload = { id: initial.id, kind: chosenKind, name: finalName };
+          if (queuedFiles.length) {
+            payload.dataUrl = await fileToDataUrl(queuedFiles[0].file);
+          }
+          await api("POST", "/api/mine/assets", payload);
+          closeModal();
+          toast("已更新参考图资产");
+          onSaved?.();
+        } catch (e) {
+          isSaving = false;
+          saveBtn.disabled = false;
+          saveBtn.textContent = "保存修改";
+          toast(e?.message || "保存失败");
+        }
+        return;
+      }
+
+      if (!queuedFiles.length) {
+        return toast("请先选择、拖入或粘贴至少一张参考图片");
+      }
+      isSaving = true;
+      saveBtn.disabled = true;
+      saveBtn.textContent = `正在保存 (${queuedFiles.length})…`;
+      try {
+        const customPrefix = nameIn.value.trim();
+        for (let i = 0; i < queuedFiles.length; i++) {
+          const f = queuedFiles[i].file;
+          const dataUrl = await fileToDataUrl(f);
+          const name = fileDisplayName(f, customPrefix, i, queuedFiles.length);
+          await api("POST", "/api/mine/assets", { kind: chosenKind, name, dataUrl });
+        }
+        closeModal();
+        toast(queuedFiles.length > 1 ? `已添加 ${queuedFiles.length} 张参考图到自建图库` : "已添加到自建图库");
+        onSaved?.();
+      } catch (e) {
+        isSaving = false;
+        saveBtn.disabled = false;
+        saveBtn.textContent = "保存到自建图库";
+        toast(e?.message || "保存失败");
+      }
+    },
+  }, isEdit ? "保存修改" : "保存到自建图库");
+
+  const body = el("div", { class: "col", style: { gap: "12px" } },
+    fileIn,
+    catHost,
+    el("div", { class: "field" }, el("label", null, "名称"), nameIn),
+    dropzone
+  );
+
+  const onModalPaste = (e) => {
+    const files = extractClipboardImageFiles(e);
+    if (!files.length) return;
+    e.preventDefault();
+    addFiles(files);
+  };
+
+  showModal(isEdit ? `编辑参考图 · ${initial.id}` : "添加参考图到自建图库", body, [
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+    saveBtn,
+  ], {
+    className: "modal-provider",
+    onClose: () => {
+      document.removeEventListener("paste", onModalPaste);
+      queuedFiles.forEach((q) => URL.revokeObjectURL(q.previewUrl));
+      queuedFiles = [];
+    },
+  });
+  document.addEventListener("paste", onModalPaste);
+
+  if (initialFiles?.length) addFiles(initialFiles);
+  renderCats();
+  renderPreviews();
 }
 
 const MINE = "__mine";

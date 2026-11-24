@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -111,6 +112,9 @@ func (s *Server) mineList(w http.ResponseWriter, r *http.Request) (any, error) {
 				id, _ := a["id"].(string)
 				if id != "" {
 					seen[id] = true
+				}
+				if _, ok := a["source"]; !ok {
+					a["source"] = "local"
 				}
 				out = append(out, a)
 			}
@@ -415,10 +419,152 @@ func (s *Server) putRecipe(r *http.Request) (any, error) {
 	return map[string]any{"recipe": rec}, nil
 }
 
+type AssetCategory struct {
+	Key     string `json:"key"`
+	Label   string `json:"label"`
+	Builtin bool   `json:"builtin"`
+}
+
+var builtinAssetCategories = []AssetCategory{
+	{Key: "character", Label: "角色", Builtin: true},
+	{Key: "prop", Label: "道具", Builtin: true},
+	{Key: "scene", Label: "场景", Builtin: true},
+	{Key: "other", Label: "其他", Builtin: true},
+}
+
+func isBuiltinAssetCategory(key string) bool {
+	for _, c := range builtinAssetCategories {
+		if c.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) listAssetCategories() ([]AssetCategory, []AssetCategory) {
+	all := make([]AssetCategory, 0, len(builtinAssetCategories)+8)
+	all = append(all, builtinAssetCategories...)
+	custom := []AssetCategory{}
+	docs, err := s.DB.ListDocs("asset_category", false)
+	if err == nil {
+		sort.Slice(docs, func(i, j int) bool {
+			if docs[i].UpdatedAt == docs[j].UpdatedAt {
+				return docs[i].ID < docs[j].ID
+			}
+			return docs[i].UpdatedAt < docs[j].UpdatedAt
+		})
+		seen := map[string]bool{}
+		for _, c := range builtinAssetCategories {
+			seen[c.Key] = true
+		}
+		for _, d := range docs {
+			var cat AssetCategory
+			if json.Unmarshal(d.Data, &cat) != nil {
+				cat = AssetCategory{Key: d.ID, Label: d.Name}
+			}
+			cat.Key = strings.TrimSpace(firstStr(cat.Key, d.ID))
+			cat.Label = strings.TrimSpace(firstStr(cat.Label, d.Name))
+			cat.Builtin = false
+			if cat.Key == "" || cat.Label == "" || seen[cat.Key] {
+				continue
+			}
+			seen[cat.Key] = true
+			custom = append(custom, cat)
+			all = append(all, cat)
+		}
+	}
+	return all, custom
+}
+
+func (s *Server) mineAssetCategoriesList(w http.ResponseWriter, r *http.Request) (any, error) {
+	all, custom := s.listAssetCategories()
+	return map[string]any{"items": all, "custom": custom}, nil
+}
+
+func (s *Server) mineAssetCategorySave(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		Key   string `json:"key"`
+		Label string `json:"label"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	label := strings.TrimSpace(body.Label)
+	if label == "" {
+		return nil, bad("分类名称不能为空")
+	}
+	if len([]rune(label)) > 24 {
+		return nil, bad("分类名称最多 24 个字符")
+	}
+	key := strings.TrimSpace(body.Key)
+	if key != "" && isBuiltinAssetCategory(key) {
+		return nil, bad("内置分类不可修改")
+	}
+	all, _ := s.listAssetCategories()
+	for _, c := range all {
+		if c.Key != key && strings.EqualFold(strings.TrimSpace(c.Label), label) {
+			return nil, bad("已存在同名分类：" + label)
+		}
+	}
+	if key == "" {
+		key = "cat_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	} else {
+		// Sanitize custom key so it is safe in URL paths and JSON.
+		var clean strings.Builder
+		for _, ch := range key {
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' {
+				clean.WriteRune(ch)
+			}
+		}
+		key = clean.String()
+		if key == "" || isBuiltinAssetCategory(key) {
+			key = "cat_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+		}
+	}
+	cat := AssetCategory{Key: key, Label: label, Builtin: false}
+	b, _ := json.Marshal(cat)
+	if err := s.DB.PutDoc(&store.Doc{Kind: "asset_category", ID: key, Name: label, Data: b, Dirty: true}); err != nil {
+		return nil, err
+	}
+	updatedAll, custom := s.listAssetCategories()
+	return map[string]any{"category": cat, "items": updatedAll, "custom": custom}, nil
+}
+
+func (s *Server) mineAssetCategoryDelete(w http.ResponseWriter, r *http.Request) (any, error) {
+	key := strings.TrimSpace(r.PathValue("key"))
+	if key == "" {
+		return nil, bad("缺少分类标识")
+	}
+	if isBuiltinAssetCategory(key) {
+		return nil, bad("内置分类不可删除")
+	}
+	_ = s.DB.DeleteDocHard("asset_category", key)
+
+	migrated := 0
+	docs, _ := s.DB.ListDocs("asset", false)
+	for _, d := range docs {
+		var a resources.Asset
+		if json.Unmarshal(d.Data, &a) != nil {
+			continue
+		}
+		if a.Kind == key {
+			a.Kind = "other"
+			b, _ := json.Marshal(a)
+			d.Data = b
+			d.Dirty = true
+			if s.DB.PutDoc(&d) == nil {
+				migrated++
+			}
+		}
+	}
+	all, custom := s.listAssetCategories()
+	return map[string]any{"ok": true, "migrated": migrated, "items": all, "custom": custom}, nil
+}
+
 func (s *Server) putCustomAsset(r *http.Request) (any, error) {
 	var body struct {
 		ID      string   `json:"id"`
-		Kind    string   `json:"kind"` // character | prop | scene
+		Kind    string   `json:"kind"` // character | prop | scene | other | cat_*
 		Name    string   `json:"name"`
 		NameEn  string   `json:"name_en"`
 		Image   string   `json:"image"`
@@ -431,8 +577,9 @@ func (s *Server) putCustomAsset(r *http.Request) (any, error) {
 	if strings.TrimSpace(body.Name) == "" {
 		return nil, bad("资产名称不能为空")
 	}
+	body.Kind = strings.TrimSpace(body.Kind)
 	if body.Kind == "" {
-		body.Kind = "character"
+		body.Kind = "other"
 	}
 	if body.DataURL != "" {
 		saved, err := saveUploadedDataURL(body.DataURL, body.Name)
@@ -440,6 +587,20 @@ func (s *Server) putCustomAsset(r *http.Request) (any, error) {
 			return nil, err
 		}
 		body.Image = saved.Path
+	}
+	if body.ID != "" && body.Image == "" {
+		if existingDoc, err := s.DB.GetDoc("asset", body.ID); err == nil {
+			var prev resources.Asset
+			if json.Unmarshal(existingDoc.Data, &prev) == nil {
+				body.Image = prev.Image
+				if body.Tags == nil {
+					body.Tags = prev.Tags
+				}
+			}
+		}
+	}
+	if strings.TrimSpace(body.Image) == "" {
+		return nil, bad("请先选择或粘贴参考图片")
 	}
 	if body.ID == "" {
 		prefix := map[string]string{"character": "MY-CH-", "prop": "MY-PR-", "scene": "MY-SCN-"}[body.Kind]
