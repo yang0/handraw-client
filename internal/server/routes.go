@@ -105,6 +105,28 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/article/vault/duplicate", s.h(s.articleVaultDuplicate))
 	m.HandleFunc("DELETE /api/article/vault/dir", s.h(s.articleVaultDeleteDir))
 	m.HandleFunc("POST /api/article/vault/reveal", s.h(s.articleVaultReveal))
+
+	// article Obsidian plugin compatibility runtime & installer (#115)
+	m.HandleFunc("GET /api/article/obsidian/plugins", s.h(s.articleObsidianPlugins))
+	m.HandleFunc("GET /api/article/obsidian/discover", s.h(s.articleObsidianDiscover))
+	m.HandleFunc("GET /api/article/obsidian/market", s.h(s.articleObsidianMarket))
+	m.HandleFunc("POST /api/article/obsidian/install", s.h(s.articleObsidianInstall))
+	m.HandleFunc("POST /api/article/obsidian/import-batch", s.h(s.articleObsidianImportBatch))
+	m.HandleFunc("PATCH /api/article/obsidian/plugins/{id}", s.h(s.articleObsidianPatch))
+	m.HandleFunc("DELETE /api/article/obsidian/plugins/{id}", s.h(s.articleObsidianDelete))
+	m.HandleFunc("GET /api/article/obsidian/plugins/{id}/bundle", s.h(s.articleObsidianBundle))
+	m.HandleFunc("GET /api/article/obsidian/plugins/{id}/data", s.h(s.articleObsidianReadData))
+	m.HandleFunc("PUT /api/article/obsidian/plugins/{id}/data", s.h(s.articleObsidianWriteData))
+	m.HandleFunc("GET /api/article/obsidian/secrets", s.h(s.articleObsidianSecretGet))
+	m.HandleFunc("PUT /api/article/obsidian/secrets", s.h(s.articleObsidianSecretSet))
+	m.HandleFunc("GET /api/article/obsidian/vault/list", s.h(s.articleObsidianVaultList))
+	m.HandleFunc("GET /api/article/obsidian/vault/raw", s.h(s.articleObsidianVaultRawRead))
+	m.HandleFunc("PUT /api/article/obsidian/vault/raw", s.h(s.articleObsidianVaultRawWrite))
+	m.HandleFunc("DELETE /api/article/obsidian/vault/raw", s.h(s.articleObsidianVaultRawDelete))
+	m.HandleFunc("POST /api/article/obsidian/request", s.h(s.articleObsidianRequestProxy))
+	m.HandleFunc("POST /api/article/obsidian/desktop/fs", s.h(s.articleObsidianDesktopFS))
+	m.HandleFunc("POST /api/article/obsidian/desktop/spawn", s.h(s.articleObsidianDesktopSpawn))
+
 	m.HandleFunc("POST /api/canvas/assistant", s.h(s.canvasAssistant))
 	m.HandleFunc("POST /api/images/import", s.h(s.uploadImage))
 
@@ -218,6 +240,13 @@ func (s *Server) ui(w http.ResponseWriter, r *http.Request) {
 	if p == "index.html" || p == "quick.html" || p == "dsh-host.html" {
 		// The page needs the API token; a cookie scoped to this origin carries it.
 		http.SetCookie(w, &http.Cookie{Name: "hw", Value: s.Token, Path: "/", HttpOnly: false, SameSite: http.SameSiteStrictMode})
+		w.Header().Set("Cache-Control", "no-store")
+	} else if p == "obsidian-host.html" {
+		// Sandboxed Obsidian plugin host: intentionally does NOT receive the API token cookie.
+		w.Header().Set("Cache-Control", "no-store")
+	} else if p == "js/obsidian-shim.js" {
+		// Opaque-origin sandbox iframe loads this ES module via CORS.
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Cache-Control", "no-store")
 	}
 	http.ServeFileFS(w, r, s.Web, p)

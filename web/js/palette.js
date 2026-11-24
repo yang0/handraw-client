@@ -92,6 +92,20 @@ export function initPalette(ctx) {
       if (!ql || a.label.toLowerCase().includes(ql) || a.hint.toLowerCase().includes(ql)) rows.push(a);
     }
 
+    const obsRt = window.__handrawObsidianRuntime;
+    if (obsRt && typeof obsRt.getCommands === "function") {
+      for (const c of obsRt.getCommands() || []) {
+        const label = `${c.pluginName}: ${c.name}`;
+        if (!ql || label.toLowerCase().includes(ql) || (c.fullId || "").toLowerCase().includes(ql) || "obsidian".includes(ql)) {
+          rows.push({
+            label,
+            hint: "Obsidian 插件",
+            run: () => obsRt.execCommand(c.fullId),
+          });
+        }
+      }
+    }
+
     if (cachedStyles) {
       const hits = cachedStyles.filter((s) =>
         !ql || s.number.toLowerCase().includes(ql) || (s.generation_name || "").toLowerCase().includes(ql) || (s.reference || "").toLowerCase().includes(ql) || (s.traits || "").toLowerCase().includes(ql)

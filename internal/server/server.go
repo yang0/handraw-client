@@ -26,6 +26,7 @@ import (
 	"github.com/yang0/handraw-client/internal/dshbridge"
 	"github.com/yang0/handraw-client/internal/galleries"
 	"github.com/yang0/handraw-client/internal/jobs"
+	"github.com/yang0/handraw-client/internal/obsidian"
 	"github.com/yang0/handraw-client/internal/plugins"
 	"github.com/yang0/handraw-client/internal/profile"
 	"github.com/yang0/handraw-client/internal/prompt"
@@ -68,6 +69,7 @@ type Server struct {
 	Jobs     *jobs.Manager
 	Updater   *updater.Updater
 	Plugins   *plugins.Runtime
+	Obsidian  *obsidian.Manager
 	Skills    *skills.Manager
 	Galleries *galleries.Registry
 	DSH       *dshbridge.Manager
@@ -96,6 +98,7 @@ func New(version string) *Server {
 	s := &Server{
 		Version:   version,
 		Token:     hex.EncodeToString(b),
+		Obsidian:  obsidian.New(appdir.ObsidianPlugins()),
 		Skills:    skills.New(appdir.Skills()),
 		Galleries: galleries.New(),
 		DSH:       dshbridge.New(filepath.Join(appdir.Cache(), "dsh-bridge")),

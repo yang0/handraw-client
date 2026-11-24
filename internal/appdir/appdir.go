@@ -65,8 +65,9 @@ func Resources() string { return sub("resources") }
 func Galleries() string { return sub("galleries") }
 func Library() string   { return sub("library") }
 func Cache() string     { return sub("cache") }
-func Plugins() string   { return sub("plugins") }
-func Skills() string    { return sub("skills") }
+func Plugins() string         { return sub("plugins") }
+func ObsidianPlugins() string { return sub("obsidian-plugins") }
+func Skills() string          { return sub("skills") }
 func Logs() string      { return sub("logs") }
 func Updates() string   { return sub("updates") }
 func DBPath() string    { return filepath.Join(Root(), "db.sqlite") }

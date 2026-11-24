@@ -1,6 +1,7 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
 import { buildTextModelSelect, openSharedSkillPickerModal } from "../skills-ui.js";
 import { computeParagraphDiff, mergeAcceptedHunks, renderCopilotMarkdown, renderInlineWordDiff } from "./article-diff.js";
+import { createArticleObsidianController } from "./article-obsidian.js";
 import { buildGroupedModelSelect } from "./create.js";
 import {
   choices,
@@ -64,6 +65,7 @@ export async function renderArticle(root, ctx, params = {}) {
     textModelRef: modRes.defaultTextModel || "",
     aiSkillIds: [],
     aiDrawerOpen: typeof window !== "undefined" ? window.innerWidth >= 1240 : true,
+    rightDrawerTab: "ai", // ai | obsidian
     aiMode: "edit", // edit | advise
     aiChat: [],
     recommendedStyles: [],
@@ -239,8 +241,23 @@ export async function renderArticle(root, ctx, params = {}) {
     title: "打开或收起右侧 AI 写作助手 (Ctrl+L)",
     "aria-label": "打开或收起右侧 AI 写作助手",
     "aria-pressed": "false",
-    onClick: () => toggleAiDrawer(),
+    onClick: () => {
+      if (state.aiDrawerOpen && state.rightDrawerTab !== "ai") {
+        state.rightDrawerTab = "ai";
+        renderStageMode();
+        session.persist();
+      } else {
+        state.rightDrawerTab = "ai";
+        toggleAiDrawer();
+      }
+    },
   }, "✨ AI 助手");
+  const obsidianQuickBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm ic-obs-top-btn",
+    title: "运行或管理 Obsidian 插件",
+    onClick: () => obsidianCtrl.openQuickActionsPopover(obsidianQuickBtn),
+  }, "🧩 插件");
   const saveBtn = el("button", { type: "button", class: "btn btn-sm", onClick: saveDraft }, "💾 保存");
 
   const topbar = el("header", { class: "ic-wechat-topbar" },
@@ -257,6 +274,7 @@ export async function renderArticle(root, ctx, params = {}) {
         editSwitchBtn,
         previewSwitchBtn
       ),
+      obsidianQuickBtn,
       aiDrawerToggleBtn,
       saveBtn
     )
@@ -372,9 +390,18 @@ export async function renderArticle(root, ctx, params = {}) {
     vaultSwitcherCount
   );
 
+  const sidebarObsidianBtn = el("button", {
+    type: "button",
+    class: "ic-vault-ico-btn",
+    title: "Obsidian 插件管理与安装",
+    "aria-label": "Obsidian 插件管理与安装",
+    onClick: () => { closeVaultPopover(); obsidianCtrl.openManagerModal("installed"); },
+  }, "🧩");
+
   const vaultFooter = el("div", { class: "ic-vault-footer" },
     vaultSwitcherBtn,
     el("div", { class: "ic-vault-footer-actions" },
+      sidebarObsidianBtn,
       el("button", {
         type: "button",
         class: "ic-vault-ico-btn",
@@ -883,41 +910,139 @@ export async function renderArticle(root, ctx, params = {}) {
     onClick: () => toggleAiDrawer(false),
   });
 
-  const aiDrawer = el("aside", { class: "ic-art-copilot hidden", "aria-label": "AI 写作助手" },
-    el("div", { class: "ic-cop-head" },
-      el("div", { class: "ic-cop-head-top" },
-        el("div", { class: "row", style: { gap: "6px", minWidth: "0" } },
-          el("span", { class: "ic-cop-spark", "aria-hidden": "true" }, "✨"),
-          el("strong", { class: "ic-cop-title" }, "AI 写作助手")
-        ),
-        el("div", { class: "row", style: { gap: "2px" } },
-          aiClearChatBtn,
-          aiCloseDrawerBtn
-        )
+  // Obsidian plugin sandbox controller (#115)
+  const drawerTabAiBtn = el("button", {
+    type: "button",
+    class: "ic-obs-drawer-tab is-active",
+    onClick: () => {
+      state.rightDrawerTab = "ai";
+      renderStageMode();
+      session.persist();
+    },
+  }, "✨ AI 助手");
+  const drawerTabObsBtn = el("button", {
+    type: "button",
+    class: "ic-obs-drawer-tab",
+    onClick: () => {
+      state.rightDrawerTab = "obsidian";
+      renderStageMode();
+      session.persist();
+    },
+  }, "🧩 插件视图");
+
+  function computeActiveDocSnapshot() {
+    let selStart = 0;
+    let selEnd = 0;
+    const content = state.content || "";
+    if (activeSegTextarea && activeSegTextarea.isConnected) {
+      const segs = Array.from(flowBox.querySelectorAll("textarea.ic-art-seg-ta"));
+      let baseOff = 0;
+      for (const ta of segs) {
+        if (ta === activeSegTextarea) {
+          selStart = baseOff + (ta.selectionStart ?? 0);
+          selEnd = baseOff + (ta.selectionEnd ?? 0);
+          break;
+        }
+        baseOff += ta.value.length + 1;
+      }
+    }
+    return {
+      path: state.activeFile || "",
+      title: state.title || "",
+      content,
+      selStart,
+      selEnd,
+    };
+  }
+
+  function syncObsidianBadges() {
+    const enabledCount = (obsidianCtrl.state.plugins || []).filter((p) => p.enabled).length;
+    obsidianQuickBtn.textContent = enabledCount > 0 ? `🧩 插件 (${enabledCount})` : "🧩 插件";
+    obsidianQuickBtn.classList.toggle("is-active", enabledCount > 0);
+    const vc = obsidianCtrl.state.viewCount || 0;
+    drawerTabObsBtn.textContent = vc > 0 ? `🧩 插件视图 (${vc})` : "🧩 插件视图";
+    const showingObs = Boolean(state.editorActive) && Boolean(state.aiDrawerOpen) && state.rightDrawerTab === "obsidian";
+    obsidianCtrl.updateHostVisibility(showingObs);
+  }
+
+  const obsidianCtrl = createArticleObsidianController({
+    getDoc: computeActiveDocSnapshot,
+    setDocContent: (nextContent) => {
+      state.content = String(nextContent ?? "");
+      state.dirty = true;
+      renderFlow();
+      syncTopbarBreadcrumb();
+      if (state.viewMode === "preview") renderPreviewStage();
+      session.persist();
+    },
+    openFile: (relPath) => {
+      if (relPath) openVaultFile(relPath);
+    },
+    onStateChange: () => syncObsidianBadges(),
+    onRevealPluginPane: () => {
+      state.rightDrawerTab = "obsidian";
+      state.aiDrawerOpen = true;
+      renderStageMode();
+      session.persist();
+    },
+  });
+
+  const aiPaneHead = el("div", { class: "ic-cop-head" },
+    el("div", { class: "ic-cop-head-top" },
+      el("div", { class: "row", style: { gap: "6px", minWidth: "0" } },
+        el("span", { class: "ic-cop-spark", "aria-hidden": "true" }, "✨"),
+        el("strong", { class: "ic-cop-title" }, "AI 写作助手")
       ),
-      el("div", { class: "ic-cop-controls" },
-        el("div", { class: "ic-cop-mode-seg", role: "group", "aria-label": "助手工作模式" },
-          aiModeEditBtn,
-          aiModeAdviseBtn
-        ),
-        textModelSel
+      el("div", { class: "row", style: { gap: "2px" } },
+        aiClearChatBtn,
+        aiCloseDrawerBtn
       )
     ),
-    copilotFeed,
-    el("div", { class: "ic-cop-composer-wrap" },
-      copilotSelectionChip,
-      aiSkillsStrip,
-      el("div", { class: "ic-cop-composer" },
-        aiInput,
-        el("div", { class: "ic-cop-composer-foot" },
-          aiPickSkillBtn,
-          el("div", { class: "row", style: { gap: "6px" } },
-            el("span", { class: "ic-cop-kbd muted" }, "Ctrl+Enter"),
-            aiRunBtn
-          )
+    el("div", { class: "ic-cop-controls" },
+      el("div", { class: "ic-cop-mode-seg", role: "group", "aria-label": "助手工作模式" },
+        aiModeEditBtn,
+        aiModeAdviseBtn
+      ),
+      textModelSel
+    )
+  );
+  const aiPaneComposer = el("div", { class: "ic-cop-composer-wrap" },
+    copilotSelectionChip,
+    aiSkillsStrip,
+    el("div", { class: "ic-cop-composer" },
+      aiInput,
+      el("div", { class: "ic-cop-composer-foot" },
+        aiPickSkillBtn,
+        el("div", { class: "row", style: { gap: "6px" } },
+          el("span", { class: "ic-cop-kbd muted" }, "Ctrl+Enter"),
+          aiRunBtn
         )
       )
     )
+  );
+  const aiPaneBody = el("div", { class: "ic-obs-drawer-pane" }, aiPaneHead, copilotFeed, aiPaneComposer);
+
+  const obsPaneHeader = el("div", { class: "ic-obs-pane-head" },
+    el("strong", { style: { fontSize: "13px" } }, "Obsidian 插件视图"),
+    el("div", { class: "row", style: { gap: "4px" } },
+      el("button", { type: "button", class: "btn btn-sm", onClick: () => obsidianCtrl.openManagerModal("installed") }, "管理"),
+      el("button", { type: "button", class: "btn btn-sm", title: "关闭右侧抽屉", onClick: () => toggleAiDrawer(false) }, "✕")
+    )
+  );
+  const obsPaneSlot = el("div", { class: "ic-obs-pane-slot" });
+  obsidianCtrl.setDockSlot(obsPaneSlot);
+  const obsPaneBody = el("div", { class: "ic-obs-drawer-pane ic-obs-pane-body hidden" },
+    obsPaneHeader,
+    obsPaneSlot
+  );
+
+  const aiDrawer = el("aside", { class: "ic-art-copilot hidden", "aria-label": "右侧工具与插件面板" },
+    el("div", { class: "ic-obs-drawer-tabs", role: "tablist" },
+      drawerTabAiBtn,
+      drawerTabObsBtn
+    ),
+    aiPaneBody,
+    obsPaneBody
   );
 
   function toggleAiDrawer(force) {
@@ -1360,7 +1485,8 @@ export async function renderArticle(root, ctx, params = {}) {
   root.appendChild(el("div", { class: "ic-wechat-editor-root" },
     topbar,
     el("div", { class: "ic-wechat-body" }, sidebar, centerCol, copilotBackdrop, aiDrawer),
-    bottombar
+    bottombar,
+    obsidianCtrl.hostWrap
   ));
 
   const onArticleGlobalKeydown = (e) => {
@@ -1494,6 +1620,7 @@ export async function renderArticle(root, ctx, params = {}) {
       if (!Array.isArray(vault.vaults)) vault.vaults = [];
       renderSidebar();
       if (!state.editorActive) renderWelcome();
+      obsidianCtrl.syncVault();
     } catch (e) {
       toast(e.message || "刷新目录失败");
     }
@@ -1512,6 +1639,8 @@ export async function renderArticle(root, ctx, params = {}) {
         treeQuery = "";
         vaultFilterIn.value = "";
         applyVaultPayload(res, { resetEditor: true });
+        obsidianCtrl.syncVault();
+        obsidianCtrl.syncDoc(true);
         toast(`已切换目录：${vault.name || vault.dir}`);
       } catch (e) {
         toast(e.message || "切换目录失败");
@@ -2338,6 +2467,7 @@ export async function renderArticle(root, ctx, params = {}) {
       });
       planNotice.textContent = "";
       renderAll();
+      obsidianCtrl.syncDoc(true);
       session.persist();
     } catch (e) {
       toast(e.message || "打开 Markdown 文件失败");
@@ -2958,6 +3088,7 @@ export async function renderArticle(root, ctx, params = {}) {
       state.dirty = true;
       charCounter.textContent = `正文字数 ${state.content.length}`;
       syncTopbarBreadcrumb();
+      obsidianCtrl.syncDoc(false);
       session.persist();
     };
 
@@ -3121,6 +3252,7 @@ export async function renderArticle(root, ctx, params = {}) {
       previewStageBox.classList.add("hidden");
       aiDrawer.classList.add("hidden");
       copilotBackdrop.classList.add("hidden");
+      obsidianCtrl.updateHostVisibility(false);
       closeSelectionBubble();
       renderWelcome();
       return;
@@ -3129,6 +3261,7 @@ export async function renderArticle(root, ctx, params = {}) {
     const isEditor = state.viewMode !== "preview";
     const isReviewing = isEditor && Boolean(activeDiffReview);
     const drawerOpen = Boolean(state.aiDrawerOpen);
+    const showingObs = drawerOpen && state.rightDrawerTab === "obsidian";
 
     editSwitchBtn.classList.toggle("is-active", isEditor);
     previewSwitchBtn.classList.toggle("is-active", !isEditor);
@@ -3139,6 +3272,11 @@ export async function renderArticle(root, ctx, params = {}) {
 
     aiDrawer.classList.toggle("hidden", !drawerOpen);
     copilotBackdrop.classList.toggle("hidden", !drawerOpen);
+    drawerTabAiBtn.classList.toggle("is-active", state.rightDrawerTab !== "obsidian");
+    drawerTabObsBtn.classList.toggle("is-active", state.rightDrawerTab === "obsidian");
+    aiPaneBody.classList.toggle("hidden", state.rightDrawerTab === "obsidian");
+    obsPaneBody.classList.toggle("hidden", state.rightDrawerTab !== "obsidian");
+    obsidianCtrl.updateHostVisibility(showingObs);
     renderCopilotPanel();
     if (isReviewing) renderInlineDiffReview();
     else if (!isEditor) renderPreviewStage();
@@ -3518,6 +3656,7 @@ export async function renderArticle(root, ctx, params = {}) {
       closeVaultPopover();
       closeTreeContextMenu();
       closeSelectionBubble();
+      obsidianCtrl.dispose();
       unsub();
       return;
     }

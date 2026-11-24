@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Handraw Obsidian Plugin Sandbox</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background-primary: #faf7f2;
+      --background-primary-alt: #f4efe6;
+      --background-secondary: #f2ece1;
+      --background-secondary-alt: #ebe3d5;
+      --background-modifier-hover: rgba(44, 34, 24, 0.06);
+      --background-modifier-border: #e5dccd;
+      --background-modifier-border-hover: #d3c6b0;
+      --background-modifier-form-field: #ffffff;
+      --background-modifier-error: #c83e2b;
+      --text-normal: #2c241b;
+      --text-muted: #6f6254;
+      --text-faint: #988b7b;
+      --text-on-accent: #ffffff;
+      --text-accent: #c84b31;
+      --text-accent-hover: #a83a23;
+      --interactive-normal: #ffffff;
+      --interactive-hover: #f5efe6;
+      --interactive-accent: #c84b31;
+      --interactive-accent-hover: #b23e26;
+      --radius-s: 6px;
+      --radius-m: 10px;
+      --radius-l: 14px;
+      --size-4-1: 4px;
+      --size-4-2: 8px;
+      --size-4-3: 12px;
+      --size-4-4: 16px;
+      --font-text: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --font-interface: var(--font-text);
+      --font-monospace: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    html[data-theme="dark"] {
+      --background-primary: #1c1916;
+      --background-primary-alt: #24201c;
+      --background-secondary: #221e1a;
+      --background-secondary-alt: #2b2621;
+      --background-modifier-hover: rgba(255, 245, 230, 0.08);
+      --background-modifier-border: #3a332c;
+      --background-modifier-border-hover: #4e453b;
+      --background-modifier-form-field: #161311;
+      --text-normal: #efe8dc;
+      --text-muted: #aba092;
+      --text-faint: #7c7266;
+      --interactive-normal: #29241f;
+      --interactive-hover: #332d27;
+      --interactive-accent: #d95d42;
+      --interactive-accent-hover: #e56d53;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      color: var(--text-normal);
+      font-family: var(--font-interface);
+      font-size: 13.5px;
+      line-height: 1.55;
+      overflow: hidden;
+    }
+    #obs-view-shell {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--background-primary);
+    }
+    body.has-modal #obs-view-shell {
+      visibility: hidden;
+    }
+    #obs-view-tabs {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 10px;
+      background: var(--background-secondary);
+      border-bottom: 1px solid var(--background-modifier-border);
+      overflow-x: auto;
+      flex-shrink: 0;
+    }
+    #obs-view-tabs:empty { display: none; }
+    .obs-view-tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: var(--radius-s);
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 12.5px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .obs-view-tab:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+    .obs-view-tab.is-active {
+      background: var(--background-primary);
+      color: var(--text-normal);
+      border-color: var(--background-modifier-border);
+      font-weight: 600;
+    }
+    .obs-view-tab-close {
+      border: 0;
+      background: transparent;
+      color: var(--text-faint);
+      cursor: pointer;
+      padding: 0 2px;
+      font-size: 12px;
+      line-height: 1;
+    }
+    .obs-view-tab-close:hover { color: var(--text-normal); }
+    #obs-view-root {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      position: relative;
+    }
+    .obs-empty-view {
+      padding: 36px 20px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+    .view-content {
+      padding: 12px 14px;
+      height: 100%;
+      overflow: auto;
+    }
+
+    /* Obsidian Modal & SettingTab Overlay */
+    #obs-modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background: rgba(20, 16, 12, 0.45);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+    }
+    #obs-modal-overlay.is-open { display: flex; }
+    .modal-container {
+      width: 100%;
+      max-width: 720px;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .modal {
+      background: var(--background-primary);
+      border: 1px solid var(--background-modifier-border);
+      border-radius: var(--radius-l);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.24);
+      display: flex;
+      flex-direction: column;
+      max-height: 90vh;
+      overflow: hidden;
+      position: relative;
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 14px 18px 10px;
+      border-bottom: 1px solid var(--background-modifier-border);
+    }
+    .modal-title {
+      font-size: 15.5px;
+      font-weight: 600;
+      color: var(--text-normal);
+      margin: 0;
+    }
+    .modal-close-button {
+      border: 0;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 16px;
+      width: 28px;
+      height: 28px;
+      border-radius: var(--radius-s);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-close-button:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+    .modal-content {
+      padding: 16px 18px 20px;
+      overflow: auto;
+      flex: 1;
+    }
+
+    /* Obsidian Setting rows */
+    .setting-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--background-modifier-border);
+    }
+    .setting-item:last-child { border-bottom: 0; }
+    .setting-item.setting-item-heading {
+      border-bottom: 1px solid var(--background-modifier-border);
+      padding-top: 16px;
+      padding-bottom: 6px;
+    }
+    .setting-item.setting-item-heading .setting-item-name {
+      font-size: 14.5px;
+      font-weight: 700;
+    }
+    .setting-item-info { flex: 1; min-width: 0; }
+    .setting-item-name { font-weight: 600; color: var(--text-normal); font-size: 13.5px; }
+    .setting-item-description { color: var(--text-muted); font-size: 12px; margin-top: 2px; word-break: break-word; }
+    .setting-item-control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    input[type="text"], input[type="password"], input[type="search"], input[type="number"], textarea, select {
+      background: var(--background-modifier-form-field);
+      color: var(--text-normal);
+      border: 1px solid var(--background-modifier-border);
+      border-radius: var(--radius-s);
+      padding: 6px 9px;
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+    }
+    input[type="text"]:focus, input[type="password"]:focus, input[type="search"]:focus, textarea:focus, select:focus {
+      border-color: var(--interactive-accent);
+    }
+    button {
+      background: var(--interactive-normal);
+      color: var(--text-normal);
+      border: 1px solid var(--background-modifier-border);
+      border-radius: var(--radius-s);
+      padding: 5px 12px;
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    button:hover { background: var(--interactive-hover); }
+    button.mod-cta {
+      background: var(--interactive-accent);
+      color: var(--text-on-accent);
+      border-color: var(--interactive-accent);
+    }
+    button.mod-cta:hover { background: var(--interactive-accent-hover); }
+    button.mod-warning {
+      background: var(--background-modifier-error);
+      color: #fff;
+      border-color: var(--background-modifier-error);
+    }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .clickable-icon {
+      border: 0;
+      background: transparent;
+      padding: 4px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: var(--radius-s);
+      color: var(--text-muted);
+    }
+    .clickable-icon:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+
+    /* Toggle Switch */
+    .checkbox-container {
+      width: 38px;
+      height: 22px;
+      border-radius: 999px;
+      background: var(--background-modifier-border);
+      position: relative;
+      cursor: pointer;
+      transition: background 0.16s ease;
+      flex-shrink: 0;
+    }
+    .checkbox-container input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .checkbox-container::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+      transition: transform 0.16s ease;
+    }
+    .checkbox-container.is-enabled { background: var(--interactive-accent); }
+    .checkbox-container.is-enabled::after { transform: translateX(16px); }
+
+    /* Suggest Modal */
+    .prompt-input {
+      width: 100%;
+      padding: 8px 10px;
+      margin-bottom: 10px;
+      font-size: 13.5px;
+    }
+    .prompt-results {
+      max-height: 360px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .suggestion-item {
+      padding: 7px 10px;
+      border-radius: var(--radius-s);
+      cursor: pointer;
+    }
+    .suggestion-item:hover, .suggestion-item.is-selected {
+      background: var(--background-modifier-hover);
+    }
+
+    /* Notice Toast */
+    #obs-notice-region {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      z-index: 2000;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      pointer-events: none;
+      max-width: 340px;
+    }
+    .notice {
+      pointer-events: auto;
+      background: #2c241b;
+      color: #faf7f2;
+      border-radius: var(--radius-m);
+      padding: 9px 13px;
+      font-size: 12.5px;
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.25);
+      word-break: break-word;
+    }
+
+    /* Context Menu */
+    .menu {
+      position: fixed;
+      z-index: 1500;
+      background: var(--background-primary);
+      border: 1px solid var(--background-modifier-border);
+      border-radius: var(--radius-m);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
+      padding: 4px;
+      min-width: 170px;
+    }
+    .menu-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: var(--radius-s);
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .menu-item:hover { background: var(--background-modifier-hover); }
+    .menu-separator { height: 1px; background: var(--background-modifier-border); margin: 4px 0; }
+
+    /* Rendered Markdown inside plugins */
+    .markdown-rendered img { max-width: 100%; height: auto; border-radius: 6px; }
+    .markdown-rendered pre {
+      background: var(--background-secondary);
+      padding: 10px 12px;
+      border-radius: var(--radius-s);
+      overflow: auto;
+      font-family: var(--font-monospace);
+      font-size: 12.5px;
+    }
+    .markdown-rendered code { font-family: var(--font-monospace); }
+    .markdown-rendered blockquote {
+      border-left: 3px solid var(--interactive-accent);
+      margin: 8px 0;
+      padding: 4px 12px;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div id="obs-view-shell">
+    <div id="obs-view-tabs" role="tablist"></div>
+    <div id="obs-view-root">
+      <div class="obs-empty-view">暂无打开的 Obsidian 插件视图。<br>可从工具栏点击插件图标或命令触发。</div>
+    </div>
+  </div>
+  <div id="obs-modal-overlay" aria-modal="true" role="dialog"></div>
+  <div id="obs-notice-region" aria-live="polite"></div>
+
+  <script type="module" src="/js/obsidian-shim.js"></script>
+</body>
+</html>
