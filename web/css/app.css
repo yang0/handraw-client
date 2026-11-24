@@ -2833,7 +2833,7 @@ dialog::backdrop {
 .insp-dropzone {
   border: 1.5px dashed var(--line);
   border-radius: 10px;
-  padding: 16px;
+  padding: 14px;
   background: var(--paper);
   display: flex;
   flex-direction: column;
@@ -2842,18 +2842,104 @@ dialog::backdrop {
   gap: 8px;
   cursor: pointer;
   text-align: center;
-  min-height: 110px;
+  min-height: 78px;
 }
 .insp-dropzone:hover,
 .insp-dropzone.is-drag {
   border-color: var(--accent);
   background: var(--accent-soft);
 }
-.insp-drop-preview {
-  max-height: 160px;
-  max-width: 100%;
+.insp-dropzone.has-image {
+  border-style: solid;
+  padding: 10px;
+  cursor: default;
+  align-items: stretch;
+  text-align: left;
+  min-height: 0;
+}
+.insp-dropzone.has-image:hover:not(.is-drag) {
+  border-color: var(--line);
+  background: var(--paper);
+}
+.insp-drop-empty.hidden,
+.insp-drop-filled.hidden {
+  display: none !important;
+}
+.insp-drop-filled {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.insp-drop-preview-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 8px;
+  padding: 8px;
+}
+.insp-drop-preview {
+  max-height: 176px;
+  max-width: 100%;
+  border-radius: 6px;
   object-fit: contain;
+  display: block;
+}
+.insp-drop-toolbar {
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.insp-drop-caption {
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insp-drop-remove-btn {
+  color: var(--danger, #b83227);
+  border-color: color-mix(in srgb, var(--danger, #c0392b) 28%, var(--line));
+}
+.insp-drop-remove-btn:hover {
+  background: color-mix(in srgb, var(--danger, #c0392b) 10%, var(--paper));
+  border-color: color-mix(in srgb, var(--danger, #c0392b) 45%, var(--line));
+}
+.modal.modal-create-insp {
+  width: min(560px, calc(100vw - 32px));
+}
+.insp-more-options {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 11px;
+  background: var(--paper);
+}
+.insp-more-summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.insp-more-summary::-webkit-details-marker {
+  display: none;
+}
+.insp-more-summary::before {
+  content: "▸";
+  font-size: 11px;
+  transition: transform 120ms ease;
+}
+.insp-more-options[open] .insp-more-summary::before {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .insp-more-summary::before {
+    transition: none;
+  }
 }
 
 .insp-price-grid {
