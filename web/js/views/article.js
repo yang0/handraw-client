@@ -1,5 +1,6 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
 import { buildTextModelSelect, openSharedSkillPickerModal } from "../skills-ui.js";
+import { computeParagraphDiff, mergeAcceptedHunks, renderCopilotMarkdown, renderInlineWordDiff } from "./article-diff.js";
 import { buildGroupedModelSelect } from "./create.js";
 import {
   choices,
@@ -62,6 +63,9 @@ export async function renderArticle(root, ctx, params = {}) {
     modelRef: modRes.defaultModel || "site:seedream-4.5",
     textModelRef: modRes.defaultTextModel || "",
     aiSkillIds: [],
+    aiDrawerOpen: typeof window !== "undefined" ? window.innerWidth >= 1240 : true,
+    aiMode: "edit", // edit | advise
+    aiChat: [],
     recommendedStyles: [],
     slots: [],
     viewMode: "editor", // editor | preview
@@ -223,6 +227,20 @@ export async function renderArticle(root, ctx, params = {}) {
   }, "预览");
 
   const activeBreadcrumb = el("span", { class: "ic-vault-breadcrumb mono" }, "");
+  const aiUndoTopBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm hidden",
+    title: "撤销最近一次应用的 AI 改稿",
+    onClick: () => undoLastAiRevision(),
+  }, "↩ 撤销改稿");
+  const aiDrawerToggleBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm ic-art-copilot-toggle",
+    title: "打开或收起右侧 AI 写作助手 (Ctrl+L)",
+    "aria-label": "打开或收起右侧 AI 写作助手",
+    "aria-pressed": "false",
+    onClick: () => toggleAiDrawer(),
+  }, "✨ AI 助手");
   const saveBtn = el("button", { type: "button", class: "btn btn-sm", onClick: saveDraft }, "💾 保存");
 
   const topbar = el("header", { class: "ic-wechat-topbar" },
@@ -233,11 +251,13 @@ export async function renderArticle(root, ctx, params = {}) {
       el("button", { type: "button", class: "btn btn-sm", onClick: openURLImportDialog }, "🔗 抓取链接")
     ),
     toolsGroup,
-    el("div", { class: "row" },
+    el("div", { class: "row", style: { gap: "6px" } },
+      aiUndoTopBtn,
       el("div", { class: "ic-article-segmented-switch", role: "group", "aria-label": "编辑与预览切换" },
         editSwitchBtn,
         previewSwitchBtn
       ),
+      aiDrawerToggleBtn,
       saveBtn
     )
   );
@@ -424,25 +444,404 @@ export async function renderArticle(root, ctx, params = {}) {
     flowBox
   );
 
+  const diffReviewBox = el("section", { class: "ic-wechat-paper ic-art-diff-paper hidden", "aria-label": "AI 改稿内联审阅" });
   const previewStageBox = el("div", { class: "col hidden", style: { gap: "12px" } });
-  const scrollArea = el("div", { class: "ic-wechat-scroll-area" }, welcomeBox, paperSheet, previewStageBox);
+  const scrollArea = el("div", { class: "ic-wechat-scroll-area" }, welcomeBox, paperSheet, diffReviewBox, previewStageBox);
+  const centerCol = el("div", { class: "ic-wechat-center-col" }, scrollArea);
 
-  // 3.5. AI Article Revision Bar (with installed Skill invocation) (#70)
+  // 3.5. Right Collapsible AI Writing Copilot + Inline Paper Diff Review + Selection Bubble (#70, #74)
   let aiEditing = false;
-  let pendingAiRevision = null; // { title, content, summary, usedSkills, prevTitle, prevContent }
-  let lastAiUndo = null; // { title, content }
+  let lastAiUndo = null; // { title, content, msgId }
+  let activeDiffReview = null; // { msgId, summary, usedSkills, prevTitle, newTitle, titleAccepted, hunks, isSelection }
+  let pinnedSelection = null; // { text, start, end, segIdx }
+  let selBubbleEl = null;
+  let selBubbleCleanup = null;
 
-  const aiResultBox = el("div", { class: "ic-art-ai-result hidden", role: "status" });
+  function closeSelectionBubble() {
+    if (selBubbleCleanup) {
+      selBubbleCleanup();
+      selBubbleCleanup = null;
+    }
+    if (selBubbleEl) {
+      selBubbleEl.remove();
+      selBubbleEl = null;
+    }
+  }
+
+  function pinSelectionToCopilot(sel, { openDrawer = true, focusInput = false, mode = null } = {}) {
+    if (!sel?.text) return;
+    pinnedSelection = { ...sel };
+    if (mode === "edit" || mode === "advise") state.aiMode = mode;
+    if (openDrawer) state.aiDrawerOpen = true;
+    renderStageMode();
+    renderCopilotPanel();
+    session.persist();
+    if (focusInput) setTimeout(() => aiInput.focus(), 40);
+  }
+
+  function showSelectionBubble(ta, segIdx, anchorX, anchorY) {
+    closeSelectionBubble();
+    const start = ta.selectionStart ?? 0;
+    const end = ta.selectionEnd ?? 0;
+    if (end - start < 2) return;
+    const text = ta.value.slice(start, end).trim();
+    if (text.length < 2) return;
+
+    const sel = { text, start, end, segIdx };
+    const bubble = el("div", { class: "ic-sel-bubble", role: "toolbar", "aria-label": "划词 AI 局部操作" },
+      el("button", {
+        type: "button",
+        class: "ic-sel-bubble-btn is-accent",
+        onMouseDown: (e) => e.preventDefault(),
+        onClick: () => {
+          closeSelectionBubble();
+          pinSelectionToCopilot(sel, { openDrawer: true, focusInput: true, mode: "edit" });
+        },
+      }, "✨ 改写"),
+      el("button", {
+        type: "button",
+        class: "ic-sel-bubble-btn",
+        onMouseDown: (e) => e.preventDefault(),
+        onClick: () => {
+          closeSelectionBubble();
+          pinSelectionToCopilot(sel, { openDrawer: true, mode: "edit" });
+          runAiArticleEdit({ instructionOverride: "精简压缩这段话，去掉冗余修饰，保留核心意思和节奏感", modeOverride: "edit", selectionOverride: sel });
+        },
+      }, "精简"),
+      el("button", {
+        type: "button",
+        class: "ic-sel-bubble-btn",
+        onMouseDown: (e) => e.preventDefault(),
+        onClick: () => {
+          closeSelectionBubble();
+          pinSelectionToCopilot(sel, { openDrawer: true, mode: "edit" });
+          runAiArticleEdit({ instructionOverride: "扩写润色这段话，补充具体画面细节或有说服力的表达", modeOverride: "edit", selectionOverride: sel });
+        },
+      }, "扩写"),
+      el("button", {
+        type: "button",
+        class: "ic-sel-bubble-btn",
+        onMouseDown: (e) => e.preventDefault(),
+        onClick: () => {
+          closeSelectionBubble();
+          pinSelectionToCopilot(sel, { openDrawer: true, mode: "edit" });
+          runAiArticleEdit({ instructionOverride: "去掉这段话的 AI 味和书面腔，改得更像真人自然口吻", modeOverride: "edit", selectionOverride: sel });
+        },
+      }, "去 AI 味"),
+      el("span", { class: "ic-sel-bubble-sep", "aria-hidden": "true" }),
+      el("button", {
+        type: "button",
+        class: "ic-sel-bubble-btn",
+        onMouseDown: (e) => e.preventDefault(),
+        onClick: () => {
+          closeSelectionBubble();
+          pinSelectionToCopilot(sel, { openDrawer: true, focusInput: true, mode: "advise" });
+        },
+      }, "💬 问助手")
+    );
+
+    bubble.style.left = "0px";
+    bubble.style.top = "0px";
+    bubble.style.visibility = "hidden";
+    document.body.appendChild(bubble);
+
+    const rect = bubble.getBoundingClientRect();
+    const taRect = ta.getBoundingClientRect();
+    const baseX = typeof anchorX === "number" && anchorX > 0 ? anchorX - rect.width / 2 : taRect.left + taRect.width / 2 - rect.width / 2;
+    const baseY = typeof anchorY === "number" && anchorY > 0 ? anchorY - rect.height - 14 : taRect.top - rect.height - 8;
+    const left = Math.max(10, Math.min(baseX, window.innerWidth - rect.width - 10));
+    const top = baseY < 56 ? Math.min(window.innerHeight - rect.height - 10, (anchorY || taRect.top) + 22) : baseY;
+    bubble.style.left = `${Math.round(left)}px`;
+    bubble.style.top = `${Math.round(top)}px`;
+    bubble.style.visibility = "visible";
+    selBubbleEl = bubble;
+
+    const onDocDown = (e) => {
+      if (!bubble.contains(e.target)) closeSelectionBubble();
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") closeSelectionBubble();
+    };
+    const onScroll = () => closeSelectionBubble();
+    document.addEventListener("pointerdown", onDocDown, true);
+    document.addEventListener("keydown", onKey, true);
+    scrollArea.addEventListener("scroll", onScroll, { passive: true });
+    selBubbleCleanup = () => {
+      document.removeEventListener("pointerdown", onDocDown, true);
+      document.removeEventListener("keydown", onKey, true);
+      scrollArea.removeEventListener("scroll", onScroll);
+    };
+  }
+
+  function undoLastAiRevision() {
+    if (!lastAiUndo) return;
+    state.title = lastAiUndo.title;
+    state.content = lastAiUndo.content;
+    state.dirty = true;
+    if (lastAiUndo.msgId && Array.isArray(state.aiChat)) {
+      const m = state.aiChat.find((x) => x.id === lastAiUndo.msgId);
+      if (m) m.applied = false;
+    }
+    lastAiUndo = null;
+    activeDiffReview = null;
+    renderFlow();
+    syncBottomBar();
+    syncTopbarBreadcrumb();
+    renderStageMode();
+    renderCopilotPanel();
+    session.persist();
+    toast("已撤销上次 AI 改稿");
+  }
+
+  function openInlineDiffReview(msg) {
+    if (!msg || !msg.revision) return;
+    const rev = msg.revision;
+    const hunks = computeParagraphDiff(rev.prevContent || "", rev.content || "");
+    activeDiffReview = {
+      msgId: msg.id,
+      summary: rev.summary || "已完成文章修改",
+      usedSkills: rev.usedSkills || [],
+      prevTitle: rev.prevTitle || "",
+      newTitle: rev.title ?? rev.prevTitle ?? "",
+      titleAccepted: true,
+      hunks,
+      isSelection: rev.kind === "selection",
+    };
+    state.viewMode = "editor";
+    renderStageMode();
+    renderInlineDiffReview();
+    renderCopilotPanel();
+    scrollArea.scrollTop = 0;
+  }
+
+  function exitInlineDiffReview() {
+    if (!activeDiffReview) return;
+    activeDiffReview = null;
+    renderStageMode();
+    renderCopilotPanel();
+  }
+
+  function applyRevisionDirect(msg, customTitle, customContent) {
+    if (!msg?.revision) return;
+    const nextTitle = customTitle !== undefined ? customTitle : msg.revision.title;
+    const nextContent = customContent !== undefined ? customContent : msg.revision.content;
+    lastAiUndo = { title: state.title || "", content: state.content || "", msgId: msg.id };
+    state.title = nextTitle;
+    state.content = nextContent;
+    state.dirty = true;
+    msg.applied = true;
+    msg.discarded = false;
+    activeDiffReview = null;
+    renderFlow();
+    syncBottomBar();
+    syncTopbarBreadcrumb();
+    renderStageMode();
+    renderCopilotPanel();
+    session.persist();
+    toast("已应用 AI 改稿到正文，按 Ctrl+S 可写回本地 Markdown");
+  }
+
+  function renderInlineDiffReview() {
+    clear(diffReviewBox);
+    const rev = activeDiffReview;
+    if (!rev) return;
+
+    const titleChanged = (rev.prevTitle || "") !== (rev.newTitle || "");
+    const changedHunks = rev.hunks.filter((h) => h.kind !== "same");
+    const totalChanges = changedHunks.length + (titleChanged ? 1 : 0);
+    const acceptedCount = changedHunks.filter((h) => h.accepted).length + (titleChanged && rev.titleAccepted ? 1 : 0);
+
+    const msg = (state.aiChat || []).find((m) => m.id === rev.msgId);
+
+    const applySelected = () => {
+      const mergedTitle = titleChanged ? (rev.titleAccepted ? rev.newTitle : rev.prevTitle) : rev.prevTitle;
+      const mergedContent = mergeAcceptedHunks(rev.hunks);
+      if (msg) {
+        applyRevisionDirect(msg, mergedTitle, mergedContent);
+      } else {
+        lastAiUndo = { title: state.title || "", content: state.content || "", msgId: "" };
+        state.title = mergedTitle;
+        state.content = mergedContent;
+        state.dirty = true;
+        activeDiffReview = null;
+        renderFlow();
+        syncBottomBar();
+        syncTopbarBreadcrumb();
+        renderStageMode();
+        renderCopilotPanel();
+        session.persist();
+        toast("已应用选中的 AI 改动");
+      }
+    };
+
+    const banner = el("div", { class: "ic-diff-banner" },
+      el("div", { class: "ic-diff-banner-info" },
+        el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+          el("span", { class: "badge badge-accent" }, rev.isSelection ? "局部改写审阅" : "AI 改稿审阅"),
+          el("strong", { style: { fontSize: "13px" } }, `共 ${totalChanges} 处改动 · 已勾选 ${acceptedCount} 处`),
+          ...(rev.usedSkills || []).map((u) => el("span", { class: "badge" }, `⚡ ${u.name || u.id}`))
+        ),
+        el("p", { class: "muted", style: { margin: 0, fontSize: "12px", lineHeight: "1.45" } }, rev.summary)
+      ),
+      el("div", { class: "row", style: { gap: "6px", flexShrink: 0, flexWrap: "wrap" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => {
+            const allOn = acceptedCount === totalChanges;
+            rev.titleAccepted = !allOn;
+            changedHunks.forEach((h) => { h.accepted = !allOn; });
+            renderInlineDiffReview();
+          },
+        }, acceptedCount === totalChanges ? "全部不采纳" : "全部采纳"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          disabled: acceptedCount === 0,
+          onClick: applySelected,
+        }, `✓ 应用已选 (${acceptedCount})`),
+        el("button", { type: "button", class: "btn btn-sm", onClick: exitInlineDiffReview }, "退出审阅")
+      )
+    );
+    diffReviewBox.appendChild(banner);
+
+    // Title diff section
+    if (titleChanged) {
+      const titleHunkEl = el("div", {
+        class: "ic-diff-hunk" + (rev.titleAccepted ? " is-accepted" : " is-rejected"),
+        dataset: { hunkKind: "title" },
+      },
+        el("div", { class: "ic-diff-hunk-head" },
+          el("span", { class: "ic-diff-hunk-tag" }, "标题改动"),
+          el("button", {
+            type: "button",
+            class: "ic-diff-hunk-toggle" + (rev.titleAccepted ? " is-on" : ""),
+            onClick: () => {
+              rev.titleAccepted = !rev.titleAccepted;
+              renderInlineDiffReview();
+            },
+          }, rev.titleAccepted ? "✓ 采纳此改动" : "✕ 保留原标题")
+        ),
+        el("div", { class: "ic-diff-hunk-title" },
+          rev.titleAccepted
+            ? renderInlineWordDiff(rev.prevTitle, rev.newTitle)
+            : el("span", null, rev.prevTitle || "（无标题）")
+        )
+      );
+      diffReviewBox.appendChild(titleHunkEl);
+    } else if (rev.prevTitle) {
+      diffReviewBox.appendChild(el("h1", { class: "ic-diff-static-title" }, rev.prevTitle));
+    }
+
+    diffReviewBox.appendChild(el("div", { class: "ic-wechat-paper-divider" }));
+
+    // Body paragraph hunks
+    const bodyFlow = el("div", { class: "ic-diff-body" });
+    if (totalChanges === 0) {
+      bodyFlow.appendChild(el("p", { class: "muted", style: { textAlign: "center", padding: "24px 0" } }, "AI 改稿结果与原文内容完全一致，没有文本差异。"));
+    }
+    rev.hunks.forEach((h) => {
+      if (h.kind === "same") {
+        bodyFlow.appendChild(el("div", { class: "ic-diff-same" }, h.oldText));
+        return;
+      }
+      const kindLabel = h.kind === "add" ? "新增段落" : (h.kind === "del" ? "删除段落" : "修改段落");
+      const contentBox = el("div", { class: "ic-diff-hunk-body" });
+      if (!h.accepted) {
+        contentBox.appendChild(el("span", { class: "ic-diff-kept-orig" }, h.oldText || "（不新增此段）"));
+      } else if (h.kind === "change") {
+        contentBox.appendChild(renderInlineWordDiff(h.oldText, h.newText));
+      } else if (h.kind === "add") {
+        contentBox.appendChild(el("ins", { class: "ic-diff-ins" }, h.newText));
+      } else {
+        contentBox.appendChild(el("del", { class: "ic-diff-del" }, h.oldText));
+      }
+
+      bodyFlow.appendChild(el("div", {
+        class: "ic-diff-hunk" + (h.accepted ? " is-accepted" : " is-rejected"),
+        dataset: { hunkId: h.id, hunkKind: h.kind },
+      },
+        el("div", { class: "ic-diff-hunk-head" },
+          el("span", { class: "ic-diff-hunk-tag" }, kindLabel),
+          el("button", {
+            type: "button",
+            class: "ic-diff-hunk-toggle" + (h.accepted ? " is-on" : ""),
+            onClick: () => {
+              h.accepted = !h.accepted;
+              renderInlineDiffReview();
+            },
+          }, h.accepted ? "✓ 采纳" : "✕ 保留原文")
+        ),
+        contentBox
+      ));
+    });
+    diffReviewBox.appendChild(bodyFlow);
+  }
+
+  // Copilot Sidebar Controls
+  const textModelSel = buildTextModelSelect(modRes, state.textModelRef);
+  textModelSel.classList.add("ic-cop-model-sel");
+  state.textModelRef = textModelSel.value;
+  textModelSel.addEventListener("change", () => {
+    state.textModelRef = textModelSel.value;
+    session.persist();
+  });
+
+  const aiModeEditBtn = el("button", {
+    type: "button",
+    class: "ic-cop-mode-btn",
+    onClick: () => {
+      state.aiMode = "edit";
+      renderCopilotPanel();
+      session.persist();
+    },
+  }, "改稿");
+  const aiModeAdviseBtn = el("button", {
+    type: "button",
+    class: "ic-cop-mode-btn",
+    onClick: () => {
+      state.aiMode = "advise";
+      renderCopilotPanel();
+      session.persist();
+    },
+  }, "诊断 / 建议");
+
+  const aiClearChatBtn = el("button", {
+    type: "button",
+    class: "ic-vault-ico-btn",
+    title: "清空本次对话记录",
+    "aria-label": "清空对话记录",
+    onClick: () => {
+      state.aiChat = [];
+      activeDiffReview = null;
+      pinnedSelection = null;
+      renderStageMode();
+      renderCopilotPanel();
+      session.persist();
+    },
+  }, makeIconSvg(ICONS.trash, 14));
+
+  const aiCloseDrawerBtn = el("button", {
+    type: "button",
+    class: "ic-vault-ico-btn",
+    title: "收起 AI 写作助手 (Ctrl+L)",
+    "aria-label": "收起 AI 写作助手",
+    onClick: () => toggleAiDrawer(false),
+  }, "×");
+
+  const copilotFeed = el("div", { class: "ic-cop-feed", role: "log", "aria-live": "polite" });
+  const copilotSelectionChip = el("div", { class: "ic-cop-sel-chip hidden" });
   const aiSkillsStrip = el("div", { class: "ic-art-ai-skills hidden" });
+
   const aiInput = el("textarea", {
-    class: "ic-art-ai-input",
-    rows: "1",
-    placeholder: "告诉 AI 如何修改这篇文章（如「去掉 AI 味、压缩开头」），或点击右侧「选择 Skill」调用已安装 Skill…（Ctrl+Enter 执行）",
-    "aria-label": "AI 改稿指令输入框",
+    class: "ic-cop-input",
+    rows: "2",
+    placeholder: "输入改稿或诊断要求…（Ctrl+Enter 发送）",
+    "aria-label": "AI 写作助手指令输入框",
   });
   const resizeAiInput = () => {
     aiInput.style.height = "auto";
-    aiInput.style.height = `${Math.min(108, Math.max(34, aiInput.scrollHeight))}px`;
+    aiInput.style.height = `${Math.min(132, Math.max(52, aiInput.scrollHeight))}px`;
   };
   aiInput.addEventListener("input", resizeAiInput);
   aiInput.addEventListener("keydown", (e) => {
@@ -452,19 +851,12 @@ export async function renderArticle(root, ctx, params = {}) {
     }
   });
 
-  const textModelSel = buildTextModelSelect(modRes, state.textModelRef);
-  state.textModelRef = textModelSel.value;
-  textModelSel.addEventListener("change", () => {
-    state.textModelRef = textModelSel.value;
-    session.persist();
-  });
-
   const aiPickSkillBtn = el("button", {
     type: "button",
     class: "btn btn-sm ic-art-ai-skill-btn",
     onClick: () => {
       openSharedSkillPickerModal({
-        title: "选择改稿 Skill",
+        title: "选择写作 / 诊断 Skill",
         selectedIds: Array.isArray(state.aiSkillIds) ? state.aiSkillIds : [],
         onChange: (ids, freshSkills) => {
           state.aiSkillIds = ids;
@@ -478,32 +870,66 @@ export async function renderArticle(root, ctx, params = {}) {
         },
       });
     },
-  }, "选择 Skill");
-
-  const aiUndoBtn = el("button", {
-    type: "button",
-    class: "btn btn-sm hidden",
-    title: "撤销最近一次应用的 AI 改稿",
-    onClick: () => {
-      if (!lastAiUndo) return;
-      state.title = lastAiUndo.title;
-      state.content = lastAiUndo.content;
-      state.dirty = true;
-      lastAiUndo = null;
-      syncAiEditBar();
-      renderFlow();
-      syncBottomBar();
-      syncTopbarBreadcrumb();
-      session.persist();
-      toast("已撤销上次 AI 改稿");
-    },
-  }, "↩ 撤销改稿");
+  }, "⚡ 选择 Skill");
 
   const aiRunBtn = el("button", {
     type: "button",
     class: "btn btn-sm btn-primary",
     onClick: () => runAiArticleEdit(),
-  }, "✨ AI 改稿");
+  }, "发送");
+
+  const copilotBackdrop = el("div", {
+    class: "ic-cop-backdrop hidden",
+    onClick: () => toggleAiDrawer(false),
+  });
+
+  const aiDrawer = el("aside", { class: "ic-art-copilot hidden", "aria-label": "AI 写作助手" },
+    el("div", { class: "ic-cop-head" },
+      el("div", { class: "ic-cop-head-top" },
+        el("div", { class: "row", style: { gap: "6px", minWidth: "0" } },
+          el("span", { class: "ic-cop-spark", "aria-hidden": "true" }, "✨"),
+          el("strong", { class: "ic-cop-title" }, "AI 写作助手")
+        ),
+        el("div", { class: "row", style: { gap: "2px" } },
+          aiClearChatBtn,
+          aiCloseDrawerBtn
+        )
+      ),
+      el("div", { class: "ic-cop-controls" },
+        el("div", { class: "ic-cop-mode-seg", role: "group", "aria-label": "助手工作模式" },
+          aiModeEditBtn,
+          aiModeAdviseBtn
+        ),
+        textModelSel
+      )
+    ),
+    copilotFeed,
+    el("div", { class: "ic-cop-composer-wrap" },
+      copilotSelectionChip,
+      aiSkillsStrip,
+      el("div", { class: "ic-cop-composer" },
+        aiInput,
+        el("div", { class: "ic-cop-composer-foot" },
+          aiPickSkillBtn,
+          el("div", { class: "row", style: { gap: "6px" } },
+            el("span", { class: "ic-cop-kbd muted" }, "Ctrl+Enter"),
+            aiRunBtn
+          )
+        )
+      )
+    )
+  );
+
+  function toggleAiDrawer(force) {
+    const next = typeof force === "boolean" ? force : !state.aiDrawerOpen;
+    state.aiDrawerOpen = next;
+    renderStageMode();
+    renderCopilotPanel();
+    session.persist();
+    if (next && state.editorActive) {
+      setTimeout(() => aiInput.focus(), 40);
+    }
+  }
 
   function renderAiSkillsBar() {
     clear(aiSkillsStrip);
@@ -512,7 +938,7 @@ export async function renderArticle(root, ctx, params = {}) {
     const valid = ids.filter((id) => byId.has(id));
     if (valid.length !== ids.length) state.aiSkillIds = valid;
     aiSkillsStrip.classList.toggle("hidden", valid.length === 0);
-    aiPickSkillBtn.textContent = valid.length > 0 ? `选择 Skill (${valid.length})` : "选择 Skill";
+    aiPickSkillBtn.textContent = valid.length > 0 ? `⚡ Skill (${valid.length})` : "⚡ 选择 Skill";
     aiPickSkillBtn.classList.toggle("is-has-skills", valid.length > 0);
     valid.forEach((id) => {
       const sk = byId.get(id);
@@ -532,93 +958,221 @@ export async function renderArticle(root, ctx, params = {}) {
     });
   }
 
-  function openAiCompareModal(rev) {
-    const beforePre = el("pre", { class: "ic-art-diff-pre mono" }, `# ${rev.prevTitle || "（无标题）"}\n\n${rev.prevContent || ""}`);
-    const afterPre = el("pre", { class: "ic-art-diff-pre mono" }, `# ${rev.title || "（无标题）"}\n\n${rev.content || ""}`);
-    showModal("AI 改稿前后对照", el("div", { class: "col", style: { gap: "10px" } },
-      el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } }, `修改摘要：${rev.summary || "已完成文章修改"}`),
-      el("div", { class: "ic-art-diff-grid" },
-        el("div", { class: "col", style: { gap: "4px", minWidth: 0 } },
-          el("strong", { style: { fontSize: "12px" } }, `修改前（${(rev.prevContent || "").length} 字）`),
-          beforePre
-        ),
-        el("div", { class: "col", style: { gap: "4px", minWidth: 0 } },
-          el("strong", { style: { fontSize: "12px", color: "var(--accent)" } }, `AI 改稿后（${(rev.content || "").length} 字）`),
-          afterPre
-        )
-      )
-    ), [
-      el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
-      el("button", {
-        type: "button",
-        class: "btn btn-primary",
-        onClick: () => {
-          closeModal();
-          applyPendingAiRevision();
-        },
-      }, "✓ 应用到正文"),
-    ]);
-  }
+  const COPILOT_PRESETS = [
+    { label: "去 AI 味", mode: "edit", prompt: "去掉文章里的 AI 味、机器套话和书面腔，改得更像真人自然表达，保留全部事实与配图链接。" },
+    { label: "优化开头", mode: "edit", prompt: "重写文章开头两段，用更有画面感或反常识的切入点留住读者，正文其余部分保持不变。" },
+    { label: "起 5 个标题", mode: "advise", prompt: "结合文章核心亮点，给出 5 个不同切入角度的公众号/小红书标题，每个附一句话说明适合人群。" },
+    { label: "共鸣与逻辑诊断", mode: "advise", prompt: "像资深主编一样逐段诊断这篇文章哪里容易流失读者、哪里论证偏虚，并给出具体修改方向（先诊断不重写）。" },
+    { label: "精简 20% 篇幅", mode: "edit", prompt: "删去重复啰嗦的过渡句，压缩约 20% 篇幅，提升信息密度与阅读节奏，保留所有配图链接。" },
+  ];
 
-  function applyPendingAiRevision() {
-    if (!pendingAiRevision) return;
-    lastAiUndo = { title: state.title || "", content: state.content || "" };
-    state.title = pendingAiRevision.title;
-    state.content = pendingAiRevision.content;
-    state.dirty = true;
-    pendingAiRevision = null;
-    syncAiEditBar();
-    renderFlow();
-    syncBottomBar();
-    syncTopbarBreadcrumb();
-    session.persist();
-    toast("已应用 AI 改稿到正文，按 Ctrl+S 可写回本地 Markdown");
-  }
-
-  function syncAiEditBar() {
+  function renderCopilotPanel() {
     renderAiSkillsBar();
-    aiUndoBtn.classList.toggle("hidden", !lastAiUndo);
+    const isAdvise = state.aiMode === "advise";
+    aiModeEditBtn.classList.toggle("is-active", !isAdvise);
+    aiModeAdviseBtn.classList.toggle("is-active", isAdvise);
+    aiInput.placeholder = pinnedSelection
+      ? (isAdvise ? "围绕选中片段提问或诊断…（Ctrl+Enter）" : "告诉 AI 如何改写这段选中内容…（Ctrl+Enter）")
+      : (isAdvise ? "让 AI 诊断文章、起标题、查风险或给建议…（Ctrl+Enter）" : "告诉 AI 如何修改这篇文章，或先选好 Skill…（Ctrl+Enter）");
     aiRunBtn.disabled = aiEditing;
-    aiRunBtn.textContent = aiEditing ? "AI 改稿中…" : "✨ AI 改稿";
+    aiRunBtn.textContent = aiEditing ? "处理中…" : (isAdvise ? "提问" : "改稿 ✨");
+    aiUndoTopBtn.classList.toggle("hidden", !lastAiUndo);
+    aiDrawerToggleBtn.classList.toggle("is-active", Boolean(state.aiDrawerOpen));
+    aiDrawerToggleBtn.setAttribute("aria-pressed", String(Boolean(state.aiDrawerOpen)));
 
-    clear(aiResultBox);
-    if (!pendingAiRevision) {
-      aiResultBox.classList.add("hidden");
-      return;
-    }
-    aiResultBox.classList.remove("hidden");
-    const rev = pendingAiRevision;
-    const skillTags = (rev.usedSkills || []).map((u) => el("span", { class: "badge badge-accent" }, `⚡ ${u.name || u.id}`));
-    const charDelta = `${(rev.prevContent || "").length} → ${(rev.content || "").length} 字`;
-    aiResultBox.append(
-      el("div", { class: "col", style: { gap: "4px", flex: "1", minWidth: 0 } },
-        el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
-          el("strong", { style: { fontSize: "12.5px" } }, "AI 改稿建议已生成"),
-          ...skillTags,
-          el("span", { class: "muted mono", style: { fontSize: "11px" } }, charDelta)
+    const chat = Array.isArray(state.aiChat) ? state.aiChat : [];
+    aiClearChatBtn.disabled = chat.length === 0 && !aiEditing;
+
+    // Pinned selection context chip
+    clear(copilotSelectionChip);
+    if (pinnedSelection?.text) {
+      copilotSelectionChip.classList.remove("hidden");
+      const preview = pinnedSelection.text.replace(/\s+/g, " ");
+      copilotSelectionChip.append(
+        el("span", { class: "ic-cop-sel-chip-ico", "aria-hidden": "true" }, "📌"),
+        el("span", { class: "ic-cop-sel-chip-text", title: pinnedSelection.text },
+          `选中片段 (${pinnedSelection.text.length} 字)：${preview.slice(0, 32)}${preview.length > 32 ? "…" : ""}`
         ),
-        el("span", { class: "muted", style: { fontSize: "12px", lineHeight: "1.45" } }, rev.summary || "已完成文章修改")
-      ),
-      el("div", { class: "row", style: { gap: "6px", flexShrink: 0, flexWrap: "wrap" } },
-        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: applyPendingAiRevision }, "✓ 应用到正文"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => openAiCompareModal(rev) }, "查看对照"),
         el("button", {
           type: "button",
-          class: "btn btn-sm",
+          class: "ic-art-skill-chip-x",
+          title: "取消引用选中片段",
+          "aria-label": "取消引用选中片段",
           onClick: () => {
-            pendingAiRevision = null;
-            syncAiEditBar();
+            pinnedSelection = null;
+            renderCopilotPanel();
           },
-        }, "放弃")
-      )
-    );
+        }, "×")
+      );
+    } else {
+      copilotSelectionChip.classList.add("hidden");
+    }
+
+    clear(copilotFeed);
+    if (!chat.length && !aiEditing) {
+      copilotFeed.appendChild(el("div", { class: "ic-cop-empty" },
+        el("div", { class: "ic-cop-empty-title" }, "边写边聊，所见即所得改稿"),
+        el("p", { class: "muted ic-cop-empty-desc" }, "支持调用已安装的写作 / 排雷 Skill；在左侧正文划选任意段落，还能只改局部不伤全文。"),
+        el("div", { class: "ic-cop-presets" },
+          ...COPILOT_PRESETS.map((p) => el("button", {
+            type: "button",
+            class: "ic-cop-preset-btn",
+            onClick: () => {
+              state.aiMode = p.mode;
+              runAiArticleEdit({ instructionOverride: p.prompt, modeOverride: p.mode });
+            },
+          },
+            el("span", { class: "ic-cop-preset-tag" }, p.mode === "advise" ? "建议" : "改稿"),
+            el("span", null, p.label)
+          ))
+        )
+      ));
+      return;
+    }
+
+    chat.forEach((msg) => {
+      if (msg.role === "user") {
+        copilotFeed.appendChild(el("div", { class: "ic-cop-msg is-user" },
+          msg.selection ? el("div", { class: "ic-cop-msg-quote" }, `📌 ${msg.selection.slice(0, 60)}${msg.selection.length > 60 ? "…" : ""}`) : null,
+          el("div", { class: "ic-cop-msg-text" }, msg.text || ""),
+          Array.isArray(msg.skills) && msg.skills.length
+            ? el("div", { class: "ic-cop-msg-tags" }, ...msg.skills.map((s) => el("span", { class: "badge badge-accent" }, `⚡ ${s}`)))
+            : null
+        ));
+        return;
+      }
+
+      // Assistant advice message
+      if (msg.kind === "advise") {
+        copilotFeed.appendChild(el("div", { class: "ic-cop-msg is-ai" },
+          el("div", { class: "ic-cop-msg-meta" },
+            el("span", { class: "badge" }, "诊断 / 建议"),
+            ...(msg.usedSkills || []).map((u) => el("span", { class: "badge badge-accent" }, `⚡ ${u.name || u.id}`)),
+            msg.model ? el("span", { class: "muted", style: { fontSize: "11px" } }, msg.model) : null
+          ),
+          renderCopilotMarkdown(msg.reply || ""),
+          el("div", { class: "ic-cop-msg-actions" },
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              onClick: async () => {
+                try {
+                  await navigator.clipboard.writeText(msg.reply || "");
+                  toast("已复制建议内容");
+                } catch { toast("复制失败"); }
+              },
+            }, "复制"),
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              onClick: () => {
+                state.aiMode = "edit";
+                aiInput.value = "请按照你刚才给出的诊断建议，直接帮我修改文章正文。";
+                resizeAiInput();
+                renderCopilotPanel();
+                aiInput.focus();
+              },
+            }, "按此建议改稿 →")
+          )
+        ));
+        return;
+      }
+
+      // Assistant revision card (edit or selection)
+      if (msg.revision) {
+        const rev = msg.revision;
+        const isReviewing = activeDiffReview?.msgId === msg.id;
+        const charDelta = rev.kind === "selection"
+          ? `${(rev.selection || "").length} → ${(rev.replacement || "").length} 字`
+          : `${(rev.prevContent || "").length} → ${(rev.content || "").length} 字`;
+        const canUndoThis = Boolean(lastAiUndo && lastAiUndo.msgId === msg.id);
+
+        copilotFeed.appendChild(el("div", {
+          class: "ic-cop-msg is-ai ic-cop-rev-card" + (isReviewing ? " is-reviewing" : "") + (msg.applied ? " is-applied" : ""),
+        },
+          el("div", { class: "ic-cop-msg-meta" },
+            el("span", { class: "badge badge-accent" }, rev.kind === "selection" ? "局部改写" : "全文修订"),
+            ...(rev.usedSkills || []).map((u) => el("span", { class: "badge" }, `⚡ ${u.name || u.id}`)),
+            el("span", { class: "muted mono", style: { fontSize: "11px" } }, charDelta),
+            msg.applied ? el("span", { class: "badge badge-ok" }, "✓ 已应用") : null,
+            msg.discarded ? el("span", { class: "badge" }, "已忽略") : null
+          ),
+          el("p", { class: "ic-cop-rev-summary" }, rev.summary || "已完成文章修改"),
+          rev.kind === "selection" && rev.replacement
+            ? el("div", { class: "ic-cop-sel-preview" }, renderInlineWordDiff(rev.selection || "", rev.replacement || ""))
+            : null,
+          el("div", { class: "ic-cop-msg-actions" },
+            !msg.applied && !msg.discarded
+              ? el("button", {
+                  type: "button",
+                  class: "btn btn-sm" + (isReviewing ? " is-active" : ""),
+                  onClick: () => (isReviewing ? exitInlineDiffReview() : openInlineDiffReview(msg)),
+                }, isReviewing ? "收起审阅" : "🔍 审阅改动")
+              : null,
+            !msg.applied && !msg.discarded
+              ? el("button", {
+                  type: "button",
+                  class: "btn btn-sm btn-primary",
+                  onClick: () => applyRevisionDirect(msg),
+                }, rev.kind === "selection" ? "✓ 替换选中" : "✓ 应用全部")
+              : null,
+            !msg.applied && !msg.discarded
+              ? el("button", {
+                  type: "button",
+                  class: "btn btn-sm",
+                  onClick: () => {
+                    msg.discarded = true;
+                    if (activeDiffReview?.msgId === msg.id) activeDiffReview = null;
+                    renderStageMode();
+                    renderCopilotPanel();
+                    session.persist();
+                  },
+                }, "放弃")
+              : null,
+            canUndoThis
+              ? el("button", { type: "button", class: "btn btn-sm", onClick: undoLastAiRevision }, "↩ 撤销这次改动")
+              : null,
+            msg.discarded
+              ? el("button", {
+                  type: "button",
+                  class: "btn btn-sm",
+                  onClick: () => {
+                    msg.discarded = false;
+                    openInlineDiffReview(msg);
+                  },
+                }, "重新查看")
+              : null
+          )
+        ));
+      }
+    });
+
+    if (aiEditing) {
+      copilotFeed.appendChild(el("div", { class: "ic-cop-msg is-ai ic-cop-thinking" },
+        el("span", { class: "ic-cop-dot" }),
+        el("span", null, state.aiMode === "advise" ? "正在通读文章并整理诊断建议…" : "正在分析文章并生成修改方案…")
+      ));
+    }
+
+    copilotFeed.scrollTop = copilotFeed.scrollHeight;
   }
 
-  async function runAiArticleEdit() {
+  function replaceSelectionInContent(fullContent, selObj, replacement) {
+    const src = String(fullContent || "");
+    const target = selObj?.text || "";
+    if (!target) return src;
+    const idx = src.indexOf(target);
+    if (idx >= 0) {
+      return src.slice(0, idx) + replacement + src.slice(idx + target.length);
+    }
+    return src;
+  }
+
+  async function runAiArticleEdit({ instructionOverride, modeOverride, selectionOverride } = {}) {
     if (aiEditing) return;
-    const instruction = aiInput.value.trim();
+    const instruction = (typeof instructionOverride === "string" ? instructionOverride : aiInput.value).trim();
     if (!instruction) {
-      toast("请先输入希望 AI 修改文章的要求");
+      toast("请先输入希望 AI 处理文章的要求");
       aiInput.focus();
       return;
     }
@@ -626,8 +1180,36 @@ export async function renderArticle(root, ctx, params = {}) {
       toast("当前文章正文为空，请先打开或输入文章内容");
       return;
     }
+
+    const mode = modeOverride || state.aiMode || "edit";
+    const selObj = selectionOverride || pinnedSelection;
+    const selText = selObj?.text || "";
+    const skillIds = Array.isArray(state.aiSkillIds) ? state.aiSkillIds : [];
+    const byId = new Map(installedSkills.map((sk) => [sk.id, sk]));
+    const skillNames = skillIds.map((id) => byId.get(id)?.name || id);
+
+    if (!Array.isArray(state.aiChat)) state.aiChat = [];
+    const history = state.aiChat.slice(-6).map((m) => ({
+      role: m.role === "user" ? "user" : "assistant",
+      content: m.role === "user" ? (m.text || "") : (m.kind === "advise" ? (m.reply || "") : (m.revision?.summary || "已完成改稿")),
+    })).filter((h) => h.content);
+
+    state.aiChat.push({
+      id: `u_${Date.now()}`,
+      role: "user",
+      text: instruction,
+      selection: selText,
+      skills: skillNames,
+    });
+    if (typeof instructionOverride !== "string") {
+      aiInput.value = "";
+      resizeAiInput();
+    }
+    state.aiDrawerOpen = true;
     aiEditing = true;
-    syncAiEditBar();
+    renderStageMode();
+    renderCopilotPanel();
+
     const prevTitle = state.title || "";
     const prevContent = state.content || "";
     try {
@@ -635,42 +1217,87 @@ export async function renderArticle(root, ctx, params = {}) {
         title: prevTitle,
         content: prevContent,
         instruction,
-        skillIds: Array.isArray(state.aiSkillIds) ? state.aiSkillIds : [],
+        mode,
+        selection: selText,
+        history,
+        skillIds,
         textModelRef: state.textModelRef,
       });
-      pendingAiRevision = {
-        title: res.title ?? prevTitle,
-        content: res.content ?? prevContent,
-        summary: res.summary || "已完成文章修改",
-        usedSkills: res.usedSkills || [],
-        prevTitle,
-        prevContent,
-      };
-      aiInput.value = "";
-      resizeAiInput();
-      toast("AI 改稿完成，请查看摘要并确认应用");
+
+      if (res.mode === "advise") {
+        state.aiChat.push({
+          id: `a_${Date.now()}`,
+          role: "assistant",
+          kind: "advise",
+          reply: res.reply || "",
+          usedSkills: res.usedSkills || [],
+          model: res.model || "",
+        });
+        toast("AI 诊断建议已生成");
+      } else if (res.mode === "selection") {
+        const replacement = res.replacement ?? selText;
+        const nextContent = replaceSelectionInContent(prevContent, selObj, replacement);
+        const aiMsg = {
+          id: `a_${Date.now()}`,
+          role: "assistant",
+          kind: "selection",
+          applied: false,
+          discarded: false,
+          revision: {
+            kind: "selection",
+            title: prevTitle,
+            content: nextContent,
+            prevTitle,
+            prevContent,
+            selection: selText,
+            replacement,
+            summary: res.summary || "已完成局部片段改写",
+            usedSkills: res.usedSkills || [],
+          },
+        };
+        state.aiChat.push(aiMsg);
+        pinnedSelection = null;
+        openInlineDiffReview(aiMsg);
+        toast("局部改写已就绪，已在纸面高亮差异");
+      } else {
+        const aiMsg = {
+          id: `a_${Date.now()}`,
+          role: "assistant",
+          kind: "edit",
+          applied: false,
+          discarded: false,
+          revision: {
+            kind: "edit",
+            title: res.title ?? prevTitle,
+            content: res.content ?? prevContent,
+            prevTitle,
+            prevContent,
+            summary: res.summary || "已完成文章修改",
+            usedSkills: res.usedSkills || [],
+          },
+        };
+        state.aiChat.push(aiMsg);
+        openInlineDiffReview(aiMsg);
+        toast("AI 改稿完成，已在纸面高亮差异供逐段审阅");
+      }
+      if (state.aiChat.length > 24) state.aiChat = state.aiChat.slice(-24);
+      session.persist();
     } catch (e) {
-      toast(e.message || "AI 改稿失败");
+      state.aiChat.push({
+        id: `err_${Date.now()}`,
+        role: "assistant",
+        kind: "advise",
+        reply: `⚠️ 请求失败：${e.message || "AI 改稿失败"}`,
+      });
+      toast(e.message || "AI 处理失败");
     } finally {
       aiEditing = false;
-      if (aiEditBar.isConnected) syncAiEditBar();
+      if (aiDrawer.isConnected) {
+        renderStageMode();
+        renderCopilotPanel();
+      }
     }
   }
-
-  const aiEditBar = el("section", { class: "ic-art-ai-bar hidden", "aria-label": "AI 改稿与 Skill 助手" },
-    aiResultBox,
-    aiSkillsStrip,
-    el("div", { class: "ic-art-ai-composer" },
-      aiInput,
-      el("div", { class: "ic-art-ai-actions" },
-        textModelSel,
-        aiPickSkillBtn,
-        aiUndoBtn,
-        aiRunBtn
-      )
-    )
-  );
-  const centerCol = el("div", { class: "ic-wechat-center-col" }, scrollArea, aiEditBar);
 
   // 4. Fixed Bottom Bar
   const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
@@ -732,16 +1359,24 @@ export async function renderArticle(root, ctx, params = {}) {
 
   root.appendChild(el("div", { class: "ic-wechat-editor-root" },
     topbar,
-    el("div", { class: "ic-wechat-body" }, sidebar, centerCol),
+    el("div", { class: "ic-wechat-body" }, sidebar, centerCol, copilotBackdrop, aiDrawer),
     bottombar
   ));
 
-  root.addEventListener("keydown", (e) => {
+  const onArticleGlobalKeydown = (e) => {
+    if (!root.isConnected) {
+      document.removeEventListener("keydown", onArticleGlobalKeydown);
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
       saveDraft();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l" && state.editorActive) {
+      e.preventDefault();
+      toggleAiDrawer();
     }
-  });
+  };
+  document.addEventListener("keydown", onArticleGlobalKeydown);
 
   // Paragraph helpers
   function paragraphBlocks() {
@@ -806,6 +1441,7 @@ export async function renderArticle(root, ctx, params = {}) {
 
   function applyVaultPayload(res, { resetEditor = false } = {}) {
     closeTreeContextMenu();
+    closeSelectionBubble();
     vault = res || vault;
     if (!Array.isArray(vault.vaults)) vault.vaults = [];
     loadExpandedForVault(vault.dir, vault.tree);
@@ -815,6 +1451,10 @@ export async function renderArticle(root, ctx, params = {}) {
       state.docId = "";
       state.editorActive = false;
       state.dirty = false;
+      state.aiChat = [];
+      activeDiffReview = null;
+      pinnedSelection = null;
+      lastAiUndo = null;
     }
     renderAll();
     session.persist();
@@ -1665,8 +2305,12 @@ export async function renderArticle(root, ctx, params = {}) {
       try {
         meta = typeof res.meta === "string" ? JSON.parse(res.meta) : (res.meta || {});
       } catch {}
-      pendingAiRevision = null;
+      const switchedFile = state.activeFile !== res.path;
+      activeDiffReview = null;
+      pinnedSelection = null;
       lastAiUndo = null;
+      closeSelectionBubble();
+      if (switchedFile) state.aiChat = [];
       Object.assign(state, {
         docId: "",
         activeFile: res.path,
@@ -2318,6 +2962,7 @@ export async function renderArticle(root, ctx, params = {}) {
     };
 
     const appendSegmentTa = (textValue, placeholder, minRows) => {
+      const segIdx = segTextareas.length;
       const linesCount = Math.max(minRows, Math.min(24, textValue.split("\n").length + 1));
       const ta = el("textarea", {
         class: "ic-art-seg-ta",
@@ -2326,7 +2971,28 @@ export async function renderArticle(root, ctx, params = {}) {
       });
       ta.value = textValue;
       ta.addEventListener("focus", () => { activeSegTextarea = ta; });
-      ta.addEventListener("input", syncContentFromSegments);
+      ta.addEventListener("input", () => {
+        closeSelectionBubble();
+        syncContentFromSegments();
+      });
+      ta.addEventListener("mouseup", (e) => {
+        setTimeout(() => {
+          if (ta.selectionEnd - ta.selectionStart >= 2) {
+            showSelectionBubble(ta, segIdx, e.clientX, e.clientY);
+          } else {
+            closeSelectionBubble();
+          }
+        }, 0);
+      });
+      ta.addEventListener("keyup", (e) => {
+        if (e.shiftKey || e.key === "Shift") {
+          if (ta.selectionEnd - ta.selectionStart >= 2) {
+            showSelectionBubble(ta, segIdx, 0, 0);
+          } else {
+            closeSelectionBubble();
+          }
+        }
+      });
       segTextareas.push(ta);
       flowBox.appendChild(ta);
     };
@@ -2451,21 +3117,31 @@ export async function renderArticle(root, ctx, params = {}) {
     welcomeBox.classList.toggle("hidden", active);
     if (!active) {
       paperSheet.classList.add("hidden");
+      diffReviewBox.classList.add("hidden");
       previewStageBox.classList.add("hidden");
-      aiEditBar.classList.add("hidden");
+      aiDrawer.classList.add("hidden");
+      copilotBackdrop.classList.add("hidden");
+      closeSelectionBubble();
       renderWelcome();
       return;
     }
     syncTopbarBreadcrumb();
     const isEditor = state.viewMode !== "preview";
+    const isReviewing = isEditor && Boolean(activeDiffReview);
+    const drawerOpen = Boolean(state.aiDrawerOpen);
+
     editSwitchBtn.classList.toggle("is-active", isEditor);
     previewSwitchBtn.classList.toggle("is-active", !isEditor);
-    toolsGroup.classList.toggle("hidden", !isEditor);
-    paperSheet.classList.toggle("hidden", !isEditor);
-    aiEditBar.classList.toggle("hidden", !isEditor);
+    toolsGroup.classList.toggle("hidden", !isEditor || isReviewing);
+    paperSheet.classList.toggle("hidden", !isEditor || isReviewing);
+    diffReviewBox.classList.toggle("hidden", !isReviewing);
     previewStageBox.classList.toggle("hidden", isEditor);
-    if (isEditor) syncAiEditBar();
-    else renderPreviewStage();
+
+    aiDrawer.classList.toggle("hidden", !drawerOpen);
+    copilotBackdrop.classList.toggle("hidden", !drawerOpen);
+    renderCopilotPanel();
+    if (isReviewing) renderInlineDiffReview();
+    else if (!isEditor) renderPreviewStage();
   }
 
   function renderAll() {
@@ -2584,7 +3260,7 @@ export async function renderArticle(root, ctx, params = {}) {
       coverRatio: state.coverRatio,
       inlineRatio: state.inlineRatio,
       includeCover: state.includeCover,
-      modelRef: state.aiTextModelRef || "",
+      modelRef: state.textModelRef || "",
     };
     try {
       const res = await api("POST", "/api/article/plan", request);
@@ -2838,8 +3514,10 @@ export async function renderArticle(root, ctx, params = {}) {
 
   const unsub = onEvent(async (msg) => {
     if (!root.isConnected) {
+      document.removeEventListener("keydown", onArticleGlobalKeydown);
       closeVaultPopover();
       closeTreeContextMenu();
+      closeSelectionBubble();
       unsub();
       return;
     }

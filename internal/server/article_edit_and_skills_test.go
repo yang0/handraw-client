@@ -141,3 +141,91 @@ func TestSkillDiscoveryImportHostAPIAndArticleEdit(t *testing.T) {
 		t.Fatalf("unexpected article edit response: %+v", editRes)
 	}
 }
+
+func TestArticleEditAdviseSelectionAndHistory(t *testing.T) {
+	var lastMsgCount int
+	var lastJSONMode bool
+	mockText := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages       []map[string]any `json:"messages"`
+			ResponseFormat map[string]any   `json:"response_format"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		lastMsgCount = len(req.Messages)
+		lastJSONMode = req.ResponseFormat != nil
+		lastUser := ""
+		if len(req.Messages) > 0 {
+			lastUser, _ = req.Messages[len(req.Messages)-1]["content"].(string)
+		}
+		var reply string
+		switch {
+		case strings.Contains(lastUser, "【选中待改片段】"):
+			reply = `{"replacement":"秋天的早晨，烧一壶 92℃ 的水慢冲一杯浅烘咖啡。","summary":"压缩口语冗余并加入具体温度画面"}`
+		case !lastJSONMode:
+			reply = "### 诊断建议\n1. 开头略显平淡，建议删去“总而言之”。\n2. 备选标题：《秋日手冲：92℃ 的慢早晨》"
+		default:
+			reply = `{"title":"秋日手冲","content":"# 秋日手冲\n\n改写后的正文。","summary":"优化结构"}`
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": reply}}},
+		})
+	}))
+	defer mockText.Close()
+
+	srv, _ := setupTestServer(t, "")
+	h := srv.Handler()
+	rrProv := doReq(t, h, srv.Token, "POST", "/api/providers", map[string]any{
+		"id": "mocktxt2", "name": "MockText2", "kind": "openai", "purpose": "text",
+		"baseUrl": mockText.URL + "/v1", "apiKey": "sk-mock2", "enabled": true,
+		"models": []map[string]any{{"id": "writer-pro", "label": "Writer Pro"}},
+	})
+	if rrProv.Code != 200 {
+		t.Fatalf("add provider: %d %s", rrProv.Code, rrProv.Body.String())
+	}
+
+	// 1. Advise mode with multi-turn history -> returns Markdown reply, JSONMode=false, history forwarded.
+	rrAdvise := doReq(t, h, srv.Token, "POST", "/api/article/edit", map[string]any{
+		"mode":         "advise",
+		"title":        "秋日手冲",
+		"content":      "总而言之，秋天喝手冲很好。",
+		"instruction":  "帮我诊断一下开头并给 1 个标题建议",
+		"history":      []map[string]any{{"role": "user", "content": "风格偏向温暖克制"}, {"role": "assistant", "content": "明白，保持克制与画面感。"}},
+		"textModelRef": "mocktxt2:writer-pro",
+	})
+	if rrAdvise.Code != 200 {
+		t.Fatalf("advise mode failed: %d %s", rrAdvise.Code, rrAdvise.Body.String())
+	}
+	if lastJSONMode || lastMsgCount != 4 { // system + 2 history + user
+		t.Fatalf("expected jsonMode=false and 4 messages, got jsonMode=%v count=%d", lastJSONMode, lastMsgCount)
+	}
+	var advRes struct {
+		Mode  string `json:"mode"`
+		Reply string `json:"reply"`
+	}
+	_ = json.Unmarshal(rrAdvise.Body.Bytes(), &advRes)
+	if advRes.Mode != "advise" || !strings.Contains(advRes.Reply, "诊断建议") {
+		t.Fatalf("unexpected advise response: %+v", advRes)
+	}
+
+	// 2. Selection surgical rewrite mode -> returns mode="selection" + replacement.
+	rrSel := doReq(t, h, srv.Token, "POST", "/api/article/edit", map[string]any{
+		"mode":         "edit",
+		"title":        "秋日手冲",
+		"content":      "第一段。\n\n总而言之，秋天喝手冲很好。\n\n最后一段。",
+		"selection":    "总而言之，秋天喝手冲很好。",
+		"instruction":  "改得更有画面感",
+		"textModelRef": "mocktxt2:writer-pro",
+	})
+	if rrSel.Code != 200 {
+		t.Fatalf("selection edit failed: %d %s", rrSel.Code, rrSel.Body.String())
+	}
+	var selRes struct {
+		Mode        string `json:"mode"`
+		Replacement string `json:"replacement"`
+		Summary     string `json:"summary"`
+	}
+	_ = json.Unmarshal(rrSel.Body.Bytes(), &selRes)
+	if selRes.Mode != "selection" || !strings.Contains(selRes.Replacement, "92℃") || selRes.Summary == "" {
+		t.Fatalf("unexpected selection response: %+v", selRes)
+	}
+}
