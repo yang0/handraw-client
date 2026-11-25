@@ -308,6 +308,17 @@ export function openReferencePickerModal({
             localPath: p,
           };
         }
+        if (meta?.source === "work" || meta?.source === "inspiration") {
+          return {
+            index: idx + 1,
+            source: meta.source,
+            id: meta.id || "",
+            label: meta.name || "",
+            prompt: meta.prompt || "",
+            promptZh: meta.promptZh || "",
+            localPath: p,
+          };
+        }
         if (meta?.id) {
           return {
             index: idx + 1,
@@ -479,7 +490,7 @@ export function openReferencePickerModal({
       toggleSelectPath(knownPath);
       return;
     }
-    if (selectedRefs.length >= limit) {
+    if (selectedRefs.length >= limit && limit > 1) {
       toast(`最多选用 ${limit} 张参考图，请先取消一张`);
       return;
     }
@@ -504,7 +515,9 @@ export function openReferencePickerModal({
         angleLabel: variantObj?.label || "",
         localOnly: Boolean(gal.localOnly),
       });
-      if (!selectedRefs.includes(res.path)) {
+      if (limit === 1) {
+        selectedRefs = [res.path];
+      } else if (!selectedRefs.includes(res.path)) {
         selectedRefs.push(res.path);
       }
       syncSelectionUI();
@@ -522,6 +535,11 @@ export function openReferencePickerModal({
     const idx = selectedRefs.indexOf(path);
     if (idx >= 0) {
       selectedRefs.splice(idx, 1);
+      syncSelectionUI();
+      return;
+    }
+    if (limit === 1) {
+      selectedRefs = [path];
       syncSelectionUI();
       return;
     }
@@ -596,6 +614,7 @@ export function openReferencePickerModal({
   // ---------- Left Navigation Rail ----------
 
   function renderRail() {
+    const prevScroll = leftRail.scrollTop;
     clear(leftRail);
 
     const makeSourceBtn = (id, ico, label, countText, extraBadge = "") => {
@@ -645,7 +664,14 @@ export function openReferencePickerModal({
         subList.appendChild(el("button", {
           type: "button",
           class: "rp-rail-sub" + (activeCategory === c.key ? " is-active" : ""),
-          onClick: () => { activeCategory = c.key; renderRail(); renderGrid(); },
+          dataset: { subKey: c.key },
+          onClick: () => {
+            activeCategory = c.key;
+            subList.querySelectorAll(".rp-rail-sub[data-sub-key]").forEach((b) => {
+              b.classList.toggle("is-active", b.dataset.subKey === c.key);
+            });
+            renderGrid();
+          },
         }, el("span", null, c.label), el("span", { class: "rp-rail-count" }, String(c.count))));
       });
       if (showNewCatForm) {
@@ -706,11 +732,14 @@ export function openReferencePickerModal({
               subList.appendChild(el("button", {
                 type: "button",
                 class: "rp-rail-sub" + (extSeries === s.key ? " is-active" : ""),
+                dataset: { subKey: s.key },
                 onClick: () => {
                   extSeries = s.key;
                   activeCategory = "ALL";
                   extPageLimit = 48;
-                  renderRail();
+                  subList.querySelectorAll(".rp-rail-sub[data-sub-key]").forEach((b) => {
+                    b.classList.toggle("is-active", b.dataset.subKey === s.key);
+                  });
                   renderToolbar();
                   renderExtGrid();
                 },
@@ -729,10 +758,13 @@ export function openReferencePickerModal({
                 subList.appendChild(el("button", {
                   type: "button",
                   class: "rp-rail-sub" + (activeCategory === c.key ? " is-active" : ""),
+                  dataset: { subKey: c.key },
                   onClick: () => {
                     activeCategory = c.key;
                     extPageLimit = 48;
-                    renderRail();
+                    subList.querySelectorAll(".rp-rail-sub[data-sub-key]").forEach((b) => {
+                      b.classList.toggle("is-active", b.dataset.subKey === c.key);
+                    });
                     renderExtGrid();
                   },
                 }, el("span", null, c.label), el("span", { class: "rp-rail-count" }, String(c.count))));
@@ -744,6 +776,8 @@ export function openReferencePickerModal({
       });
       leftRail.appendChild(extGroup);
     }
+    leftRail.scrollTop = prevScroll;
+    requestAnimationFrame(() => { leftRail.scrollTop = prevScroll; });
   }
 
   // ---------- Center Top Toolbar (Single Clean Row!) ----------
@@ -894,7 +928,8 @@ export function openReferencePickerModal({
       const isSel = Boolean(it.image && selectedRefs.includes(it.image));
       const isBusy = materializingKey === `insp:${it.id}`;
       const thumbSrc = it.image ? localImg(it.thumb || it.image) : (it.remoteUrl ? remoteThumb(it.remoteUrl) : "");
-      const wrap = el("div", { class: "rp-thumb-wrap", dataset: { fallback: it.id || "图" } });
+      const isFullFrame = activeTab === "works" || activeTab === "inspirations";
+      const wrap = el("div", { class: "rp-thumb-wrap" + (isFullFrame ? " is-contain-thumb" : ""), dataset: { fallback: it.id || "图" } });
       const img = el("img", {
         src: thumbSrc,
         alt: it.name || it.id || "参考图",
@@ -1767,7 +1802,8 @@ export function openReferencePickerModal({
           thumb: im.thumb || im.path,
           kind: "work",
           subLabel: run.modelLabel || run.mode || "作品",
-          prompt: im.prompt || im.subject || "",
+          prompt: String(im.prompt || run.originalRequest || im.subject || "").trim(),
+          promptZh: String(im.subject || run.originalRequest || "").trim(),
           source: "work",
         });
       });
@@ -1790,7 +1826,8 @@ export function openReferencePickerModal({
         kind: "inspiration",
         folder: it.folder || it.category || "灵感库",
         tags: Array.isArray(it.tags) ? it.tags : [],
-        prompt: it.prompt || it.promptZh || "",
+        prompt: String(it.prompt || it.promptZh || it.rawText || "").trim(),
+        promptZh: String(it.promptZh || it.prompt || it.rawText || "").trim(),
         source: "inspiration",
       });
     }

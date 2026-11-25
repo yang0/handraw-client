@@ -477,7 +477,8 @@ async function openRunDetail(runId, ctx, onChanged) {
     onClick: () => {
       const im = doneImages[activeIdx] || doneImages[0];
       if (!im?.path) return;
-      openStyleEditorModal({ image: im.path }, null, { stacked: true });
+      const pText = String(im.prompt || expandedInfo.defaultPrompt || originalReqText || "").trim();
+      openStyleEditorModal({ image: im.path, prompt: pText }, null, { stacked: true });
     },
   }, "🎨 提取画风");
 
@@ -488,7 +489,8 @@ async function openRunDetail(runId, ctx, onChanged) {
     onClick: () => {
       const im = doneImages[activeIdx] || doneImages[0];
       if (!im?.path) return;
-      openLayoutEditorModal({ image: im.path }, null, { stacked: true });
+      const pText = String(im.prompt || expandedInfo.defaultPrompt || originalReqText || "").trim();
+      openLayoutEditorModal({ image: im.path, prompt: pText }, null, { stacked: true });
     },
   }, "📐 提取图型");
 

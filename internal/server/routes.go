@@ -74,6 +74,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/mine/recipes/sync", s.h(s.mineRecipesSync))
 	m.HandleFunc("POST /api/mine/{kind}/{id}/publish", s.h(s.minePublish))
 	m.HandleFunc("POST /api/mine/analyze", s.h(s.mineAnalyze))
+	m.HandleFunc("POST /api/mine/suggest-name", s.h(s.mineSuggestName))
 	m.HandleFunc("POST /api/mine/upload", s.h(s.uploadImage))
 
 	// chat + skills (#58, #60, #69)

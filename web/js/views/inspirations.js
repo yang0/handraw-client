@@ -1371,6 +1371,7 @@ function openLocalInspirationDetail(item, ctx, onChanged, availableFolders = [])
         onClick: () => openStyleEditorModal({
           image: cur.imagePath || "",
           remoteImageUrl: cur.imageUrl || "",
+          prompt: String(cur.promptZh || cur.prompt || cur.rawText || "").trim(),
         }, null, { stacked: true }),
       }, "🎨 提取画风") : null,
       hasAnyImg ? el("button", {
@@ -1379,6 +1380,7 @@ function openLocalInspirationDetail(item, ctx, onChanged, availableFolders = [])
         onClick: () => openLayoutEditorModal({
           image: cur.imagePath || "",
           remoteImageUrl: cur.imageUrl || "",
+          prompt: String(cur.promptZh || cur.prompt || cur.rawText || "").trim(),
         }, null, { stacked: true }),
       }, "📐 提取图型") : null,
       cur.publishedUrl ? el("button", { type: "button", class: "btn", onClick: () => openURL(cur.publishedUrl) }, "查看社区页 ↗") : null,

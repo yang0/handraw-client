@@ -6,41 +6,6 @@ import {
   readClipboardImagesViaApi,
 } from "./ref-picker.js";
 
-const MAX_RESOURCE_IMAGES = 5;
-
-const LAYOUT_STARTER_TEMPLATES = [
-  {
-    label: "上下留白社媒卡",
-    text: "竖版上下分区结构：下方 65% 为主画面视觉区，上方 35% 保持干净暖纸留白用于排印主标题与副标题，四周留均衡呼吸边距，无多余边框装饰。",
-  },
-  {
-    label: "左右双栏对照",
-    text: "画面采用左右 1:1 对称双栏结构，中间以柔和细虚线或留白带分隔，顶部通栏放置居中主题标题，左右两栏各含独立小标题、主体配图区与底部精炼要点标注。",
-  },
-  {
-    label: "四宫格手账分镜",
-    text: "整体分为 2×2 四宫格圆角分镜面板，顶部留紧凑主标题条，每格配有角标序号与底部简短手写说明区，格间留均匀暖纸缝隙形成连续叙事节奏。",
-  },
-  {
-    label: "居中视觉海报",
-    text: "经典中心构图海报：画面正中 60% 聚焦单一核心视觉主体，顶部居中排布大字主标题，底部居中排布精炼副标题与小号标注信息，四周保留宽阔负空间。",
-  },
-];
-
-function dedupImages(initial) {
-  const out = [];
-  const push = (p) => {
-    const clean = String(p || "").trim();
-    if (!clean || out.includes(clean)) return;
-    if (out.length < MAX_RESOURCE_IMAGES) out.push(clean);
-  };
-  if (initial?.image) push(initial.image);
-  if (Array.isArray(initial?.images)) {
-    for (const p of initial.images) push(p);
-  }
-  return out;
-}
-
 async function uploadLocalFile(file) {
   const fd = new FormData();
   fd.append("file", file);
@@ -49,28 +14,42 @@ async function uploadLocalFile(file) {
   return up.path;
 }
 
+function initialCoverImage(initial) {
+  const direct = String(initial?.image || "").trim();
+  if (direct) return direct;
+  if (Array.isArray(initial?.images)) {
+    for (const p of initial.images) {
+      const clean = String(p || "").trim();
+      if (clean) return clean;
+    }
+  }
+  return "";
+}
+
 function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
   const isLayout = kind === "layout";
   const label = isLayout ? "图型" : "画风";
   const isEdit = Boolean(initial?.docId);
   const stacked = Boolean(opts?.stacked);
 
-  let images = dedupImages(initial);
+  let coverImage = initialCoverImage(initial);
+  let visionEnabled = false; // Default OFF: users often already have/tuned their description
   let isUploading = false;
   let isAnalyzing = false;
+  let isSuggestingName = false;
   let isSaving = false;
   let selectedModelRef = "";
+  let pendingPromptOffer = null; // { text, sourceLabel }
   let closeThisModal = () => closeModal();
 
-  // Hidden file input for local file selection
+  // Hidden file input for single local cover image selection
   const fileInput = el("input", {
     type: "file",
     accept: "image/*",
-    multiple: true,
     class: "hidden",
   });
 
-  // Form controls (single unified description textarea — no CN/EN split!)
+  // Name input with embedded AI recommend-name icon button
   const nameIn = el("input", {
     type: "text",
     class: "input re-name-input",
@@ -81,44 +60,80 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
     "aria-label": `${label}名称`,
   });
 
+  const suggestNameBtn = el("button", {
+    type: "button",
+    class: "re-name-ai-btn",
+    title: "根据下方描述让 AI 推荐名称",
+    "aria-label": `根据描述让 AI 推荐${label}名称`,
+    onClick: () => { void runSuggestName(); },
+  }, "✨");
+
+  const nameFieldWrap = el("div", { class: "re-name-wrap" }, nameIn, suggestNameBtn);
+
+  // Single unified description textarea (no CN/EN split; auto-fills initial prompt if creating from work/inspiration)
   const initialDesc = isLayout
-    ? (initial?.description || initial?.prompt_zh || initial?.prompt_en || "")
-    : (initial?.description || initial?.traits || initial?.traitsEn || "");
+    ? (initial?.description || initial?.prompt_zh || initial?.prompt_en || initial?.prompt || "")
+    : (initial?.description || initial?.traits || initial?.traitsEn || initial?.prompt || "");
 
   const descIn = el("textarea", {
     class: "textarea re-desc-textarea",
-    rows: "7",
+    rows: "8",
     placeholder: isLayout
-      ? "描述区域划分、主标题区、主配图区、要点区和留白比例（中英文皆可，不用分两栏）…"
+      ? "描述区域划分、主标题区、主配图区、要点区和留白比例（中英文皆可）…"
       : "只描述纯粹视觉艺术语言：媒介、笔触线条、纸张肌理、色彩倾向、光影与氛围（避免出现具体人物、服饰或场景）…",
     "aria-label": isLayout ? "排版与构图约束" : "视觉特征描述",
   }, initialDesc);
 
+  const promptOfferBar = el("div", { class: "re-prompt-offer hidden" });
   const warnBox = el("div", { class: "re-warn-banner hidden", role: "alert" });
   const uploadStatus = el("span", { class: "muted re-upload-status", role: "status" }, "");
 
-  // Media stage + thumbnails
+  // Media stage (single cover image only)
   const mediaStage = el("div", { class: "re-media-stage" });
-  const thumbRail = el("div", { class: "re-thumb-rail" });
+  const mediaActionsBar = el("div", { class: "re-media-actions hidden" });
   const dropOverlay = el("div", { class: "re-drop-overlay hidden", "aria-hidden": "true" },
     el("div", { class: "re-drop-overlay-box" },
       el("span", { style: { fontSize: "24px" } }, "📥"),
-      el("strong", null, `松开鼠标添加${label}参考图`),
-      el("span", { class: "muted", style: { fontSize: "12px" } }, `最多支持 ${MAX_RESOURCE_IMAGES} 张，第 1 张自动作为封面`)
+      el("strong", null, `松开鼠标设为${label}参考封面图`),
+      el("span", { class: "muted", style: { fontSize: "12px" } }, "仅需 1 张参考图即可")
     )
   );
 
-  // Unified AI model picker (Website / 3rd-party OpenAI / Local AI Harness + sub-models)
+  // Optional AI Vision extraction section (disabled by default)
+  const visionChk = el("input", {
+    type: "checkbox",
+    checked: false,
+    class: "re-vision-chk",
+  });
   const modelPillHost = el("div", { class: "studio-model-pill is-plan re-model-pill", title: "选择识别提取引擎（官网视觉服务 / 第三方接口 / 本地 AI Harness）" },
     el("span", { class: "studio-model-pill-tag" }, "识别"),
     el("span", { class: "muted", style: { padding: "0 10px", fontSize: "12px" } }, "加载模型…")
   );
-
   const analyzeBtn = el("button", {
     type: "button",
     class: "btn btn-sm re-analyze-btn",
     onClick: () => { void runAnalyze(); },
   }, isLayout ? "✨ 提取排版结构" : "✨ 提取视觉特征");
+
+  const aiControlsRow = el("div", { class: "re-ai-controls hidden" },
+    modelPillHost,
+    analyzeBtn
+  );
+
+  visionChk.addEventListener("change", () => {
+    visionEnabled = Boolean(visionChk.checked);
+    aiControlsRow.classList.toggle("hidden", !visionEnabled);
+    syncActionButtons();
+  });
+
+  const aiCard = el("div", { class: "re-ai-card" },
+    el("label", { class: "re-vision-toggle" },
+      visionChk,
+      el("span", { class: "re-vision-title" }, "启用 AI 视觉识别"),
+      el("span", { class: "muted re-vision-hint" }, "从参考图自动提取（默认关闭）")
+    ),
+    aiControlsRow
+  );
 
   api("GET", "/api/models").then((modRes) => {
     const initRef = modRes.defaultVisionModel || modRes.sceneModels?.studioPlan || modRes.defaultTextModel || "";
@@ -142,38 +157,79 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
     );
   });
 
-  function addImagePaths(paths) {
-    let added = 0;
-    for (const raw of paths || []) {
-      const p = String(raw || "").trim();
-      if (!p || images.includes(p)) continue;
-      if (images.length >= MAX_RESOURCE_IMAGES) break;
-      images.push(p);
-      added++;
+  function renderPromptOffer() {
+    clear(promptOfferBar);
+    if (!pendingPromptOffer || !pendingPromptOffer.text) {
+      promptOfferBar.classList.add("hidden");
+      return;
     }
-    renderMedia();
-    return added;
+    const { text, sourceLabel } = pendingPromptOffer;
+    promptOfferBar.classList.remove("hidden");
+    promptOfferBar.append(
+      el("span", { class: "re-prompt-offer-text" }, `💡 所选${sourceLabel}附带提示词`),
+      el("div", { class: "row", style: { gap: "6px", flexShrink: "0" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => {
+            descIn.value = text;
+            pendingPromptOffer = null;
+            renderPromptOffer();
+            descIn.focus();
+            toast(`已替换为该${sourceLabel}的提示词`);
+          },
+        }, "替换填入"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => {
+            descIn.value = descIn.value.trim() ? `${descIn.value.trim()}\n${text}` : text;
+            pendingPromptOffer = null;
+            renderPromptOffer();
+            descIn.focus();
+            toast(`已追加该${sourceLabel}的提示词`);
+          },
+        }, "追加"),
+        el("button", {
+          type: "button",
+          class: "icon-btn",
+          style: { width: "22px", height: "22px", fontSize: "12px" },
+          title: "忽略",
+          "aria-label": "忽略提示词带入",
+          onClick: () => { pendingPromptOffer = null; renderPromptOffer(); },
+        }, "×")
+      )
+    );
   }
 
-  async function ingestFiles(files, sourceLabel = "添加") {
-    const imgFiles = Array.from(files || []).filter((f) =>
-      String(f?.type || "").startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(f?.name || "")
-    );
-    if (!imgFiles.length) return toast("请选择或粘贴图片文件");
-    const remain = MAX_RESOURCE_IMAGES - images.length;
-    if (remain <= 0) return toast(`最多添加 ${MAX_RESOURCE_IMAGES} 张参考图，请先移除一张`);
+  function applyPickedPrompt(promptText, sourceLabel = "作品") {
+    const clean = String(promptText || "").trim();
+    if (!clean) return;
+    if (!descIn.value.trim()) {
+      descIn.value = clean;
+      pendingPromptOffer = null;
+      renderPromptOffer();
+      uploadStatus.textContent = `已自动带入该${sourceLabel}的提示词，可直接调整`;
+      toast(`已带入该${sourceLabel}的提示词`);
+    } else if (descIn.value.trim() !== clean) {
+      pendingPromptOffer = { text: clean, sourceLabel };
+      renderPromptOffer();
+    }
+  }
+
+  async function ingestSingleFile(file, sourceLabel = "添加") {
+    const isImg = String(file?.type || "").startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(file?.name || "");
+    if (!isImg) return toast("请选择或粘贴图片文件");
     isUploading = true;
-    uploadStatus.textContent = `正在${sourceLabel}图片…`;
+    uploadStatus.textContent = `正在${sourceLabel}参考图…`;
     syncActionButtons();
     try {
-      let okCount = 0;
-      for (const f of imgFiles.slice(0, remain)) {
-        const savedPath = await uploadLocalFile(f);
-        okCount += addImagePaths([savedPath]);
-      }
-      if (okCount > 0) {
-        uploadStatus.textContent = `已${sourceLabel} ${okCount} 张参考图`;
-      }
+      const savedPath = await uploadLocalFile(file);
+      coverImage = savedPath;
+      pendingPromptOffer = null;
+      renderPromptOffer();
+      uploadStatus.textContent = `已${sourceLabel}参考封面图`;
+      renderMedia();
     } catch (e) {
       toast(e?.message || `${sourceLabel}图片失败`);
       uploadStatus.textContent = "";
@@ -187,7 +243,7 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
     try {
       const res = await readClipboardImagesViaApi();
       if (res.supported && res.files.length) {
-        await ingestFiles(res.files, "粘贴");
+        await ingestSingleFile(res.files[0], "粘贴");
         return;
       }
       if (res.supported && !res.files.length) {
@@ -200,38 +256,47 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
 
   function openLibraryPicker(initialTab = "works") {
     openReferencePickerModal({
-      currentRefs: [...images],
-      maxCount: MAX_RESOURCE_IMAGES,
-      title: `为「${label}」挑选参考图（作品 / 灵感库 / 图库）`,
+      currentRefs: coverImage ? [coverImage] : [],
+      maxCount: 1,
+      title: `为「${label}」选择 1 张参考封面图`,
       initialTab,
       stacked: true,
-      onConfirm: (nextRefs) => {
-        images = (nextRefs || []).slice(0, MAX_RESOURCE_IMAGES);
-        uploadStatus.textContent = images.length ? `已选用 ${images.length} 张参考图` : "";
+      onConfirm: (nextRefs, nextMeta) => {
+        coverImage = (nextRefs && nextRefs[0]) ? String(nextRefs[0]).trim() : "";
+        uploadStatus.textContent = coverImage ? "已选用参考封面图" : "";
         renderMedia();
+        const meta = Array.isArray(nextMeta) ? nextMeta[0] : null;
+        if (meta && (meta.source === "work" || meta.source === "inspiration")) {
+          const pickedPrompt = String(meta.promptZh || meta.prompt || "").trim();
+          const srcLbl = meta.source === "inspiration" ? "灵感" : "作品";
+          if (pickedPrompt) applyPickedPrompt(pickedPrompt, srcLbl);
+        }
       },
     });
   }
 
   function syncActionButtons() {
-    analyzeBtn.disabled = isAnalyzing || isUploading || images.length === 0;
+    analyzeBtn.disabled = !visionEnabled || isAnalyzing || isUploading || !coverImage;
     analyzeBtn.textContent = isAnalyzing
       ? "识别提取中…"
       : (isLayout ? "✨ 提取排版结构" : "✨ 提取视觉特征");
+    suggestNameBtn.disabled = isSuggestingName || isSaving;
+    suggestNameBtn.classList.toggle("is-busy", isSuggestingName);
+    suggestNameBtn.textContent = isSuggestingName ? "…" : "✨";
     saveBtn.disabled = isSaving || isUploading;
     saveBtn.textContent = isSaving ? "保存中…" : (isEdit ? `保存${label}` : `创建${label}`);
   }
 
   function renderMedia() {
     clear(mediaStage);
-    clear(thumbRail);
+    clear(mediaActionsBar);
 
-    if (images.length === 0) {
+    if (!coverImage) {
       mediaStage.classList.add("is-empty");
       mediaStage.append(
         el("div", { class: "re-empty-ico", "aria-hidden": "true" }, isLayout ? "📐" : "🎨"),
-        el("strong", { class: "re-empty-title" }, `添加 1–${MAX_RESOURCE_IMAGES} 张参考图（第 1 张作封面）`),
-        el("p", { class: "muted re-empty-sub" }, "支持拖拽图片至此、按 Ctrl/⌘ + V 粘贴，或从作品库与灵感库挑选"),
+        el("strong", { class: "re-empty-title" }, "添加 1 张参考封面图（选填）"),
+        el("p", { class: "muted re-empty-sub" }, "支持拖拽图片、按 Ctrl/⌘ + V 粘贴，或从作品库 / 灵感库挑选并带入提示词"),
         el("div", { class: "re-source-btns" },
           el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => fileInput.click() }, "📁 本地选图"),
           el("button", { type: "button", class: "btn btn-sm", onClick: () => { void pasteFromClipboardBtn(); } }, "📋 粘贴"),
@@ -240,60 +305,42 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
           el("button", { type: "button", class: "btn btn-sm", onClick: () => openLibraryPicker("mine") }, "🖼️ 图库")
         )
       );
-      thumbRail.classList.add("hidden");
+      mediaActionsBar.classList.add("hidden");
     } else {
       mediaStage.classList.remove("is-empty");
-      const coverPath = images[0];
       mediaStage.append(
-        el("img", { class: "re-hero-img", src: localImg(coverPath), alt: `${label}封面预览` }),
-        el("span", { class: "re-cover-pill" }, `封面图 · ${images.length}/${MAX_RESOURCE_IMAGES}`),
-        el("div", { class: "re-hero-actions" },
-          el("button", { type: "button", class: "btn btn-sm", title: "从本地选择更多图片", onClick: () => fileInput.click() }, "＋ 本地"),
-          el("button", { type: "button", class: "btn btn-sm", title: "粘贴剪贴板图片", onClick: () => { void pasteFromClipboardBtn(); } }, "📋 粘贴"),
-          el("button", { type: "button", class: "btn btn-sm", title: "从作品库、灵感库或图库挑选", onClick: () => openLibraryPicker("works") }, "🎨 作品/灵感")
-        )
+        el("img", { class: "re-hero-img", src: localImg(coverImage), alt: `${label}封面预览` }),
+        el("span", { class: "re-cover-pill" }, "封面参考图")
       );
-
-      thumbRail.classList.remove("hidden");
-      images.forEach((p, idx) => {
-        const isCover = idx === 0;
-        thumbRail.appendChild(el("div", {
-          class: "re-thumb-item" + (isCover ? " is-cover" : ""),
-          title: isCover ? "当前封面图" : "点击设为封面图",
+      mediaActionsBar.classList.remove("hidden");
+      mediaActionsBar.append(
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => fileInput.click() }, "📁 换本地图"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => { void pasteFromClipboardBtn(); } }, "📋 粘贴"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => openLibraryPicker("works") }, "🎨 作品/灵感"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm re-remove-img-btn",
+          title: "移除当前封面图",
           onClick: () => {
-            if (idx === 0) return;
-            const picked = images.splice(idx, 1)[0];
-            images.unshift(picked);
+            coverImage = "";
+            uploadStatus.textContent = "";
             renderMedia();
           },
-        },
-          el("img", { src: localImg(p), alt: `参考图 ${idx + 1}` }),
-          isCover ? el("span", { class: "re-thumb-badge" }, "封面") : null,
-          el("button", {
-            type: "button",
-            class: "re-thumb-del",
-            title: "移除此图",
-            "aria-label": `移除参考图 ${idx + 1}`,
-            onClick: (e) => {
-              e.stopPropagation();
-              images.splice(idx, 1);
-              renderMedia();
-            },
-          }, "×")
-        ));
-      });
+        }, "移除")
+      );
     }
     syncActionButtons();
   }
 
   async function runAnalyze() {
-    if (!images.length) return toast(`请先添加 1–${MAX_RESOURCE_IMAGES} 张参考图`);
+    if (!visionEnabled) return;
+    if (!coverImage) return toast("请先添加 1 张参考图");
     isAnalyzing = true;
     uploadStatus.textContent = isLayout ? "正在分析参考图构图与排版结构…" : "正在分析参考图纯粹视觉语言…";
     syncActionButtons();
     try {
       const res = await api("POST", "/api/mine/analyze", {
-        images,
+        images: [coverImage],
         kind,
         purpose: "create",
         modelRef: selectedModelRef,
@@ -323,6 +370,35 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
     }
   }
 
+  async function runSuggestName() {
+    const desc = descIn.value.trim();
+    if (!desc) {
+      descIn.focus();
+      return toast(`请先填写${isLayout ? "排版与构图约束" : "视觉特征描述"}，再让 AI 推荐名称`);
+    }
+    if (isSuggestingName) return;
+    isSuggestingName = true;
+    syncActionButtons();
+    try {
+      const res = await api("POST", "/api/mine/suggest-name", {
+        kind,
+        description: desc,
+        modelRef: visionEnabled ? selectedModelRef : "",
+      });
+      const suggested = String(res?.name || "").trim();
+      if (!suggested) throw new Error("未获取到推荐名称，请重试");
+      nameIn.value = suggested;
+      nameIn.focus();
+      nameIn.select();
+      toast(`已推荐${label}名称：${suggested}`);
+    } catch (e) {
+      toast(e?.message || "AI 推荐名称失败，请检查模型配置");
+    } finally {
+      isSuggestingName = false;
+      syncActionButtons();
+    }
+  }
+
   async function handleSave() {
     const name = nameIn.value.trim();
     const desc = descIn.value.trim();
@@ -336,6 +412,7 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
     }
     isSaving = true;
     syncActionButtons();
+    const singleImages = coverImage ? [coverImage] : [];
     try {
       if (isLayout) {
         const res = await api("POST", "/api/mine/layouts", {
@@ -345,8 +422,8 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
           description: desc,
           prompt_zh: desc,
           prompt_en: desc,
-          image: images[0] || "",
-          images,
+          image: coverImage,
+          images: singleImages,
         });
         toast(isEdit ? "图型已更新并准备同步" : "图型已创建");
         closeThisModal();
@@ -359,8 +436,8 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
           description: desc,
           traits: desc,
           traitsEn: desc,
-          image: images[0] || "",
-          images,
+          image: coverImage,
+          images: singleImages,
         });
         if (res.violations?.length) {
           toast("已保存，建议后续移除特征中的主体词：" + res.violations.join("、"));
@@ -379,48 +456,32 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
   }
 
   fileInput.addEventListener("change", () => {
-    const files = Array.from(fileInput.files || []);
+    const file = fileInput.files?.[0];
     fileInput.value = "";
-    if (files.length) void ingestFiles(files, "上传");
+    if (file) void ingestSingleFile(file, "上传");
   });
-
-  // Layout quick-starter chips
-  const layoutStarterRow = isLayout
-    ? el("div", { class: "re-starter-row" },
-        el("span", { class: "muted", style: { fontSize: "11.5px" } }, "快捷模板："),
-        ...LAYOUT_STARTER_TEMPLATES.map((tpl) => el("button", {
-          type: "button",
-          class: "btn btn-sm re-starter-chip",
-          onClick: () => {
-            if (!nameIn.value.trim()) nameIn.value = tpl.label;
-            descIn.value = descIn.value.trim() ? `${descIn.value.trim()}\n${tpl.text}` : tpl.text;
-            descIn.focus();
-          },
-        }, tpl.label))
-      )
-    : null;
 
   const leftCol = el("div", { class: "re-col-media" },
     mediaStage,
-    thumbRail,
-    el("div", { class: "re-ai-bar" },
-      modelPillHost,
-      analyzeBtn
-    ),
+    mediaActionsBar,
+    aiCard,
     uploadStatus
   );
 
   const rightCol = el("div", { class: "re-col-form" },
     el("div", { class: "field re-field" },
-      el("label", { class: "re-label" }, `${label}名称`),
-      nameIn
+      el("div", { class: "re-label-row" },
+        el("label", { class: "re-label" }, `${label}名称`),
+        el("span", { class: "muted", style: { fontSize: "11.5px" } }, "点右侧 ✨ 可按描述让 AI 起名")
+      ),
+      nameFieldWrap
     ),
     el("div", { class: "field re-field re-field-grow" },
       el("div", { class: "re-label-row" },
         el("label", { class: "re-label" }, isLayout ? "排版与构图约束" : "视觉特征描述"),
         el("span", { class: "muted", style: { fontSize: "11.5px" } }, isLayout ? "描述分栏、标题与留白" : "仅描述画风视觉语言，勿写具体人物场景")
       ),
-      layoutStarterRow,
+      promptOfferBar,
       descIn
     ),
     warnBox,
@@ -457,7 +518,7 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
     const files = Array.from(e.dataTransfer?.files || []);
     if (files.length) {
       e.preventDefault();
-      void ingestFiles(files, "拖入");
+      void ingestSingleFile(files[0], "拖入");
     }
   });
 
@@ -467,12 +528,11 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
   let dlg = null;
   const onPaste = (e) => {
     if (!dlg?.open) return;
-    // If a stacked reference picker is open on top, let that picker own the paste event.
     if (document.querySelector("dialog.modal-ref-picker[open]")) return;
     const files = extractClipboardImageFiles(e);
     if (!files.length) return;
     e.preventDefault();
-    void ingestFiles(files, "粘贴");
+    void ingestSingleFile(files[0], "粘贴");
   };
 
   const openModalFn = stacked ? showStackedModal : showModal;
@@ -489,14 +549,14 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
 
   renderMedia();
 
-  // If opened from a remote inspiration without local image, materialize it automatically
-  if (!images.length && initial?.remoteImageUrl) {
-    uploadStatus.textContent = "正在加载参考图…";
+  if (!coverImage && initial?.remoteImageUrl) {
+    uploadStatus.textContent = "正在加载参考封面图…";
     api("POST", "/api/mine/upload", { url: initial.remoteImageUrl, name: initial?.name || label })
       .then((up) => {
         if (up?.path && dlg?.open) {
-          addImagePaths([up.path]);
-          uploadStatus.textContent = "已带入参考图，可点击「提取」自动生成描述";
+          coverImage = up.path;
+          renderMedia();
+          uploadStatus.textContent = "已带入参考封面图";
         }
       })
       .catch(() => { uploadStatus.textContent = ""; });

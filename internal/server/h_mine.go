@@ -1360,6 +1360,150 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 	}
 }
 
+func cleanSuggestedResourceName(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	var parsed struct {
+		Name  string `json:"name"`
+		Title string `json:"title"`
+	}
+	if json.Unmarshal([]byte(extractJSON(s)), &parsed) == nil {
+		if cand := strings.TrimSpace(firstStr(parsed.Name, parsed.Title)); cand != "" {
+			s = cand
+		}
+	}
+	if idx := strings.IndexAny(s, "\r\n"); idx >= 0 {
+		s = s[:idx]
+	}
+	s = strings.TrimSpace(strings.Trim(s, `"'“”‘’《》【】「」()（）.:：。`))
+	if rs := []rune(s); len(rs) > 24 {
+		s = string(rs[:24])
+	}
+	return strings.TrimSpace(s)
+}
+
+func (s *Server) mineSuggestName(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		Kind        string `json:"kind"` // style | layout
+		Description string `json:"description"`
+		ModelRef    string `json:"modelRef"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	desc := strings.TrimSpace(body.Description)
+	if desc == "" {
+		return nil, bad("请先填写描述内容，再让 AI 推荐名称")
+	}
+	if rs := []rune(desc); len(rs) > 4000 {
+		desc = string(rs[:4000])
+	}
+	kind := strings.ToLower(strings.TrimSpace(body.Kind))
+	if kind != "layout" {
+		kind = "style"
+	}
+	route, err := resolveAIRouteForScene("text", "studioPlan", body.ModelRef)
+	if err != nil {
+		return nil, err
+	}
+
+	promptText := "请根据以下画风视觉特征描述，起一个简洁优雅、好记且贴合视觉气质的中文画风名称（4 到 10 个汉字，不要加书名号、引号、编号或多余解释）。只返回严格 JSON：{\"name\":\"画风名称\"}\n\n画风视觉特征描述：\n" + desc
+	if kind == "layout" {
+		promptText = "请根据以下图型排版与构图约束描述，起一个简洁直观、便于复用检索的中文图型名称（4 到 10 个汉字，不要加书名号、引号、编号或多余解释）。只返回严格 JSON：{\"name\":\"图型名称\"}\n\n图型排版约束描述：\n" + desc
+	}
+
+	finish := func(source, modelName, rawReply string) (map[string]any, error) {
+		name := cleanSuggestedResourceName(rawReply)
+		if name == "" {
+			return nil, bad("AI 未返回有效名称，请重试或换一个模型")
+		}
+		out := map[string]any{"name": name, "source": source}
+		if modelName != "" {
+			out["model"] = modelName
+		}
+		return out, nil
+	}
+
+	suggestWithSite := func() (map[string]any, error) {
+		aiRes, aiErr := s.Site.AIChat(r.Context(), site.AIChatRequest{
+			Capability:   "text",
+			Messages:     []providers.ChatMessage{{Role: "user", Content: promptText}},
+			JSONMode:     true,
+			FeatureScope: "resource_name",
+		})
+		if aiErr != nil {
+			return nil, aiErr
+		}
+		return finish("site", aiRes.Service, aiRes.Content)
+	}
+
+	suggestWithProvider := func(tp settings.Provider, model string) (map[string]any, error) {
+		reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: promptText}}, true)
+		if err != nil {
+			return nil, err
+		}
+		return finish("provider", tp.Name+":"+model, reply)
+	}
+
+	suggestWithHarness := func(hst harnesses.Status, subModel string) (map[string]any, error) {
+		res, err := harnesses.Chat(r.Context(), hst, harnesses.ChatRequest{
+			Messages: []harnesses.Message{{Role: "user", Content: promptText}},
+			JSONMode: true,
+			Model:    subModel,
+		})
+		if err != nil {
+			return nil, err
+		}
+		lbl := hst.Name
+		if res.Model != "" {
+			lbl += " · " + res.Model
+		}
+		return finish("harness", lbl, res.Text)
+	}
+
+	switch route.Mode {
+	case "harness":
+		return suggestWithHarness(route.Harness, route.HarnessSubModel)
+	case "provider":
+		return suggestWithProvider(route.Provider, route.Model)
+	case "site":
+		if !s.Site.LoggedIn() {
+			return nil, site.ErrNotLoggedIn
+		}
+		return suggestWithSite()
+	default:
+		var siteErr error
+		if s.Site.LoggedIn() {
+			if res, err := suggestWithSite(); err == nil {
+				return res, nil
+			} else {
+				siteErr = err
+			}
+		}
+		if tp, model, ok := findTextProviderFor("text"); ok {
+			if res, err := suggestWithProvider(tp, model); err == nil {
+				return res, nil
+			} else if siteErr == nil {
+				return nil, err
+			}
+		}
+		for _, hst := range harnesses.Discover(settings.Get().Harnesses) {
+			if hst.Available {
+				if res, err := suggestWithHarness(hst, ""); err == nil {
+					return res, nil
+				}
+				break
+			}
+		}
+		if siteErr != nil {
+			return nil, siteErr
+		}
+		return nil, bad("请先登录手绘风账号，或配置第三方文字接口 / 本地 AI Harness 后再使用 AI 推荐名称")
+	}
+}
+
 func analyzeSiteError(err error) error {
 	var ae *site.APIError
 	if errors.As(err, &ae) && (ae.Status == 404 || ae.Code == "token_scope_denied") {

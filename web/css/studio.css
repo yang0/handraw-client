@@ -4585,10 +4585,14 @@ dialog.modal-ref-picker-studio {
   overflow: hidden;
   flex-shrink: 0;
 }
-.rp-thumb-wrap.is-ext-thumb {
+.rp-thumb-wrap.is-ext-thumb,
+.rp-thumb-wrap.is-contain-thumb {
   aspect-ratio: 3 / 4;
-  background: #fff;
+  background: var(--surface-2);
   border: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+}
+.rp-thumb-wrap.is-ext-thumb {
+  background: #fff;
 }
 .rp-thumb-wrap img {
   width: 100%;
@@ -4598,7 +4602,8 @@ dialog.modal-ref-picker-studio {
   opacity: 0;
   transition: opacity 0.14s ease-out;
 }
-.rp-thumb-wrap.is-ext-thumb img {
+.rp-thumb-wrap.is-ext-thumb img,
+.rp-thumb-wrap.is-contain-thumb img {
   object-fit: contain;
   padding: 4px;
   box-sizing: border-box;
@@ -5693,93 +5698,58 @@ dialog.modal-resource-editor .modal-body {
   font-weight: 600;
   backdrop-filter: blur(4px);
 }
-.re-hero-actions {
-  position: absolute;
-  bottom: 9px;
-  right: 9px;
-  display: flex;
-  gap: 5px;
-  flex-wrap: wrap;
-}
-.re-hero-actions .btn {
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: blur(6px);
-  border-radius: 999px;
-  padding: 3px 9px;
-  font-size: 11.5px;
-}
-.re-thumb-rail {
+.re-media-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
   flex-wrap: wrap;
+  gap: 6px;
 }
-.re-thumb-item {
-  position: relative;
-  width: 56px;
-  height: 56px;
-  border-radius: 9px;
-  border: 1.5px solid var(--line);
-  background: var(--surface-2);
-  cursor: pointer;
-  overflow: visible;
-  transition: border-color 0.14s ease, transform 0.12s ease;
+.re-remove-img-btn {
+  margin-left: auto;
+  color: var(--ink-muted);
 }
-.re-thumb-item:hover {
-  border-color: var(--accent);
+.re-remove-img-btn:hover {
+  color: var(--err, #b83227);
+  border-color: color-mix(in srgb, var(--err, #b83227) 40%, var(--line));
 }
-.re-thumb-item.is-cover {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
-}
-.re-thumb-item img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border-radius: 7px;
-  display: block;
-}
-.re-thumb-badge {
-  position: absolute;
-  bottom: 2px;
-  left: 2px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 9.5px;
-  font-weight: 700;
-  line-height: 1.45;
-}
-.re-thumb-del {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  width: 18px;
-  height: 18px;
-  border: 0;
-  border-radius: 50%;
-  background: var(--ink);
-  color: var(--paper);
-  font-size: 12px;
-  line-height: 1;
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  opacity: 0.9;
-}
-.re-thumb-del:hover {
-  background: var(--accent);
-  color: #fff;
-}
-.re-ai-bar {
+.re-ai-card {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 9px 11px;
   border-radius: 12px;
   border: 1px solid var(--line);
   background: var(--paper);
+  min-width: 0;
+}
+.re-vision-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12.5px;
+}
+.re-vision-chk {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin: 0;
+}
+.re-vision-title {
+  font-weight: 600;
+  color: var(--ink);
+}
+.re-vision-hint {
+  font-size: 11.5px;
+}
+.re-ai-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
   min-width: 0;
 }
 .re-model-pill {
@@ -5833,21 +5803,60 @@ dialog.modal-resource-editor .modal-body {
   font-weight: 700;
   color: var(--ink);
 }
-.re-starter-row {
+.re-name-wrap {
+  position: relative;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 5px;
 }
-.re-starter-chip {
-  border-radius: 999px;
-  padding: 2px 9px;
-  font-size: 11px;
+.re-name-input {
+  width: 100%;
+  padding-right: 36px;
+}
+.re-name-ai-btn {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 14px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background-color 0.14s ease, border-color 0.14s ease, transform 0.12s ease;
+}
+.re-name-ai-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+.re-name-ai-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.re-prompt-offer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  background: color-mix(in srgb, var(--accent) 5%, var(--paper));
+  font-size: 12px;
+}
+.re-prompt-offer-text {
+  color: var(--ink);
+  font-weight: 500;
 }
 .re-desc-textarea {
   width: 100%;
-  min-height: 178px;
-  max-height: 300px;
+  min-height: 196px;
+  max-height: 320px;
   resize: none;
   field-sizing: content;
   line-height: 1.6;

@@ -171,4 +171,22 @@ func TestMineAnalyzeLayoutAndHarnessImageArgs(t *testing.T) {
 	if res.Kind != "layout" || res.Name != "三段卡片排版" || !strings.Contains(res.Description, "顶部通栏") || res.PromptZh != res.Description {
 		t.Fatalf("unexpected analyze layout response: %+v", res)
 	}
+
+	// Verify /api/mine/suggest-name recommends a concise name from description
+	rrName := doReq(t, srv.Handler(), srv.Token, "POST", "/api/mine/suggest-name", map[string]any{
+		"kind":        "style",
+		"description": "温润棉纸底色、淡彩水彩晕染与柔和细钢笔线条",
+		"modelRef":    "p_vision:gpt-4o",
+	})
+	if rrName.Code != 200 {
+		t.Fatalf("suggest-name failed: %d %s", rrName.Code, rrName.Body.String())
+	}
+	var nameRes struct {
+		Name   string `json:"name"`
+		Source string `json:"source"`
+	}
+	_ = json.Unmarshal(rrName.Body.Bytes(), &nameRes)
+	if nameRes.Name != "三段卡片排版" || nameRes.Source != "provider" {
+		t.Fatalf("unexpected suggest-name response: %+v", nameRes)
+	}
 }
