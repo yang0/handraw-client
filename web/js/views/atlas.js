@@ -204,7 +204,15 @@ async function drawStyles(stage, groups, ctx) {
   const query = state.q.trim().toLowerCase();
   const mineAll = mineRes.items || [];
   const mine = mineAll.filter((m) => !query || JSON.stringify(m).toLowerCase().includes(query));
-  const official = (res.items || []).filter((x) => x.source !== "mine");
+  const minePublishedCodes = new Set(
+    mineAll.map((m) => String(m?.published?.code || "").toUpperCase()).filter(Boolean)
+  );
+  const official = (res.items || []).filter((x) => {
+    if (x.source === "mine") return false;
+    // Avoid showing duplicate cards in "全部流派" when user's own style is also published to community (#162).
+    if (state.group === "" && minePublishedCodes.has(String(x.number || "").toUpperCase())) return false;
+    return true;
+  });
   // My styles lead "全部流派" and own the "我的画风" group.
   const items = [...(state.group === "" || mineOnly ? mine.map((m) => ({ ...m, _mine: true })) : []), ...official];
 
@@ -418,7 +426,9 @@ async function drawLayouts(stage, ctx) {
     api("GET", "/api/mine/layouts").catch(() => ({ items: [] })),
   ]);
   const mine = (mineRes.items || []).map((l) => ({ ...l, category: "mine", _mine: true }));
-  const items = [...mine, ...(res.items || []).filter((l) => l.source !== "mine")];
+  const minePubCodes = new Set(mine.map((m) => String(m?.published?.code || "").toUpperCase()).filter(Boolean));
+  const others = (res.items || []).filter((l) => l.source !== "mine" && !minePubCodes.has(String(l.id || "").toUpperCase()));
+  const items = [...mine, ...others];
   drawCatalog(stage, {
     kind: "layouts", title: "图型", allLabel: "全部图型", items,
     groups: [{ key: "mine", label: "我的图型" }],
