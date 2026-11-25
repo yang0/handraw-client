@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/yang0/handraw-client/internal/secrets"
+	"github.com/yang0/handraw-client/internal/settings"
 	"github.com/yang0/handraw-client/internal/site"
 )
 
@@ -87,5 +88,97 @@ func TestExtensionSubmissionsProxy(t *testing.T) {
 	rrMine := doReq(t, h, srv.Token, "GET", "/api/extensions/submissions/mine?channel=plugin", nil)
 	if rrMine.Code != 200 || !strings.Contains(rrMine.Body.String(), `"loggedIn":true`) || !strings.Contains(rrMine.Body.String(), `"Demo 插件"`) {
 		t.Fatalf("unexpected GET /mine response: %d %s", rrMine.Code, rrMine.Body.String())
+	}
+}
+
+func TestExtensionSubmissionInspectAIAndManifestFallback(t *testing.T) {
+	mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/alice/handraw-sketch-board":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"handraw-sketch-board","description":"Interactive whiteboard for Markdown notes","default_branch":"main","topics":["whiteboard","obsidian"],"owner":{"login":"alice"}}`))
+		case "/alice/handraw-sketch-board/main/manifest.json":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"sketch-board","name":"Sketch Board","version":"1.4.2","minAppVersion":"1.4.0","author":"Alice","description":"Embed hand-drawn whiteboards in Markdown notes."}`))
+		case "/alice/handraw-sketch-board/main/README.md":
+			_, _ = w.Write([]byte("# Sketch Board\n\nEmbed hand-drawn whiteboards and flowcharts directly inside Markdown notes.\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockGH.Close()
+
+	prevAPI, prevRaw := submissionGitHubAPIBase, submissionGitHubRawBase
+	submissionGitHubAPIBase = mockGH.URL
+	submissionGitHubRawBase = mockGH.URL
+	t.Cleanup(func() {
+		submissionGitHubAPIBase = prevAPI
+		submissionGitHubRawBase = prevRaw
+	})
+
+	// 1. Without AI configured -> deterministic manifest extraction still works seamlessly.
+	srv, _ := setupTestServer(t, "")
+	h := srv.Handler()
+	rrManifest := doReq(t, h, srv.Token, "POST", "/api/extensions/submissions/inspect", map[string]any{
+		"repoUrl": "alice/handraw-sketch-board",
+	})
+	if rrManifest.Code != 200 {
+		t.Fatalf("inspect manifest fallback failed: %d %s", rrManifest.Code, rrManifest.Body.String())
+	}
+	var manRes struct {
+		ParsedBy string                 `json:"parsedBy"`
+		Info     inspectedExtensionInfo `json:"info"`
+	}
+	_ = json.Unmarshal(rrManifest.Body.Bytes(), &manRes)
+	if manRes.ParsedBy != "manifest" || manRes.Info.Channel != "obsidian" || manRes.Info.Name != "Sketch Board" || manRes.Info.Version != "1.4.2" || manRes.Info.RepoURL != "https://github.com/alice/handraw-sketch-board" {
+		t.Fatalf("unexpected manifest inspect result: %+v", manRes)
+	}
+
+	// 2. With text AI provider -> AI enriches into clean Chinese display title & summary.
+	mockAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reply, _ := json.Marshal(map[string]any{
+			"channel":     "obsidian",
+			"name":        "Sketch Board 手绘白板",
+			"description": "在 Markdown 笔记中直接嵌入可交互手绘白板与流程图，支持双向跳转。",
+			"authorName":  "Alice",
+			"version":     "1.4.2",
+			"tags":        []string{"白板", "手绘", "流程图"},
+		})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": string(reply)}}},
+		})
+	}))
+	defer mockAI.Close()
+
+	_, err := settings.Update(func(st *settings.Settings) error {
+		st.Providers = append(st.Providers, settings.Provider{
+			ID:      "mockins",
+			Name:    "MockInspectAI",
+			Kind:    "openai",
+			Purpose: "text",
+			BaseURL: mockAI.URL + "/v1",
+			Enabled: true,
+			Models:  []settings.Model{{ID: "fast-parse", Label: "Fast Parse"}},
+		})
+		st.DefaultTextModel = "mockins:fast-parse"
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("update text provider: %v", err)
+	}
+
+	rrAI := doReq(t, h, srv.Token, "POST", "/api/extensions/submissions/inspect", map[string]any{
+		"repoUrl": "https://github.com/alice/handraw-sketch-board",
+	})
+	if rrAI.Code != 200 {
+		t.Fatalf("inspect with AI failed: %d %s", rrAI.Code, rrAI.Body.String())
+	}
+	var aiRes struct {
+		ParsedBy string                 `json:"parsedBy"`
+		Info     inspectedExtensionInfo `json:"info"`
+	}
+	_ = json.Unmarshal(rrAI.Body.Bytes(), &aiRes)
+	if aiRes.ParsedBy != "ai" || aiRes.Info.Channel != "obsidian" || aiRes.Info.Name != "Sketch Board 手绘白板" || !strings.Contains(aiRes.Info.Description, "手绘白板") || len(aiRes.Info.Tags) != 3 {
+		t.Fatalf("unexpected AI inspect result: %+v", aiRes)
 	}
 }

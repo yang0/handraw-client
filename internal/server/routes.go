@@ -242,6 +242,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/plugins/install", s.h(s.pluginInstall))
 	m.HandleFunc("DELETE /api/plugins/{id}", s.h(s.pluginRemove))
 	m.HandleFunc("POST /api/plugins/{id}/call", s.h(s.pluginCall))
+	m.HandleFunc("POST /api/extensions/submissions/inspect", s.h(s.extensionSubmissionInspect))
 	m.HandleFunc("POST /api/extensions/submissions", s.h(s.extensionSubmissionCreate))
 	m.HandleFunc("GET /api/extensions/submissions/mine", s.h(s.extensionSubmissionMine))
 	m.HandleFunc("GET /api/update", s.h(s.updateStatus))

@@ -91,78 +91,67 @@ const SUBMISSION_STATUS_MAP = {
 
 export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = null } = {}) {
   let mode = "form"; // "form" | "mine"
+  // 2-step flow (#157): "url" (just paste repo URL) -> "confirm" (AI parsed basic info, confirm & submit)
+  let step = (prefill?.repoUrl && prefill?.name) ? "confirm" : "url";
+  let inspecting = false;
   let submitting = false;
   let mineData = null;
   let mineLoading = false;
+  let parsedMeta = {
+    parsedBy: prefill?.name ? "prefill" : "",
+    detectedFiles: [],
+    slug: prefill?.slug || "",
+    homepageUrl: prefill?.homepageUrl || "",
+    authorName: prefill?.authorName || "",
+    version: prefill?.version || "",
+    tags: Array.isArray(prefill?.tags) ? prefill.tags : [],
+  };
 
   const chSel = el("select", { class: "select" },
     ...CHANNEL_OPTIONS.map((c) => el("option", { value: c.value, selected: c.value === channel }, c.label))
   );
   const currentMeta = () => CHANNEL_OPTIONS.find((c) => c.value === chSel.value) || CHANNEL_OPTIONS[0];
 
-  const nameIn = el("input", {
-    class: "input",
-    type: "text",
-    value: prefill?.name || "",
-    placeholder: "插件显示名称（必填）",
-  });
   const repoIn = el("input", {
     class: "input mono",
     type: "text",
     value: prefill?.repoUrl || "",
-    placeholder: currentMeta().repoPlaceholder,
+    placeholder: "粘贴 GitHub / Gitee 仓库地址（如 https://github.com/owner/repo 或 owner/repo）",
+    "aria-label": "仓库或资源地址",
   });
-  chSel.addEventListener("change", () => {
-    repoIn.placeholder = currentMeta().repoPlaceholder;
+  const nameIn = el("input", {
+    class: "input",
+    type: "text",
+    value: prefill?.name || "",
+    placeholder: "扩展名称（必填）",
   });
-
   const descIn = el("textarea", {
     class: "textarea",
-    rows: "3",
-    placeholder: "简要说明插件用途、核心功能与使用方式（必填）",
+    rows: "2",
+    placeholder: "一句话说明用途与核心亮点（必填）",
   });
   descIn.value = prefill?.description || "";
-
-  const authorIn = el("input", {
-    class: "input",
-    type: "text",
-    value: prefill?.authorName || "",
-    placeholder: "作者名称（可选，默认当前账号）",
-  });
-  const verIn = el("input", {
-    class: "input mono",
-    type: "text",
-    value: prefill?.version || "",
-    placeholder: "版本号，如 1.0.0（可选）",
-  });
-  const homeIn = el("input", {
-    class: "input",
-    type: "url",
-    value: prefill?.homepageUrl || "",
-    placeholder: "主页或文档链接 https://...（可选）",
-  });
-  const contactIn = el("input", {
-    class: "input",
-    type: "text",
-    value: "",
-    placeholder: "联系方式：邮箱 / 微信 / GitHub（可选）",
-  });
-  const tagsIn = el("input", {
-    class: "input",
-    type: "text",
-    value: Array.isArray(prefill?.tags) ? prefill.tags.join(", ") : "",
-    placeholder: "标签，逗号分隔（可选）",
-  });
-  const notesIn = el("textarea", {
-    class: "textarea",
-    rows: "2",
-    placeholder: "补充说明：兼容范围、安装注意事项、Gitee 镜像等（可选）",
-  });
 
   const errBox = el("div", { class: "muted", style: { color: "var(--err, #c62828)", fontSize: "12.5px", display: "none" } });
   const bodyHost = el("div", { class: "col", style: { gap: "10px" } });
   const tabHost = el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px" } });
-  const submitBtn = el("button", { type: "button", class: "btn btn-primary" }, "提交收录申请");
+  const actionBtn = el("button", { type: "button", class: "btn btn-primary" }, "✨ AI 解析仓库");
+
+  const setErr = (msg, showLoginLink = false) => {
+    clear(errBox);
+    if (!msg) {
+      errBox.style.display = "none";
+      return;
+    }
+    errBox.append(msg);
+    if (showLoginLink) {
+      errBox.append(" ", el("a", {
+        href: "#settings",
+        onClick: (ev) => { ev.preventDefault(); closeModal(); ctx.go("settings"); },
+      }, "去登录 →"));
+    }
+    errBox.style.display = "block";
+  };
 
   const loadMine = async () => {
     mineLoading = true;
@@ -176,6 +165,126 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
       if (bodyHost.isConnected) paintBody();
     }
   };
+
+  const syncActionBtn = () => {
+    if (mode !== "form") {
+      actionBtn.style.display = "none";
+      return;
+    }
+    actionBtn.style.display = "";
+    if (step === "url") {
+      actionBtn.disabled = inspecting;
+      actionBtn.textContent = inspecting ? "⏳ AI 正在读取解析…" : "✨ AI 解析仓库";
+    } else {
+      actionBtn.disabled = submitting || inspecting;
+      actionBtn.textContent = submitting ? "提交中…" : "确认并提交收录";
+    }
+  };
+
+  const runInspect = async () => {
+    if (inspecting) return;
+    setErr("");
+    const rawUrl = repoIn.value.trim();
+    if (!rawUrl) {
+      setErr("请先粘贴仓库地址（支持 GitHub / Gitee 链接或 owner/repo）");
+      repoIn.focus();
+      return;
+    }
+    inspecting = true;
+    syncActionBtn();
+    paintBody();
+    try {
+      const res = await api("POST", "/api/extensions/submissions/inspect", {
+        repoUrl: rawUrl,
+        channel: chSel.value,
+      });
+      const info = res?.info || {};
+      if (info.channel && CHANNEL_OPTIONS.some((c) => c.value === info.channel)) {
+        chSel.value = info.channel;
+      }
+      if (info.repoUrl) repoIn.value = info.repoUrl;
+      nameIn.value = info.name || nameIn.value || "";
+      descIn.value = info.description || descIn.value || "";
+      parsedMeta = {
+        parsedBy: res?.parsedBy || "manifest",
+        detectedFiles: Array.isArray(res?.detectedFiles) ? res.detectedFiles : [],
+        slug: info.slug || "",
+        homepageUrl: info.homepageUrl || info.repoUrl || "",
+        authorName: info.authorName || "",
+        version: info.version || "",
+        tags: Array.isArray(info.tags) ? info.tags : [],
+      };
+      step = "confirm";
+      toast(parsedMeta.parsedBy === "ai" ? "AI 已解析仓库信息，请核对后提交" : "已从仓库读取基础信息，请核对后提交");
+    } catch (e) {
+      setErr(e?.message || "解析仓库失败，可检查地址或点下方手动填写基础信息");
+    } finally {
+      inspecting = false;
+      syncActionBtn();
+      if (bodyHost.isConnected) paintBody();
+    }
+  };
+
+  const runSubmit = async () => {
+    if (submitting) return;
+    setErr("");
+    const name = nameIn.value.trim();
+    const repoUrl = repoIn.value.trim();
+    const description = descIn.value.trim();
+    if (!repoUrl) {
+      setErr("请填写仓库地址");
+      return;
+    }
+    if (name.length < 2) {
+      setErr("请确认扩展名称（至少 2 个字符）");
+      nameIn.focus();
+      return;
+    }
+    if (description.length < 4) {
+      setErr("请确认一句话简介（至少 4 个字符）");
+      descIn.focus();
+      return;
+    }
+    submitting = true;
+    syncActionBtn();
+    try {
+      await api("POST", "/api/extensions/submissions", {
+        channel: chSel.value,
+        name,
+        slug: parsedMeta.slug || prefill?.slug || "",
+        repoUrl,
+        homepageUrl: parsedMeta.homepageUrl || repoUrl,
+        description,
+        authorName: parsedMeta.authorName || "",
+        version: parsedMeta.version || "",
+        tags: parsedMeta.tags || [],
+      });
+      toast("收录申请已提交，审核通过后将上架官方市场");
+      mode = "mine";
+      mineData = null;
+      paintTabs();
+      await loadMine();
+    } catch (e) {
+      const msg = e?.message || "提交失败";
+      setErr(msg, e?.status === 401 || msg.includes("登录"));
+    } finally {
+      submitting = false;
+      if (actionBtn.isConnected) syncActionBtn();
+    }
+  };
+
+  repoIn.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && mode === "form" && step === "url") {
+      e.preventDefault();
+      runInspect();
+    }
+  });
+
+  actionBtn.addEventListener("click", () => {
+    if (mode !== "form") return;
+    if (step === "url") runInspect();
+    else runSubmit();
+  });
 
   const paintTabs = () => {
     clear(tabHost);
@@ -203,31 +312,93 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
         onClick: loadMine,
       }, "↻ 刷新"));
     }
-    submitBtn.style.display = mode === "form" ? "" : "none";
+    syncActionBtn();
   };
 
   const paintBody = () => {
     clear(bodyHost);
     if (mode === "form") {
-      bodyHost.append(
+      if (step === "url") {
+        bodyHost.append(
+          el("div", { class: "field" },
+            el("label", null, "仓库 / 资源地址"),
+            repoIn
+          ),
+          el("p", { class: "muted", style: { margin: "0", fontSize: "12.5px", lineHeight: "1.55" } },
+            "只需粘贴一个 GitHub / Gitee 仓库地址（或 index.json / SKILL.md 链接），AI 会自动读取并整理名称、栏目、简介和作者信息，解析后确认即可提交。"
+          ),
+          inspecting
+            ? el("div", { class: "card row", style: { padding: "10px 12px", gap: "8px", alignItems: "center", fontSize: "12.5px" } },
+                el("span", null, "⏳"),
+                el("span", { class: "muted" }, "正在读取仓库清单与 README 并由 AI 自动归纳基础信息…")
+              )
+            : el("div", { class: "row", style: { justifyContent: "flex-end" } },
+                el("button", {
+                  type: "button",
+                  class: "btn btn-sm",
+                  onClick: () => {
+                    setErr("");
+                    step = "confirm";
+                    parsedMeta.parsedBy = "manual";
+                    syncActionBtn();
+                    paintBody();
+                  },
+                }, "跳过解析，直接填基础信息 →")
+              ),
+          errBox
+        );
+        return;
+      }
+
+      // Step 2: Compact Confirmation Card (basic info only — no 10-field wall!)
+      const statusText = parsedMeta.parsedBy === "ai"
+        ? `✨ AI 已自动解析${parsedMeta.detectedFiles.length ? `（读取 ${parsedMeta.detectedFiles.slice(0, 3).join("、")}）` : ""}`
+        : parsedMeta.parsedBy === "manifest"
+        ? `✓ 已从仓库清单自动提取${parsedMeta.detectedFiles.length ? `（${parsedMeta.detectedFiles.slice(0, 3).join("、")}）` : ""}`
+        : parsedMeta.parsedBy === "prefill"
+        ? "已带入当前扩展信息，确认后即可提交"
+        : "填写以下基础信息即可提交";
+
+      const metaBits = [
+        parsedMeta.authorName ? `作者：${parsedMeta.authorName}` : "",
+        parsedMeta.version ? `版本：v${parsedMeta.version.replace(/^v/i, "")}` : "",
+        parsedMeta.tags?.length ? `标签：${parsedMeta.tags.join(" · ")}` : "",
+      ].filter(Boolean);
+
+      const nodes = [
+        el("div", { class: "card col", style: { gap: "6px", padding: "10px 12px", background: "var(--paper)" } },
+          el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+            el("span", { class: "badge badge-accent" }, statusText),
+            el("div", { class: "row", style: { gap: "6px" } },
+              el("button", {
+                type: "button",
+                class: "btn btn-sm",
+                disabled: inspecting,
+                onClick: runInspect,
+              }, inspecting ? "解析中…" : "↻ AI 重解析"),
+              el("button", {
+                type: "button",
+                class: "btn btn-sm",
+                onClick: () => { setErr(""); step = "url"; syncActionBtn(); paintBody(); repoIn.focus(); },
+              }, "换个地址")
+            )
+          ),
+          el("div", { class: "mono muted", style: { fontSize: "11.5px", wordBreak: "break-all" } }, repoIn.value.trim() || "（未填仓库地址）"),
+          metaBits.length
+            ? el("div", { class: "muted", style: { fontSize: "11.5px" } }, metaBits.join("  ·  "))
+            : null
+        ),
+        !repoIn.value.trim()
+          ? el("div", { class: "field" }, el("label", null, "仓库地址 *"), repoIn)
+          : null,
         el("div", { class: "split" },
           el("div", { class: "field" }, el("label", null, "所属栏目"), chSel),
-          el("div", { class: "field" }, el("label", null, "插件名称 *"), nameIn)
+          el("div", { class: "field" }, el("label", null, "名称 *"), nameIn)
         ),
-        el("div", { class: "field" }, el("label", null, "仓库 / 下载地址 *"), repoIn),
-        el("div", { class: "field" }, el("label", null, "插件简介 *"), descIn),
-        el("div", { class: "split" },
-          el("div", { class: "field" }, el("label", null, "作者名称"), authorIn),
-          el("div", { class: "field" }, el("label", null, "版本号"), verIn)
-        ),
-        el("div", { class: "split" },
-          el("div", { class: "field" }, el("label", null, "主页 / 文档链接"), homeIn),
-          el("div", { class: "field" }, el("label", null, "联系方式"), contactIn)
-        ),
-        el("div", { class: "field" }, el("label", null, "标签"), tagsIn),
-        el("div", { class: "field" }, el("label", null, "补充说明"), notesIn),
-        errBox
-      );
+        el("div", { class: "field" }, el("label", null, "一句话简介 *"), descIn),
+        errBox,
+      ].filter(Boolean);
+      bodyHost.append(...nodes);
       return;
     }
 
@@ -272,80 +443,14 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
     bodyHost.appendChild(listWrap);
   };
 
-  submitBtn.addEventListener("click", async () => {
-    if (submitting) return;
-    errBox.style.display = "none";
-    errBox.textContent = "";
-    const name = nameIn.value.trim();
-    const repoUrl = repoIn.value.trim();
-    const description = descIn.value.trim();
-    if (name.length < 2) {
-      errBox.textContent = "请填写插件名称（至少 2 个字符）";
-      errBox.style.display = "block";
-      return;
-    }
-    if (!repoUrl) {
-      errBox.textContent = "请填写仓库或下载地址";
-      errBox.style.display = "block";
-      return;
-    }
-    if (description.length < 4) {
-      errBox.textContent = "请填写简短插件简介（至少 4 个字符）";
-      errBox.style.display = "block";
-      return;
-    }
-    submitting = true;
-    submitBtn.disabled = true;
-    submitBtn.textContent = "提交中…";
-    try {
-      const tags = tagsIn.value
-        .split(/[,，\s]+/)
-        .map((x) => x.trim())
-        .filter(Boolean);
-      await api("POST", "/api/extensions/submissions", {
-        channel: chSel.value,
-        name,
-        slug: prefill?.slug || "",
-        repoUrl,
-        homepageUrl: homeIn.value.trim(),
-        description,
-        authorName: authorIn.value.trim(),
-        version: verIn.value.trim(),
-        tags,
-        contact: contactIn.value.trim(),
-        notes: notesIn.value.trim(),
-      });
-      toast("收录申请已提交，管理员审核后将收录至官方市场");
-      mode = "mine";
-      mineData = null;
-      paintTabs();
-      await loadMine();
-    } catch (e) {
-      const msg = e?.message || "提交失败";
-      errBox.textContent = msg;
-      errBox.style.display = "block";
-      if (e?.status === 401 || msg.includes("登录")) {
-        errBox.append(" ", el("a", {
-          href: "#settings",
-          onClick: (ev) => { ev.preventDefault(); closeModal(); ctx.go("settings"); },
-        }, "去登录 →"));
-      }
-    } finally {
-      submitting = false;
-      if (submitBtn.isConnected) {
-        submitBtn.disabled = false;
-        submitBtn.textContent = "提交收录申请";
-      }
-    }
-  });
-
   paintTabs();
   paintBody();
 
   showModal("申请收录到官方市场", el("div", { class: "col", style: { gap: "12px" } }, tabHost, bodyHost), [
     el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
-    submitBtn,
+    actionBtn,
   ]);
+  if (step === "url") setTimeout(() => repoIn.focus(), 30);
 }
 
 // =========================================================================
