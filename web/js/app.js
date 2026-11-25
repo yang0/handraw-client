@@ -195,8 +195,11 @@ async function start() {
   }
 
   const PADDED_VIEWS = new Set(["home", "atlas", "works", "inspirations", "plugins", "settings"]);
+  let navSeq = 0;
 
   async function go(view, params = {}) {
+    const myNavSeq = ++navSeq;
+    main._navSeq = myNavSeq;
     if (view === "series") {
       view = "create";
     }
@@ -223,6 +226,7 @@ async function start() {
     if (currentView.startsWith("dsh:")) {
       const pid = currentView.slice(4);
       const plugRes = await api("GET", "/api/plugins").catch(() => ({ community: [] }));
+      if (navSeq !== myNavSeq) return;
       const comm = (plugRes.community || []).find((x) => x.id === pid && x.enabled && x.kind === "dsh");
       if (!comm) {
         main.appendChild(el("div", { class: "card muted", style: { margin: "14px" } }, "该 DSH 插件未启用或不存在。请先在侧栏「插件」中启用。"));
@@ -262,6 +266,7 @@ async function start() {
     if (currentView.startsWith("plugin:")) {
       const [, pid, idxStr] = currentView.split(":");
       const plugRes = await api("GET", "/api/plugins").catch(() => ({ community: [] }));
+      if (navSeq !== myNavSeq) return;
       const comm = (plugRes.community || []).find((x) => x.id === pid && x.enabled);
       const panel = idxStr === "page" ? comm?.page : comm?.panels?.[Number(idxStr || 0)];
       if (!comm || !panel) {
@@ -281,6 +286,7 @@ async function start() {
     try {
       await renderer(main, ctx, currentParams);
     } catch (e) {
+      if (navSeq !== myNavSeq) return;
       clear(main);
       main.appendChild(el("div", { class: "card col" },
         el("strong", null, "页面加载遇到问题"),

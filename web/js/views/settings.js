@@ -49,6 +49,7 @@ export async function renderSettings(root, ctx, params = {}) {
     activeSettingsTab = requestedTab;
   }
 
+  const navSeqAtStart = root._navSeq;
   const [accRes, balRes, settRes, updRes, loginRes, skillsRes, harnessRes, modRes] = await Promise.all([
     api("GET", "/api/account").catch(() => ({ loggedIn: false })),
     api("GET", "/api/account/balance").catch((e) => ({ loggedIn: false, error: e?.message || "" })),
@@ -59,7 +60,7 @@ export async function renderSettings(root, ctx, params = {}) {
     api("GET", params?.rescanHarnesses ? "/api/harnesses?rescan=1" : "/api/harnesses").catch(() => ({ items: [], scenes: [], sceneModels: {} })),
     api("GET", "/api/models").catch(() => ({ textProviders: [], harnesses: [], loggedIn: false })),
   ]);
-  if (!root.isConnected || root._settingsRenderSeq !== seq) return;
+  if (!root.isConnected || root._settingsRenderSeq !== seq || root._navSeq !== navSeqAtStart || root.dataset.view !== "settings") return;
 
   root._settingsCleanup?.();
   clear(root);

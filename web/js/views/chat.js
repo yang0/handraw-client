@@ -9,6 +9,41 @@ const chatCss = el("link", { rel: "stylesheet", href: new URL("../../css/chat.cs
 document.head.appendChild(chatCss);
 
 const SIDEBAR_COLLAPSED_KEY = "handraw:chat:sidebarCollapsed";
+const ACTIVE_SESSION_KEY = "handraw:chat:activeSessionId";
+
+// Module-level runtime state so in-flight turns, active session selection, and drafts
+// survive switching to other sidebar views and returning (#143).
+let lastActiveSessionId = "";
+const inFlightTurns = new Map(); // sessionId -> sess
+const recentSettledSessions = new Map(); // sessionId -> { sess, settledAt }
+const draftBySession = new Map(); // sessionId -> { text, refs }
+let mountedChatView = null;
+
+function getLastActiveSessionId() {
+  if (lastActiveSessionId) return lastActiveSessionId;
+  try { return sessionStorage.getItem(ACTIVE_SESSION_KEY) || ""; } catch { return ""; }
+}
+
+function setLastActiveSessionId(id) {
+  lastActiveSessionId = String(id || "");
+  try {
+    if (lastActiveSessionId) sessionStorage.setItem(ACTIVE_SESSION_KEY, lastActiveSessionId);
+    else sessionStorage.removeItem(ACTIVE_SESSION_KEY);
+  } catch {}
+}
+
+async function persistChatSession(sess) {
+  if (!sess) return;
+  sess.updatedAt = Date.now();
+  try {
+    const res = await api("PUT", `/api/docs/chat_session/${encodeURIComponent(sess.id)}`, {
+      name: sess.name,
+      data: { ...sess.data, updatedAt: sess.updatedAt },
+    });
+    if (res.doc?.id) sess.id = res.doc.id;
+    sess.persisted = true;
+  } catch {}
+}
 
 const STARTERS = [
   { tag: "💬 自由对话", text: "帮我构思 3 个小红书手账内容选题，并给出吸睛封面标题建议" },
@@ -363,34 +398,86 @@ export async function renderChat(root, ctx, params = {}) {
     sessions.forEach((s) => { s.persisted = true; });
   }
 
-  let activeId = sessions[0].id;
-  let draftRefs = [];
-  let isSending = false;
+  // Merge any currently in-flight or just-settled sessions so switching away and back
+  // never loses messages even during a narrow persist race window (#143).
+  const nowMs = Date.now();
+  for (const [sid, entry] of recentSettledSessions.entries()) {
+    if (nowMs - entry.settledAt > 15000) {
+      recentSettledSessions.delete(sid);
+      continue;
+    }
+    const idx = sessions.findIndex((s) => s.id === sid);
+    if (idx >= 0) {
+      if ((entry.sess.updatedAt || 0) >= (sessions[idx].updatedAt || 0)) sessions[idx] = entry.sess;
+    } else {
+      sessions = [entry.sess, ...sessions];
+    }
+  }
+  for (const [fid, liveSess] of inFlightTurns.entries()) {
+    const idx = sessions.findIndex((s) => s.id === fid);
+    if (idx >= 0) {
+      sessions[idx] = liveSess;
+    } else {
+      sessions = [liveSess, ...sessions];
+    }
+  }
+
+  const savedActiveId = getLastActiveSessionId();
+  let activeId = sessions.some((s) => s.id === savedActiveId) ? savedActiveId : sessions[0].id;
+  setLastActiveSessionId(activeId);
+  const initialDraft = draftBySession.get(activeId);
+  let draftRefs = Array.isArray(initialDraft?.refs) ? [...initialDraft.refs] : [];
   let sidebarCollapsed = getSidebarCollapsed();
   let threadQuery = "";
   let editingThreadId = "";
   let modelPopoverOpen = false;
 
   const activeSession = () => sessions.find((s) => s.id === activeId) || sessions[0];
+  const isSessionSending = (id) => inFlightTurns.has(id);
+  const isActiveSending = () => isSessionSending(activeSession().id);
 
-  async function persistSession(sess) {
-    if (!sess) return;
-    sess.updatedAt = Date.now();
-    try {
-      const res = await api("PUT", `/api/docs/chat_session/${encodeURIComponent(sess.id)}`, {
-        name: sess.name,
-        data: { ...sess.data, updatedAt: sess.updatedAt },
-      });
-      if (res.doc?.id) sess.id = res.doc.id;
-      sess.persisted = true;
-    } catch {}
+  const persistSession = persistChatSession;
+
+  function saveCurrentDraft() {
+    if (!activeId) return;
+    const text = typeof inputEl !== "undefined" ? (inputEl.value || "") : "";
+    if (!text && draftRefs.length === 0) {
+      draftBySession.delete(activeId);
+    } else {
+      draftBySession.set(activeId, { text, refs: [...draftRefs] });
+    }
+  }
+
+  function restoreDraftFor(id) {
+    const d = draftBySession.get(id);
+    draftRefs = Array.isArray(d?.refs) ? [...d.refs] : [];
+    if (typeof inputEl !== "undefined") {
+      inputEl.value = d?.text || "";
+      autoResize();
+    }
+  }
+
+  function switchActiveSession(nextId) {
+    if (!nextId) return;
+    if (nextId !== activeId) saveCurrentDraft();
+    activeId = nextId;
+    setLastActiveSessionId(activeId);
+    restoreDraftFor(activeId);
+    syncModelPickers();
+    renderAll();
   }
 
   const startNewChat = () => {
+    saveCurrentDraft();
     const ns = makeBlankSession();
     sessions = [ns, ...sessions];
     activeId = ns.id;
+    setLastActiveSessionId(activeId);
     draftRefs = [];
+    if (typeof inputEl !== "undefined") {
+      inputEl.value = "";
+      autoResize();
+    }
     editingThreadId = "";
     syncModelPickers();
     renderAll();
@@ -520,6 +607,7 @@ export async function renderChat(root, ctx, params = {}) {
         }, "×")
       ));
     });
+    saveCurrentDraft();
   }
 
   function renderSelectedSkills() {
@@ -636,6 +724,7 @@ export async function renderChat(root, ctx, params = {}) {
   inputEl.addEventListener("input", () => {
     autoResize();
     updateSlashMenu();
+    saveCurrentDraft();
   });
   inputEl.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
@@ -988,7 +1077,9 @@ export async function renderChat(root, ctx, params = {}) {
     filtered.forEach((sess) => {
       const isAct = sess.id === activeId;
       const msgCount = sess.data.messages.length;
-      const sub = msgCount > 0 ? `${msgCount} 条 · ${fmtTime(sess.updatedAt)}` : "空聊天";
+      const sub = isSessionSending(sess.id)
+        ? "思考中…"
+        : (msgCount > 0 ? `${msgCount} 条 · ${fmtTime(sess.updatedAt)}` : "空聊天");
 
       if (editingThreadId === sess.id) {
         const inp = el("input", {
@@ -1024,16 +1115,12 @@ export async function renderChat(root, ctx, params = {}) {
         "aria-selected": String(isAct),
         tabindex: "0",
         onClick: () => {
-          activeId = sess.id;
-          syncModelPickers();
-          renderAll();
+          switchActiveSession(sess.id);
         },
         onKeydown: (e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            activeId = sess.id;
-            syncModelPickers();
-            renderAll();
+            switchActiveSession(sess.id);
           }
         },
       },
@@ -1065,8 +1152,15 @@ export async function renderChat(root, ctx, params = {}) {
                     await api("DELETE", `/api/docs/chat_session/${encodeURIComponent(sess.id)}`).catch(() => {});
                   }
                   sessions = sessions.filter((x) => x.id !== sess.id);
+                  draftBySession.delete(sess.id);
+                  inFlightTurns.delete(sess.id);
+                  recentSettledSessions.delete(sess.id);
                   if (sessions.length === 0) sessions = [makeBlankSession()];
-                  if (activeId === sess.id) activeId = sessions[0].id;
+                  if (activeId === sess.id) {
+                    activeId = sessions[0].id;
+                    setLastActiveSessionId(activeId);
+                    restoreDraftFor(activeId);
+                  }
                   syncModelPickers();
                   renderAll();
                 },
@@ -1238,7 +1332,8 @@ export async function renderChat(root, ctx, params = {}) {
     const prevMainScrollTop = mainScroller ? mainScroller.scrollTop : 0;
     clear(messagesBox);
 
-    if (!sess.data.messages.length && !isSending) {
+    const sendingNow = isSessionSending(sess.id);
+    if (!sess.data.messages.length && !sendingNow) {
       messagesBox.appendChild(el("div", { class: "chat-empty" },
         el("div", { class: "chat-empty-badge", "aria-hidden": "true" }, "✦"),
         el("h2", null, "手绘风 AI 聊天工作台"),
@@ -1363,7 +1458,7 @@ export async function renderChat(root, ctx, params = {}) {
         const regenBtn = el("button", {
           type: "button",
           class: "chat-msg-act-btn",
-          disabled: isSending,
+          disabled: sendingNow,
           title: "基于上一条提问重新生成本条回复",
           onClick: () => regenerateFromIndex(msgIdx),
         }, "↻ 重新生成");
@@ -1399,7 +1494,7 @@ export async function renderChat(root, ctx, params = {}) {
       messagesBox.appendChild(wrap);
     });
 
-    if (isSending) {
+    if (sendingNow) {
       messagesBox.appendChild(el("article", { class: "chat-msg is-assistant" },
         el("div", { class: "chat-assistant-avatar", "aria-hidden": "true" }, "✦"),
         el("div", { class: "chat-assistant-body" },
@@ -1421,14 +1516,15 @@ export async function renderChat(root, ctx, params = {}) {
   }
 
   function renderAll() {
+    const busy = isActiveSending();
     syncSidebarState();
     renderHeader();
     renderThreads();
     renderSelectedSkills();
     renderDraftRefs();
     renderMessages(true);
-    sendBtn.disabled = isSending;
-    sendBtn.textContent = isSending ? "思考中…" : "发送";
+    sendBtn.disabled = busy;
+    sendBtn.textContent = busy ? "思考中…" : "发送";
   }
 
   // ---------- Skill Picker Modal ----------
@@ -1635,8 +1731,15 @@ export async function renderChat(root, ctx, params = {}) {
 
   // ---------- Send Turn & Regenerate ----------
   async function sendMessages(sess, confirmed) {
-    isSending = true;
-    renderAll();
+    if (!sess || inFlightTurns.has(sess.id)) return;
+    inFlightTurns.set(sess.id, sess);
+    setLastActiveSessionId(sess.id);
+    if (page.isConnected) renderAll();
+
+    // Persist user message immediately BEFORE awaiting /api/chat/turn so switching
+    // to another tab (or reloading) never loses submitted content (#143).
+    await persistChatSession(sess);
+
     const apiMessages = sess.data.messages.map((m) => ({ role: m.role, content: m.content || "" }));
     const lastUser = [...sess.data.messages].reverse().find((m) => m.role === "user");
     const isDirect = Boolean(sess.data.directPrompt);
@@ -1646,19 +1749,23 @@ export async function renderChat(root, ctx, params = {}) {
       const sk = byID.get(id);
       return sk && !sk.builtin && sk.id !== "handraw-skill";
     });
+    const reqTextModel = sess.data.textModelRef || textModelSel.value;
+    const reqImageModel = sess.data.imageModelRef || imageModelSel.value;
+    const reqRatio = sess.data.ratio || ratioSel.value;
+
+    let res = null;
     try {
-      const res = await api("POST", "/api/chat/turn", {
+      res = await api("POST", "/api/chat/turn", {
         sessionId: sess.id,
         messages: apiMessages,
-        textModelRef: textModelSel.value,
-        imageModelRef: imageModelSel.value,
+        textModelRef: reqTextModel,
+        imageModelRef: reqImageModel,
         skillIds: activeIds,
         directPrompt: isDirect,
-        ratio: ratioSel.value,
+        ratio: reqRatio,
         refs: lastUser?.refs || [],
         confirmed,
       });
-      if (!page.isConnected) return;
       sess.data.messages.push({
         id: uid("msg"),
         role: "assistant",
@@ -1672,14 +1779,8 @@ export async function renderChat(root, ctx, params = {}) {
         pendingConfirm: res.pendingConfirm || null,
         ts: Date.now(),
       });
-      await persistSession(sess);
-      if (res.skillsChanged) await reloadSkills();
-      if (res.pluginsChanged) await ctx.refreshNav?.();
-      for (const r of (res.runs || [])) {
-        if (r?.id && (r.images || []).some((im) => im.status === "queued" || im.status === "running")) {
-          syncRun(r.id);
-        }
-      }
+      // Always persist the assistant reply even if the user switched to another tab (#143).
+      await persistChatSession(sess);
     } catch (e) {
       sess.data.messages.push({
         id: uid("msg"),
@@ -1687,25 +1788,31 @@ export async function renderChat(root, ctx, params = {}) {
         content: `请求失败：${e.message || "未知错误"}`,
         ts: Date.now(),
       });
+      await persistChatSession(sess);
     } finally {
-      isSending = false;
-      renderAll();
+      recentSettledSessions.set(sess.id, { sess, settledAt: Date.now() });
+      inFlightTurns.delete(sess.id);
+      if (mountedChatView && mountedChatView.isAlive()) {
+        await mountedChatView.onTurnSettled(sess, res);
+      } else if (res?.pluginsChanged) {
+        await ctx.refreshNav?.();
+      }
     }
   }
 
   async function regenerateFromIndex(assistantIdx) {
-    if (isSending) return;
     const sess = activeSession();
+    if (isSessionSending(sess.id)) return;
     if (assistantIdx <= 0 || assistantIdx >= sess.data.messages.length) return;
     sess.data.messages = sess.data.messages.slice(0, assistantIdx);
     await sendMessages(sess, false);
   }
 
   async function sendCurrentInput(confirmed) {
-    if (isSending) return;
+    const sess = activeSession();
+    if (isSessionSending(sess.id)) return;
     const text = inputEl.value.trim();
     if (!text) return;
-    const sess = activeSession();
     if (sess.data.messages.length === 0) {
       sess.name = text.replace(/^\/\S+\s*/, "").slice(0, 22) || "新聊天";
     }
@@ -1724,13 +1831,14 @@ export async function renderChat(root, ctx, params = {}) {
     });
     inputEl.value = "";
     draftRefs = [];
+    draftBySession.delete(sess.id);
     autoResize();
     await sendMessages(sess, confirmed);
   }
 
   async function retryLastWithConfirm() {
-    if (isSending) return;
     const sess = activeSession();
+    if (isSessionSending(sess.id)) return;
     await sendMessages(sess, true);
   }
 
@@ -1763,8 +1871,28 @@ export async function renderChat(root, ctx, params = {}) {
     } catch {}
   }
 
+  const viewHandle = {
+    isAlive: () => page.isConnected,
+    onTurnSettled: async (updatedSess, res) => {
+      if (!page.isConnected) return;
+      const idx = sessions.findIndex((s) => s.id === updatedSess.id);
+      if (idx >= 0) sessions[idx] = updatedSess;
+      else sessions = [updatedSess, ...sessions];
+      if (res?.skillsChanged) await reloadSkills();
+      if (res?.pluginsChanged) await ctx.refreshNav?.();
+      renderAll();
+      for (const r of (res?.runs || [])) {
+        if (r?.id && (r.images || []).some((im) => im.status === "queued" || im.status === "running")) {
+          syncRun(r.id);
+        }
+      }
+    },
+  };
+  mountedChatView = viewHandle;
+
   const unsub = onEvent((msg) => {
     if (!page.isConnected) {
+      if (mountedChatView === viewHandle) mountedChatView = null;
       unsub();
       return;
     }
@@ -1786,6 +1914,10 @@ export async function renderChat(root, ctx, params = {}) {
   if (params.directPrompt !== undefined) {
     activeSession().data.directPrompt = Boolean(params.directPrompt);
   }
+  if (initialDraft?.text && !params.prompt) {
+    inputEl.value = initialDraft.text;
+    autoResize();
+  }
   if (Array.isArray(params.refs) && params.refs.length) {
     const merged = [...draftRefs];
     for (const rp of params.refs) {
@@ -1796,7 +1928,17 @@ export async function renderChat(root, ctx, params = {}) {
   if (params.prompt) {
     inputEl.value = params.prompt;
     autoResize();
+    saveCurrentDraft();
   }
   syncModelPickers();
   renderAll();
+
+  // Refresh any in-progress image runs that may have finished while user was on another tab (#143)
+  for (const m of (activeSession().data.messages || [])) {
+    for (const r of (m.runs || [])) {
+      if (r?.id && (r.images || []).some((im) => im.status === "queued" || im.status === "running")) {
+        syncRun(r.id);
+      }
+    }
+  }
 }
