@@ -1117,20 +1117,27 @@ func fileExists(p string) bool {
 
 func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
-		Images   []string `json:"images"`
-		Kind     string   `json:"kind"`    // style | layout
-		Purpose  string   `json:"purpose"` // find | create
-		ModelRef string   `json:"modelRef"`
+		Images     []string `json:"images"`
+		SourceText string   `json:"sourceText"`
+		Mode       string   `json:"mode"`    // "" | "vision" | "prompt"
+		Kind       string   `json:"kind"`    // style | layout
+		Purpose    string   `json:"purpose"` // find | create
+		ModelRef   string   `json:"modelRef"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
-	if len(body.Images) == 0 {
-		return nil, bad("请先选择、粘贴或拖入参考图")
-	}
 	kind := strings.ToLower(strings.TrimSpace(body.Kind))
 	if kind != "layout" {
 		kind = "style"
+	}
+	mode := strings.ToLower(strings.TrimSpace(body.Mode))
+	srcText := strings.TrimSpace(body.SourceText)
+	if mode == "prompt" || (srcText != "" && len(body.Images) == 0) {
+		return s.mineDistillFromPrompt(r.Context(), kind, srcText, body.ModelRef)
+	}
+	if len(body.Images) == 0 {
+		return nil, bad("请先选择、粘贴或拖入参考图")
 	}
 	route, err := resolveAIRoute("vision", body.ModelRef)
 	if err != nil {
@@ -1357,6 +1364,148 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 			Code:   "analyze_unavailable",
 			Msg:    "请先登录手绘风账号，或选择第三方接口 / 本地 AI Harness 进行识别提取",
 		}
+	}
+}
+
+func (s *Server) mineDistillFromPrompt(ctx context.Context, kind, sourceText, modelRef string) (map[string]any, error) {
+	src := strings.TrimSpace(sourceText)
+	if src == "" {
+		return nil, bad("请先填写或带入提示词内容，再进行提炼")
+	}
+	if rs := []rune(src); len(rs) > 8000 {
+		src = string(rs[:8000])
+	}
+	p, err := s.pack()
+	if err != nil {
+		return nil, err
+	}
+	route, err := resolveAIRouteForScene("text", "studioPlan", modelRef)
+	if err != nil {
+		return nil, err
+	}
+
+	promptText := "请从下面这段生图提示词中，彻底剔除具体人物、动物、服饰、物品、建筑和故事情节，只提炼出纯粹可复用的视觉艺术语言（媒介、笔触线条、纸张肌理、色彩倾向、光影质感与空间氛围），输出一段精炼清晰的中文画风特征描述。返回严格 JSON: {\"name\":\"画风名称（4-10字）\",\"description\":\"纯视觉画风特征描述\"}\n\n原始提示词：\n" + src
+	if kind == "layout" {
+		promptText = "请从下面这段生图提示词中，彻底剔除具体画风笔触与具体人物/故事情节，只提炼出纯粹可复用的画面构图与版面排版约束（区域划分、视觉动线、标题区/主画面区/注释区位置与比例、边框分隔与留白机制），输出一段精炼清晰的中文排版约束描述。返回严格 JSON: {\"name\":\"图型名称（4-10字）\",\"description\":\"构图与版面排版约束描述\"}\n\n原始提示词：\n" + src
+	}
+
+	finish := func(source, service, modelName, rawReply string) (map[string]any, error) {
+		var out struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			TraitsZh    string `json:"traitsZh"`
+			TraitsEn    string `json:"traitsEn"`
+			PromptZh    string `json:"promptZh"`
+			PromptEn    string `json:"promptEn"`
+		}
+		if json.Unmarshal([]byte(extractJSON(rawReply)), &out) != nil {
+			return nil, bad("模型返回格式无法解析，请重试或换一个模型")
+		}
+		desc := strings.TrimSpace(firstStr(out.Description, out.TraitsZh, out.PromptZh, out.TraitsEn, out.PromptEn))
+		if desc == "" {
+			return nil, bad("模型未返回有效提炼结果，请重试")
+		}
+		res := map[string]any{
+			"source":      source,
+			"mode":        "prompt",
+			"kind":        kind,
+			"name":        cleanSuggestedResourceName(out.Name),
+			"description": desc,
+			"traitsZh":    desc,
+			"traitsEn":    firstStr(strings.TrimSpace(out.TraitsEn), desc),
+			"promptZh":    desc,
+			"promptEn":    firstStr(strings.TrimSpace(out.PromptEn), desc),
+		}
+		if service != "" {
+			res["service"] = service
+		}
+		if modelName != "" {
+			res["model"] = modelName
+		}
+		if kind == "style" {
+			res["matches"] = p.SearchStyles(desc, 5)
+			res["violations"] = prompt.CheckTraitViolations(desc)
+		} else {
+			res["violations"] = []string{}
+		}
+		return res, nil
+	}
+
+	distillWithSite := func() (map[string]any, error) {
+		aiRes, aiErr := s.Site.AIChat(ctx, site.AIChatRequest{
+			Capability:   "text",
+			Messages:     []providers.ChatMessage{{Role: "user", Content: promptText}},
+			JSONMode:     true,
+			FeatureScope: "resource_distill",
+		})
+		if aiErr != nil {
+			return nil, aiErr
+		}
+		return finish("site", aiRes.Service, "", aiRes.Content)
+	}
+
+	distillWithProvider := func(tp settings.Provider, model string) (map[string]any, error) {
+		reply, err := providers.Chat(ctx, tp, model, []providers.ChatMessage{{Role: "user", Content: promptText}}, true)
+		if err != nil {
+			return nil, err
+		}
+		return finish("provider", "", tp.Name+":"+model, reply)
+	}
+
+	distillWithHarness := func(hst harnesses.Status, subModel string) (map[string]any, error) {
+		res, err := harnesses.Chat(ctx, hst, harnesses.ChatRequest{
+			Messages: []harnesses.Message{{Role: "user", Content: promptText}},
+			JSONMode: true,
+			Model:    subModel,
+		})
+		if err != nil {
+			return nil, err
+		}
+		lbl := hst.Name
+		if res.Model != "" {
+			lbl += " · " + res.Model
+		}
+		return finish("harness", "", lbl, res.Text)
+	}
+
+	switch route.Mode {
+	case "harness":
+		return distillWithHarness(route.Harness, route.HarnessSubModel)
+	case "provider":
+		return distillWithProvider(route.Provider, route.Model)
+	case "site":
+		if !s.Site.LoggedIn() {
+			return nil, site.ErrNotLoggedIn
+		}
+		return distillWithSite()
+	default:
+		var siteErr error
+		if s.Site.LoggedIn() {
+			if res, err := distillWithSite(); err == nil {
+				return res, nil
+			} else {
+				siteErr = err
+			}
+		}
+		if tp, model, ok := findTextProviderFor("text"); ok {
+			if res, err := distillWithProvider(tp, model); err == nil {
+				return res, nil
+			} else if siteErr == nil {
+				return nil, err
+			}
+		}
+		for _, hst := range harnesses.Discover(settings.Get().Harnesses) {
+			if hst.Available {
+				if res, err := distillWithHarness(hst, ""); err == nil {
+					return res, nil
+				}
+				break
+			}
+		}
+		if siteErr != nil {
+			return nil, siteErr
+		}
+		return nil, bad("请先登录手绘风账号，或选择第三方接口 / 本地 AI Harness 进行提示词提炼")
 	}
 }
 

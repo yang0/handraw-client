@@ -189,4 +189,24 @@ func TestMineAnalyzeLayoutAndHarnessImageArgs(t *testing.T) {
 	if nameRes.Name != "三段卡片排版" || nameRes.Source != "provider" {
 		t.Fatalf("unexpected suggest-name response: %+v", nameRes)
 	}
+
+	// Verify /api/mine/analyze with mode="prompt" & sourceText distills pure style/layout without images
+	rrDistill := doReq(t, srv.Handler(), srv.Token, "POST", "/api/mine/analyze", map[string]any{
+		"mode":       "prompt",
+		"kind":       "layout",
+		"sourceText": "画一张穿红裙的女孩在咖啡馆看书，上方留白标题，中间主图，底部三列要点卡片",
+		"modelRef":   "p_vision:gpt-4o",
+	})
+	if rrDistill.Code != 200 {
+		t.Fatalf("analyze prompt distill failed: %d %s", rrDistill.Code, rrDistill.Body.String())
+	}
+	var distRes struct {
+		Mode        string `json:"mode"`
+		Kind        string `json:"kind"`
+		Description string `json:"description"`
+	}
+	_ = json.Unmarshal(rrDistill.Body.Bytes(), &distRes)
+	if distRes.Mode != "prompt" || distRes.Kind != "layout" || !strings.Contains(distRes.Description, "顶部通栏") {
+		t.Fatalf("unexpected distill response: %+v", distRes)
+	}
 }
