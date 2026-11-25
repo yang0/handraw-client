@@ -289,8 +289,37 @@ export function openReferencePickerModal({
     class: "btn btn-primary",
     onClick: () => {
       const result = [...selectedRefs];
+      const resultMeta = result.map((p, idx) => {
+        const meta = itemByPath.get(p);
+        if (meta?.source === "gallery" && meta.galleryId && meta.itemId) {
+          return {
+            index: idx + 1,
+            source: "gallery",
+            galleryId: meta.galleryId,
+            itemId: meta.itemId,
+            variant: meta.variant || "",
+            label: meta.name || meta.itemId,
+            localPath: p,
+          };
+        }
+        if (meta?.id) {
+          return {
+            index: idx + 1,
+            source: "asset",
+            assetId: meta.id,
+            label: meta.name || "",
+            localPath: p,
+          };
+        }
+        return {
+          index: idx + 1,
+          source: "upload",
+          label: meta?.name || "",
+          localPath: p,
+        };
+      });
       closeModal();
-      if (typeof onConfirm === "function") onConfirm(result);
+      if (typeof onConfirm === "function") onConfirm(result, resultMeta);
     },
   }, `✓ 确认选用 (${selectedRefs.length}/${limit})`);
 
@@ -430,6 +459,10 @@ export function openReferencePickerModal({
       itemByPath.set(res.path, {
         name: res.name || (variantObj ? `${item.name} · ${variantObj.label}` : item.name),
         image: res.path,
+        source: "gallery",
+        galleryId: gal.id,
+        itemId: item.id,
+        variant: res.variant || vKey || "",
         sourceLabel: gal.name || gal.id,
         angleLabel: variantObj?.label || "",
         localOnly: Boolean(gal.localOnly),

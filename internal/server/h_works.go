@@ -230,16 +230,21 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 			"alreadyPublished": true,
 		}, nil
 	}
+	if run.PublishedInspirationID != "" {
+		return nil, bad("该图片已发布至社区灵感广场，同一张图片不可重复发布为社区作品")
+	}
 	if isDirectPromptRun(run, s.resolveRunRecipe(run, nil)) {
-		return nil, bad("该图片为提示词直出（未调用手绘 Skill，无画风配方），请改用「发布到灵感库」分享提示词与图片")
+		return nil, bad("该图片为提示词直出（未调用手绘 Skill，无画风配方），请发布至社区「灵感库」")
 	}
 	var body struct {
 		Title    string   `json:"title"`
 		Notes    string   `json:"notes"`
 		Price    int      `json:"price"`
 		ImageIDs []string `json:"imageIds"`
-		// WebP data URLs encoded by the UI (long edge <= 2048, q85), keyed by image id.
+		// WebP data URLs encoded by the UI (long edge <= 1024), keyed by image id.
 		Encoded map[string]string `json:"encoded"`
+		// Optional WebP data URLs for local reference images, keyed by localPath.
+		RefEncoded map[string]string `json:"refEncoded"`
 	}
 	_ = decode(r, &body)
 	body.Title = strings.TrimSpace(body.Title)
@@ -302,6 +307,7 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 	}
 	payload := map[string]any{
 		"externalRunId":   extUUID,
+		"sourceRunId":     extUUID,
 		"requestId":       "skill-history-" + extUUID,
 		"originClient":    "skill",
 		"visibility":      "public",
@@ -311,6 +317,15 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 		"title":           string(title),
 		"price":           body.Price,
 		"recipe":          s.publishRecipe(run),
+	}
+	if runRefs := extractRunRefMeta(run); len(runRefs) > 0 {
+		refSpecs, rErr := s.preparePublishRefSpecs(r.Context(), runRefs, body.RefEncoded)
+		if rErr != nil {
+			return nil, bad(rErr.Error())
+		}
+		if len(refSpecs) > 0 {
+			payload["refSpecs"] = refSpecs
+		}
 	}
 	if body.Notes != "" {
 		payload["notes"] = body.Notes

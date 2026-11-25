@@ -167,6 +167,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/inspirations/clip", s.h(s.inspirationsClip))
 	m.HandleFunc("POST /api/inspirations/{id}/organize", s.h(s.inspirationsOrganize))
 	m.HandleFunc("POST /api/inspirations/{id}/publish", s.h(s.inspirationsPublish))
+	m.HandleFunc("POST /api/inspirations/materialize-refs", s.h(s.inspirationsMaterializeRefs))
 	m.HandleFunc("POST /api/settings/clip-token/rotate", s.h(s.clipTokenRotate))
 
 	// account + site

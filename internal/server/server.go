@@ -372,7 +372,19 @@ func (s *Server) h(fn handler) http.HandlerFunc {
 			case errors.Is(err, store.ErrNotFound):
 				status = 404
 			}
-			writeJSON(w, status, map[string]any{"error": err.Error(), "code": code})
+			payload := map[string]any{"error": err.Error(), "code": code}
+			if se != nil && len(se.Raw) > 0 {
+				var rawObj map[string]any
+				if json.Unmarshal(se.Raw, &rawObj) == nil {
+					if ct, ok := rawObj["conflictTarget"].(map[string]any); ok {
+						if u, _ := ct["url"].(string); strings.HasPrefix(u, "/") && s.Site != nil {
+							ct["fullUrl"] = strings.TrimRight(s.Site.Base(), "/") + u
+						}
+						payload["conflictTarget"] = ct
+					}
+				}
+			}
+			writeJSON(w, status, payload)
 			return
 		}
 		if out == nil {

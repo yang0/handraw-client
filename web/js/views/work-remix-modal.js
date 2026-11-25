@@ -32,8 +32,58 @@ function resolveSlotPrompt(basePrompt, slots, values) {
   return out;
 }
 
+function galleryLabelOf(gid) {
+  return ({
+    "ruic-poses": "姿态图鉴",
+    "ruic-costumes": "衣装图鉴",
+    "ruic-faces": "人像图鉴",
+  }[String(gid || "")] || String(gid || "开源图鉴"));
+}
+
+function renderLocalRefDisclosure(refSpecs) {
+  if (!Array.isArray(refSpecs) || !refSpecs.length) return null;
+  return el("div", { class: "col", style: { gap: "6px", padding: "10px 12px", borderRadius: "10px", border: "1px solid var(--line)", background: "var(--bg-elevated, var(--paper))" } },
+    el("strong", { style: { fontSize: "12.5px" } }, `🖼 将随本次分享一并公开的参考图（共 ${refSpecs.length} 张）`),
+    ...refSpecs.map((rf, i) => {
+      const idx = Number(rf?.index || (i + 1));
+      const isGal = rf?.source === "gallery";
+      const label = isGal
+        ? `${galleryLabelOf(rf.galleryId)} · ${rf.label || rf.itemId || ""}${rf.variant ? ` (${rf.variant})` : ""}`
+        : (rf?.label || `参考图 ${idx}`);
+      const badge = isGal ? "开源图鉴引用 · 不上传图片" : "压缩去 EXIF · 云端去重秒传";
+      return el("div", { class: "row", style: { justifyContent: "space-between", gap: "8px", fontSize: "12px" } },
+        el("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, `图 ${idx} · ${label}`),
+        el("span", { class: "badge", style: { flexShrink: "0", fontSize: "11px" } }, badge)
+      );
+    }),
+    el("span", { class: "muted", style: { fontSize: "11.5px" } }, "垫图生成的灵感公开时须一并公开所用参考图，以便买家解锁后一键做同款；若含隐私照片请勿发布。")
+  );
+}
+
+async function encodeLocalRefSpecs(refSpecs) {
+  const refEncoded = {};
+  if (!Array.isArray(refSpecs) || !refSpecs.length) return refEncoded;
+  for (const rf of refSpecs) {
+    if (!rf || rf.source === "gallery" || rf.source === "catalog" || !rf.localPath) continue;
+    try {
+      const enc = await toWebp(localImg(rf.localPath), { maxEdge: 1024, quality: 0.82 });
+      if (enc) refEncoded[rf.localPath] = enc;
+    } catch {}
+  }
+  return refEncoded;
+}
+
 export function openShareInspirationModal(item, ctx, onDone) {
   if (!item?.id) return;
+  if (item.runPublishedWorkId) {
+    toast("该图片已作为社区作品发布，同一张图片不可重复上架到灵感库");
+    if (item.runPublishedUrl) openURL(item.runPublishedUrl);
+    return;
+  }
+  if (item.runIsSkill) {
+    toast("该图片使用手绘 Skill 配方生成，请前往画廊发布为「社区作品」");
+    return;
+  }
   let priceVal = item.publishedPrice >= 1 && item.publishedPrice <= 20 ? item.publishedPrice : 5;
 
   const titleIn = el("input", { class: "input", value: item.title || "", placeholder: "给这张灵感起个一眼看懂的中文标题" });
@@ -108,14 +158,17 @@ export function openShareInspirationModal(item, ctx, onDone) {
   );
 
   const previewImgSrc = item.imagePath ? localImg(item.imagePath) : (item.imageUrl ? remoteThumb(item.imageUrl, 360) : "");
+  const conflictArea = el("div", { class: "col", style: { gap: "6px" } });
   const body = el("div", { class: "col", style: { gap: "12px" } },
     previewImgSrc ? el("div", { class: "row", style: { gap: "12px", alignItems: "center" } },
       el("img", { src: previewImgSrc, alt: "", style: { width: "76px", height: "76px", objectFit: "cover", borderRadius: "8px", border: "1px solid var(--line)" } }),
       el("div", { class: "col", style: { gap: "4px", flex: "1" } },
         el("strong", null, item.title || "准备分享灵感"),
-        el("span", { class: "muted" }, "不限图片来源（支持自己创作或从 X / 网页收集整理的优质提示词），系统按内容指纹保护首位分享者的解锁收益权。")
+        el("span", { class: "muted" }, "不限图片来源（支持纯提示词创作或从 X / 网页收集整理的优质提示词），系统按内容指纹保护首位分享者的解锁收益权并防止与社区作品重复。")
       )
     ) : null,
+    conflictArea,
+    renderLocalRefDisclosure(item.refSpecs),
     el("div", { class: "field" }, el("label", null, "灵感标题"), titleIn),
     el("div", { class: "field" }, el("label", null, "完整提示词"), promptIn),
     pricingBox,
@@ -147,11 +200,13 @@ export function openShareInspirationModal(item, ctx, onDone) {
       }
       submitBtn.disabled = true;
       submitBtn.textContent = "正在压缩 WebP 并上架…";
+      clear(conflictArea);
       try {
         let encoded = "";
         if (item.imagePath) {
           encoded = await toWebp(localImg(item.imagePath), { maxEdge: 1024, quality: 0.85 });
         }
+        const refEncoded = await encodeLocalRefSpecs(item.refSpecs);
         const res = await api("POST", `/api/inspirations/${encodeURIComponent(item.id)}/publish`, {
           title: titleIn.value.trim(),
           prompt: promptTxt,
@@ -160,6 +215,7 @@ export function openShareInspirationModal(item, ctx, onDone) {
           sourceUrl,
           price,
           encoded,
+          refEncoded,
         });
         ctx.refreshTopbar?.();
         onDone?.(res);
@@ -198,6 +254,15 @@ export function openShareInspirationModal(item, ctx, onDone) {
         submitBtn.disabled = false;
         submitBtn.textContent = "立即上架积分解锁";
         const msg = e?.message || "发布失败";
+        if (e?.conflictTarget) {
+          const ct = e.conflictTarget;
+          const cUrl = ct.fullUrl || ct.url || "";
+          const cKind = ct.kind === "work" ? "社区作品" : "社区灵感";
+          conflictArea.appendChild(el("div", { class: "card row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px", padding: "10px 12px", borderColor: "var(--accent)" } },
+            el("span", { style: { fontSize: "12.5px" } }, `⚠ 该图已作为${cKind}《${ct.title || ct.id || ""}》上架，不可重复发布`),
+            cUrl ? el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openURL(cUrl) }, "↗ 查看已有内容") : null
+          ));
+        }
         if (/登录|login|401/i.test(msg)) {
           toast("请先在「设置 → 账号」登录手绘风账号后再分享赚积分");
         } else {
@@ -233,9 +298,9 @@ function mergeTags(baseTags, extraTags) {
 }
 
 export function openBatchShareInspirationsModal(items, ctx, opts = {}) {
-  const initialList = Array.isArray(items) ? items.filter((it) => it && it.id) : [];
+  const initialList = (Array.isArray(items) ? items : []).filter((it) => it && it.id && !it.runPublishedWorkId && !it.runIsSkill);
   if (!initialList.length) {
-    toast("请先选择至少一张要分享的灵感图片");
+    toast("所选条目不可重复分享到灵感库（可能已作为社区作品上架或属手绘配方作品）");
     return;
   }
 
@@ -579,12 +644,14 @@ export function openBatchShareInspirationsModal(items, ctx, opts = {}) {
       const notesTxt = String(it.notes || "").trim() || fallbackNote;
 
       try {
+        const refEncoded = await encodeLocalRefSpecs(it.refSpecs);
         const res = await api("POST", `/api/inspirations/${encodeURIComponent(it.id)}/publish`, {
           title: titleTxt,
           prompt: promptTxt,
           notes: notesTxt,
           tags: mergedTags,
           price,
+          refEncoded,
         });
         entry.status = "done";
         entry.url = res.fullUrl || res.url || "";
@@ -1034,11 +1101,17 @@ export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
         },
       }, `🔓 消耗 ${price} 积分解锁完整提示词并做同款`);
 
+      const refSummary = item.refSummary && typeof item.refSummary === "object" ? item.refSummary : { total: 0 };
+      const refTotal = Number(refSummary.total || 0);
+      const refLabels = Array.isArray(refSummary.labels) ? refSummary.labels : [];
       promptSection = el("div", { class: "insp-locked-box col" },
         el("div", { class: "row", style: { justifyContent: "space-between" } },
-          el("strong", null, "🔒 完整提示词与可替换模板已锁定"),
+          el("strong", null, `🔒 完整提示词${refTotal > 0 ? "、参考图" : ""}与可替换模板已锁定`),
           el("span", { class: "badge badge-accent" }, `${price} 积分`)
         ),
+        refTotal > 0 ? el("div", { class: "muted", style: { fontSize: "12px", padding: "6px 8px", borderRadius: "8px", background: "var(--paper-soft, rgba(0,0,0,0.04))" } },
+          `🖼 含 ${refTotal} 项配套参考图（${refLabels.join(" / ") || "参考图"}），解锁后可查看并一键还原做同款`
+        ) : null,
         el("div", { class: "insp-locked-preview" }, item.promptPreview || "解锁后可查看完整双语提示词、替换变量槽位并一键做同款…"),
         unlockBtn,
         el("span", { class: "muted", style: { fontSize: "11.5px" } }, "注：积分仅用于解锁社区提示词、付费画风与收费贴，不可兑换生图额度；作者将获得 80% 积分分成。"),
@@ -1098,6 +1171,7 @@ export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
               source: "community",
               sourceAuthor: author,
               recipe: item.recipe || {},
+              refSpecs: Array.isArray(item.refSpecs) ? item.refSpecs : [],
               suggestedStyle,
             });
             saveBtn.textContent = "★ 已收进灵感库";
@@ -1108,6 +1182,68 @@ export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
           }
         },
       }, "★ 收进我的灵感库");
+
+      const unlockedRefSpecs = Array.isArray(item.refSpecs) ? item.refSpecs : [];
+      const refSpecsSection = unlockedRefSpecs.length
+        ? el("div", { class: "col", style: { gap: "6px", padding: "10px 12px", borderRadius: "10px", border: "1px solid var(--line)", background: "var(--bg-elevated, var(--paper))" } },
+            el("strong", { style: { fontSize: "12.5px" } }, `🖼 配套参考图（共 ${unlockedRefSpecs.length} 项 · 点下方「做同款」自动还原）`),
+            el("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(118px, 1fr))", gap: "8px" } },
+              ...unlockedRefSpecs.map((rf, i) => {
+                const idx = Number(rf?.index || (i + 1));
+                if (rf?.source === "gallery") {
+                  return el("div", { style: { padding: "8px", borderRadius: "8px", border: "1px solid var(--line)", background: "var(--paper)", display: "flex", flexDirection: "column", gap: "3px" } },
+                    el("span", { style: { fontSize: "11px", color: "var(--accent)", fontWeight: "600" } }, `图 ${idx} · ${galleryLabelOf(rf.galleryId)}`),
+                    el("span", { style: { fontSize: "12px", wordBreak: "break-word" } }, rf.label || rf.itemId || ""),
+                    el("span", { class: "muted mono", style: { fontSize: "10.5px" } }, `${rf.itemId || ""}${rf.variant ? ` · ${rf.variant}` : ""}`)
+                  );
+                }
+                const refAbsUrl = absSiteUrl(rf?.url || "", siteBase);
+                return el("div", { style: { borderRadius: "8px", overflow: "hidden", border: "1px solid var(--line)", background: "var(--paper)", display: "flex", flexDirection: "column" } },
+                  refAbsUrl ? el("img", { src: remoteThumb(refAbsUrl, 240), alt: rf?.label || `参考图 ${idx}`, style: { width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" }, loading: "lazy" }) : null,
+                  el("div", { style: { padding: "5px 7px", fontSize: "11.5px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, `图 ${idx} · ${rf?.label || "参考垫图"}`)
+                );
+              })
+            )
+          )
+        : null;
+
+      const remixGoBtn = el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: async () => {
+          const finalPrompt = promptDisplay.textContent;
+          const hasSkill = Boolean(suggestedStyle || item.recipe?.styleIds?.length || item.recipe?.layoutId);
+          let remixRefs = [];
+          let remixRefMeta = [];
+          if (unlockedRefSpecs.length) {
+            remixGoBtn.disabled = true;
+            remixGoBtn.textContent = "正在准备参考图…";
+            try {
+              const mat = await api("POST", "/api/inspirations/materialize-refs", { refSpecs: unlockedRefSpecs });
+              remixRefs = mat?.paths || [];
+              remixRefMeta = mat?.refs || [];
+              if (Array.isArray(mat?.warnings) && mat.warnings.length) {
+                toast(mat.warnings.join("；"));
+              }
+            } catch (err) {
+              toast(err?.message || "部分参考图准备失败，仍将带入提示词");
+            } finally {
+              remixGoBtn.disabled = false;
+              remixGoBtn.textContent = "✨ 一键带入生图工作台做同款";
+            }
+          }
+          closeModal();
+          ctx.go("create", {
+            directPrompt: !hasSkill,
+            forkOf: hasSkill ? (item.workId || "") : "",
+            forkTitle: title,
+            style: hasSkill ? (suggestedStyle || "") : "",
+            recipe: hasSkill ? (item.recipe || (suggestedStyle ? { styleIds: [suggestedStyle] } : {})) : undefined,
+            theme: finalPrompt,
+            ...(remixRefs.length ? { refs: remixRefs, refMeta: remixRefMeta } : {}),
+          });
+        },
+      }, "✨ 一键带入生图工作台做同款");
 
       promptSection = el("div", { class: "col", style: { gap: "10px" } },
         el("div", { class: "insp-prompt-box" },
@@ -1124,25 +1260,10 @@ export async function openInspirationRemixModal(inspId, ctx, opts = {}) {
           ),
           promptDisplay
         ),
+        refSpecsSection,
         slotsBox,
         el("div", { class: "insp-remix-actions col" },
-          el("button", {
-            type: "button",
-            class: "btn btn-primary",
-            onClick: () => {
-              const finalPrompt = promptDisplay.textContent;
-              const hasSkill = Boolean(suggestedStyle || item.recipe?.styleIds?.length || item.recipe?.layoutId);
-              closeModal();
-              ctx.go("create", {
-                directPrompt: !hasSkill,
-                forkOf: hasSkill ? (item.workId || "") : "",
-                forkTitle: title,
-                style: hasSkill ? (suggestedStyle || "") : "",
-                recipe: hasSkill ? (item.recipe || (suggestedStyle ? { styleIds: [suggestedStyle] } : {})) : undefined,
-                theme: finalPrompt,
-              });
-            },
-          }, "✨ 一键带入生图工作台做同款"),
+          remixGoBtn,
           el("div", { class: "row", style: { gap: "8px" } },
             el("button", {
               type: "button",

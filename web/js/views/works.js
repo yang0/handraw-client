@@ -262,15 +262,66 @@ async function openRunDetail(runId, ctx, onChanged) {
   const expandedInfo = extractExpandedPrompts(run, doneImages);
   const originalReqText = String(run.originalRequest || "").trim();
   const isDirectPrompt = Boolean(detail.isDirectPrompt);
+  const runMetaObj = (() => {
+    try {
+      return typeof run.meta === "string" ? JSON.parse(run.meta || "{}") : (run.meta || {});
+    } catch { return {}; }
+  })();
+  const runRefs = Array.isArray(runMetaObj?.refs) ? runMetaObj.refs : [];
+
+  const galleryLabelOf = (gid) => ({
+    "ruic-poses": "姿态图鉴",
+    "ruic-costumes": "衣装图鉴",
+    "ruic-faces": "人像图鉴",
+  }[String(gid || "")] || String(gid || "开源图鉴"));
+
+  const renderRefDisclosure = (refs) => {
+    if (!Array.isArray(refs) || !refs.length) return null;
+    const rows = refs.map((rf, i) => {
+      const idx = Number(rf?.index || (i + 1));
+      const isGal = rf?.source === "gallery";
+      const badge = isGal ? "开源图鉴引用 · 不上传图片" : "压缩去 EXIF · 云端去重秒传";
+      const name = isGal
+        ? `${galleryLabelOf(rf.galleryId)} · ${rf.label || rf.itemId || ""}${rf.variant ? ` (${rf.variant})` : ""}`
+        : (rf?.label || `参考图 ${idx}`);
+      return el("div", { class: "row", style: { justifyContent: "space-between", gap: "8px", fontSize: "12px", padding: "4px 8px", borderRadius: "6px", background: "var(--paper-soft, rgba(0,0,0,0.03))" } },
+        el("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, `图 ${idx} · ${name}`),
+        el("span", { class: "badge", style: { flexShrink: "0", fontSize: "11px" } }, badge)
+      );
+    });
+    return el("div", { class: "col", style: { gap: "6px", padding: "10px 12px", borderRadius: "10px", border: "1px solid var(--line)", background: "var(--bg-elevated, var(--paper))" } },
+      el("strong", { style: { fontSize: "12.5px" } }, `🖼 将随本次发布一并公开的参考图（共 ${refs.length} 张）`),
+      ...rows,
+      el("span", { class: "muted", style: { fontSize: "11.5px" } }, "垫图生成的作品公开时须一并公开所用参考图，以便买家解锁后一键做同款；若含不便公开的隐私照片，请勿发布到社区。")
+    );
+  };
+
+  const encodeLocalRefs = async (refs, statusBtn) => {
+    const refEncoded = {};
+    if (!Array.isArray(refs) || !refs.length) return refEncoded;
+    const localItems = refs.filter((rf) => rf && rf.source !== "gallery" && rf.source !== "catalog" && rf.localPath);
+    for (let i = 0; i < localItems.length; i++) {
+      const lp = localItems[i].localPath;
+      if (statusBtn) statusBtn.textContent = `正在压缩参考图 (${i + 1}/${localItems.length})…`;
+      try {
+        const enc = await toWebp(localImg(lp), { maxEdge: 1024, quality: 0.82 });
+        if (enc) refEncoded[lp] = enc;
+      } catch {}
+    }
+    return refEncoded;
+  };
 
   // Shared modal state
   let activeIdx = 0;
   let zoomed = false;
   let activeTab = "details"; // "details" | "publish"
-  let publishMode = isDirectPrompt ? "inspiration" : "work";  // "work" | "inspiration"
+  const publishMode = isDirectPrompt ? "inspiration" : "work"; // Strictly mutually exclusive (#118)
   let workPrice = 2;
   let inspPrice = 5;
-  let publishedInspReceipt = null;
+  let publishedInspReceipt = run.publishedInspirationId
+    ? { id: run.publishedInspirationId, url: run.publishedInspirationUrl || "", price: 0 }
+    : null;
+  let conflictNotice = null;
   let trashArmed = false;
   let trashTimer = null;
   const selectedIds = new Set(doneImages.slice(0, 12).map((i) => i.id));
@@ -541,12 +592,12 @@ async function openRunDetail(runId, ctx, onChanged) {
 
   const headBar = el("div", { class: "wd-head" },
     el("div", { class: "wd-title-wrap" }, titleIn, saveHint),
-    el("div", { class: "wd-head-actions" }, starBtn, saveInspBtn, trashBtn, closeBtn)
+    el("div", { class: "wd-head-actions" }, starBtn, isDirectPrompt ? saveInspBtn : null, trashBtn, closeBtn)
   );
 
   // Two clean tabs
   const tabDetailsBtn = el("button", { type: "button", class: "wd-tab is-active", "data-wd-tab": "details" }, "📋 详情与提示词");
-  const pubStatusDot = el("span", { class: "wd-tab-dot", hidden: !run.publishedWorkId });
+  const pubStatusDot = el("span", { class: "wd-tab-dot", hidden: !(run.publishedWorkId || run.publishedInspirationId) });
   const tabPublishBtn = el("button", { type: "button", class: "wd-tab", "data-wd-tab": "publish" }, "☁ 发布到社区", pubStatusDot);
   const tabsBar = el("div", { class: "wd-tabs" }, tabDetailsBtn, tabPublishBtn);
 
@@ -852,47 +903,47 @@ async function openRunDetail(runId, ctx, onChanged) {
     }
 
     if (isDirectPrompt) {
-      publishMode = "inspiration";
       pubWrap.appendChild(el("div", { class: "direct-mode-callout", "data-work-section": "direct-publish-note" },
-        el("strong", null, "💡 分享到社区「灵感库」（图片 + 提示词）"),
-        el("span", null, "该图片为提示词直出（未调用手绘 Skill），将直接以「图片 + 提示词」形式上架社区灵感库，支持 1~20 积分解锁（作者享 80% 分成），被评论后自动同步至论坛「贴图与提示词」板块。")
+        el("strong", null, "💡 自动归属社区「灵感库」（纯提示词直出）"),
+        el("span", null, "该图片未调用手绘 Skill，将自动上架至社区灵感库（1~20 积分解锁完整提示词与参考图，作者享 80% 分成；同一张图全站仅上架一次）。")
       ));
       if (run.publishedWorkId && run.publishedUrl) {
-        pubWrap.appendChild(renderPublishedReceipt("网站作品栏作品", run.publishedUrl, 0));
+        pubWrap.appendChild(renderPublishedReceipt("社区作品（该图已发布，无需重复上架）", run.publishedUrl, 0));
+        pane.appendChild(pubWrap);
+        inspectorFoot.hidden = true;
+        return;
       }
     } else {
-      const choiceWorkBtn = el("button", {
-        type: "button",
-        class: "work-publish-choice" + (publishMode === "work" ? " is-active" : ""),
-        "data-publish-choice": "work",
-        onClick: () => { publishMode = "work"; renderPane(); },
-      },
-        el("strong", null, "🎨 发布为「作品」"),
-        el("span", null, "手绘 Skill 配方 + 原始输入；他人查看配方需积分解锁。")
-      );
-      const choiceInspBtn = el("button", {
-        type: "button",
-        class: "work-publish-choice" + (publishMode === "inspiration" ? " is-active" : ""),
-        "data-publish-choice": "inspiration",
-        onClick: () => { publishMode = "inspiration"; renderPane(); },
-      },
-        el("strong", null, "💡 发布为「灵感库」"),
-        el("span", null, "解析后提示词 + 图片；评论后自动进论坛「贴图与提示词」。")
-      );
-      pubWrap.appendChild(el("div", { class: "wd-publish-choices-compact" }, choiceWorkBtn, choiceInspBtn));
+      pubWrap.appendChild(el("div", { class: "direct-mode-callout", "data-work-section": "skill-publish-note" },
+        el("strong", null, "🎨 自动归属「社区作品」（手绘 Skill 配方）"),
+        el("span", null, "本作品使用手绘 Skill 生成，将发布至社区作品（解锁后展示画风/图型/配色配方与创作主题，不另行上架灵感库，保护配方与提示词资产并避免重复）。")
+      ));
+      if (publishedInspReceipt && !run.publishedWorkId) {
+        pubWrap.appendChild(renderPublishedReceipt("社区灵感（该图已发布，无需重复上架）", publishedInspReceipt.url, publishedInspReceipt.price || 0));
+        pane.appendChild(pubWrap);
+        inspectorFoot.hidden = true;
+        return;
+      }
+    }
+
+    if (conflictNotice) {
+      const cUrl = conflictNotice.fullUrl || conflictNotice.url || "";
+      const cKindLabel = conflictNotice.kind === "work" ? "社区作品" : "社区灵感";
+      pubWrap.appendChild(el("div", { class: "work-published-card", style: { borderColor: "var(--accent)" } },
+        el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "6px" } },
+          el("strong", null, `⚠ 该图片已作为${cKindLabel}《${conflictNotice.title || conflictNotice.id || ""}》上架`),
+          cUrl ? el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openURL(cUrl) }, "↗ 查看已有内容") : null
+        ),
+        el("span", { class: "muted", style: { fontSize: "12px" } }, "同一张图片在全站仅可公开上架一次，请勿重复发布。")
+      ));
     }
 
     if (publishMode === "work") {
       if (run.publishedWorkId) {
         const autoLabel = run.source === "site"
-          ? "网站作品栏作品（网站模型生图已自动发布，无需重复发布）"
+          ? "社区作品（网站模型生图已自动同步，无需重复发布）"
           : "社区作品";
         pubWrap.appendChild(renderPublishedReceipt(autoLabel, run.publishedUrl, run._publishedPrice || 0));
-        pubWrap.appendChild(el("span", { class: "muted", style: { fontSize: "12px" } },
-          run.source === "site"
-            ? "使用网站模型生成的公开图片已自动同步到网站作品栏，客户端不会重复发布；如需分享「Skill 解析后的完整提示词」赚积分，可切换到右侧「发布为灵感库」。"
-            : "如需将「Skill 解析后的完整提示词」另行上架赚积分，可点上方右侧切换为「发布为灵感库」。"
-        ));
         pane.appendChild(pubWrap);
         inspectorFoot.hidden = true;
         return;
@@ -916,6 +967,9 @@ async function openRunDetail(runId, ctx, onChanged) {
       });
       syncWorkPrice(workPrice);
 
+      const refBox = renderRefDisclosure(runRefs);
+      if (refBox) pubWrap.appendChild(refBox);
+
       pubWrap.appendChild(el("div", { class: "work-pricing-panel" },
         el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "6px" } },
           el("strong", { style: { fontSize: "12.5px" } }, "🔒 配方解锁积分（必选 · 不支持免费）"),
@@ -930,8 +984,10 @@ async function openRunDetail(runId, ctx, onChanged) {
         if (!selectedIds.size) return toast("请至少勾选 1 张已完成的图片");
         submitBtn.disabled = true;
         const prevLabel = submitBtn.textContent;
+        conflictNotice = null;
         try {
           const { ids, encoded } = await encodeSelectedImages(submitBtn);
+          const refEncoded = await encodeLocalRefs(runRefs, submitBtn);
           submitBtn.textContent = "正在发布作品…";
           const res = await api("POST", `/api/works/${encodeURIComponent(run.id)}/publish`, {
             title: titleIn.value.trim(),
@@ -939,6 +995,7 @@ async function openRunDetail(runId, ctx, onChanged) {
             price: workPrice,
             imageIds: ids,
             encoded,
+            refEncoded,
           });
           toast(`作品已发布！配方定价 ${workPrice} 积分`);
           run.publishedWorkId = res.workId;
@@ -947,6 +1004,10 @@ async function openRunDetail(runId, ctx, onChanged) {
           renderPane();
           onChanged?.();
         } catch (e) {
+          if (e?.conflictTarget) {
+            conflictNotice = e.conflictTarget;
+            renderPane();
+          }
           toast(e.message || "发布失败");
           submitBtn.disabled = false;
           submitBtn.textContent = prevLabel;
@@ -958,7 +1019,7 @@ async function openRunDetail(runId, ctx, onChanged) {
       inspectorFoot.appendChild(submitBtn);
     } else {
       if (publishedInspReceipt) {
-        pubWrap.appendChild(renderPublishedReceipt("灵感库提示词", publishedInspReceipt.url, publishedInspReceipt.price));
+        pubWrap.appendChild(renderPublishedReceipt("社区灵感库", publishedInspReceipt.url, publishedInspReceipt.price));
         pane.appendChild(pubWrap);
         inspectorFoot.hidden = true;
         return;
@@ -986,8 +1047,11 @@ async function openRunDetail(runId, ctx, onChanged) {
       });
       syncInspPrice(inspPrice);
 
+      const refBox = renderRefDisclosure(runRefs);
+      if (refBox) pubWrap.appendChild(refBox);
+
       pubWrap.appendChild(el("div", { class: "field" },
-        el("label", null, isDirectPrompt ? "将分享的生图提示词（可微调）" : "将分享的解析后提示词（可微调）"),
+        el("label", null, "将分享的生图提示词（可微调）"),
         inspPromptIn
       ));
       pubWrap.appendChild(el("div", { class: "work-pricing-panel" },
@@ -1008,11 +1072,13 @@ async function openRunDetail(runId, ctx, onChanged) {
       submitBtn.addEventListener("click", async () => {
         if (!selectedIds.size) return toast("请至少勾选 1 张已完成的图片");
         const promptTxt = inspPromptIn.value.trim();
-        if (!promptTxt) return toast("请确认要分享的解析后提示词");
+        if (!promptTxt) return toast("请确认要分享的提示词");
         submitBtn.disabled = true;
         const prevLabel = submitBtn.textContent;
+        conflictNotice = null;
         try {
           const { orderedDataUrls } = await encodeSelectedImages(submitBtn);
+          const refEncoded = await encodeLocalRefs(runRefs, submitBtn);
           submitBtn.textContent = "正在上架灵感库…";
           const firstSelectedImg = run.images.find((x) => selectedIds.has(x.id) && x.path) || doneImages[0];
           const tags = inspTagsIn.value.split(/[,，、\s]+/).map((s) => s.replace(/^#/, "").trim()).filter(Boolean);
@@ -1020,13 +1086,14 @@ async function openRunDetail(runId, ctx, onChanged) {
             title: titleIn.value.trim() || run.title || "我的创作灵感",
             imagePath: firstSelectedImg?.path || "",
             prompt: promptTxt,
-            promptZh: isDirectPrompt ? "" : (expandedInfo.zh || ""),
+            promptZh: "",
             tags,
             notes: notesIn.value.trim(),
             source: "local",
             runId: run.id,
-            recipe: isDirectPrompt ? {} : parsedRec.raw,
-            suggestedStyle: isDirectPrompt ? "" : (parsedRec.styleIds[0] || ""),
+            recipe: {},
+            refSpecs: runRefs,
+            suggestedStyle: "",
           });
           const inspId = created?.item?.id || created?.id;
           if (!inspId) throw new Error("本地灵感记录创建失败");
@@ -1037,14 +1104,21 @@ async function openRunDetail(runId, ctx, onChanged) {
             tags,
             price: inspPrice,
             encoded: orderedDataUrls[0] || "",
+            refEncoded,
             images: orderedDataUrls,
           });
-          publishedInspReceipt = { url: pubRes.fullUrl || pubRes.url || "", price: inspPrice };
+          run.publishedInspirationId = pubRes.id || inspId;
+          run.publishedInspirationUrl = pubRes.fullUrl || pubRes.url || "";
+          publishedInspReceipt = { id: run.publishedInspirationId, url: run.publishedInspirationUrl, price: inspPrice };
           toast(`已上架到灵感库！解锁定价 ${inspPrice} 积分`);
           ctx.refreshTopbar?.();
           renderPane();
           onChanged?.();
         } catch (e) {
+          if (e?.conflictTarget) {
+            conflictNotice = e.conflictTarget;
+            renderPane();
+          }
           toast(e.message || "发布失败");
           submitBtn.disabled = false;
           submitBtn.textContent = prevLabel;

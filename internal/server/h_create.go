@@ -534,7 +534,8 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		MaskDataURL           string           `json:"maskDataUrl"`
 		AnnotatedGuideDataURL string           `json:"annotatedGuideDataUrl"`
 		Refs                  []string         `json:"refs"`
-		GalleryRefs      []GalleryRef     `json:"galleryRefs"`
+		RefMeta               []RunRefMeta     `json:"refMeta"`
+		GalleryRefs           []GalleryRef     `json:"galleryRefs"`
 		Items            []struct {
 			Theme  string `json:"theme"`
 			Style  string `json:"style"`
@@ -766,14 +767,19 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	var persistedRecipe json.RawMessage
 	var runMeta json.RawMessage
 	defaultRunTitle := "手绘风创作"
+	refMetaList := s.buildRunRefMeta(body.RefMeta, body.GalleryRefs, body.Refs)
 	if body.DirectPrompt {
 		persistedRecipe = json.RawMessage("{}")
-		runMeta, _ = json.Marshal(map[string]any{
+		metaObj := map[string]any{
 			"directPrompt": true,
 			"ratio":        itemRatios[0],
 			"resolution":   effResolution,
 			"quality":      effQuality,
-		})
+		}
+		if len(refMetaList) > 0 {
+			metaObj["refs"] = refMetaList
+		}
+		runMeta, _ = json.Marshal(metaObj)
 		defaultRunTitle = "直出创作"
 	} else {
 		var parentRecipe json.RawMessage
@@ -802,6 +808,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			body.Resolution,
 			body.Quality,
 		)
+		if len(refMetaList) > 0 {
+			runMeta, _ = json.Marshal(map[string]any{"refs": refMetaList})
+		}
 	}
 	run := &store.Run{
 		ID:              runID,

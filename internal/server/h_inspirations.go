@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/yang0/handraw-client/internal/appdir"
 	"github.com/yang0/handraw-client/internal/jobs"
 	"github.com/yang0/handraw-client/internal/providers"
@@ -52,16 +53,20 @@ type inspirationData struct {
 	PublishedURL   string            `json:"publishedUrl,omitempty"`
 	PublishedPrice int               `json:"publishedPrice,omitempty"`
 	Recipe         map[string]any    `json:"recipe,omitempty"`
+	RefSpecs       []RunRefMeta      `json:"refSpecs,omitempty"`
 	SuggestedStyle string            `json:"suggestedStyle,omitempty"`
 	AIOrganized    bool              `json:"aiOrganized,omitempty"`
 	CreatedAt      string            `json:"createdAt,omitempty"`
 }
 
 type inspirationItem struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	UpdatedAt string `json:"updatedAt"`
-	Category  string `json:"category,omitempty"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	UpdatedAt          string `json:"updatedAt"`
+	Category           string `json:"category,omitempty"`
+	RunPublishedWorkID string `json:"runPublishedWorkId,omitempty"`
+	RunPublishedURL    string `json:"runPublishedUrl,omitempty"`
+	RunIsSkill         bool   `json:"runIsSkill,omitempty"`
 	inspirationData
 }
 
@@ -542,13 +547,24 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 				continue
 			}
 		}
-		items = append(items, inspirationItem{
+		it := inspirationItem{
 			ID:              d.ID,
 			Name:            d.Name,
 			UpdatedAt:       d.UpdatedAt,
 			Category:        cat,
 			inspirationData: data,
-		})
+		}
+		if data.RunID != "" {
+			if linkedRun, rErr := s.DB.GetRun(data.RunID); rErr == nil {
+				it.RunPublishedWorkID = linkedRun.PublishedWorkID
+				it.RunPublishedURL = linkedRun.PublishedURL
+				it.RunIsSkill = !isDirectPromptRun(linkedRun, s.resolveRunRecipe(linkedRun, nil))
+				if len(it.RefSpecs) == 0 {
+					it.RefSpecs = extractRunRefMeta(linkedRun)
+				}
+			}
+		}
+		items = append(items, it)
 	}
 
 	type folderCount struct {
@@ -904,6 +920,7 @@ func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any
 		RunID          string            `json:"runId"`
 		WorkID         string            `json:"workId"`
 		Recipe         map[string]any    `json:"recipe"`
+		RefSpecs       []RunRefMeta      `json:"refSpecs"`
 		SuggestedStyle string            `json:"suggestedStyle"`
 		AutoOrganize   bool              `json:"autoOrganize"`
 		SyncCollection bool              `json:"syncCollection"`
@@ -991,6 +1008,12 @@ func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any
 			s.ensureInspirationFolder(folderVal)
 		}
 	}
+	refSpecs := body.RefSpecs
+	if len(refSpecs) == 0 && strings.TrimSpace(body.RunID) != "" {
+		if linkedRun, rErr := s.DB.GetRun(strings.TrimSpace(body.RunID)); rErr == nil {
+			refSpecs = extractRunRefMeta(linkedRun)
+		}
+	}
 	data := inspirationData{
 		Title:          strings.TrimSpace(body.Title),
 		ImagePath:      imgPath,
@@ -1008,6 +1031,7 @@ func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any
 		RunID:          strings.TrimSpace(body.RunID),
 		WorkID:         strings.TrimSpace(body.WorkID),
 		Recipe:         body.Recipe,
+		RefSpecs:       refSpecs,
 		SuggestedStyle: strings.TrimSpace(body.SuggestedStyle),
 	}
 	item, err := s.saveInspiration(id, data)
@@ -1442,20 +1466,41 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 		return nil, err
 	}
 	var body struct {
-		Title     string   `json:"title"`
-		Prompt    string   `json:"prompt"`
-		Notes     string   `json:"notes"`
-		Price     int      `json:"price"`
-		Tags      []string `json:"tags"`
-		SourceURL string   `json:"sourceUrl"`
-		Encoded   string   `json:"encoded"`
-		Images    []string `json:"images"`
+		Title      string            `json:"title"`
+		Prompt     string            `json:"prompt"`
+		Notes      string            `json:"notes"`
+		Price      int               `json:"price"`
+		Tags       []string          `json:"tags"`
+		SourceURL  string            `json:"sourceUrl"`
+		Encoded    string            `json:"encoded"`
+		RefEncoded map[string]string `json:"refEncoded"`
+		Images     []string          `json:"images"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
 	if body.Price < 1 || body.Price > 20 {
 		return nil, bad("灵感提示词须设置 1~20 积分解锁，暂不支持免费分享")
+	}
+
+	// Single-channel mutual exclusion (#118):
+	// 1. Handraw Skill works belong exclusively to Community Works (protects Skill prompts & prevents duplicates).
+	// 2. Runs already published as Community Works cannot be republished to Community Inspirations.
+	sourceRunID := ""
+	publishRefs := cur.RefSpecs
+	if cur.RunID != "" {
+		if linkedRun, rErr := s.DB.GetRun(cur.RunID); rErr == nil {
+			if !isDirectPromptRun(linkedRun, s.resolveRunRecipe(linkedRun, nil)) {
+				return nil, bad("该图片使用手绘 Skill 配方生成，请前往画廊发布为「社区作品」，不可重复发布到灵感库")
+			}
+			if linkedRun.PublishedWorkID != "" {
+				return nil, bad("该图片已发布为社区作品，同一张图片不可重复上架到灵感库")
+			}
+			sourceRunID = uuid.NewSHA1(uuid.NameSpaceURL, []byte("handraw-run:"+linkedRun.ID)).String()
+			if len(publishRefs) == 0 {
+				publishRefs = extractRunRefMeta(linkedRun)
+			}
+		}
 	}
 
 	title := firstStr(strings.TrimSpace(body.Title), cur.Title, "灵感分享")
@@ -1506,6 +1551,18 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 		"imageUrl":       imageDataOrURL,
 		"imageSha256":    imageSHA,
 	}
+	if sourceRunID != "" {
+		payload["sourceRunId"] = sourceRunID
+	}
+	if len(publishRefs) > 0 {
+		refSpecs, rErr := s.preparePublishRefSpecs(r.Context(), publishRefs, body.RefEncoded)
+		if rErr != nil {
+			return nil, bad(rErr.Error())
+		}
+		if len(refSpecs) > 0 {
+			payload["refSpecs"] = refSpecs
+		}
+	}
 	if len(body.Images) > 0 {
 		payload["images"] = body.Images
 	}
@@ -1533,6 +1590,14 @@ func (s *Server) inspirationsPublish(w http.ResponseWriter, r *http.Request) (an
 	d.PublishedURL = pubURL
 	d.PublishedPrice = body.Price
 	updated, _ := s.saveInspiration(id, d)
+	if cur.RunID != "" && pubID != "" {
+		_ = s.DB.UpdateRun(cur.RunID, map[string]any{
+			"published_inspiration_id":  pubID,
+			"published_inspiration_url": pubURL,
+		})
+		_ = jobs.WriteRunJSON(s.DB, cur.RunID)
+		s.Emit("work_published", map[string]any{"runId": cur.RunID, "inspirationId": pubID, "url": pubURL, "price": body.Price})
+	}
 	s.Emit("inspirations", map[string]any{"updated": true, "published": true, "id": id})
 	s.Emit("balance", map[string]any{"refresh": true})
 	resp["item"] = updated

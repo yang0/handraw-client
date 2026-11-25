@@ -30,6 +30,8 @@ const viewState = {
 };
 
 function getShareEligibility(item) {
+  if (item?.runPublishedWorkId) return { ok: false, reason: "已在社区作品上架" };
+  if (item?.runIsSkill) return { ok: false, reason: "手绘配方作品请去画廊发布" };
   const hasImg = Boolean(item?.imagePath || item?.imageUrl);
   const hasPrompt = Boolean(String(item?.prompt || item?.promptZh || item?.rawText || "").trim());
   if (!hasImg) return { ok: false, reason: "缺少图片" };
@@ -1903,8 +1905,23 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
             el("button", {
               type: "button",
               class: "btn btn-sm",
-              onClick: () => {
+              onClick: async () => {
                 const hasSkill = Boolean(item.suggestedStyle || item.recipe?.styleIds?.length || item.recipe?.layoutId);
+                let remixRefs = [];
+                let remixRefMeta = [];
+                if (Array.isArray(item.refSpecs) && item.refSpecs.length) {
+                  const localOnly = item.refSpecs.filter((rf) => rf && rf.localPath);
+                  if (localOnly.length === item.refSpecs.length) {
+                    remixRefs = localOnly.map((rf) => rf.localPath);
+                    remixRefMeta = localOnly;
+                  } else {
+                    try {
+                      const mat = await api("POST", "/api/inspirations/materialize-refs", { refSpecs: item.refSpecs });
+                      remixRefs = mat?.paths || [];
+                      remixRefMeta = mat?.refs || [];
+                    } catch {}
+                  }
+                }
                 ctx.go("create", {
                   directPrompt: !hasSkill,
                   forkOf: hasSkill ? (item.workId || "") : "",
@@ -1912,14 +1929,26 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
                   style: hasSkill ? (item.suggestedStyle || item.recipe?.styleIds?.[0] || "") : "",
                   recipe: hasSkill ? (item.recipe || (item.suggestedStyle ? { styleIds: [item.suggestedStyle] } : {})) : undefined,
                   theme: item.prompt || item.promptZh || item.rawText || item.title,
+                  ...(remixRefs.length ? { refs: remixRefs, refMeta: remixRefMeta } : {}),
                 });
               },
             }, "✨ 做同款"),
-            el("button", {
-              type: "button",
-              class: "btn btn-sm btn-primary",
-              onClick: () => openShareInspirationModal(item, ctx, loadVault),
-            }, item.publishedId ? "已分享" : "☁ 分享赚积分")
+            item.runPublishedWorkId || item.runIsSkill
+              ? el("button", {
+                  type: "button",
+                  class: "btn btn-sm",
+                  disabled: !item.runPublishedUrl,
+                  title: item.runPublishedWorkId ? "该图已作为社区作品上架，同一张图不可重复发布到灵感库" : "手绘配方作品请前往画廊发布为社区作品",
+                  onClick: () => {
+                    if (item.runPublishedUrl) openURL(item.runPublishedUrl);
+                    else toast("手绘配方作品请前往画廊发布为「社区作品」");
+                  },
+                }, item.runPublishedWorkId ? "已在作品上架 ↗" : "请去画廊发布")
+              : el("button", {
+                  type: "button",
+                  class: "btn btn-sm btn-primary",
+                  onClick: () => openShareInspirationModal(item, ctx, loadVault),
+                }, item.publishedId ? "已分享" : "☁ 分享赚积分")
           );
 
       const cardEl = el("article", {

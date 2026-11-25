@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS runs (
   remote_run_id TEXT NOT NULL DEFAULT '',
   published_work_id TEXT NOT NULL DEFAULT '',
   published_url TEXT NOT NULL DEFAULT '',
+  published_inspiration_id TEXT NOT NULL DEFAULT '',
+  published_inspiration_url TEXT NOT NULL DEFAULT '',
   deleted_at TEXT NOT NULL DEFAULT '',
   meta TEXT NOT NULL DEFAULT '{}'
 );
@@ -102,6 +104,13 @@ func Open(path string) (*DB, error) {
 		d.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	// Idempotent column migrations for existing databases (#118).
+	for _, ddl := range []string{
+		`ALTER TABLE runs ADD COLUMN published_inspiration_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN published_inspiration_url TEXT NOT NULL DEFAULT ''`,
+	} {
+		_, _ = d.Exec(ddl)
+	}
 	return &DB{sql: d}, nil
 }
 
@@ -132,10 +141,12 @@ type Run struct {
 	Starred         bool            `json:"starred"`
 	ParentID        string          `json:"parentId"`
 	GroupID         string          `json:"groupId"`
-	RemoteRunID     string          `json:"remoteRunId"`
-	PublishedWorkID string          `json:"publishedWorkId"`
-	PublishedURL    string          `json:"publishedUrl"`
-	Meta            json.RawMessage `json:"meta"`
+	RemoteRunID             string          `json:"remoteRunId"`
+	PublishedWorkID         string          `json:"publishedWorkId"`
+	PublishedURL            string          `json:"publishedUrl"`
+	PublishedInspirationID  string          `json:"publishedInspirationId"`
+	PublishedInspirationURL string          `json:"publishedInspirationUrl"`
+	Meta                    json.RawMessage `json:"meta"`
 	Images          []Image         `json:"images,omitempty"`
 }
 
@@ -159,7 +170,7 @@ type Image struct {
 	Meta         json.RawMessage `json:"meta"`
 }
 
-const runCols = `id, created_at, updated_at, mode, title, original_request, prompt_zh, prompt_en, recipe, model, model_label, source, cost_cents, free_count, status, error, dir, starred, parent_id, group_id, remote_run_id, published_work_id, published_url, meta`
+const runCols = `id, created_at, updated_at, mode, title, original_request, prompt_zh, prompt_en, recipe, model, model_label, source, cost_cents, free_count, status, error, dir, starred, parent_id, group_id, remote_run_id, published_work_id, published_url, published_inspiration_id, published_inspiration_url, meta`
 
 func rawOr(b json.RawMessage, def string) string {
 	if len(b) == 0 {
@@ -181,10 +192,11 @@ func (d *DB) InsertRun(r *Run, images []Image) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO runs (`+runCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err = tx.Exec(`INSERT INTO runs (`+runCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, r.CreatedAt, r.UpdatedAt, r.Mode, r.Title, r.OriginalRequest, r.PromptZh, r.PromptEn,
 		rawOr(r.Recipe, "{}"), r.Model, r.ModelLabel, r.Source, r.CostCents, r.FreeCount, r.Status, r.Error,
-		r.Dir, boolInt(r.Starred), r.ParentID, r.GroupID, r.RemoteRunID, r.PublishedWorkID, r.PublishedURL, rawOr(r.Meta, "{}"))
+		r.Dir, boolInt(r.Starred), r.ParentID, r.GroupID, r.RemoteRunID, r.PublishedWorkID, r.PublishedURL,
+		r.PublishedInspirationID, r.PublishedInspirationURL, rawOr(r.Meta, "{}"))
 	if err != nil {
 		return err
 	}
@@ -217,7 +229,8 @@ func (d *DB) UpdateImage(id string, fields map[string]any) error {
 }
 
 var runFields = map[string]bool{"title": true, "status": true, "error": true, "cost_cents": true, "free_count": true, "starred": true,
-	"remote_run_id": true, "published_work_id": true, "published_url": true, "deleted_at": true, "meta": true, "prompt_zh": true, "prompt_en": true, "dir": true}
+	"remote_run_id": true, "published_work_id": true, "published_url": true, "published_inspiration_id": true, "published_inspiration_url": true,
+	"deleted_at": true, "meta": true, "prompt_zh": true, "prompt_en": true, "dir": true}
 var imageFields = map[string]bool{"status": true, "path": true, "thumb": true, "width": true, "height": true, "sha256": true, "error": true,
 	"remote_task_id": true, "cost_cents": true, "meta": true, "prompt": true}
 
@@ -260,7 +273,7 @@ func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var starred int
 	err := sc.Scan(&r.ID, &r.CreatedAt, &r.UpdatedAt, &r.Mode, &r.Title, &r.OriginalRequest, &r.PromptZh, &r.PromptEn,
 		&recipe, &r.Model, &r.ModelLabel, &r.Source, &r.CostCents, &r.FreeCount, &r.Status, &r.Error, &r.Dir, &starred,
-		&r.ParentID, &r.GroupID, &r.RemoteRunID, &r.PublishedWorkID, &r.PublishedURL, &meta)
+		&r.ParentID, &r.GroupID, &r.RemoteRunID, &r.PublishedWorkID, &r.PublishedURL, &r.PublishedInspirationID, &r.PublishedInspirationURL, &meta)
 	r.Recipe = json.RawMessage(recipe)
 	r.Meta = json.RawMessage(meta)
 	r.Starred = starred == 1
@@ -345,9 +358,9 @@ func (d *DB) ListRuns(q RunQuery) ([]Run, int, error) {
 		where = append(where, "r.starred = 1")
 	}
 	if q.Published == "yes" || q.Published == "1" {
-		where = append(where, "r.published_work_id != ''")
+		where = append(where, "(r.published_work_id != '' OR r.published_inspiration_id != '')")
 	} else if q.Published == "no" || q.Published == "0" {
-		where = append(where, "r.published_work_id = ''")
+		where = append(where, "(r.published_work_id = '' AND r.published_inspiration_id = '')")
 	}
 	if q.GroupID != "" {
 		where = append(where, "r.group_id = ?")

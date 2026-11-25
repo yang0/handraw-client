@@ -39,6 +39,7 @@ export async function api(method, path, body) {
     const err = new Error((data && data.error) || `请求失败（${resp.status}）`);
     err.status = resp.status;
     err.code = data && data.code;
+    err.conflictTarget = data && data.conflictTarget;
     throw err;
   }
   return data;

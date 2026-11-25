@@ -243,6 +243,7 @@ export async function renderCreate(root, ctx, params = {}) {
     redraw: false,
     modelRef: modRes.defaultModel || "site:seedream-4.5",
     refs: [],
+    refMeta: [],
     galleryRefs: [],
     parentId: "",
     groupId: "",
@@ -281,6 +282,11 @@ export async function renderCreate(root, ctx, params = {}) {
     if (p.tones) state.tone = Array.isArray(p.tones) ? (p.tones[0] || "") : String(p.tones || "");
     if (params.recipe?.id) state.recipeId = params.recipe.id;
     if (params.refs || params.editImage) state.refs = Array.isArray(params.refs) ? [...params.refs] : [params.editImage];
+    if (Array.isArray(params.refMeta)) {
+      state.refMeta = [...params.refMeta];
+    } else if (params.refs || params.editImage) {
+      state.refMeta = (state.refs || []).map((p, idx) => ({ index: idx + 1, source: "upload", localPath: p }));
+    }
     if (Array.isArray(params.galleryRefs)) {
       state.galleryRefs = [...params.galleryRefs];
     } else if (params.galleryRef && params.galleryRef.kind && params.galleryRef.id) {
@@ -846,8 +852,17 @@ export async function renderCreate(root, ctx, params = {}) {
       currentRefs: state.refs || [],
       maxCount: MAX_REF_IMAGES,
       title: "选择参考图",
-      onConfirm: (nextRefs) => {
+      onConfirm: (nextRefs, nextMeta) => {
+        const prevMap = new Map((state.refMeta || []).filter((m) => m && m.localPath).map((m) => [m.localPath, m]));
         state.refs = nextRefs;
+        state.refMeta = (nextRefs || []).map((p, idx) => {
+          const picked = Array.isArray(nextMeta) ? nextMeta[idx] : null;
+          if (picked && (picked.source === "gallery" || picked.source === "asset" || picked.label)) {
+            return { ...picked, index: idx + 1, localPath: p };
+          }
+          const prev = prevMap.get(p);
+          return prev ? { ...prev, index: idx + 1, localPath: p } : { index: idx + 1, source: "upload", localPath: p };
+        });
         renderRefs();
         session.persist();
       },
@@ -1998,6 +2013,10 @@ export async function renderCreate(root, ctx, params = {}) {
         parentId: state.parentId,
         forkOf: isDirect ? "" : (state.forkOf || ""),
         refs: state.refs,
+        refMeta: (state.refs || []).map((p, idx) => {
+          const hit = (state.refMeta || []).find((m) => m && m.localPath === p);
+          return hit ? { ...hit, index: idx + 1, localPath: p } : { index: idx + 1, source: "upload", localPath: p };
+        }),
         galleryRefs: payloadGalleryRefs,
         items: payloadItems,
         recipe: payloadRecipe,
