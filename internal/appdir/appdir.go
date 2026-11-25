@@ -30,8 +30,7 @@ var (
 //   - On Windows: scans all local fixed drives and selects the writable drive
 //     with the largest available free space (<Drive>:\handraw-client), pinning
 //     the choice in %APPDATA%\handraw-client\data-dir.txt so later launches do
-//     not drift when disk usage changes. Existing %APPDATA%\handraw-client data
-//     is preserved on upgrade (#125).
+//     not drift when disk usage changes (#125).
 //   - On macOS: ~/Library/Application Support/handraw-client.
 //   - Elsewhere: $XDG_DATA_HOME/handraw-client or ~/.local/share/handraw-client.
 //
@@ -175,11 +174,6 @@ func selectWindowsRoot(cfg windowsRootConfig) string {
 				return pinned
 			}
 		}
-	}
-
-	// 2. Preserve existing legacy data in %APPDATA%\handraw-client for upgrading users.
-	if cfg.appdataDir != "" && cfg.hasData != nil && cfg.hasData(cfg.appdataDir) {
-		return cfg.appdataDir
 	}
 
 	// Sort drives by available free space descending; tie-break prefers non-system drives, then drive letter.

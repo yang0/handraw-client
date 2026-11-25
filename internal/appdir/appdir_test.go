@@ -54,8 +54,9 @@ func TestSelectWindowsRootHonorsPinnedPointerAcrossFreeSpaceChanges(t *testing.T
 	}
 }
 
-func TestSelectWindowsRootPreservesLegacyAppDataForExistingUsers(t *testing.T) {
+func TestSelectWindowsRootIgnoresOldAppDataAndPicksLargestDrive(t *testing.T) {
 	legacy := `C:\Users\alice\AppData\Roaming\handraw-client`
+	var savedPtr string
 	got := selectWindowsRoot(windowsRootConfig{
 		appdataDir:  legacy,
 		systemDrive: `C:\`,
@@ -66,9 +67,10 @@ func TestSelectWindowsRootPreservesLegacyAppDataForExistingUsers(t *testing.T) {
 		hasData:       func(dir string) bool { return strings.EqualFold(dir, legacy) },
 		probeWritable: func(string) bool { return true },
 		readPointer:   func(string) string { return "" },
+		writePointer:  func(_, v string) { savedPtr = v },
 	})
-	if !strings.EqualFold(got, legacy) {
-		t.Fatalf("existing legacy AppData user must not lose data, got %q", got)
+	if !strings.EqualFold(got, `D:\handraw-client`) || !strings.EqualFold(savedPtr, `D:\handraw-client`) {
+		t.Fatalf("should pick largest free drive D:\\handraw-client instead of sticking to C: AppData, got=%q ptr=%q", got, savedPtr)
 	}
 }
 
