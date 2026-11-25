@@ -103,6 +103,28 @@ func DefaultPluginMarkets() []PluginMarketSource {
 	}
 }
 
+// GalleryMarketSource is one subscribed Format 1 extension gallery market index.json URL (#122).
+type GalleryMarketSource struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Official bool   `json:"official,omitempty"`
+	Enabled  bool   `json:"enabled"`
+}
+
+// DefaultGalleryMarkets returns the built-in official extension gallery market sources.
+func DefaultGalleryMarkets() []GalleryMarketSource {
+	return []GalleryMarketSource{
+		{
+			ID:       "handraw-galleries-official",
+			Name:     "手绘风官方图库市场",
+			URL:      "https://raw.githubusercontent.com/yang0/handraw-galleries/main/index.json",
+			Official: true,
+			Enabled:  true,
+		},
+	}
+}
+
 type Settings struct {
 	SiteBase           string               `json:"siteBase"`
 	WorksDir           string               `json:"worksDir"`
@@ -124,8 +146,9 @@ type Settings struct {
 	SceneModels        map[string]string    `json:"sceneModels,omitempty"` // per-scene text/planning model overrides (#119)
 	Plugins            map[string]bool      `json:"plugins"`
 	PluginConfig       map[string]any       `json:"pluginConfig"`
-	PluginMarkets      []PluginMarketSource `json:"pluginMarkets,omitempty"`
-	LastRecipeID       string               `json:"lastRecipeId"`
+	PluginMarkets      []PluginMarketSource  `json:"pluginMarkets,omitempty"`
+	GalleryMarkets     []GalleryMarketSource `json:"galleryMarkets,omitempty"`
+	LastRecipeID       string                `json:"lastRecipeId"`
 	Onboarded          bool                 `json:"onboarded"`
 	// KeepSiteGenerationsPrivate stops website-model images from being
 	// published to the community automatically (the website default is public).
@@ -149,6 +172,7 @@ func Defaults() Settings {
 		Plugins:           map[string]bool{},
 		PluginConfig:      map[string]any{},
 		PluginMarkets:     DefaultPluginMarkets(),
+		GalleryMarkets:    DefaultGalleryMarkets(),
 	}
 }
 
@@ -241,6 +265,9 @@ func clone(s Settings) Settings {
 	if len(out.PluginMarkets) == 0 {
 		out.PluginMarkets = DefaultPluginMarkets()
 	}
+	if len(out.GalleryMarkets) == 0 {
+		out.GalleryMarkets = DefaultGalleryMarkets()
+	}
 	return out
 }
 
@@ -263,6 +290,9 @@ func load() Settings {
 	}
 	if len(s.PluginMarkets) == 0 {
 		s.PluginMarkets = DefaultPluginMarkets()
+	}
+	if len(s.GalleryMarkets) == 0 {
+		s.GalleryMarkets = DefaultGalleryMarkets()
 	}
 	return s
 }

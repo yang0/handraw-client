@@ -13,10 +13,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/yang0/handraw-client/internal/appdir"
 	"github.com/yang0/handraw-client/internal/galleries"
 	"github.com/yang0/handraw-client/internal/profile"
 	"github.com/yang0/handraw-client/internal/resources"
+	"github.com/yang0/handraw-client/internal/settings"
 )
 
 const maxPluginGalleryImageBytes = 12 << 20 // 12 MiB safety cap for base64 plugin image replies
@@ -391,42 +393,190 @@ func (s *Server) galleryItemMaterialize(w http.ResponseWriter, r *http.Request) 
 	return s.materializeGalleryItem(r.Context(), kind, id, variant)
 }
 
-// galleryPacksList lists installable third-party local-only libraries (e.g. RuiC-PoseAtlas).
-func (s *Server) galleryPacksList(w http.ResponseWriter, r *http.Request) (any, error) {
+func galleryMarketSourcesFromSettings() []galleries.MarketSource {
+	st := settings.Get()
+	out := make([]galleries.MarketSource, 0, len(st.GalleryMarkets))
+	for _, m := range st.GalleryMarkets {
+		out = append(out, galleries.MarketSource{
+			ID:       m.ID,
+			Name:     m.Name,
+			URL:      m.URL,
+			Official: m.Official,
+			Enabled:  m.Enabled,
+		})
+	}
+	return out
+}
+
+// galleryMarketList returns the merged extension gallery plugin market catalog
+// (official yang0/handraw-galleries + custom subscribed sources + locally installed packs) (#122).
+func (s *Server) galleryMarketList(w http.ResponseWriter, r *http.Request) (any, error) {
+	refresh := r.URL.Query().Get("refresh") == "1" || strings.EqualFold(r.URL.Query().Get("refresh"), "true")
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	res := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), refresh)
 	return map[string]any{
 		"ok":            true,
-		"defaultMirror": galleries.RuiCMirrorGitee,
-		"packs":         galleries.ListExternalPacks(appdir.Galleries()),
+		"defaultMirror": res.DefaultMirror,
+		"sources":       res.Sources,
+		"categories":    res.Categories,
+		"packs":         res.Packs,
 	}, nil
 }
 
-// galleryPacksInstall installs one or more RuiC-PoseAtlas libraries locally
-// from the user's preferred mirror (Gitee by default in China, GitHub fallback).
+// galleryMarketAddSource validates and subscribes a custom Format 1 gallery market index.json URL.
+func (s *Server) galleryMarketAddSource(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	rawURL := strings.TrimSpace(body.URL)
+	if !strings.HasPrefix(rawURL, "https://") && !strings.HasPrefix(rawURL, "http://") {
+		return nil, bad("图库市场地址必须以 http:// 或 https:// 开头")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	idx, err := galleries.FetchMarketIndex(ctx, rawURL, true)
+	if err != nil {
+		return nil, bad("无法读取图库市场索引：" + err.Error())
+	}
+	name := firstStr(strings.TrimSpace(body.Name), idx.Title.Label(), "自定义图库市场")
+	srcID := "gal_mkt_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	_, err = settings.Update(func(st *settings.Settings) error {
+		for _, cur := range st.GalleryMarkets {
+			if strings.EqualFold(strings.TrimSpace(cur.URL), rawURL) {
+				return fmt.Errorf("已订阅过该图库市场源：%s", cur.Name)
+			}
+		}
+		st.GalleryMarkets = append(st.GalleryMarkets, settings.GalleryMarketSource{
+			ID:      srcID,
+			Name:    name,
+			URL:     rawURL,
+			Enabled: true,
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, bad(err.Error())
+	}
+	res := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
+	return map[string]any{
+		"ok":            true,
+		"id":            srcID,
+		"defaultMirror": res.DefaultMirror,
+		"sources":       res.Sources,
+		"categories":    res.Categories,
+		"packs":         res.Packs,
+	}, nil
+}
+
+// galleryMarketRemoveSource unsubscribes a custom gallery market source (refusing official).
+func (s *Server) galleryMarketRemoveSource(w http.ResponseWriter, r *http.Request) (any, error) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		return nil, bad("缺少图库市场源 ID")
+	}
+	_, err := settings.Update(func(st *settings.Settings) error {
+		found := false
+		next := make([]settings.GalleryMarketSource, 0, len(st.GalleryMarkets))
+		for _, cur := range st.GalleryMarkets {
+			if cur.ID == id {
+				if cur.Official {
+					return fmt.Errorf("官方图库市场源不可删除")
+				}
+				found = true
+				continue
+			}
+			next = append(next, cur)
+		}
+		if !found {
+			return fmt.Errorf("未找到指定的图库市场源")
+		}
+		st.GalleryMarkets = next
+		return nil
+	})
+	if err != nil {
+		return nil, bad(err.Error())
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	res := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
+	return map[string]any{
+		"ok":            true,
+		"defaultMirror": res.DefaultMirror,
+		"sources":       res.Sources,
+		"categories":    res.Categories,
+		"packs":         res.Packs,
+	}, nil
+}
+
+// galleryPacksList lists available extension gallery plugins (backed by Gallery Market #122).
+func (s *Server) galleryPacksList(w http.ResponseWriter, r *http.Request) (any, error) {
+	return s.galleryMarketList(w, r)
+}
+
+// galleryPacksInstall installs one or more gallery plugins from the Gallery Market
+// or directly from a JSON/ZIP URL (#122).
 func (s *Server) galleryPacksInstall(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
 		ID     string   `json:"id"`
 		IDs    []string `json:"ids"`
+		URL    string   `json:"url"`
 		Mirror string   `json:"mirror"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
+	mirror := firstStr(strings.TrimSpace(body.Mirror), galleries.RuiCMirrorGitee)
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+
+	// Direct JSON / ZIP gallery plugin URL install.
+	if rawURL := strings.TrimSpace(body.URL); rawURL != "" {
+		st, err := galleries.InstallGalleryFromURL(ctx, appdir.Galleries(), rawURL, body.ID, mirror)
+		if err != nil {
+			return nil, bad(err.Error())
+		}
+		s.Galleries.InvalidateFileCache()
+		s.Emit("galleries", map[string]any{"updated": true})
+		catalog := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
+		return map[string]any{
+			"ok":            true,
+			"installed":     []galleries.MarketPackStatus{st},
+			"defaultMirror": catalog.DefaultMirror,
+			"sources":       catalog.Sources,
+			"categories":    catalog.Categories,
+			"packs":         catalog.Packs,
+		}, nil
+	}
+
 	ids := body.IDs
 	if strings.TrimSpace(body.ID) != "" {
 		ids = append(ids, strings.TrimSpace(body.ID))
 	}
 	if len(ids) == 0 {
-		ids = []string{"ruic-poses", "ruic-costumes", "ruic-faces"}
+		return nil, bad("请选择要安装的扩展图库")
 	}
-	mirror := firstStr(strings.TrimSpace(body.Mirror), galleries.RuiCMirrorGitee)
 
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-	defer cancel()
+	catalog := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
+	byID := map[string]galleries.MarketPackStatus{}
+	for _, p := range catalog.Packs {
+		byID[p.ID] = p
+	}
 
-	var installed []galleries.ExternalPackStatus
+	var installed []galleries.MarketPackStatus
 	var errs []string
-	for _, id := range ids {
-		st, err := galleries.InstallExternalPack(ctx, appdir.Galleries(), id, mirror)
+	for _, rawID := range ids {
+		id := strings.ToLower(strings.TrimSpace(rawID))
+		pack, ok := byID[id]
+		if !ok {
+			errs = append(errs, fmt.Sprintf("%s: 图库市场中未找到该扩展图库", rawID))
+			continue
+		}
+		st, err := galleries.InstallMarketPack(ctx, appdir.Galleries(), pack, mirror)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", id, err))
 			continue
@@ -439,11 +589,15 @@ func (s *Server) galleryPacksInstall(w http.ResponseWriter, r *http.Request) (an
 	if len(installed) == 0 && len(errs) > 0 {
 		return nil, bad("安装图库失败：" + strings.Join(errs, "；"))
 	}
+	refreshed := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
 	return map[string]any{
-		"ok":        true,
-		"installed": installed,
-		"errors":    errs,
-		"packs":     galleries.ListExternalPacks(appdir.Galleries()),
+		"ok":            true,
+		"installed":     installed,
+		"errors":        errs,
+		"defaultMirror": refreshed.DefaultMirror,
+		"sources":       refreshed.Sources,
+		"categories":    refreshed.Categories,
+		"packs":         refreshed.Packs,
 	}, nil
 }
 
@@ -454,14 +608,20 @@ func (s *Server) galleryPackUninstall(w http.ResponseWriter, r *http.Request) (a
 	}
 	_ = decode(r, &body)
 	purge := body.PurgeCache == nil || *body.PurgeCache
-	if err := galleries.UninstallExternalPack(appdir.Galleries(), id, purge); err != nil {
+	if err := galleries.UninstallAnyPack(appdir.Galleries(), id, purge); err != nil {
 		return nil, bad(err.Error())
 	}
 	s.Galleries.InvalidateFileCache()
 	s.Emit("galleries", map[string]any{"updated": true})
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	refreshed := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
 	return map[string]any{
-		"ok":    true,
-		"packs": galleries.ListExternalPacks(appdir.Galleries()),
+		"ok":            true,
+		"defaultMirror": refreshed.DefaultMirror,
+		"sources":       refreshed.Sources,
+		"categories":    refreshed.Categories,
+		"packs":         refreshed.Packs,
 	}, nil
 }
 

@@ -151,18 +151,111 @@ function prefersReducedMotion() {
   return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
 }
 
-// ---------- Interactive Canvas Force-Directed Graph (with Auto-Fit, Arrows, Controls & Legend) ----------
+// ---------- Reusable Obsidian-Style Floating Context Menu (#121) ----------
+let activeCtxMenu = null;
+let activeCtxCleanup = null;
+
+export function closeArticleContextMenu() {
+  if (activeCtxCleanup) { activeCtxCleanup(); activeCtxCleanup = null; }
+  if (activeCtxMenu) { activeCtxMenu.remove(); activeCtxMenu = null; }
+}
+
+export function openArticleContextMenu(ev, items) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  closeArticleContextMenu();
+  const valid = (items || []).filter(Boolean);
+  if (!valid.length) return;
+
+  const menu = el("div", { class: "ic-ctx-menu", role: "menu" });
+  valid.forEach((it) => {
+    if (it.sep) {
+      menu.appendChild(el("div", { class: "ic-ctx-sep", role: "separator" }));
+      return;
+    }
+    if (it.header) {
+      menu.appendChild(el("div", { class: "ic-ctx-header" }, it.header));
+      return;
+    }
+    const btn = el("button", {
+      type: "button",
+      role: "menuitem",
+      class: "ic-ctx-item" + (it.danger ? " is-danger" : ""),
+      disabled: Boolean(it.disabled),
+      onClick: () => {
+        closeArticleContextMenu();
+        it.onClick?.();
+      },
+    },
+      el("span", { class: "ic-ctx-ico", "aria-hidden": "true" }, it.icon || ""),
+      el("span", { class: "ic-ctx-label" }, it.label || ""),
+      it.shortcut ? el("span", { class: "ic-ctx-kbd" }, it.shortcut) : null
+    );
+    menu.appendChild(btn);
+  });
+
+  document.body.appendChild(menu);
+  const mw = menu.offsetWidth || 220;
+  const mh = menu.offsetHeight || 240;
+  const x = Math.max(8, Math.min(ev.clientX, window.innerWidth - mw - 10));
+  const y = Math.max(8, Math.min(ev.clientY, window.innerHeight - mh - 10));
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  activeCtxMenu = menu;
+
+  const onDown = (e) => { if (!menu.contains(e.target)) closeArticleContextMenu(); };
+  const onKey = (e) => { if (e.key === "Escape") closeArticleContextMenu(); };
+  const onWheel = (e) => { if (!menu.contains(e.target)) closeArticleContextMenu(); };
+  const onResize = () => closeArticleContextMenu();
+  document.addEventListener("pointerdown", onDown, true);
+  document.addEventListener("keydown", onKey, true);
+  window.addEventListener("wheel", onWheel, { passive: true });
+  window.addEventListener("resize", onResize);
+  activeCtxCleanup = () => {
+    document.removeEventListener("pointerdown", onDown, true);
+    document.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("wheel", onWheel);
+    window.removeEventListener("resize", onResize);
+  };
+}
+
+const FOLDER_PALETTE = [
+  "#4c7260", // sage
+  "#49688a", // slate ink
+  "#a37039", // warm ochre
+  "#7b5a82", // muted plum
+  "#3b7a7d", // deep teal
+  "#a85c48", // terracotta
+  "#6e6958", // olive stone
+  "#5a7347", // moss
+];
+
+function folderOfPath(p) {
+  const s = String(p || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const idx = s.indexOf("/");
+  return idx > 0 ? s.slice(0, idx) : "根目录";
+}
+
+// ---------- Interactive Canvas Force-Directed Graph (Full-Workspace & Mini) ----------
 function mountForceGraph(container, rawGraph, opts = {}) {
   const {
     mode = "local", // local | global
     activePath = "",
     hops = 1,
     showUnresolved = true,
+    hideOrphans = false,
+    colorByFolder = true,
+    activeFolder = "",
+    repulseMul = 1.0,
+    linkDistMul = 1.0,
+    nodeScale = 1.0,
     showLegend = false,
     showControls = true,
     query = "",
     interactive = true,
     onNodeClick = null,
+    onNodeContextMenu = null,
+    onFolderPick = null,
   } = opts;
 
   clear(container);
@@ -188,12 +281,30 @@ function mountForceGraph(container, rawGraph, opts = {}) {
     allNodes.forEach((n) => keptIds.add(n.id));
   }
 
+  // Assign deterministic folder colors
+  const folderColorMap = new Map();
+  const folderCounts = new Map();
+  let colorCursor = 0;
+  allNodes.forEach((n) => {
+    if (!n.exists) return;
+    const f = folderOfPath(n.path);
+    folderCounts.set(f, (folderCounts.get(f) || 0) + 1);
+    if (!folderColorMap.has(f)) {
+      folderColorMap.set(f, FOLDER_PALETTE[colorCursor % FOLDER_PALETTE.length]);
+      colorCursor++;
+    }
+  });
+
   let nodes = allNodes
-    .filter((n) => keptIds.has(n.id) && (showUnresolved || n.exists))
+    .filter((n) => keptIds.has(n.id) && (showUnresolved || n.exists) && (!hideOrphans || (n.degree || 0) > 0 || (activePath && n.path?.toLowerCase() === activePath.toLowerCase())))
     .map((n, i) => {
       const isCur = Boolean(activePath && n.path && n.path.toLowerCase() === activePath.toLowerCase());
+      const folder = n.exists ? folderOfPath(n.path) : "未创建";
+      const baseR = isCur ? 10.5 : Math.min(12, 5.8 + Math.sqrt(n.degree || 0) * 1.45);
       return {
         ...n,
+        folder,
+        folderColor: n.exists ? (folderColorMap.get(folder) || "#7c6e5f") : "#c7bcb0",
         isCurrent: isCur,
         x: 0,
         y: 0,
@@ -201,7 +312,7 @@ function mountForceGraph(container, rawGraph, opts = {}) {
         vy: 0,
         inDeg: 0,
         outDeg: 0,
-        radius: isCur ? 10 : Math.min(11.5, 5.8 + Math.sqrt(n.degree || 0) * 1.45),
+        radius: baseR * nodeScale,
         _seed: i,
       };
     });
@@ -278,10 +389,10 @@ function mountForceGraph(container, rawGraph, opts = {}) {
 
   function tickPhysics(steps = 1) {
     const big = width >= 500;
-    const repulse = big ? 5200 : 2800;
-    const linkDist = big ? 124 : 78;
+    const repulse = (big ? 5600 : 2800) * repulseMul;
+    const linkDist = (big ? 128 : 78) * linkDistMul;
     const springK = 0.048;
-    const centerK = 0.012;
+    const centerK = 0.011;
     for (let s = 0; s < steps; s++) {
       for (let i = 0; i < nodes.length; i++) {
         const a = nodes[i];
@@ -442,11 +553,12 @@ function mountForceGraph(container, rawGraph, opts = {}) {
     ctx.globalAlpha = 1;
 
     // Nodes + crisp labels
-    const showLabels = camScale >= 0.55 || nodes.length <= 40;
+    const showLabels = camScale >= 0.52 || nodes.length <= 45;
     for (const n of nodes) {
-      const matchesQ = !ql || n.label.toLowerCase().includes(ql) || (n.path || "").toLowerCase().includes(ql);
-      const lit = (!focusSet || focusSet.has(n.id)) && matchesQ;
-      ctx.globalAlpha = lit ? 1 : 0.2;
+      const matchesQ = !ql || n.label.toLowerCase().includes(ql) || (n.path || "").toLowerCase().includes(ql) || (n.folder || "").toLowerCase().includes(ql);
+      const matchesFolder = !activeFolder || n.folder === activeFolder;
+      const lit = (!focusSet || focusSet.has(n.id)) && matchesQ && matchesFolder;
+      ctx.globalAlpha = lit ? 1 : 0.16;
 
       // Halo ring on current or hovered node
       if (n.isCurrent || hoveredNode === n) {
@@ -456,9 +568,12 @@ function mountForceGraph(container, rawGraph, opts = {}) {
         ctx.fill();
       }
 
+      const nodeFill = n.isCurrent
+        ? accent
+        : (!n.exists ? unresolvedColor : (hoveredNode === n ? accent : (colorByFolder ? n.folderColor : mutedNode)));
       ctx.beginPath();
       ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
-      ctx.fillStyle = n.isCurrent ? accent : (n.exists ? (hoveredNode === n ? accent : mutedNode) : unresolvedColor);
+      ctx.fillStyle = nodeFill;
       ctx.fill();
 
       if (n.isCurrent || hoveredNode === n) {
@@ -521,8 +636,12 @@ function mountForceGraph(container, rawGraph, opts = {}) {
     if (!rafId) rafId = requestAnimationFrame(loop);
   }
 
-  function zoomBy(factor) {
-    camScale = Math.max(0.28, Math.min(3.5, camScale * factor));
+  function zoomBy(factor, pivotSx = width / 2, pivotSy = height / 2) {
+    const before = screenToWorld(pivotSx, pivotSy);
+    camScale = Math.max(0.22, Math.min(3.8, camScale * factor));
+    const after = screenToWorld(pivotSx, pivotSy);
+    camX += after.x - before.x;
+    camY += after.y - before.y;
     draw();
   }
 
@@ -535,13 +654,33 @@ function mountForceGraph(container, rawGraph, opts = {}) {
   }
 
   if (showLegend) {
-    container.appendChild(el("div", { class: "ic-link-graph-legend" },
+    const legendBox = el("div", { class: "ic-link-graph-legend" },
       el("span", { class: "ic-lg-item" }, el("i", { class: "ic-lg-dot is-current" }), "当前文章"),
-      el("span", { class: "ic-lg-item" }, el("i", { class: "ic-lg-dot is-note" }), "已有笔记"),
       el("span", { class: "ic-lg-item" }, el("i", { class: "ic-lg-dot is-unres" }), "未创建"),
       el("span", { class: "ic-lg-item" }, el("i", { class: "ic-lg-line" }), "引用"),
       el("span", { class: "ic-lg-item" }, el("i", { class: "ic-lg-line is-embed" }), "嵌入")
-    ));
+    );
+    if (colorByFolder && folderColorMap.size > 0) {
+      const topFolders = Array.from(folderCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 7);
+      if (topFolders.length > 1 || (topFolders.length === 1 && topFolders[0][0] !== "根目录")) {
+        legendBox.appendChild(el("span", { class: "ic-lg-sep" }));
+        topFolders.forEach(([fname, cnt]) => {
+          const btn = el("button", {
+            type: "button",
+            class: "ic-lg-folder-btn" + (activeFolder === fname ? " is-active" : ""),
+            title: activeFolder === fname ? "点击取消文件夹筛选" : `点击高亮「${fname}」目录笔记`,
+            onClick: () => onFolderPick?.(activeFolder === fname ? "" : fname),
+          },
+            el("i", { class: "ic-lg-dot", style: { background: folderColorMap.get(fname) } }),
+            `${fname} (${cnt})`
+          );
+          legendBox.appendChild(btn);
+        });
+      }
+    }
+    container.appendChild(legendBox);
   }
 
   if (interactive) {
@@ -629,8 +768,17 @@ function mountForceGraph(container, rawGraph, opts = {}) {
 
     canvas.addEventListener("wheel", (ev) => {
       ev.preventDefault();
-      zoomBy(ev.deltaY < 0 ? 1.14 : 0.88);
+      const r = canvas.getBoundingClientRect();
+      zoomBy(ev.deltaY < 0 ? 1.15 : 0.87, ev.clientX - r.left, ev.clientY - r.top);
     }, { passive: false });
+
+    canvas.addEventListener("contextmenu", (ev) => {
+      const r = canvas.getBoundingClientRect();
+      const hit = hitTest(ev.clientX - r.left, ev.clientY - r.top);
+      if (hit && onNodeContextMenu) {
+        onNodeContextMenu(ev, hit);
+      }
+    });
 
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => { resize(); fitToView(); }) : null;
     if (ro) ro.observe(container);
@@ -1309,89 +1457,233 @@ export function createArticleLinksController(opts) {
     sheet.appendChild(box);
   }
 
-  // ---------- Full Relationship Graph Modal ----------
-  function openGraphModal(initialMode = "global") {
-    let mode = initialMode;
-    let hops = 1;
-    let showUnresolved = true;
-    let query = "";
-    let graphHandle = null;
+  // ---------- Full-Workspace Interactive Graph Stage (#121 — replaces cramped modal) ----------
+  let wsGraphHandle = null;
+  const wsGraphState = {
+    mode: "global", // global | local
+    focusPath: "",
+    hops: 1,
+    showUnresolved: true,
+    hideOrphans: false,
+    colorByFolder: true,
+    activeFolder: "",
+    query: "",
+    repulseMul: 1.0,
+    linkDistMul: 1.0,
+    nodeScale: 1.0,
+    settingsOpen: false,
+  };
 
-    const canvasWrap = el("div", { class: "ic-link-graph-modal-canvas" });
+  function destroyWorkspaceGraph() {
+    if (wsGraphHandle) {
+      wsGraphHandle.destroy();
+      wsGraphHandle = null;
+    }
+  }
+
+  function openGraphModal(initialMode = "global", focusPath = "") {
+    wsGraphState.mode = initialMode || "global";
+    wsGraphState.focusPath = focusPath || (initialMode === "local" ? (opts.getActivePath?.() || data.activePath || "") : "");
+    wsGraphState.activeFolder = "";
+    if (typeof opts.onOpenGraphView === "function") {
+      opts.onOpenGraphView(wsGraphState.mode, wsGraphState.focusPath);
+    }
+  }
+
+  function renderWorkspaceGraph(stageEl) {
+    if (!stageEl) return;
+    destroyWorkspaceGraph();
+    clear(stageEl);
+
+    const canvasWrap = el("div", { class: "ic-ws-graph-canvas" });
     const searchIn = el("input", {
       type: "search",
-      class: "input",
-      style: { width: "210px" },
-      placeholder: "筛选笔记节点…",
+      class: "input ic-ws-graph-search",
+      value: wsGraphState.query,
+      placeholder: "筛选笔记、路径或文件夹…",
     });
 
-    const localBtn = el("button", { type: "button", class: "btn btn-sm" }, "局部图谱");
-    const globalBtn = el("button", { type: "button", class: "btn btn-sm" }, "全库图谱");
+    const globalBtn = el("button", { type: "button", class: "ic-article-seg-btn" }, "全库图谱");
+    const localBtn = el("button", { type: "button", class: "ic-article-seg-btn" }, "局部图谱");
     const hop1Btn = el("button", { type: "button", class: "btn btn-sm" }, "1 跳");
     const hop2Btn = el("button", { type: "button", class: "btn btn-sm" }, "2 跳");
-    const hopsGroup = el("div", { class: "row", style: { gap: "4px" } }, hop1Btn, hop2Btn);
+    const hopsGroup = el("div", { class: "row", style: { gap: "3px" } }, hop1Btn, hop2Btn);
 
     const unresCb = el("input", { type: "checkbox" });
-    unresCb.checked = showUnresolved;
-    const statsLbl = el("span", { class: "badge" }, "");
+    unresCb.checked = wsGraphState.showUnresolved;
+    const orphanCb = el("input", { type: "checkbox" });
+    orphanCb.checked = wsGraphState.hideOrphans;
+    const folderCb = el("input", { type: "checkbox" });
+    folderCb.checked = wsGraphState.colorByFolder;
+
+    const statsBadge = el("span", { class: "badge" }, "");
+    const focusBtn = el("button", {
+      type: "button",
+      class: "btn btn-sm" + (opts.isGraphFullscreen?.() ? " btn-primary" : ""),
+      title: "收起/恢复左右侧栏以全屏浏览图谱",
+      onClick: () => {
+        opts.onToggleGraphFullscreen?.();
+        const isFs = Boolean(opts.isGraphFullscreen?.());
+        focusBtn.classList.toggle("btn-primary", isFs);
+        focusBtn.textContent = isFs ? "✕ 退出全屏" : "⛶ 专注全屏";
+        setTimeout(() => wsGraphHandle?.fitToView(), 80);
+      },
+    }, opts.isGraphFullscreen?.() ? "✕ 退出全屏" : "⛶ 专注全屏");
+
+    const settingsPop = el("div", { class: "ic-ws-graph-settings" + (wsGraphState.settingsOpen ? "" : " hidden") });
+    const makeSliderRow = (label, min, max, step, val, onChange) => {
+      const valLbl = el("span", { class: "mono muted", style: { fontSize: "11px" } }, String(val));
+      const inp = el("input", { type: "range", min: String(min), max: String(max), step: String(step), value: String(val) });
+      inp.addEventListener("input", () => {
+        valLbl.textContent = inp.value;
+        onChange(Number(inp.value));
+      });
+      return el("div", { class: "ic-ws-gs-row" },
+        el("div", { class: "ic-ws-gs-head" }, el("span", null, label), valLbl),
+        inp
+      );
+    };
+
+    const settingsBtn = el("button", {
+      type: "button",
+      class: "btn btn-sm" + (wsGraphState.settingsOpen ? " btn-primary" : ""),
+      title: "调整图谱排斥力、连线距离与显示筛选",
+      onClick: () => {
+        wsGraphState.settingsOpen = !wsGraphState.settingsOpen;
+        settingsPop.classList.toggle("hidden", !wsGraphState.settingsOpen);
+        settingsBtn.classList.toggle("btn-primary", wsGraphState.settingsOpen);
+      },
+    }, "⚙ 参数");
 
     const mount = () => {
-      if (graphHandle) { graphHandle.destroy(); graphHandle = null; }
-      localBtn.classList.toggle("btn-primary", mode === "local");
-      globalBtn.classList.toggle("btn-primary", mode === "global");
-      hopsGroup.classList.toggle("hidden", mode !== "local");
-      hop1Btn.classList.toggle("btn-primary", hops === 1);
-      hop2Btn.classList.toggle("btn-primary", hops === 2);
+      destroyWorkspaceGraph();
+      const targetFocus = wsGraphState.focusPath || opts.getActivePath?.() || data.activePath || "";
+      globalBtn.classList.toggle("is-active", wsGraphState.mode === "global");
+      localBtn.classList.toggle("is-active", wsGraphState.mode === "local");
+      hopsGroup.classList.toggle("hidden", wsGraphState.mode !== "local");
+      hop1Btn.classList.toggle("btn-primary", wsGraphState.hops === 1);
+      hop2Btn.classList.toggle("btn-primary", wsGraphState.hops === 2);
 
       const nCount = (data.graph?.nodes || []).length;
       const eCount = (data.graph?.edges || []).length;
-      statsLbl.textContent = `${nCount} 节点 · ${eCount} 条双链`;
+      statsBadge.textContent = `${nCount} 笔记 · ${eCount} 双链`;
 
-      graphHandle = mountForceGraph(canvasWrap, data.graph, {
-        mode,
-        activePath: opts.getActivePath?.() || data.activePath || "",
-        hops,
-        showUnresolved,
+      wsGraphHandle = mountForceGraph(canvasWrap, data.graph, {
+        mode: wsGraphState.mode,
+        activePath: targetFocus,
+        hops: wsGraphState.hops,
+        showUnresolved: wsGraphState.showUnresolved,
+        hideOrphans: wsGraphState.hideOrphans,
+        colorByFolder: wsGraphState.colorByFolder,
+        activeFolder: wsGraphState.activeFolder,
+        repulseMul: wsGraphState.repulseMul,
+        linkDistMul: wsGraphState.linkDistMul,
+        nodeScale: wsGraphState.nodeScale,
         showLegend: true,
         showControls: true,
-        query,
+        query: wsGraphState.query,
         interactive: true,
+        onFolderPick: (fname) => {
+          wsGraphState.activeFolder = fname;
+          mount();
+        },
         onNodeClick: async (node) => {
-          closeModal();
           if (node.exists && node.path) await opts.openNote?.(node.path);
           else await opts.createAndOpenNote?.(node.label);
+        },
+        onNodeContextMenu: (ev, node) => {
+          openArticleContextMenu(ev, [
+            { header: node.label },
+            {
+              icon: "↗",
+              label: node.exists ? "打开此笔记" : "新建并打开此笔记",
+              onClick: () => (node.exists && node.path ? opts.openNote?.(node.path) : opts.createAndOpenNote?.(node.label)),
+            },
+            node.exists && node.path ? {
+              icon: "📑",
+              label: "在新标签页打开",
+              onClick: () => opts.openNote?.(node.path, { newTab: true }),
+            } : null,
+            node.exists && node.path ? {
+              icon: "🎯",
+              label: "聚焦此节点的局部图谱",
+              onClick: () => {
+                wsGraphState.mode = "local";
+                wsGraphState.focusPath = node.path;
+                mount();
+              },
+            } : null,
+            { sep: true },
+            {
+              icon: "🔗",
+              label: `复制双链 [[${node.label}]]`,
+              onClick: () => {
+                navigator.clipboard?.writeText(`[[${node.label}]]`).catch(() => {});
+                toast(`已复制 [[${node.label}]]`);
+              },
+            },
+            node.exists && node.path ? {
+              icon: "📂",
+              label: "在系统文件夹中显示",
+              onClick: () => api("POST", "/api/article/vault/reveal", { path: node.path }).catch(() => {}),
+            } : null,
+          ]);
         },
       });
     };
 
-    localBtn.addEventListener("click", () => { mode = "local"; mount(); });
-    globalBtn.addEventListener("click", () => { mode = "global"; mount(); });
-    hop1Btn.addEventListener("click", () => { hops = 1; mount(); });
-    hop2Btn.addEventListener("click", () => { hops = 2; mount(); });
-    unresCb.addEventListener("change", () => { showUnresolved = unresCb.checked; mount(); });
-    searchIn.addEventListener("input", () => { query = searchIn.value; mount(); });
-
-    const body = el("div", { class: "ic-link-graph-modal" },
-      el("div", { class: "ic-link-graph-bar" },
-        el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
-          localBtn,
-          globalBtn,
-          hopsGroup,
-          searchIn,
-          el("label", { class: "ic-obs-check-lbl" }, unresCb, el("span", null, "显示未创建节点"))
-        ),
-        el("div", { class: "row", style: { gap: "8px" } },
-          statsLbl,
-          el("button", { type: "button", class: "btn btn-sm", onClick: () => graphHandle?.fitToView() }, "⌖ 自适应居中")
-        )
-      ),
-      canvasWrap,
-      el("div", { class: "muted", style: { fontSize: "11.5px" } }, "滚轮缩放 · 拖拽空白处平移 · 拖动节点调整布局 · 悬停高亮子图 · 点击节点直达或新建笔记")
+    settingsPop.append(
+      el("div", { class: "ic-ws-gs-title" }, "图谱筛选与物理布局"),
+      el("label", { class: "ic-obs-check-lbl" }, unresCb, el("span", null, "显示尚未创建的悬空节点")),
+      el("label", { class: "ic-obs-check-lbl" }, orphanCb, el("span", null, "隐藏无关联的孤立笔记")),
+      el("label", { class: "ic-obs-check-lbl" }, folderCb, el("span", null, "按顶层文件夹自动分组着色")),
+      makeSliderRow("节点排斥力", 0.4, 2.6, 0.1, wsGraphState.repulseMul, (v) => { wsGraphState.repulseMul = v; mount(); }),
+      makeSliderRow("连线间距", 0.5, 2.2, 0.1, wsGraphState.linkDistMul, (v) => { wsGraphState.linkDistMul = v; mount(); }),
+      makeSliderRow("节点大小", 0.7, 1.6, 0.1, wsGraphState.nodeScale, (v) => { wsGraphState.nodeScale = v; mount(); }),
+      el("div", { class: "row", style: { justifyContent: "flex-end", marginTop: "4px" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => {
+            wsGraphState.repulseMul = 1.0;
+            wsGraphState.linkDistMul = 1.0;
+            wsGraphState.nodeScale = 1.0;
+            wsGraphState.activeFolder = "";
+            mount();
+          },
+        }, "恢复默认参数")
+      )
     );
 
-    showModal("关系图谱（Obsidian 双链网络）", body, [
-      el("button", { type: "button", class: "btn", onClick: () => { graphHandle?.destroy(); closeModal(); } }, "关闭"),
-    ]);
+    globalBtn.addEventListener("click", () => { wsGraphState.mode = "global"; mount(); });
+    localBtn.addEventListener("click", () => { wsGraphState.mode = "local"; mount(); });
+    hop1Btn.addEventListener("click", () => { wsGraphState.hops = 1; mount(); });
+    hop2Btn.addEventListener("click", () => { wsGraphState.hops = 2; mount(); });
+    unresCb.addEventListener("change", () => { wsGraphState.showUnresolved = unresCb.checked; mount(); });
+    orphanCb.addEventListener("change", () => { wsGraphState.hideOrphans = orphanCb.checked; mount(); });
+    folderCb.addEventListener("change", () => { wsGraphState.colorByFolder = folderCb.checked; mount(); });
+    searchIn.addEventListener("input", () => { wsGraphState.query = searchIn.value; mount(); });
+
+    const floatingBar = el("div", { class: "ic-ws-graph-bar" },
+      el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => opts.onExitGraphView?.(),
+        }, "← 返回文章"),
+        el("div", { class: "ic-article-segmented-switch" }, globalBtn, localBtn),
+        hopsGroup,
+        searchIn
+      ),
+      el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+        statsBadge,
+        settingsBtn,
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => wsGraphHandle?.fitToView() }, "⌖ 居中"),
+        focusBtn
+      )
+    );
+
+    stageEl.append(canvasWrap, floatingBar, settingsPop);
     requestAnimationFrame(() => mount());
   }
 
@@ -1613,6 +1905,8 @@ export function createArticleLinksController(opts) {
   function dispose() {
     closeAutocomplete();
     hideHoverPreview(true);
+    closeArticleContextMenu();
+    destroyWorkspaceGraph();
     if (miniGraphHandle) { miniGraphHandle.destroy(); miniGraphHandle = null; }
   }
 
@@ -1625,6 +1919,14 @@ export function createArticleLinksController(opts) {
     renderPropertiesBar,
     renderPreviewBlock,
     renderPreviewBacklinksFooter,
+    renderWorkspaceGraph,
+    destroyWorkspaceGraph,
+    appendInlineWithLinks,
+    parseFrontmatterEntries,
+    resolveLocalTarget,
+    bindHoverPreview,
+    buildEmbeddedNoteCard,
+    fetchNoteText,
     triggerInsertWikilink,
     attachTextarea,
     openGraphModal,

@@ -128,9 +128,22 @@ export async function renderAtlas(root, ctx, params = {}) {
     timer = setTimeout(() => { state.q = searchInput.value; drawContent(); }, 180);
   });
 
+  const extMarketBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm atlas-market-btn",
+    title: "浏览、安装或管理扩展图库插件（支持官方市场、自定义市场源与 JSON/ZIP 链接直装）",
+    onClick: () => openExternalPacksModal(
+      () => renderAtlas(root, ctx),
+      (packId) => {
+        state.tab = packId;
+        renderAtlas(root, ctx);
+      }
+    ),
+  }, "🧩 扩展图库");
+
   root.appendChild(el("div", { class: "page-head atlas-head" },
     el("h1", { class: "page-title" }, "风格画廊"),
-    el("div", { class: "row atlas-toolbar" }, tabBar, searchInput)
+    el("div", { class: "row atlas-toolbar" }, tabBar, searchInput, extMarketBtn)
   ));
 
   const stage = el("div");
@@ -1565,117 +1578,302 @@ function formatCacheSize(bytes) {
 
 export async function openExternalPacksModal(onChanged, onOpenPack) {
   let packs = [];
+  let sources = [];
+  let categories = [];
   let mirror = "gitee";
+  let activeCat = ""; // "" | "__installed__" | categoryId
+  let panelMode = ""; // "" | "add-source" | "direct-url"
   let busyId = "";
 
   const host = el("div", { class: "col", style: { gap: "12px" } },
-    el("p", { class: "muted", style: { margin: 0 } }, "正在加载扩展图库列表…")
+    el("p", { class: "muted", style: { margin: 0 } }, "正在加载扩展图库市场…")
   );
+
+  const applyCatalog = (res) => {
+    packs = Array.isArray(res?.packs) ? res.packs : [];
+    sources = Array.isArray(res?.sources) ? res.sources : [];
+    categories = Array.isArray(res?.categories) ? res.categories : [];
+    if (res?.defaultMirror && !mirror) mirror = res.defaultMirror;
+  };
+
+  const loadMarket = async (refresh = false) => {
+    const res = await api("GET", `/api/galleries/market${refresh ? "?refresh=1" : ""}`);
+    applyCatalog(res);
+  };
+
+  const sourceTypeLabel = (t) => {
+    if (t === "ruic-poseatlas") return "开源图鉴";
+    if (t === "zip") return "ZIP 图库包";
+    return "JSON 图库";
+  };
 
   const renderModalBody = () => {
     clear(host);
+
+    // 1. Subscribed Market Sources & Quick Actions Bar
+    const srcChips = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } });
+    sources.forEach((s) => {
+      const chip = el("span", {
+        class: "badge" + (s.official ? " badge-accent" : ""),
+        title: s.error ? `${s.url}\n加载失败：${s.error}${s.fallback ? "（已使用内置回退索引）" : ""}` : s.url,
+        style: { display: "inline-flex", alignItems: "center", gap: "5px", padding: "3px 9px" },
+      },
+        s.name || s.id,
+        s.fallback ? "（离线索引）" : (s.error ? "（连接失败）" : ` · ${s.count || 0}`),
+        !s.official
+          ? el("button", {
+              type: "button",
+              class: "gal-chip-x",
+              "aria-label": `移除市场源 ${s.name || s.id}`,
+              disabled: Boolean(busyId),
+              onClick: async () => {
+                busyId = "__src__";
+                renderModalBody();
+                try {
+                  const res = await api("DELETE", `/api/galleries/market/sources/${encodeURIComponent(s.id)}`);
+                  applyCatalog(res);
+                  toast(`已移除图库源「${s.name || s.id}」`);
+                } catch (e) {
+                  toast(e?.message || "移除失败");
+                } finally {
+                  busyId = "";
+                  renderModalBody();
+                }
+              },
+            }, "×")
+          : null
+      );
+      srcChips.appendChild(chip);
+    });
+
+    const topSourceCard = el("div", { class: "card col", style: { padding: "11px 13px", gap: "8px", background: "var(--paper)" } },
+      el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+        el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
+          el("strong", { style: { fontSize: "13px" } }, "图库插件市场源"),
+          el("a", {
+            href: "https://github.com/yang0/handraw-galleries",
+            class: "muted",
+            style: { fontSize: "11.5px" },
+            onClick: (e) => { e.preventDefault(); openURL("https://github.com/yang0/handraw-galleries"); },
+          }, "官方图库仓库 ↗")
+        ),
+        el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+          el("button", {
+            type: "button",
+            class: "btn btn-sm",
+            disabled: Boolean(busyId),
+            onClick: async () => {
+              busyId = "__refresh__";
+              renderModalBody();
+              try {
+                await loadMarket(true);
+                toast("已刷新图库市场索引");
+              } catch (e) {
+                toast(e?.message || "刷新失败");
+              } finally {
+                busyId = "";
+                renderModalBody();
+              }
+            },
+          }, busyId === "__refresh__" ? "刷新中…" : "刷新市场"),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm" + (panelMode === "add-source" ? " btn-primary" : ""),
+            disabled: Boolean(busyId),
+            onClick: () => { panelMode = panelMode === "add-source" ? "" : "add-source"; renderModalBody(); },
+          }, "+ 添加图库源"),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm" + (panelMode === "direct-url" ? " btn-primary" : ""),
+            disabled: Boolean(busyId),
+            onClick: () => { panelMode = panelMode === "direct-url" ? "" : "direct-url"; renderModalBody(); },
+          }, "🔗 链接直装")
+        )
+      ),
+      srcChips,
+      el("div", { class: "muted", style: { fontSize: "11.5px" } }, "🔒 全部扩展图库由用户按需选装，索引与图片仅缓存在本机，不会同步或上传至网站。")
+    );
+
+    // 2. Optional Drawer: Add Market Source OR Direct URL Install
+    let drawer = null;
+    if (panelMode === "add-source") {
+      const urlIn = el("input", { class: "input", type: "url", placeholder: "输入图库市场 index.json 链接（https://.../index.json）" });
+      const nameIn = el("input", { class: "input", type: "text", placeholder: "市场名称（可选，留空自动读取索引标题）", style: { maxWidth: "220px" } });
+      drawer = el("div", { class: "card col", style: { padding: "11px 13px", gap: "8px", borderColor: "var(--accent)" } },
+        el("strong", { style: { fontSize: "12.5px" } }, "订阅第三方图库市场源（Format 1 index.json）"),
+        el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+          el("div", { style: { flex: "1", minWidth: "240px" } }, urlIn),
+          nameIn,
+          el("button", {
+            type: "button",
+            class: "btn btn-sm btn-primary",
+            disabled: Boolean(busyId),
+            onClick: async () => {
+              const u = urlIn.value.trim();
+              if (!u) { toast("请先输入 index.json 地址"); return; }
+              busyId = "__add_src__";
+              renderModalBody();
+              try {
+                const res = await api("POST", "/api/galleries/market/sources", { url: u, name: nameIn.value.trim() });
+                applyCatalog(res);
+                panelMode = "";
+                toast("已订阅新的图库市场源");
+              } catch (e) {
+                toast(e?.message || "添加失败");
+              } finally {
+                busyId = "";
+                renderModalBody();
+              }
+            },
+          }, busyId === "__add_src__" ? "校验中…" : "确认订阅")
+        )
+      );
+    } else if (panelMode === "direct-url") {
+      const urlIn = el("input", { class: "input", type: "url", placeholder: "输入单个图库插件的 .json 或 .zip 链接（https://...）" });
+      const idIn = el("input", { class: "input mono", type: "text", placeholder: "自定义 ID（可选）", style: { maxWidth: "170px" } });
+      drawer = el("div", { class: "card col", style: { padding: "11px 13px", gap: "8px", borderColor: "var(--accent)" } },
+        el("strong", { style: { fontSize: "12.5px" } }, "从链接直接安装图库插件（支持声明式 JSON 或离线 ZIP 包）"),
+        el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+          el("div", { style: { flex: "1", minWidth: "240px" } }, urlIn),
+          idIn,
+          el("button", {
+            type: "button",
+            class: "btn btn-sm btn-primary",
+            disabled: Boolean(busyId),
+            onClick: async () => {
+              const u = urlIn.value.trim();
+              if (!u) { toast("请先输入图库 JSON 或 ZIP 地址"); return; }
+              busyId = "__direct__";
+              renderModalBody();
+              try {
+                const res = await api("POST", "/api/galleries/market/install", { url: u, id: idIn.value.trim(), mirror });
+                applyCatalog(res);
+                panelMode = "";
+                const added = (res.installed || [])[0];
+                toast(`已安装扩展图库「${added?.name || added?.id || "新图库"}」`);
+                onChanged?.();
+              } catch (e) {
+                toast(e?.message || "安装失败");
+              } finally {
+                busyId = "";
+                renderModalBody();
+              }
+            },
+          }, busyId === "__direct__" ? "安装中…" : "立即安装")
+        )
+      );
+    }
+
+    // 3. Category Filter Pills + Mirror Switcher
+    const installedCount = packs.filter((p) => p.installed).length;
+    const catBar = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } },
+      el("button", {
+        type: "button",
+        class: "pill-btn" + (activeCat === "" ? " pill-accent" : ""),
+        onClick: () => { activeCat = ""; renderModalBody(); },
+      }, `全部 (${packs.length})`),
+      el("button", {
+        type: "button",
+        class: "pill-btn" + (activeCat === "__installed__" ? " pill-accent" : ""),
+        onClick: () => { activeCat = "__installed__"; renderModalBody(); },
+      }, `已安装 (${installedCount})`),
+      ...categories.map((c) => el("button", {
+        type: "button",
+        class: "pill-btn" + (activeCat === c.id ? " pill-accent" : ""),
+        onClick: () => { activeCat = c.id; renderModalBody(); },
+      }, `${c.name} (${c.count})`))
+    );
+
     const mirrorBar = el("div", { class: "row ext-mirror-bar", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+      catBar,
       el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
-        el("span", { style: { fontSize: "12.5px", fontWeight: "700" } }, "下载源："),
+        el("span", { class: "muted", style: { fontSize: "12px" } }, "镜像："),
         el("button", {
           type: "button",
           class: "pill-btn" + (mirror === "gitee" ? " pill-accent" : ""),
           disabled: Boolean(busyId),
           onClick: () => { mirror = "gitee"; renderModalBody(); },
-        }, "🇨🇳 Gitee 国内镜像（推荐）"),
+        }, "Gitee 国内"),
         el("button", {
           type: "button",
           class: "pill-btn" + (mirror === "github" ? " pill-accent" : ""),
           disabled: Boolean(busyId),
           onClick: () => { mirror = "github"; renderModalBody(); },
         }, "GitHub 原仓")
-      ),
-      el("button", {
-        type: "button",
-        class: "btn btn-sm btn-primary",
-        disabled: Boolean(busyId) || packs.every((p) => p.installed),
-        onClick: async () => {
-          const targets = packs.filter((p) => !p.installed).map((p) => p.id);
-          if (!targets.length) return;
-          busyId = "__all__";
-          renderModalBody();
-          try {
-            const res = await api("POST", "/api/galleries/packs/install", { ids: targets, mirror });
-            packs = res.packs || packs;
-            toast(`已一键安装 ${(res.installed || []).length} 套扩展图库（索引就绪，图片按需缓存）`);
-            onChanged?.();
-          } catch (e) {
-            toast(e?.message || "安装失败");
-          } finally {
-            busyId = "";
-            renderModalBody();
-          }
-        },
-      }, busyId === "__all__" ? "正在安装全部…" : (packs.every((p) => p.installed) ? "✓ 全部已安装" : "⚡ 一键安装全部 3 套"))
+      )
     );
 
-    const notice = el("div", { class: "card", style: { padding: "10px 12px", background: "var(--paper)", fontSize: "12px", lineHeight: "1.6" } },
-      el("div", null,
-        el("strong", null, "RuiC-PoseAtlas 开源视觉图鉴（MIT 协议）"),
-        " · 由客户端直接从 ",
-        el("a", {
-          href: mirror === "gitee" ? "https://gitee.com/mingtian2018/RuiC-PoseAtlas" : "https://github.com/HRuiCcc/RuiC-PoseAtlas",
-          onClick: (e) => { e.preventDefault(); openURL(mirror === "gitee" ? "https://gitee.com/mingtian2018/RuiC-PoseAtlas" : "https://github.com/HRuiCcc/RuiC-PoseAtlas"); },
-        }, mirror === "gitee" ? "Gitee 镜像" : "GitHub 原仓"),
-        " 安装索引（仅 ~1 MB，秒装完成），浏览或选用时自动按需缓存到本机。",
-      ),
-      el("div", { class: "muted", style: { marginTop: "3px" } }, "🔒 严格仅限本机使用：图库文件与缓存不会同步或上传至手绘风网站，网站也不托管这些第三方图库。")
-    );
+    // 4. Filtered Gallery Plugin Cards
+    const visiblePacks = packs.filter((p) => {
+      if (activeCat === "__installed__") return Boolean(p.installed);
+      if (activeCat) return Array.isArray(p.categories) && p.categories.includes(activeCat);
+      return true;
+    });
 
     const list = el("div", { class: "col", style: { gap: "10px" } });
-    packs.forEach((p) => {
-      const isBusy = busyId === p.id || busyId === "__all__";
+    if (!visiblePacks.length) {
+      list.appendChild(el("div", { class: "card muted", style: { textAlign: "center", padding: "24px 12px" } },
+        activeCat === "__installed__"
+          ? "当前还没有安装任何扩展图库。切换回「全部」即可按需一键安装开源图鉴或社区图库插件。"
+          : "该分类下暂无扩展图库插件。"
+      ));
+    }
+
+    visiblePacks.forEach((p) => {
+      const isBusy = busyId === p.id;
+      const metaParts = [];
+      if (p.author) metaParts.push(`作者：${p.author}`);
+      if (p.license) metaParts.push(p.license);
+      if (p.marketName) metaParts.push(`来源：${p.marketName}`);
       const statsText = p.installed
-        ? `已安装 · ${p.itemCount || 0} 条 · 本地已缓存 ${p.cachedFiles || 0} 张 (${formatCacheSize(p.cachedBytes)}) · 源：${p.mirror === "github" ? "GitHub" : "Gitee"}`
-        : "未安装";
-      const actions = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } });
+        ? `已安装${p.installedVersion ? " v" + p.installedVersion : ""} · ${p.itemCount || 0} 条 · 本地缓存 ${p.cachedFiles || 0} 张 (${formatCacheSize(p.cachedBytes)})`
+        : "未安装（按需选装）";
+
+      const actions = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", flexShrink: "0" } });
       if (p.installed) {
         actions.append(
           el("button", {
             type: "button",
             class: "btn btn-sm btn-primary",
-            disabled: isBusy,
+            disabled: Boolean(busyId),
             onClick: () => {
               closeModal();
               onOpenPack?.(p.id);
             },
           }, "去浏览"),
+          !p.customInstall
+            ? el("button", {
+                type: "button",
+                class: "btn btn-sm" + (p.hasUpdate ? " pill-accent" : ""),
+                disabled: Boolean(busyId),
+                onClick: async () => {
+                  busyId = p.id;
+                  renderModalBody();
+                  try {
+                    const res = await api("POST", "/api/galleries/market/install", { id: p.id, mirror });
+                    applyCatalog(res);
+                    toast(`已更新「${p.name}」图库索引`);
+                    onChanged?.();
+                  } catch (e) {
+                    toast(e?.message || "更新失败");
+                  } finally {
+                    busyId = "";
+                    renderModalBody();
+                  }
+                },
+              }, isBusy ? "更新中…" : (p.hasUpdate ? `更新至 v${p.version}` : "更新 / 切源"))
+            : null,
           el("button", {
             type: "button",
-            class: "btn btn-sm",
-            disabled: isBusy,
-            onClick: async () => {
-              busyId = p.id;
-              renderModalBody();
-              try {
-                const res = await api("POST", "/api/galleries/packs/install", { id: p.id, mirror });
-                packs = res.packs || packs;
-                toast(`已更新「${p.name}」索引`);
-                onChanged?.();
-              } catch (e) {
-                toast(e?.message || "更新失败");
-              } finally {
-                busyId = "";
-                renderModalBody();
-              }
-            },
-          }, isBusy ? "更新中…" : "更新 / 切源"),
-          el("button", {
-            type: "button",
-            class: "btn btn-sm",
-            disabled: isBusy,
+            class: "btn btn-sm btn-danger",
+            disabled: Boolean(busyId),
             onClick: async () => {
               if (!window.confirm(`卸载「${p.name}」并清理本地图片缓存（${formatCacheSize(p.cachedBytes)}）？`)) return;
               busyId = p.id;
               renderModalBody();
               try {
-                const res = await api("POST", `/api/galleries/packs/${encodeURIComponent(p.id)}/uninstall`, { purgeCache: true });
-                packs = res.packs || packs;
+                const res = await api("POST", `/api/galleries/market/${encodeURIComponent(p.id)}/uninstall`, { purgeCache: true });
+                applyCatalog(res);
                 toast(`已卸载「${p.name}」并清理缓存`);
                 onChanged?.();
               } catch (e) {
@@ -1692,14 +1890,14 @@ export async function openExternalPacksModal(onChanged, onOpenPack) {
           el("button", {
             type: "button",
             class: "btn btn-sm btn-primary",
-            disabled: isBusy,
+            disabled: Boolean(busyId),
             onClick: async () => {
               busyId = p.id;
               renderModalBody();
               try {
-                const res = await api("POST", "/api/galleries/packs/install", { id: p.id, mirror });
-                packs = res.packs || packs;
-                toast(`已安装「${p.name}」，可立即在画廊和生图参考图中使用`);
+                const res = await api("POST", "/api/galleries/market/install", { id: p.id, mirror });
+                applyCatalog(res);
+                toast(`已安装「${p.name}」，可立即在画廊与生图参考图中使用`);
                 onChanged?.();
               } catch (e) {
                 toast(e?.message || "安装失败");
@@ -1714,36 +1912,47 @@ export async function openExternalPacksModal(onChanged, onOpenPack) {
 
       list.appendChild(el("div", { class: "card ext-pack-card" },
         el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "flex-start", gap: "10px", flexWrap: "wrap" } },
-          el("div", { class: "col", style: { gap: "4px", flex: "1", minWidth: "220px" } },
+          el("div", { class: "col", style: { gap: "4px", flex: "1", minWidth: "240px" } },
             el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
               el("strong", { style: { fontSize: "14.5px" } }, p.name),
-              el("span", { class: "badge badge-accent" }, p.badge),
-              p.multiVariant ? el("span", { class: "badge" }, "5 视角可选") : null,
-              el("span", { class: "badge" }, "🔒 仅本机")
+              p.version ? el("span", { class: "badge mono" }, `v${p.version}`) : null,
+              p.badge ? el("span", { class: "badge badge-accent" }, p.badge) : null,
+              el("span", { class: "badge" }, sourceTypeLabel(p.sourceType)),
+              p.multiVariant ? el("span", { class: "badge" }, "多视角") : null,
+              p.installed ? el("span", { class: "badge badge-ok" }, "已安装") : null
             ),
-            el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px", lineHeight: "1.5" } }, p.description),
-            el("span", { class: "muted", style: { fontSize: "11.5px" } }, statsText)
+            p.description ? el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px", lineHeight: "1.5" } }, p.description) : null,
+            el("div", { class: "row muted", style: { gap: "10px", fontSize: "11.5px", flexWrap: "wrap" } },
+              el("span", null, statsText),
+              metaParts.length ? el("span", null, metaParts.join(" · ")) : null,
+              p.upstreamUrl
+                ? el("a", {
+                    href: p.upstreamUrl,
+                    onClick: (e) => { e.preventDefault(); openURL(p.upstreamUrl); },
+                  }, "项目主页 ↗")
+                : null
+            )
           ),
           actions
         )
       ));
     });
 
-    host.append(notice, mirrorBar, list);
+    host.append(topSourceCard);
+    if (drawer) host.append(drawer);
+    host.append(mirrorBar, list);
   };
 
-  showModal("扩展视觉图库（仅本机安装）", host, [
+  showModal("扩展图库市场（按需选装 · 仅本机）", host, [
     el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
   ], { className: "modal-ext-packs" });
 
   try {
-    const res = await api("GET", "/api/galleries/packs");
-    packs = res.packs || [];
-    if (res.defaultMirror) mirror = res.defaultMirror;
+    await loadMarket(false);
     renderModalBody();
   } catch (e) {
     clear(host);
-    host.appendChild(el("p", { class: "muted" }, `加载失败：${e?.message || e}`));
+    host.appendChild(el("p", { class: "muted" }, `加载扩展图库市场失败：${e?.message || e}`));
   }
 }
 

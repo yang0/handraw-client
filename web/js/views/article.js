@@ -1,7 +1,8 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
 import { buildTextModelSelect, openSharedSkillPickerModal } from "../skills-ui.js";
 import { computeParagraphDiff, mergeAcceptedHunks, renderCopilotMarkdown, renderInlineWordDiff } from "./article-diff.js";
-import { createArticleLinksController } from "./article-links.js";
+import { closeArticleContextMenu, createArticleLinksController, openArticleContextMenu } from "./article-links.js";
+import { createArticleLiveEditor } from "./article-live.js";
 import { createArticleObsidianController } from "./article-obsidian.js";
 import { buildGroupedModelSelect } from "./create.js";
 import {
@@ -65,19 +66,28 @@ export async function renderArticle(root, ctx, params = {}) {
     modelRef: modRes.defaultModel || "site:seedream-4.5",
     textModelRef: modRes.sceneModels?.articleEdit || modRes.defaultTextModel || "",
     aiSkillIds: [],
-    aiDrawerOpen: typeof window !== "undefined" ? window.innerWidth >= 1240 : true,
-    rightDrawerTab: "ai", // ai | obsidian
+    aiDrawerOpen: false,
+    rightDrawerTab: "ai", // ai | links | obsidian
     aiMode: "edit", // edit | advise
     aiChat: [],
     recommendedStyles: [],
     slots: [],
-    viewMode: "editor", // editor | preview
+    viewMode: "live", // live | source | preview | graph
     previewKind: "wechat_desktop", // wechat_desktop | wechat_mobile | markdown
+    sidebarCollapsed: false,
+    wideMode: false,
+    graphFullscreen: false,
+    openTabs: [],
     activeRun: null,
     slotMap: [],
   });
   root = session.root;
   const state = session.state;
+  if (!state.viewMode || state.viewMode === "editor") state.viewMode = "live";
+  if (!Array.isArray(state.openTabs)) state.openTabs = [];
+  if (state.activeFile && !state.openTabs.includes(state.activeFile)) state.openTabs.push(state.activeFile);
+  let lastEditorViewMode = state.viewMode === "source" ? "source" : "live";
+  let graphMounted = false;
   let submitting = false;
   let planning = false;
   let activeSegTextarea = null;
@@ -153,10 +163,11 @@ export async function renderArticle(root, ctx, params = {}) {
       state.docId = "";
       state.editorActive = true;
       state.dirty = true;
-      state.viewMode = "editor";
+      state.viewMode = lastEditorViewMode || "live";
       if (res.title) state.title = res.title;
       state.content = res.content || "";
       state.slots = [];
+      liveEditor.resetEditing();
       renderAll();
       session.persist();
       toast("已导入文稿，可点击保存写入本地 Markdown");
@@ -166,8 +177,11 @@ export async function renderArticle(root, ctx, params = {}) {
     fileIn.value = "";
   });
 
-  // Format helper applied to active markdown segment textarea
+  // Format helper applied to active markdown segment textarea or Live Preview block
   function getEditorTextarea() {
+    if (state.viewMode === "live") {
+      return liveEditor.getActiveTextarea();
+    }
     return activeSegTextarea && activeSegTextarea.isConnected
       ? activeSegTextarea
       : flowBox.querySelector("textarea.ic-art-seg-ta");
@@ -176,6 +190,10 @@ export async function renderArticle(root, ctx, params = {}) {
   function applyFormat(fmt) {
     if (fmt === "illust") {
       insertSlotAt("");
+      return;
+    }
+    if (state.viewMode === "live") {
+      liveEditor.applyFormat(fmt);
       return;
     }
     if (fmt === "wikilink") {
@@ -219,13 +237,13 @@ export async function renderArticle(root, ctx, params = {}) {
       ["italic", "I"],
       ["quote", "❝"],
       ["hr", "—"],
-      ["ul", "• 列表"],
-      ["ol", "1. 列表"],
+      ["ul", "•"],
+      ["ol", "1."],
       ["code", "</>"],
-    ].map(([k, lbl]) => el("button", { type: "button", class: "ic-wechat-tool-btn", onClick: () => applyFormat(k) }, lbl)),
+    ].map(([k, lbl]) => el("button", { type: "button", class: "ic-wechat-tool-btn", title: lbl, onClick: () => applyFormat(k) }, lbl)),
     el("div", { class: "ic-wechat-tool-sep" }),
-    el("button", { type: "button", class: "ic-wechat-tool-btn", title: "插入 Obsidian 双链 [[笔记]]", onClick: () => applyFormat("wikilink") }, "[[ 双链"),
-    el("button", { type: "button", class: "ic-wechat-tool-btn", onClick: () => applyFormat("illust") }, "＋ 插入配图位")
+    el("button", { type: "button", class: "ic-wechat-tool-btn", title: "插入 Obsidian 双链 [[笔记]]", onClick: () => applyFormat("wikilink") }, "[["),
+    el("button", { type: "button", class: "ic-wechat-tool-btn", title: "插入 AI 配图位", onClick: () => applyFormat("illust") }, "＋配图")
   );
 
   // Back / Forward note navigation history (#120)
@@ -273,16 +291,75 @@ export async function renderArticle(root, ctx, params = {}) {
     });
   }
 
-  const editSwitchBtn = el("button", {
+  const sidebarToggleBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm ic-sidebar-toggle-btn",
+    title: "折叠或展开左侧文档目录 (Ctrl+\\)",
+    "aria-label": "折叠或展开左侧文档目录",
+    onClick: () => {
+      state.sidebarCollapsed = !state.sidebarCollapsed;
+      renderStageMode();
+      session.persist();
+    },
+  }, "◧");
+
+  const liveSwitchBtn = el("button", {
     type: "button",
     class: "ic-article-seg-btn",
-    onClick: () => { state.viewMode = "editor"; renderStageMode(); },
-  }, "编辑");
+    title: "Obsidian 风格所见即所得实时预览编辑",
+    onClick: () => {
+      state.viewMode = "live";
+      lastEditorViewMode = "live";
+      state.graphFullscreen = false;
+      liveEditor.resetEditing();
+      renderFlow();
+      renderStageMode();
+      session.persist();
+    },
+  }, "实时预览");
+  const sourceSwitchBtn = el("button", {
+    type: "button",
+    class: "ic-article-seg-btn",
+    title: "纯 Markdown 源码分段编辑",
+    onClick: () => {
+      state.viewMode = "source";
+      lastEditorViewMode = "source";
+      state.graphFullscreen = false;
+      renderFlow();
+      renderStageMode();
+      session.persist();
+    },
+  }, "源码");
   const previewSwitchBtn = el("button", {
     type: "button",
     class: "ic-article-seg-btn",
-    onClick: () => { state.viewMode = "preview"; renderStageMode(); },
-  }, "预览");
+    title: "公众号桌面 / 手机成品排版预览",
+    onClick: () => {
+      state.viewMode = "preview";
+      state.graphFullscreen = false;
+      renderStageMode();
+      session.persist();
+    },
+  }, "排版");
+  const graphSwitchBtn = el("button", {
+    type: "button",
+    class: "ic-article-seg-btn",
+    title: "全工作区知识库关系图谱",
+    onClick: () => {
+      linksCtrl.openGraphModal("global");
+    },
+  }, "🕸 图谱");
+
+  const wideModeBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm ic-wide-toggle-btn",
+    title: "切换舒适阅读宽度 / 铺满工作区宽屏",
+    onClick: () => {
+      state.wideMode = !state.wideMode;
+      renderStageMode();
+      session.persist();
+    },
+  }, "↔ 宽屏");
 
   const activeBreadcrumb = el("span", { class: "ic-vault-breadcrumb mono" }, "");
   const aiUndoTopBtn = el("button", {
@@ -319,18 +396,22 @@ export async function renderArticle(root, ctx, params = {}) {
   const topbar = el("header", { class: "ic-wechat-topbar" },
     el("div", { class: "row", style: { minWidth: "0", gap: "6px" } },
       fileIn,
+      sidebarToggleBtn,
       el("div", { class: "ic-nav-hist-group" }, navBackBtn, navFwdBtn),
       activeBreadcrumb,
-      el("button", { type: "button", class: "btn btn-sm", onClick: () => fileIn.click() }, "📄 导入"),
-      el("button", { type: "button", class: "btn btn-sm", onClick: openURLImportDialog }, "🔗 抓取链接")
+      el("button", { type: "button", class: "btn btn-sm", title: "导入本地 MD/TXT/DOCX 文档", onClick: () => fileIn.click() }, "📄 导入"),
+      el("button", { type: "button", class: "btn btn-sm", title: "抓取网页正文", onClick: openURLImportDialog }, "🔗 抓取")
     ),
     toolsGroup,
     el("div", { class: "row", style: { gap: "6px" } },
       aiUndoTopBtn,
-      el("div", { class: "ic-article-segmented-switch", role: "group", "aria-label": "编辑与预览切换" },
-        editSwitchBtn,
-        previewSwitchBtn
+      el("div", { class: "ic-article-segmented-switch", role: "group", "aria-label": "视图模式切换" },
+        liveSwitchBtn,
+        sourceSwitchBtn,
+        previewSwitchBtn,
+        graphSwitchBtn
       ),
+      wideModeBtn,
       obsidianQuickBtn,
       aiDrawerToggleBtn,
       saveBtn
@@ -541,7 +622,9 @@ export async function renderArticle(root, ctx, params = {}) {
   const diffReviewBox = el("section", { class: "ic-wechat-paper ic-art-diff-paper hidden", "aria-label": "AI 改稿内联审阅" });
   const previewStageBox = el("div", { class: "col hidden", style: { gap: "12px" } });
   const scrollArea = el("div", { class: "ic-wechat-scroll-area" }, welcomeBox, paperSheet, diffReviewBox, previewStageBox);
-  const centerCol = el("div", { class: "ic-wechat-center-col" }, scrollArea);
+  const openTabsBar = el("div", { class: "ic-art-tabs-bar hidden", role: "tablist", "aria-label": "已打开的文档标签页" });
+  const graphStageBox = el("div", { class: "ic-ws-graph-stage hidden", "aria-label": "全工作区知识库关系图谱" });
+  const centerCol = el("div", { class: "ic-wechat-center-col" }, openTabsBar, scrollArea, graphStageBox);
 
   // 3.5. Right Collapsible AI Writing Copilot + Inline Paper Diff Review + Selection Bubble (#70, #74)
   let aiEditing = false;
@@ -701,7 +784,7 @@ export async function renderArticle(root, ctx, params = {}) {
       hunks,
       isSelection: rev.kind === "selection",
     };
-    state.viewMode = "editor";
+    state.viewMode = lastEditorViewMode || "live";
     renderStageMode();
     renderInlineDiffReview();
     renderCopilotPanel();
@@ -1010,7 +1093,7 @@ export async function renderArticle(root, ctx, params = {}) {
   const linksCtrl = createArticleLinksController({
     getActivePath: () => state.activeFile || "",
     getActiveContent: () => state.content || "",
-    openNote: (relPath) => openVaultFile(relPath),
+    openNote: (relPath, openOpts) => openVaultFile(relPath, openOpts),
     createAndOpenNote: async (targetName) => {
       const clean = String(targetName || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
       if (!clean) return;
@@ -1039,9 +1122,34 @@ export async function renderArticle(root, ctx, params = {}) {
       linksCtrl.refresh(state.activeFile || "");
       session.persist();
     },
+    onOpenGraphView: () => {
+      state.editorActive = true;
+      state.viewMode = "graph";
+      graphMounted = false;
+      renderStageMode();
+      session.persist();
+    },
+    onExitGraphView: () => {
+      state.graphFullscreen = false;
+      if (state.activeFile || state.docId || state.content) {
+        state.viewMode = lastEditorViewMode || "live";
+      } else {
+        state.viewMode = "live";
+        state.editorActive = false;
+      }
+      renderStageMode();
+      session.persist();
+    },
+    isGraphFullscreen: () => Boolean(state.graphFullscreen),
+    onToggleGraphFullscreen: () => {
+      state.graphFullscreen = !state.graphFullscreen;
+      renderStageMode();
+      session.persist();
+    },
     onTriggerInsertLink: () => {
-      if (state.viewMode !== "editor") {
-        state.viewMode = "editor";
+      if (state.viewMode === "preview" || state.viewMode === "graph") {
+        state.viewMode = lastEditorViewMode || "live";
+        renderFlow();
         renderStageMode();
       }
       applyFormat("wikilink");
@@ -1051,8 +1159,264 @@ export async function renderArticle(root, ctx, params = {}) {
       drawerTabLinksBtn.textContent = cnt > 0 ? `🔗 双链 (${cnt})` : "🔗 双链";
       linksCtrl.renderPaperLinksBar(paperLinksBar);
       if (state.viewMode === "preview") renderPreviewStage();
+      else if (state.viewMode === "live" && state.editorActive && !liveEditor.getActiveTextarea()) {
+        liveEditor.render(flowBox);
+      }
     },
   });
+
+  function extractSelectionToNote(selText) {
+    return new Promise((resolve) => {
+      const firstLine = String(selText || "").split(/\r?\n/).map((l) => l.trim()).find(Boolean) || "新提取笔记";
+      const defaultTitle = firstLine
+        .replace(/^#+\s*/, "")
+        .replace(/^[-*+>\s]+/, "")
+        .replace(/[\\/:*?"<>|[\]]/g, "")
+        .trim()
+        .slice(0, 28) || "新提取笔记";
+      const baseDir = parentDirOf(state.activeFile || "");
+      const titleIn = el("input", { class: "input", value: defaultTitle, placeholder: "输入新笔记标题…" });
+      let done = false;
+      const finish = (val) => {
+        if (done) return;
+        done = true;
+        resolve(val || "");
+      };
+      const submit = async () => {
+        const cleanTitle = titleIn.value.trim().replace(/[\\/:*?"<>|[\]]/g, "-");
+        if (!cleanTitle) return toast("请输入新笔记标题");
+        const mdPath = baseDir ? `${baseDir}/${cleanTitle}.md` : `${cleanTitle}.md`;
+        try {
+          await api("PUT", "/api/article/vault/file", {
+            path: mdPath,
+            title: cleanTitle,
+            content: `# ${cleanTitle}\n\n${selText}\n`,
+          });
+          closeModal();
+          await refreshVaultTree();
+          toast(`已提取为新笔记「${cleanTitle}」并替换为双链`);
+          finish(cleanTitle);
+        } catch (err) {
+          toast(err.message || "提取新笔记失败");
+        }
+      };
+      titleIn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); submit(); }
+      });
+      showModal("提取选中内容为新笔记", el("div", { class: "col", style: { gap: "8px" } },
+        el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } },
+          `将把选中的 ${selText.length} 字写入新笔记${baseDir ? `（目录：${baseDir}/）` : "（根目录）"}，并在当前位置自动替换为 [[新笔记]] 双链。`
+        ),
+        titleIn
+      ), [
+        el("button", { type: "button", class: "btn", onClick: () => { closeModal(); finish(""); } }, "取消"),
+        el("button", { type: "button", class: "btn btn-primary", onClick: submit }, "提取并替换双链"),
+      ]);
+      titleIn.focus();
+      titleIn.select();
+    });
+  }
+
+  const liveEditor = createArticleLiveEditor({
+    linksCtrl,
+    getContent: () => state.content || "",
+    setContent: (next) => {
+      state.content = String(next ?? "");
+      state.dirty = true;
+      charCounter.textContent = `正文字数 ${state.content.length}`;
+      syncTopbarBreadcrumb();
+      obsidianCtrl.syncDoc(false);
+      session.persist();
+    },
+    getActivePath: () => state.activeFile || "",
+    getSlots: () => state.slots || [],
+    renderSlotCard: (sl, no, desc, orphan) => renderSlotCard(sl, no, desc, orphan),
+    insertSlotAt: (anchor, role) => insertSlotAt(anchor, role),
+    onAskAiSelection: (selText, mode) => {
+      state.rightDrawerTab = "ai";
+      pinSelectionToCopilot({ text: selText, start: 0, end: selText.length, segIdx: 0 }, {
+        openDrawer: true,
+        focusInput: true,
+        mode: mode || "edit",
+      });
+    },
+    onExtractSelectionToNote: (selText) => extractSelectionToNote(selText),
+    onOpenNoteNewTab: (relPath) => openVaultFile(relPath, { newTab: true }),
+  });
+
+  function ensureOpenTab(relPath) {
+    if (!relPath) return;
+    if (!Array.isArray(state.openTabs)) state.openTabs = [];
+    if (!state.openTabs.includes(relPath)) {
+      state.openTabs.push(relPath);
+      if (state.openTabs.length > 18) {
+        const idx = state.openTabs.findIndex((p) => p !== state.activeFile && p !== relPath);
+        if (idx >= 0) state.openTabs.splice(idx, 1);
+      }
+    }
+  }
+
+  function closeOpenTab(relPath) {
+    if (!Array.isArray(state.openTabs)) return;
+    const idx = state.openTabs.indexOf(relPath);
+    if (idx < 0) return;
+    const doClose = async () => {
+      state.openTabs.splice(idx, 1);
+      if (state.activeFile === relPath) {
+        const nextTab = state.openTabs[idx] || state.openTabs[idx - 1] || "";
+        if (nextTab) {
+          await openVaultFile(nextTab);
+        } else {
+          state.activeFile = "";
+          state.dirty = false;
+          if (state.viewMode !== "graph") state.editorActive = false;
+          renderAll();
+          session.persist();
+        }
+      } else {
+        renderOpenTabsBar();
+        session.persist();
+      }
+    };
+    if (state.activeFile === relPath && state.dirty) {
+      guardDirtyBeforeSwitch(doClose);
+    } else {
+      doClose();
+    }
+  }
+
+  function renderOpenTabsBar() {
+    clear(openTabsBar);
+    const tabs = Array.isArray(state.openTabs) ? state.openTabs : [];
+    const showBar = Boolean(state.editorActive) && !(state.viewMode === "graph" && state.graphFullscreen);
+    openTabsBar.classList.toggle("hidden", !showBar);
+    if (!showBar) return;
+
+    tabs.forEach((relPath, idx) => {
+      const base = relPath.split("/").pop().replace(/\.(md|markdown)$/i, "");
+      const isActive = state.viewMode !== "graph" && state.activeFile === relPath;
+      const isDirty = isActive && Boolean(state.dirty);
+      const tabEl = el("div", {
+        class: "ic-art-tab" + (isActive ? " is-active" : ""),
+        role: "tab",
+        "aria-selected": String(isActive),
+        title: relPath,
+        onClick: () => {
+          if (state.activeFile === relPath && state.viewMode === "graph") {
+            state.viewMode = lastEditorViewMode || "live";
+            state.graphFullscreen = false;
+            renderFlow();
+            renderStageMode();
+            session.persist();
+            return;
+          }
+          if (state.activeFile !== relPath) {
+            guardDirtyBeforeSwitch(() => openVaultFile(relPath));
+          }
+        },
+        onMouseDown: (ev) => {
+          if (ev.button === 1) {
+            ev.preventDefault();
+            closeOpenTab(relPath);
+          }
+        },
+        onContextMenu: (ev) => {
+          openArticleContextMenu(ev, [
+            { header: relPath },
+            { icon: "✕", label: "关闭当前标签", onClick: () => closeOpenTab(relPath) },
+            tabs.length > 1 ? {
+              icon: "⊟",
+              label: "关闭其他标签",
+              onClick: () => {
+                state.openTabs = [relPath];
+                if (state.activeFile !== relPath) openVaultFile(relPath);
+                else { renderOpenTabsBar(); session.persist(); }
+              },
+            } : null,
+            idx < tabs.length - 1 ? {
+              icon: "⇥",
+              label: "关闭右侧标签",
+              onClick: () => {
+                state.openTabs = tabs.slice(0, idx + 1);
+                if (state.activeFile && !state.openTabs.includes(state.activeFile)) openVaultFile(relPath);
+                else { renderOpenTabsBar(); session.persist(); }
+              },
+            } : null,
+            { sep: true },
+            {
+              icon: "🔗",
+              label: `复制双链 [[${base}]]`,
+              onClick: () => {
+                navigator.clipboard?.writeText(`[[${base}]]`).catch(() => {});
+                toast(`已复制 [[${base}]]`);
+              },
+            },
+            {
+              icon: "📌",
+              label: `复制嵌入 ![[${base}]]`,
+              onClick: () => {
+                navigator.clipboard?.writeText(`![[${base}]]`).catch(() => {});
+                toast(`已复制 ![[${base}]]`);
+              },
+            },
+            {
+              icon: "🕸",
+              label: "查看局部关系图谱",
+              onClick: () => linksCtrl.openGraphModal("local", relPath),
+            },
+            {
+              icon: "📂",
+              label: "在系统文件夹中显示",
+              onClick: () => revealVaultPath(relPath),
+            },
+          ]);
+        },
+      },
+        el("span", { class: "ic-art-tab-name" }, base),
+        isDirty ? el("span", { class: "ic-art-tab-dot", title: "有未保存修改" }, "●") : null,
+        el("button", {
+          type: "button",
+          class: "ic-art-tab-x",
+          title: `关闭 ${base}`,
+          "aria-label": `关闭标签 ${base}`,
+          onClick: (ev) => {
+            ev.stopPropagation();
+            closeOpenTab(relPath);
+          },
+        }, "×")
+      );
+      openTabsBar.appendChild(tabEl);
+    });
+
+    // Quick "+" new note tab button + pinned Graph View tab
+    openTabsBar.appendChild(el("button", {
+      type: "button",
+      class: "ic-art-tab-add",
+      title: "新建 Markdown 笔记",
+      "aria-label": "新建 Markdown 笔记",
+      onClick: () => openNewMarkdownModal(state.selectedDir || ""),
+    }, "＋"));
+
+    const graphTabActive = state.viewMode === "graph";
+    openTabsBar.appendChild(el("button", {
+      type: "button",
+      class: "ic-art-tab ic-art-tab-graph" + (graphTabActive ? " is-active" : ""),
+      role: "tab",
+      "aria-selected": String(graphTabActive),
+      title: "在全工作区打开知识库关系图谱",
+      onClick: () => {
+        if (graphTabActive && (state.activeFile || state.docId)) {
+          state.viewMode = lastEditorViewMode || "live";
+          state.graphFullscreen = false;
+          renderFlow();
+          renderStageMode();
+          session.persist();
+        } else {
+          linksCtrl.openGraphModal("global");
+        }
+      },
+    }, "🕸 关系图谱"));
+  }
 
   function computeActiveDocSnapshot() {
     let selStart = 0;
@@ -1670,6 +2034,15 @@ export async function renderArticle(root, ctx, params = {}) {
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l" && state.editorActive) {
       e.preventDefault();
       toggleAiDrawer();
+    } else if ((e.ctrlKey || e.metaKey) && e.key === "\\") {
+      e.preventDefault();
+      state.sidebarCollapsed = !state.sidebarCollapsed;
+      renderStageMode();
+      session.persist();
+    } else if (e.key === "Escape" && state.viewMode === "graph" && state.graphFullscreen) {
+      state.graphFullscreen = false;
+      renderStageMode();
+      session.persist();
     } else if (e.altKey && e.key === "ArrowLeft" && state.editorActive) {
       e.preventDefault();
       navigateHistory(-1);
@@ -1699,6 +2072,7 @@ export async function renderArticle(root, ctx, params = {}) {
       activeBreadcrumb.title = "";
       saveBtn.textContent = "💾 存为 MD";
     }
+    renderOpenTabsBar();
   }
 
   let vaultPopoverEl = null;
@@ -1743,6 +2117,7 @@ export async function renderArticle(root, ctx, params = {}) {
 
   function applyVaultPayload(res, { resetEditor = false } = {}) {
     closeTreeContextMenu();
+    closeArticleContextMenu();
     closeSelectionBubble();
     vault = res || vault;
     if (!Array.isArray(vault.vaults)) vault.vaults = [];
@@ -1753,10 +2128,13 @@ export async function renderArticle(root, ctx, params = {}) {
       state.docId = "";
       state.editorActive = false;
       state.dirty = false;
+      state.openTabs = [];
+      state.graphFullscreen = false;
       state.aiChat = [];
       activeDiffReview = null;
       pinnedSelection = null;
       lastAiUndo = null;
+      liveEditor.resetEditing();
     }
     renderAll();
     session.persist();
@@ -2298,6 +2676,9 @@ export async function renderArticle(root, ctx, params = {}) {
         closeModal();
         const nextPath = res.to || res.path || toPath;
         if (isFile) {
+          if (Array.isArray(state.openTabs)) {
+            state.openTabs = state.openTabs.map((p) => (p === target.path ? nextPath : p));
+          }
           if (state.activeFile === target.path) {
             state.activeFile = nextPath;
             syncTopbarBreadcrumb();
@@ -2308,6 +2689,9 @@ export async function renderArticle(root, ctx, params = {}) {
           expandedDirs = nextExpanded;
           persistExpanded();
           state.selectedDir = rewritePathPrefix(state.selectedDir, target.path, nextPath);
+          if (Array.isArray(state.openTabs)) {
+            state.openTabs = state.openTabs.map((p) => rewritePathPrefix(p, target.path, nextPath));
+          }
           if (state.activeFile) {
             const rewritten = rewritePathPrefix(state.activeFile, target.path, nextPath);
             if (rewritten !== state.activeFile) {
@@ -2401,6 +2785,9 @@ export async function renderArticle(root, ctx, params = {}) {
           try {
             await api("DELETE", `/api/article/vault/file?path=${encodeURIComponent(node.path)}`);
             closeModal();
+            if (Array.isArray(state.openTabs)) {
+              state.openTabs = state.openTabs.filter((p) => p !== node.path);
+            }
             if (state.activeFile === node.path) {
               state.activeFile = "";
               state.editorActive = false;
@@ -2431,6 +2818,9 @@ export async function renderArticle(root, ctx, params = {}) {
             await api("DELETE", `/api/article/vault/dir?path=${encodeURIComponent(node.path)}`);
             closeModal();
             const prefix = `${node.path}/`;
+            if (Array.isArray(state.openTabs)) {
+              state.openTabs = state.openTabs.filter((p) => p !== node.path && !String(p).startsWith(prefix));
+            }
             if (state.activeFile === node.path || String(state.activeFile || "").startsWith(prefix)) {
               state.activeFile = "";
               state.editorActive = false;
@@ -2458,6 +2848,7 @@ export async function renderArticle(root, ctx, params = {}) {
     ev.stopPropagation();
     closeVaultPopover();
     closeTreeContextMenu();
+    closeArticleContextMenu();
 
     const kind = target?.kind || "root";
     const relPath = target?.path || "";
@@ -2489,11 +2880,47 @@ export async function renderArticle(root, ctx, params = {}) {
       );
     } else if (kind === "file") {
       const parent = parentDirOf(relPath);
+      const base = (target.name || relPath.split("/").pop() || "").replace(/\.(md|markdown)$/i, "");
       items.push(
         { label: "打开编辑", icon: ICONS.open, run: () => openVaultFile(relPath) },
-        { label: "在同目录新建 Markdown", icon: ICONS.newNote, run: () => openNewMarkdownModal(parent) },
+        { label: "在新标签页打开", icon: ICONS.duplicate, run: () => openVaultFile(relPath, { newTab: true }) },
         { sep: true },
-        { label: "重命名", icon: ICONS.rename, run: () => openRenameModal(target) },
+        {
+          label: `复制双链 [[${base}]]`,
+          icon: ICONS.copy,
+          run: () => {
+            navigator.clipboard?.writeText(`[[${base}]]`).catch(() => {});
+            toast(`已复制 [[${base}]]`);
+          },
+        },
+        {
+          label: `复制嵌入 ![[${base}]]`,
+          icon: ICONS.copy,
+          run: () => {
+            navigator.clipboard?.writeText(`![[${base}]]`).catch(() => {});
+            toast(`已复制 ![[${base}]]`);
+          },
+        },
+        {
+          label: "查看局部关系图谱",
+          icon: ICONS.open,
+          run: () => linksCtrl.openGraphModal("local", relPath),
+        },
+        {
+          label: "查看反向链接",
+          icon: ICONS.open,
+          run: async () => {
+            if (state.activeFile !== relPath) await openVaultFile(relPath);
+            state.rightDrawerTab = "links";
+            state.aiDrawerOpen = true;
+            renderStageMode();
+            linksCtrl.refresh(relPath);
+            session.persist();
+          },
+        },
+        { sep: true },
+        { label: "在同目录新建 Markdown", icon: ICONS.newNote, run: () => openNewMarkdownModal(parent) },
+        { label: "重命名（同步更新双链）", icon: ICONS.rename, run: () => openRenameModal(target) },
         { label: "创建副本", icon: ICONS.duplicate, run: () => duplicateVaultFile(relPath) },
         { sep: true },
         { label: "在文件管理器中打开", icon: ICONS.reveal, run: () => revealVaultPath(relPath) },
@@ -2622,7 +3049,10 @@ export async function renderArticle(root, ctx, params = {}) {
       pinnedSelection = null;
       lastAiUndo = null;
       closeSelectionBubble();
+      closeArticleContextMenu();
+      liveEditor.resetEditing();
       if (switchedFile) state.aiChat = [];
+      ensureOpenTab(res.path);
       Object.assign(state, {
         docId: "",
         activeFile: res.path,
@@ -2644,7 +3074,8 @@ export async function renderArticle(root, ctx, params = {}) {
         includeCover: meta.includeCover !== false,
         recommendedStyles: Array.isArray(meta.recommendedStyles) ? meta.recommendedStyles : [],
         slots: Array.isArray(meta.slots) ? meta.slots : [],
-        viewMode: "editor",
+        viewMode: lastEditorViewMode || "live",
+        graphFullscreen: false,
         activeRun: null,
         slotMap: [],
       });
@@ -2668,10 +3099,12 @@ export async function renderArticle(root, ctx, params = {}) {
         activeFile: "",
         editorActive: true,
         dirty: false,
-        viewMode: "editor",
+        viewMode: lastEditorViewMode || "live",
+        graphFullscreen: false,
         activeRun: null,
         slotMap: [],
       });
+      liveEditor.resetEditing();
       state.fusion = data.fusion ?? Boolean(data.style2);
       state.title = data.title || r.doc.name || "";
       state.slots = Array.isArray(data.slots) ? data.slots : [];
@@ -2931,6 +3364,7 @@ export async function renderArticle(root, ctx, params = {}) {
       el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", justifyContent: "center" } },
         el("button", { type: "button", class: "btn btn-primary", onClick: openAddVaultDialog }, "＋ 添加本地目录（如 Obsidian 库）"),
         el("button", { type: "button", class: "btn", onClick: () => openNewMarkdownModal(state.selectedDir || "") }, "＋ 新建 Markdown"),
+        el("button", { type: "button", class: "btn", onClick: () => linksCtrl.openGraphModal("global") }, "🕸 浏览全库关系图谱"),
         el("button", { type: "button", class: "btn", onClick: () => fileIn.click() }, "📄 导入文档")
       )
     ));
@@ -3234,6 +3668,10 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function renderFlow() {
+    if (state.viewMode === "live") {
+      liveEditor.render(flowBox);
+      return;
+    }
     clear(flowBox);
     const coverSlot = state.slots.find((s) => s.role === "cover");
     const inlineSlots = state.slots.filter((s) => s.role !== "cover");
@@ -3307,6 +3745,89 @@ export async function renderArticle(root, ctx, params = {}) {
             closeSelectionBubble();
           }
         }
+      });
+      ta.addEventListener("contextmenu", (ev) => {
+        const s = ta.selectionStart ?? 0;
+        const e = ta.selectionEnd ?? 0;
+        const sel = ta.value.slice(s, e).trim();
+        const items = [];
+        if (sel.length >= 2) {
+          items.push(
+            { header: `选中文本 (${sel.length} 字)` },
+            {
+              icon: "✨",
+              label: "让 AI 改写选中片段",
+              onClick: () => {
+                state.rightDrawerTab = "ai";
+                pinSelectionToCopilot({ text: sel, start: s, end: e, segIdx }, { openDrawer: true, focusInput: true, mode: "edit" });
+              },
+            },
+            {
+              icon: "💬",
+              label: "向 AI 提问 / 诊断这段",
+              onClick: () => {
+                state.rightDrawerTab = "ai";
+                pinSelectionToCopilot({ text: sel, start: s, end: e, segIdx }, { openDrawer: true, focusInput: true, mode: "advise" });
+              },
+            },
+            {
+              icon: "🔗",
+              label: `转为双链 [[${sel.slice(0, 14)}${sel.length > 14 ? "…" : ""}]]`,
+              onClick: () => {
+                ta.setRangeText(`[[${sel}]]`, s, e, "end");
+                ta.dispatchEvent(new Event("input", { bubbles: true }));
+              },
+            },
+            {
+              icon: "📄",
+              label: "提取为新笔记并替换为双链…",
+              onClick: async () => {
+                const base = await extractSelectionToNote(sel);
+                if (base) {
+                  ta.setRangeText(`[[${base}]]`, s, e, "end");
+                  ta.dispatchEvent(new Event("input", { bubbles: true }));
+                }
+              },
+            },
+            { sep: true }
+          );
+        } else {
+          items.push({ header: "Markdown 源码操作" });
+        }
+        items.push(
+          { icon: "🔗", label: "插入双链 [[笔记]]", onClick: () => linksCtrl.triggerInsertWikilink(ta) },
+          { icon: "🎨", label: "在此插入 AI 配图位", onClick: () => insertSlotAt(sel || "") },
+          {
+            icon: "⊞",
+            label: "插入 Markdown 表格",
+            onClick: () => {
+              ta.setRangeText("\n| 列一 | 列二 | 列三 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |\n", s, e, "end");
+              ta.dispatchEvent(new Event("input", { bubbles: true }));
+            },
+          },
+          {
+            icon: "💡",
+            label: "插入提示框 (Callout)",
+            onClick: () => {
+              ta.setRangeText("\n> [!TIP] 提示\n> 在此输入提示内容\n", s, e, "end");
+              ta.dispatchEvent(new Event("input", { bubbles: true }));
+            },
+          },
+          { sep: true },
+          {
+            icon: "👁",
+            label: "切回所见即所得实时预览",
+            onClick: () => {
+              state.viewMode = "live";
+              lastEditorViewMode = "live";
+              liveEditor.resetEditing();
+              renderFlow();
+              renderStageMode();
+              session.persist();
+            },
+          }
+        );
+        openArticleContextMenu(ev, items);
       });
       segTextareas.push(ta);
       linksCtrl.attachTextarea(ta);
@@ -3429,10 +3950,25 @@ export async function renderArticle(root, ctx, params = {}) {
 
   function renderStageMode() {
     const active = Boolean(state.editorActive);
-    topbar.classList.toggle("hidden", !active);
-    bottombar.classList.toggle("hidden", !active);
+    const isGraph = active && state.viewMode === "graph";
+    const isGraphFs = isGraph && Boolean(state.graphFullscreen);
+
+    sidebar.classList.toggle("hidden", Boolean(state.sidebarCollapsed) || isGraphFs);
+    sidebarToggleBtn.classList.toggle("is-active", Boolean(state.sidebarCollapsed));
+    sidebarToggleBtn.title = state.sidebarCollapsed ? "展开左侧文档目录 (Ctrl+\\)" : "折叠左侧文档目录 (Ctrl+\\)";
+
+    topbar.classList.toggle("hidden", !active || isGraphFs);
+    bottombar.classList.toggle("hidden", !active || isGraph);
     welcomeBox.classList.toggle("hidden", active);
+
     if (!active) {
+      if (graphMounted) {
+        linksCtrl.destroyWorkspaceGraph();
+        graphMounted = false;
+      }
+      openTabsBar.classList.add("hidden");
+      graphStageBox.classList.add("hidden");
+      scrollArea.classList.remove("hidden");
       paperSheet.classList.add("hidden");
       diffReviewBox.classList.add("hidden");
       previewStageBox.classList.add("hidden");
@@ -3444,18 +3980,43 @@ export async function renderArticle(root, ctx, params = {}) {
       renderWelcome();
       return;
     }
+
     syncTopbarBreadcrumb();
-    const isEditor = state.viewMode !== "preview";
+    const isLive = state.viewMode === "live";
+    const isSource = state.viewMode === "source";
+    const isPreview = state.viewMode === "preview";
+    const isEditor = isLive || isSource;
     const isReviewing = isEditor && Boolean(activeDiffReview);
-    const drawerOpen = Boolean(state.aiDrawerOpen);
+    const drawerOpen = Boolean(state.aiDrawerOpen) && !isGraphFs;
     const showingObs = drawerOpen && state.rightDrawerTab === "obsidian";
 
-    editSwitchBtn.classList.toggle("is-active", isEditor);
-    previewSwitchBtn.classList.toggle("is-active", !isEditor);
+    liveSwitchBtn.classList.toggle("is-active", isLive);
+    sourceSwitchBtn.classList.toggle("is-active", isSource);
+    previewSwitchBtn.classList.toggle("is-active", isPreview);
+    graphSwitchBtn.classList.toggle("is-active", isGraph);
+
+    wideModeBtn.classList.toggle("hidden", isGraph);
+    wideModeBtn.classList.toggle("is-active", Boolean(state.wideMode));
+    wideModeBtn.textContent = state.wideMode ? "↔ 舒适" : "↔ 宽屏";
+    paperSheet.classList.toggle("is-wide", Boolean(state.wideMode));
+    previewStageBox.classList.toggle("is-wide", Boolean(state.wideMode));
+
     toolsGroup.classList.toggle("hidden", !isEditor || isReviewing);
+    scrollArea.classList.toggle("hidden", isGraph);
+    graphStageBox.classList.toggle("hidden", !isGraph);
     paperSheet.classList.toggle("hidden", !isEditor || isReviewing);
     diffReviewBox.classList.toggle("hidden", !isReviewing);
-    previewStageBox.classList.toggle("hidden", isEditor);
+    previewStageBox.classList.toggle("hidden", !isPreview);
+
+    if (isGraph) {
+      if (!graphMounted) {
+        graphMounted = true;
+        linksCtrl.renderWorkspaceGraph(graphStageBox);
+      }
+    } else if (graphMounted) {
+      linksCtrl.destroyWorkspaceGraph();
+      graphMounted = false;
+    }
 
     aiDrawer.classList.toggle("hidden", !drawerOpen);
     drawerResizer.classList.toggle("hidden", !drawerOpen);
@@ -3470,7 +4031,7 @@ export async function renderArticle(root, ctx, params = {}) {
     obsidianCtrl.updateHostVisibility(showingObs);
     renderCopilotPanel();
     if (isReviewing) renderInlineDiffReview();
-    else if (!isEditor) renderPreviewStage();
+    else if (isPreview) renderPreviewStage();
   }
 
   function renderAll() {
@@ -3553,10 +4114,11 @@ export async function renderArticle(root, ctx, params = {}) {
             state.docId = "";
             state.editorActive = true;
             state.dirty = true;
-            state.viewMode = "editor";
+            state.viewMode = lastEditorViewMode || "live";
             if (res.title) state.title = res.title;
             state.content = res.content || "";
             state.slots = [];
+            liveEditor.resetEditing();
             closeModal();
             renderAll();
             session.persist();
@@ -3776,6 +4338,7 @@ export async function renderArticle(root, ctx, params = {}) {
       });
       state.activeFile = res.path;
       state.dirty = false;
+      ensureOpenTab(res.path);
       if (embedImages && res.content) {
         state.content = res.content;
         renderFlow();
@@ -3846,6 +4409,7 @@ export async function renderArticle(root, ctx, params = {}) {
       document.removeEventListener("keydown", onArticleGlobalKeydown);
       closeVaultPopover();
       closeTreeContextMenu();
+      closeArticleContextMenu();
       closeSelectionBubble();
       obsidianCtrl.dispose();
       linksCtrl.dispose();
