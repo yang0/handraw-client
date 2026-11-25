@@ -128,7 +128,7 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 	})
 	jm.PluginProviders = srv.CommunityProviders
 	srv.Jobs = jm
-	jm.Start(ctx, 2)
+	jm.Start(ctx, 6)
 
 	upd.OnChange = func(st updater.Status) {
 		srv.Emit("update", st)

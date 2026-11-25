@@ -92,6 +92,7 @@ export async function renderArticle(root, ctx, params = {}) {
     wideMode: false,
     graphFullscreen: false,
     openTabs: [],
+    activeRuns: [],
     activeRun: null,
     slotMap: [],
   });
@@ -100,14 +101,32 @@ export async function renderArticle(root, ctx, params = {}) {
   if (!state.viewMode || state.viewMode === "editor" || state.viewMode === "source") state.viewMode = "live";
   if (!Array.isArray(state.openTabs)) state.openTabs = [];
   if (state.activeFile && !state.openTabs.includes(state.activeFile)) state.openTabs.push(state.activeFile);
+  if (!Array.isArray(state.activeRuns)) {
+    state.activeRuns = state.activeRun?.id
+      ? [{ run: state.activeRun, slotMap: Array.isArray(state.slotMap) ? state.slotMap : [] }]
+      : [];
+  }
+  state.activeRun = null;
+  state.slotMap = [];
   let lastEditorViewMode = "live";
   let graphMounted = false;
   let edgelessMountedKey = "";
   let boardMounted = false;
   let activeAssetPreview = null;
   let assetMountedPath = "";
-  let submitting = false;
+  const submittingSlotIds = new Set();
   let planning = false;
+
+  function isRunActive(run) {
+    return Boolean(run?.images?.some((im) => im.status === "queued" || im.status === "running"));
+  }
+  function isSlotGenerating(slotId) {
+    if (!slotId) return false;
+    if (submittingSlotIds.has(slotId)) return true;
+    return (state.activeRuns || []).some((entry) =>
+      (entry.run?.images || []).some((im, i) => entry.slotMap?.[i]?.id === slotId && (im.status === "queued" || im.status === "running"))
+    );
+  }
   let activeSegTextarea = null;
   let treeQuery = "";
   const EXPANDED_STORAGE_KEY = "article-vault-expanded-v2";
@@ -3674,9 +3693,11 @@ export async function renderArticle(root, ctx, params = {}) {
         slots: Array.isArray(meta.slots) ? meta.slots : [],
         viewMode: lastEditorViewMode || "live",
         graphFullscreen: false,
+        activeRuns: [],
         activeRun: null,
         slotMap: [],
       });
+      submittingSlotIds.clear();
       planNotice.textContent = "";
       renderAll();
       obsidianCtrl.syncDoc(true);
@@ -3699,9 +3720,11 @@ export async function renderArticle(root, ctx, params = {}) {
         dirty: false,
         viewMode: lastEditorViewMode || "live",
         graphFullscreen: false,
+        activeRuns: [],
         activeRun: null,
         slotMap: [],
       });
+      submittingSlotIds.clear();
       liveEditor.resetEditing();
       state.fusion = data.fusion ?? Boolean(data.style2);
       state.title = data.title || r.doc.name || "";
@@ -4018,11 +4041,14 @@ export async function renderArticle(root, ctx, params = {}) {
     styleBadgeId.textContent = `#${state.style || "FA-013"}`;
     styleBadgeName.textContent = stObj ? resourceName(stObj) : "选择画风";
 
-    const pendingCount = state.slots.filter((sl) => sl.selected !== false && !sl.imagePath).length;
+    const pendingCount = state.slots.filter((sl) => sl.selected !== false && !sl.imagePath && !isSlotGenerating(sl.id)).length;
+    const generatingCount = state.slots.filter((sl) => isSlotGenerating(sl.id)).length;
     const hasPending = pendingCount > 0;
     planBtn.className = "btn btn-sm" + (!hasPending ? " btn-primary" : "");
     batchBtn.className = "btn btn-sm" + (hasPending ? " btn-primary" : "");
-    batchBtn.textContent = hasPending ? `生成待出配图 (${pendingCount})` : "生成配图";
+    batchBtn.textContent = hasPending
+      ? `生成待出配图 (${pendingCount})`
+      : (generatingCount > 0 ? `并发生图中 (${generatingCount})…` : "生成配图");
   }
 
   function renderRecommendedStyles() {
@@ -4048,21 +4074,27 @@ export async function renderArticle(root, ctx, params = {}) {
 
   function renderBatchSummary() {
     clear(batchSummaryBox);
-    const run = state.activeRun;
-    if (!run || !Array.isArray(run.images) || !run.images.length) {
+    const runs = Array.isArray(state.activeRuns) ? state.activeRuns : [];
+    const allImages = runs.flatMap((entry) => (Array.isArray(entry?.run?.images) ? entry.run.images : []));
+    if (!allImages.length) {
       batchSummaryBox.className = "hidden";
       return;
     }
-    const total = run.images.length;
-    const done = run.images.filter((im) => im.status === "done").length;
-    const failed = run.images.filter((im) => im.status === "failed").length;
-    const active = run.images.some((im) => im.status === "queued" || im.status === "running");
+    const total = allImages.length;
+    const done = allImages.filter((im) => im.status === "done").length;
+    const failed = allImages.filter((im) => im.status === "failed").length;
+    const running = allImages.filter((im) => im.status === "running").length;
+    const queued = allImages.filter((im) => im.status === "queued").length;
+    const active = running + queued;
     const pct = Math.round((100 * (done + failed)) / Math.max(1, total));
+    const statusParts = [`${done + failed} / ${total} 已处理`, `成功 ${done}`, `失败 ${failed}`];
+    if (running > 0) statusParts.push(`绘制中 ${running}`);
+    if (queued > 0) statusParts.push(`排队 ${queued}`);
     batchSummaryBox.className = "hw-article-generation-summary";
     batchSummaryBox.append(
       el("div", { class: "hw-article-summary-head" },
-        el("strong", null, active ? "正在并发生图…" : "本批配图结果"),
-        el("span", null, `${done + failed} / ${total} 已处理 · 成功 ${done} · 失败 ${failed}`)
+        el("strong", null, active > 0 ? `正在并发生图（${active} 张进行中）…` : "本批配图结果"),
+        el("span", null, statusParts.join(" · "))
       ),
       el("div", { class: "hw-article-summary-meter", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(total), "aria-valuenow": String(done + failed) },
         el("span", { style: { width: `${pct}%` } })
@@ -4220,7 +4252,7 @@ export async function renderArticle(root, ctx, params = {}) {
     else if (sl.imagePath && !sl.variants.includes(sl.imagePath)) sl.variants.unshift(sl.imagePath);
 
     const isCover = sl.role === "cover";
-    const isGenerating = state.activeRun?.images?.some((im, i) => state.slotMap[i]?.id === sl.id && (im.status === "queued" || im.status === "running"));
+    const isGenerating = isSlotGenerating(sl.id);
     const status = isGenerating ? "generating" : (sl.imagePath ? "done" : (sl.error ? "error" : "idle"));
     const statusLabel = { generating: "生成中…", done: "✓ 已完成", error: "! 生成失败", idle: "待生成" }[status];
 
@@ -4618,24 +4650,34 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   async function runGenerate(target, confirmed) {
-    if (submitting) return;
-    if (state.activeRun?.images?.some((im) => im.status === "queued" || im.status === "running")) {
-      toast("本篇文章的配图仍在生成，请等待当前批次完成");
-      return;
-    }
     if (state.fusion && (!state.style || !state.style2)) {
       toast("双画风融合请先在「⚙ 配图参数」中选择角色与场景画风");
       return;
     }
     const single = typeof target === "string";
-    const slots = single
-      ? state.slots.filter((sl) => sl.id === target)
-      : target === true
-      ? state.slots.filter((sl) => sl.role === "cover" && !sl.imagePath).slice(0, 1)
-      : state.slots.filter((sl) => sl.selected !== false && !sl.imagePath);
-    if (!slots.length) {
-      toast(target === true ? "没有待生成的封面，请先规划或添加封面" : "没有待生成的配图");
-      return;
+    let slots = [];
+    if (single) {
+      const targetSlot = state.slots.find((sl) => sl.id === target);
+      if (!targetSlot) return;
+      if (isSlotGenerating(targetSlot.id)) {
+        toast("该配图位正在生成中，请稍候");
+        return;
+      }
+      slots = [targetSlot];
+    } else if (target === true) {
+      slots = state.slots.filter((sl) => sl.role === "cover" && !sl.imagePath && !isSlotGenerating(sl.id)).slice(0, 1);
+      if (!slots.length) {
+        const coverBusy = state.slots.some((sl) => sl.role === "cover" && isSlotGenerating(sl.id));
+        toast(coverBusy ? "封面正在生成中，请稍候" : "没有待生成的封面，请先规划或添加封面");
+        return;
+      }
+    } else {
+      slots = state.slots.filter((sl) => sl.selected !== false && !sl.imagePath && !isSlotGenerating(sl.id));
+      if (!slots.length) {
+        const anyBusy = state.slots.some((sl) => isSlotGenerating(sl.id));
+        toast(anyBusy ? "全部待出配图已在并发生成中" : "没有待生成的配图");
+        return;
+      }
     }
     if (slots.some((sl) => !sl.theme?.trim())) {
       toast("请先点击「调提示词」为待生成配图填写主题");
@@ -4646,9 +4688,9 @@ export async function renderArticle(root, ctx, params = {}) {
       return;
     }
     const signatures = slots.map(slotSignature);
-    submitting = true;
-    sampleBtn.disabled = true;
-    batchBtn.disabled = true;
+    slots.forEach((sl) => submittingSlotIds.add(sl.id));
+    renderFlow();
+    syncBottomBar();
     try {
       const res = await api("POST", "/api/generate", {
         mode: "article",
@@ -4677,18 +4719,27 @@ export async function renderArticle(root, ctx, params = {}) {
         return;
       }
       slots.forEach((sl) => { sl.error = ""; });
-      state.activeRun = { ...res.run, images: res.images };
-      state.slotMap = slots.map((sl, i) => ({ id: sl.id, signature: signatures[i] }));
-      planNotice.textContent = `已提交 ${slots.length} 张配图，完成后自动插入正文。`;
-      renderBatchSummary();
-      renderFlow();
+      // Keep any still-running concurrent batches and append this new batch (#150)
+      const stillActive = (state.activeRuns || []).filter((entry) => isRunActive(entry?.run));
+      const newEntry = {
+        run: { ...res.run, images: res.images },
+        slotMap: slots.map((sl, i) => ({ id: sl.id, signature: signatures[i] })),
+      };
+      state.activeRuns = [...stillActive, newEntry];
+      const totalActive = state.activeRuns
+        .flatMap((e) => e.run?.images || [])
+        .filter((im) => im.status === "queued" || im.status === "running").length;
+      planNotice.textContent = totalActive > slots.length
+        ? `已并发提交 ${slots.length} 张配图（当前共 ${totalActive} 张生成中），完成后自动插入正文。`
+        : `已提交 ${slots.length} 张配图，完成后自动插入正文。`;
       session.persist();
     } catch (e) {
       toast(e.message);
     } finally {
-      submitting = false;
-      sampleBtn.disabled = false;
-      batchBtn.disabled = false;
+      slots.forEach((sl) => submittingSlotIds.delete(sl.id));
+      renderBatchSummary();
+      renderFlow();
+      syncBottomBar();
     }
   }
 
@@ -4777,7 +4828,7 @@ export async function renderArticle(root, ctx, params = {}) {
     try {
       const res = await api("PUT", `/api/docs/article/${encodeURIComponent(state.docId || "new")}`, {
         name: state.title || "未命名文章",
-        data: { ...state, activeRun: null, slotMap: [] },
+        data: { ...state, activeRuns: [], activeRun: null, slotMap: [] },
       });
       state.docId = res.doc.id;
       state.dirty = false;
@@ -4792,25 +4843,36 @@ export async function renderArticle(root, ctx, params = {}) {
     }
   }
 
-  async function refreshRun() {
-    const runId = state.activeRun?.id;
-    if (!runId) return;
-    const detail = await api("GET", `/api/works/${encodeURIComponent(runId)}`);
-    if (state.activeRun?.id !== runId) return;
-    state.activeRun = detail.run;
-    (detail.run.images || []).forEach((im, i) => {
-      const mapped = state.slotMap[i];
-      const slot = state.slots.find((sl) => sl.id === mapped?.id);
-      if (slot && slotSignature(slot) === mapped.signature) {
-        if (im.status === "done" && im.path) {
-          if (!Array.isArray(slot.variants)) slot.variants = [];
-          if (!slot.variants.includes(im.path)) slot.variants.push(im.path);
-          slot.imagePath = im.path;
-          slot.error = "";
+  async function refreshRun(targetRunId = "") {
+    const entries = Array.isArray(state.activeRuns) ? state.activeRuns : [];
+    const targets = targetRunId
+      ? entries.filter((e) => e?.run?.id === targetRunId)
+      : entries.filter((e) => e?.run?.id);
+    if (!targets.length) return;
+
+    let changed = false;
+    await Promise.allSettled(targets.map(async (entry) => {
+      const runId = entry.run.id;
+      const detail = await api("GET", `/api/works/${encodeURIComponent(runId)}`);
+      const liveEntry = (state.activeRuns || []).find((e) => e?.run?.id === runId);
+      if (!liveEntry || !detail?.run) return;
+      liveEntry.run = detail.run;
+      (detail.run.images || []).forEach((im, i) => {
+        const mapped = liveEntry.slotMap?.[i];
+        const slot = state.slots.find((sl) => sl.id === mapped?.id);
+        if (slot && slotSignature(slot) === mapped.signature) {
+          if (im.status === "done" && im.path) {
+            if (!Array.isArray(slot.variants)) slot.variants = [];
+            if (!slot.variants.includes(im.path)) slot.variants.push(im.path);
+            slot.imagePath = im.path;
+            slot.error = "";
+          }
+          if (im.status === "failed") slot.error = im.error || "生成失败，可重试；已有图片已保留";
         }
-        if (im.status === "failed") slot.error = im.error || "生成失败，可重试；已有图片已保留";
-      }
-    });
+      });
+      changed = true;
+    }));
+    if (!changed) return;
     renderBatchSummary();
     renderFlow();
     syncBottomBar();
@@ -4835,9 +4897,9 @@ export async function renderArticle(root, ctx, params = {}) {
       return;
     }
     const rid = msg.data?.runId || msg.data?.id;
-    if ((msg.type === "job" || msg.type === "run") && state.activeRun && rid === state.activeRun.id) {
+    if ((msg.type === "job" || msg.type === "run") && rid && (state.activeRuns || []).some((e) => e?.run?.id === rid)) {
       try {
-        await refreshRun();
+        await refreshRun(rid);
       } catch {}
     }
     if (msg.type === "skills") {
