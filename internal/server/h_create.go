@@ -64,20 +64,45 @@ func (s *Server) buildPrompt(w http.ResponseWriter, r *http.Request) (any, error
 			}
 		}
 	}
-	res, err := prompt.Build(p, s.Rules(), in)
-	if err != nil {
-		return nil, bad(err.Error())
+	localIn := in
+	preview := map[string]string{}
+	siteModelOnly := false
+	if prot, meta := s.inspectProtectedResource(r.Context(), "style", localIn.Style); prot {
+		siteModelOnly = true
+		preview["styleImage"] = meta.Image
+		preview["styleName"] = firstStr(meta.Name, meta.Code)
+		localIn.Style = ""
+	}
+	if prot, meta := s.inspectProtectedResource(r.Context(), "style", localIn.Style2); prot {
+		siteModelOnly = true
+		preview["style2Image"] = meta.Image
+		preview["style2Name"] = firstStr(meta.Name, meta.Code)
+		localIn.Style2 = ""
+	}
+	if prot, meta := s.inspectProtectedResource(r.Context(), "layout", localIn.Layout); prot {
+		siteModelOnly = true
+		preview["layoutImage"] = meta.Image
+		preview["layoutName"] = firstStr(meta.Name, meta.Code)
+		localIn.Layout = ""
+	}
+	var res prompt.Result
+	if localIn.Style != "" || localIn.Layout != "" || localIn.Color != "" {
+		res, err = prompt.Build(p, s.Rules(), localIn)
+		if err != nil {
+			return nil, bad(err.Error())
+		}
+	} else {
+		res = prompt.Result{Primary: strings.TrimSpace(localIn.Theme), Zh: strings.TrimSpace(localIn.Theme)}
 	}
 	// Attach preview asset paths for zero-cost local preview.
-	preview := map[string]string{}
 	if res.StyleID != "" {
 		if st, ok := p.Style(res.StyleID); ok {
 			preview["styleImage"] = st.Image
 			preview["styleName"] = firstStr(st.NameZh, st.GenerationName)
 		}
 	}
-	if in.Style2 != "" {
-		if st2, ok := p.Style(in.Style2); ok {
+	if localIn.Style2 != "" {
+		if st2, ok := p.Style(localIn.Style2); ok {
 			preview["style2Image"] = st2.Image
 			preview["style2Name"] = firstStr(st2.NameZh, st2.GenerationName)
 		}
@@ -95,13 +120,18 @@ func (s *Server) buildPrompt(w http.ResponseWriter, r *http.Request) (any, error
 			preview["colorName"] = c.NameZh
 		}
 	}
-	if in.Tone != "" {
-		if t, ok := p.Tone(in.Tone); ok {
+	if localIn.Tone != "" {
+		if t, ok := p.Tone(localIn.Tone); ok {
 			preview["toneImage"] = t.Image
 			preview["toneName"] = t.NameZh
 		}
 	}
-	return map[string]any{"result": res, "preview": preview}, nil
+	out := map[string]any{"result": res, "preview": preview}
+	if siteModelOnly {
+		out["siteModelOnly"] = true
+		out["siteModelOnlyNotice"] = "已选社区受保护画风/图型，提示词已加密隐藏，仅支持使用网站模型云端生图。"
+	}
+	return out, nil
 }
 
 func (s *Server) expandTheme(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -824,13 +854,55 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			Tone: firstStr(it.Tone, galCtx.Tone), Mood: it.Mood, Theme: it.Theme, Ratio: it.Ratio,
 			Text: it.Text, Model: rawModel, Mode: it.Mode, Redraw: it.Redraw, Extra: it.Extra,
 		}
+		// Enforce site-model-only generation for community/exclusive protected resources (#162).
+		localBuildIn := in
+		usesProtectedResource := false
+		for _, chk := range []struct {
+			kind string
+			id   string
+			clear func()
+		}{
+			{"style", localBuildIn.Style, func() { localBuildIn.Style = "" }},
+			{"style", localBuildIn.Style2, func() { localBuildIn.Style2 = "" }},
+			{"layout", localBuildIn.Layout, func() { localBuildIn.Layout = "" }},
+		} {
+			if chk.id == "" {
+				continue
+			}
+			if prot, meta := s.inspectProtectedResource(r.Context(), chk.kind, chk.id); prot {
+				usesProtectedResource = true
+				if !isSite {
+					return nil, &apiError{
+						Status: http.StatusForbidden,
+						Code:   "site_model_required",
+						Msg:    fmt.Sprintf("社区受保护资源 %s《%s》已隐藏提示词，仅支持通过网站生图模型生成，请切换为网站模型后再试", meta.Code, meta.Name),
+					}
+				}
+				if !s.Site.LoggedIn() {
+					return nil, site.ErrNotLoggedIn
+				}
+				if meta.Known && !meta.Unlocked && !meta.IsMine {
+					label := "画风"
+					if chk.kind == "layout" {
+						label = "图型"
+					}
+					return nil, &apiError{
+						Status: http.StatusForbidden,
+						Code:   "asset_locked",
+						Msg:    fmt.Sprintf("尚未解锁社区%s %s《%s》（需 %d 积分），请先解锁后再使用网站模型生图", label, meta.Code, meta.Name, max(1, meta.UnlockCost)),
+					}
+				}
+				// Never build or concatenate hidden community prompt locally; website injects it server-side.
+				chk.clear()
+			}
+		}
 		var pr prompt.Result
 		if it.Prompt != "" {
 			pr.Primary, pr.Zh = it.Prompt, it.Prompt
 		} else if body.PromptCustomized && strings.TrimSpace(body.CustomPrompt) != "" {
 			pr.Primary, pr.Zh = body.CustomPrompt, body.CustomPrompt
-		} else if in.Style != "" || in.Layout != "" || in.Color != "" {
-			res, err := prompt.Build(p, s.Rules(), in)
+		} else if localBuildIn.Style != "" || localBuildIn.Layout != "" || localBuildIn.Color != "" {
+			res, err := prompt.Build(p, s.Rules(), localBuildIn)
 			if err != nil {
 				return nil, bad(err.Error())
 			}
@@ -838,6 +910,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		} else {
 			pr.Primary, pr.Zh = it.Theme, it.Theme
 		}
+		_ = usesProtectedResource
 		finalPrompt := prompt.ForGeneration(pr, s.Rules())
 		if !body.PromptCustomized && strings.TrimSpace(it.Prompt) == "" && body.Mode != "edit" {
 			finalPrompt = appendChineseTypographyDirective(finalPrompt, it.Mode, firstStr(it.Layout, galCtx.Layout), it.Theme, it.Text)

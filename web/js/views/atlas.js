@@ -24,6 +24,7 @@ const state = {
 };
 
 const layoutNames = {
+  community: "社区共享",
   "comic-storyboard": "漫画分镜", ecommerce: "电商图型",
   infographic: "信息图", "ip-character": "角色设计", "social-card": "社媒卡片",
 };
@@ -239,6 +240,14 @@ async function drawStyles(stage, groups, ctx) {
         grid.appendChild(mineStyleCard(s, ctx, drawStylesWrap));
         return;
       }
+      const isProtected = Boolean(s.promptHidden || s.siteModelOnly || s.source === "community" || s.source === "exclusive");
+      const isLocked = isProtected && !s.unlocked && !s.isMine;
+      const cost = Math.max(1, Number(s.unlockCost || 1));
+      const badgeEl = isProtected
+        ? (isLocked
+            ? el("span", { class: "badge badge-warn" }, `🔒 ${cost} 积分`)
+            : el("span", { class: "badge badge-ok" }, s.isMine ? "我的共享" : "✓ 已解锁 · 网站模型"))
+        : (s.source && s.source !== "official" ? el("span", { class: "badge badge-accent" }, s.source === "mine" ? "我的" : "已解锁") : null);
       const card = el("div", { class: "style-card" },
         el("img", {
           class: "style-thumb",
@@ -248,15 +257,37 @@ async function drawStyles(stage, groups, ctx) {
           onClick: () => openStyleDetail(s.number, ctx, drawStylesWrap),
         }),
         el("div", { class: "style-body", onClick: () => openStyleDetail(s.number, ctx, drawStylesWrap) },
-          el("div", { class: "row", style: { justifyContent: "space-between" } },
+          el("div", { class: "row", style: { justifyContent: "space-between", gap: "6px" } },
             el("span", { class: "style-code" }, s.number),
-            s.source && s.source !== "official" ? el("span", { class: "badge badge-accent" }, s.source === "mine" ? "我的" : "已解锁") : null
+            badgeEl
           ),
           el("div", { class: "style-name" }, s.nameZh || s.generation_name),
-          el("div", { class: "style-traits" }, s.traits || s.reference)
+          isProtected
+            ? el("div", { class: "style-traits muted" }, `${s.authorName ? `by ${s.authorName} · ` : ""}🔒 提示词已隐藏 · 仅限网站模型生图`)
+            : el("div", { class: "style-traits" }, s.traits || s.reference)
         ),
         el("div", { class: "style-actions" },
-          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { style: s.number }) }, "用于创作")
+          isLocked
+            ? el("button", {
+                type: "button",
+                class: "btn btn-sm btn-primary",
+                onClick: async (e) => {
+                  e.stopPropagation();
+                  const btn = e.currentTarget;
+                  btn.disabled = true;
+                  btn.textContent = "解锁中…";
+                  try {
+                    await api("POST", `/api/resources/community/${encodeURIComponent(s.number)}/unlock`, {});
+                    toast(`已解锁 ${s.nameZh || s.number}，可直接使用网站模型生图`);
+                    drawStylesWrap();
+                  } catch (err) {
+                    toast(err.message || "解锁失败");
+                    btn.disabled = false;
+                    btn.textContent = `🔓 解锁 (${cost}积分)`;
+                  }
+                },
+              }, `🔓 解锁 (${cost}积分)`)
+            : el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { style: s.number }) }, isProtected ? "☁ 网站模型创作" : "用于创作")
         )
       );
       grid.appendChild(card);
@@ -305,9 +336,13 @@ async function openStyleDetail(id, ctx, onRefresh) {
       }, `${sim.number} ${sim.nameZh || sim.generation_name}`));
     });
 
+    const isProtected = Boolean(st.promptHidden || st.siteModelOnly || st.source === "community" || st.source === "exclusive");
+    const isLocked = isProtected && !st.unlocked && !st.isMine;
+    const cost = Math.max(1, Number(st.unlockCost || 1));
+
     const body = el("div", { class: "col" },
       imgEl,
-      st.grid ? el("button", {
+      !isProtected && st.grid ? el("button", {
         type: "button",
         class: "btn btn-sm",
         onClick: () => { showGrid = !showGrid; imgEl.src = packImg(showGrid ? st.grid : st.image); },
@@ -315,27 +350,62 @@ async function openStyleDetail(id, ctx, onRefresh) {
       el("div", { class: "row" },
         el("span", { class: "badge badge-accent" }, st.number),
         el("span", { class: "badge" }, st.group || st.groupZh),
-        st.reference ? el("span", { class: "badge" }, "参考：" + st.reference) : null,
-        res.decision?.activation ? el("span", { class: "badge" }, "激活：" + res.decision.activation) : null
+        st.authorName ? el("span", { class: "badge" }, "作者：" + st.authorName) : null,
+        isProtected ? el("span", { class: "badge badge-warn" }, isLocked ? `🔒 ${cost} 积分解锁` : "☁ 仅限网站模型生图") : null,
+        !isProtected && st.reference ? el("span", { class: "badge" }, "参考：" + st.reference) : null,
+        !isProtected && res.decision?.activation ? el("span", { class: "badge" }, "激活：" + res.decision.activation) : null
       ),
-      el("p", { style: { margin: "4px 0" } }, st.traits),
-      st.traitsEn ? el("p", { class: "muted", style: { margin: 0 } }, st.traitsEn) : null,
-      el("strong", { style: { marginTop: "8px" } }, "相近画风（12 个）"),
-      simGrid
+      isProtected
+        ? el("div", { class: "card", style: { padding: "12px", background: "var(--surface-2)", borderStyle: "dashed" } },
+            el("strong", { style: { fontSize: "13px" } }, "🔒 特征描述词已加密隐藏"),
+            el("p", { class: "muted", style: { margin: "6px 0 0", fontSize: "12.5px", lineHeight: 1.6 } },
+              st.description || "网友分享的收费画风受提示词保护，不会在任何位置展示明文特征词；解锁后仅支持在客户端选择「网站生图模型」由云端自动注入出图。"
+            )
+          )
+        : el("p", { style: { margin: "4px 0" } }, st.traits),
+      !isProtected && st.traitsEn ? el("p", { class: "muted", style: { margin: 0 } }, st.traitsEn) : null,
+      !isProtected && (simRes.items || []).length ? el("strong", { style: { marginTop: "8px" } }, "相近画风（12 个）") : null,
+      !isProtected && (simRes.items || []).length ? simGrid : null
     );
 
-    showModal(`${st.number} · ${st.nameZh || st.generation_name}`, body, [
-      el("button", {
+    const footerBtns = [];
+    if (!isProtected) {
+      footerBtns.push(el("button", {
         type: "button",
         class: "btn",
         onClick: () => { closeModal(); state.group = MINE; openEditStyleDialog({ name: (st.nameZh || st.generation_name) + " · 变体", traits: st.traits, traitsEn: st.traitsEn || st.traits }, onRefresh); },
-      }, "另存为我的画风"),
-      el("button", {
+      }, "另存为我的画风"));
+    }
+    if (isLocked) {
+      footerBtns.push(el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        onClick: async (e) => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          btn.textContent = "解锁中…";
+          try {
+            await api("POST", `/api/resources/community/${encodeURIComponent(st.number)}/unlock`, {});
+            toast(`已解锁 ${st.nameZh || st.number}，现在可用网站模型生图`);
+            closeModal();
+            if (onRefresh) onRefresh();
+            openStyleDetail(st.number, ctx, onRefresh);
+          } catch (err) {
+            toast(err.message || "解锁失败");
+            btn.disabled = false;
+            btn.textContent = `🔓 立即解锁（${cost} 积分）`;
+          }
+        },
+      }, `🔓 立即解锁（${cost} 积分）`));
+    } else {
+      footerBtns.push(el("button", {
         type: "button",
         class: "btn btn-primary",
         onClick: () => { closeModal(); ctx.go("create", { style: st.number }); },
-      }, "去生图"),
-    ]);
+      }, isProtected ? "☁ 用网站模型去生图" : "去生图"));
+    }
+
+    showModal(`${st.number} · ${st.nameZh || st.generation_name}`, body, footerBtns);
   } catch (err) {
     toast(err.message);
   }
@@ -359,17 +429,49 @@ async function drawLayouts(stage, ctx) {
       el("span", { class: "muted" }, "描述区域划分、标题区、配图区和留白，就能在创作时像官方图型一样使用。"),
       el("div", { class: "row" }, el("button", { type: "button", class: "btn btn-primary btn-sm", onClick: () => openEditLayoutDialog({}, reload) }, "新建图型"))
     ) : "",
-    card: (l) => l._mine ? mineLayoutCard(l, ctx, reload) : el("div", { class: "style-card" },
-      el("img", { class: "style-thumb", src: packImg(l.image), alt: l.name, loading: "lazy" }),
-      el("div", { class: "style-body" },
-        el("div", { class: "style-code" }, `${l.id} · ${l.category}`),
-        el("div", { class: "style-name" }, l.name),
-        el("div", { class: "style-traits" }, l.prompt_zh || (l.keywords || []).join(" · "))
-      ),
-      el("div", { class: "style-actions" },
-        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { layout: l.id }) }, "用于创作")
-      )
-    ),
+    card: (l) => {
+      if (l._mine) return mineLayoutCard(l, ctx, reload);
+      const isProtected = Boolean(l.promptHidden || l.siteModelOnly || l.source === "community" || l.source === "exclusive");
+      const isLocked = isProtected && !l.unlocked && !l.isMine;
+      const cost = Math.max(1, Number(l.unlockCost || 1));
+      return el("div", { class: "style-card" },
+        el("img", { class: "style-thumb", src: packImg(l.image), alt: l.name, loading: "lazy" }),
+        el("div", { class: "style-body" },
+          el("div", { class: "row", style: { justifyContent: "space-between", gap: "6px" } },
+            el("div", { class: "style-code" }, `${l.id} · ${layoutNames[l.category] || l.category}`),
+            isProtected
+              ? el("span", { class: "badge " + (isLocked ? "badge-warn" : "badge-ok") }, isLocked ? `🔒 ${cost} 积分` : "✓ 网站模型")
+              : null
+          ),
+          el("div", { class: "style-name" }, l.name),
+          isProtected
+            ? el("div", { class: "style-traits muted" }, `${l.authorName ? `by ${l.authorName} · ` : ""}🔒 提示词已隐藏 · 仅限网站模型生图`)
+            : el("div", { class: "style-traits" }, l.prompt_zh || (l.keywords || []).join(" · "))
+        ),
+        el("div", { class: "style-actions" },
+          isLocked
+            ? el("button", {
+                type: "button",
+                class: "btn btn-sm btn-primary",
+                onClick: async (e) => {
+                  const btn = e.currentTarget;
+                  btn.disabled = true;
+                  btn.textContent = "解锁中…";
+                  try {
+                    await api("POST", `/api/resources/community/${encodeURIComponent(l.id)}/unlock`, {});
+                    toast(`已解锁 ${l.name}，可使用网站模型生图`);
+                    reload();
+                  } catch (err) {
+                    toast(err.message || "解锁失败");
+                    btn.disabled = false;
+                    btn.textContent = `🔓 解锁 (${cost}积分)`;
+                  }
+                },
+              }, `🔓 解锁 (${cost}积分)`)
+            : el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => ctx.go("create", { layout: l.id }) }, isProtected ? "☁ 网站模型创作" : "用于创作")
+        )
+      );
+    },
   });
 }
 
@@ -1279,114 +1381,144 @@ function publishButton(kindPath, item, name, reload) {
   return el("button", { type: "button", class: "btn btn-sm", onClick: () => openPublishResourceDialog(kindPath, item, name, reload) }, "发布到社区");
 }
 
-// openPublishResourceDialog: pick a cover and examples from finished works,
-// choose free or a point price, publish (handraw-web docs/sharing-v2.md §2.1).
+// openPublishResourceDialog: 1-click paid-only share aligned with Web (#162).
+// Minimum 1 point, presets + custom 1..500, prompt permanently hidden on server.
 async function openPublishResourceDialog(kindPath, item, name, reload) {
   const label = kindPath === "styles" ? "画风" : "图型";
-  const code = item.number || item.id;
-  // Images made with this resource come first; any finished image can be used.
-  const res = await api("GET", "/api/works?limit=60").catch(() => ({ items: [] }));
-  const pool = [];
-  for (const r of res.items || []) {
-    const matches = Boolean(code) && JSON.stringify(r.recipe || {}).includes(code);
-    for (const im of r.images || []) {
-      if (im.status === "done" && im.path) pool.push({ path: im.path, thumb: im.thumb, matches });
-    }
-  }
-  pool.sort((a, b) => Number(b.matches) - Number(a.matches));
-  const chosen = [];
-  const grid = el("div", { class: "publish-pick" });
-  const counter = el("span", { class: "muted" }, "");
-  const refresh = () => {
-    grid.querySelectorAll(".pick").forEach((node) => {
-      const idx = chosen.indexOf(node.dataset.path);
-      node.classList.toggle("on", idx >= 0);
-      node.querySelector(".pick-n").textContent = idx === 0 ? "封面" : idx > 0 ? String(idx) : "";
-    });
-    counter.textContent = `已选 ${chosen.length} 张（第 1 张作封面，自动裁成正方形；至少 3 张，最多 10 张）`;
-  };
-  if (!pool.length) {
-    grid.appendChild(el("div", { class: "muted" }, `还没有可用的作品图。先用这个${label}生成 3 张以上不同主题的图，再回来发布。`));
-  }
-  pool.slice(0, 60).forEach((im) => {
-    const node = el("button", { type: "button", class: "pick", dataset: { path: im.path }, onClick: () => {
-      const idx = chosen.indexOf(im.path);
-      if (idx >= 0) chosen.splice(idx, 1);
-      else if (chosen.length < 10) chosen.push(im.path);
-      refresh();
-    } },
-      el("img", { src: localImg(im.thumb || im.path), alt: "", loading: "lazy" }),
-      el("span", { class: "pick-n" }),
-      im.matches ? el("span", { class: "pick-tag" }, `用了此${label}`) : null
-    );
-    grid.appendChild(node);
-  });
-  refresh();
+  const presets = [1, 5, 10, 20, 50, 100];
+  let selectedPrice = 10;
+  const hasExistingCover = Boolean(item.image || item.remoteImageUrl || (Array.isArray(item.images) && item.images.length > 0));
+  let chosenCoverPath = "";
 
-  const descIn = el("textarea", { class: "textarea", rows: 3, maxlength: 300, placeholder: `介绍这个${label}：适合什么主题、有什么特点（8–300 字）` });
-  const priceSel = el("select", { class: "input" },
-    el("option", { value: "0" }, "免费公开（定义可见，别人可加入并在本地使用）")
-  );
-  const priceHint = el("span", { class: "muted", style: { fontSize: "12px" } }, "正在读取你的等级…");
-  // Paid tiers depend on the creator level (handraw-web #376).
-  api("GET", "/api/account/level").then((lv) => {
-    const cap = lv && lv.available ? Number(lv.priceCap || 0) : 500;
-    const tiers = [10, 30, 50, 100, 200, 500].filter((v) => v <= cap);
-    tiers.forEach((v) => priceSel.appendChild(el("option", { value: String(v) }, `${v} 积分（定义保密，别人解锁后只能用网站模型生成）`)));
-    priceHint.textContent = !lv || !lv.available ? ""
-      : tiers.length ? `你现在是 Lv${lv.level}，收费定价最高 ${cap > 100000 ? 500 : cap} 积分。`
-      : `你现在是 Lv${lv.level}，达到 Lv3 后可以发布收费画风/图型；现在可以先免费发布积累经验。`;
-  }).catch(() => { priceHint.textContent = ""; });
-  const note = el("span", { class: "muted", style: { fontSize: "12px" } }, "免费资源立即上架；收费资源由社区评审团审核通过后开售。积分只用于站内解锁，不能提现。");
-  priceSel.addEventListener("change", () => {
-    note.textContent = priceSel.value === "0"
-      ? "免费资源立即上架；违规内容可被举报下架。"
-      : "收费资源由社区评审团审核通过后开售。别人解锁时你获得积分（只能用于站内解锁）。";
+  const priceInput = el("input", {
+    type: "number",
+    class: "input",
+    min: "1",
+    max: "500",
+    step: "1",
+    value: String(selectedPrice),
+    style: { width: "110px", textAlign: "center", fontWeight: "700" },
   });
+  const presetWrap = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } });
+  const priceHint = el("span", { class: "muted", style: { fontSize: "12px" } }, "");
+  const syncPrice = () => {
+    presetWrap.querySelectorAll("button").forEach((b) => {
+      const on = Number(b.dataset.price) === selectedPrice;
+      b.className = "btn btn-sm" + (on ? " btn-primary" : "");
+    });
+    priceHint.textContent = `定价 ${selectedPrice} 积分：特征提示词永久加密隐藏，发布后即时上架社区，他人解锁后仅能通过网站模型调用，你将自动获得积分分成。`;
+  };
+  presets.forEach((p) => {
+    presetWrap.appendChild(el("button", {
+      type: "button",
+      class: "btn btn-sm",
+      dataset: { price: String(p) },
+      onClick: () => {
+        selectedPrice = p;
+        priceInput.value = String(p);
+        syncPrice();
+      },
+    }, `${p} 积分`));
+  });
+  priceInput.addEventListener("input", () => {
+    const val = Number(String(priceInput.value || "").trim());
+    if (Number.isInteger(val) && val >= 1 && val <= 500) {
+      selectedPrice = val;
+      syncPrice();
+    }
+  });
+  syncPrice();
+
+  const descIn = el("input", {
+    type: "text",
+    class: "input",
+    maxlength: 200,
+    placeholder: `选填公开简介（请勿填写提示词；留空将自动生成安全简介）`,
+  });
+
+  // Only ask user to pick a cover from works if the resource has no cover yet.
+  let coverPickerSection = null;
+  if (!hasExistingCover) {
+    const res = await api("GET", "/api/works?limit=30").catch(() => ({ items: [] }));
+    const grid = el("div", { class: "publish-pick" });
+    const pool = [];
+    for (const r of res.items || []) {
+      for (const im of r.images || []) {
+        if (im.status === "done" && im.path) pool.push(im);
+      }
+    }
+    if (!pool.length) {
+      grid.appendChild(el("div", { class: "muted" }, `当前${label}尚无封面图，请先在编辑弹窗上传一张封面图后再发布。`));
+    } else {
+      pool.slice(0, 24).forEach((im) => {
+        const node = el("button", {
+          type: "button",
+          class: "pick",
+          dataset: { path: im.path },
+          onClick: () => {
+            chosenCoverPath = im.path;
+            grid.querySelectorAll(".pick").forEach((n) => n.classList.toggle("on", n.dataset.path === chosenCoverPath));
+          },
+        }, el("img", { src: localImg(im.thumb || im.path), alt: "", loading: "lazy" }));
+        grid.appendChild(node);
+      });
+    }
+    coverPickerSection = el("div", { class: "field" }, el("label", null, "补选 1 张封面图（当前尚无封面）"), grid);
+  }
+
   const body = el("div", { class: "col", style: { gap: "10px" } },
-    el("strong", null, `发布「${name}」到手绘风社区`),
-    el("span", { class: "muted" }, "发布后所有人都能在网站看到它的名称、封面和示例图。"),
-    counter, grid,
-    el("div", { class: "field" }, el("label", null, "简介"), descIn),
-    el("div", { class: "field" }, el("label", null, "价格"), priceSel, priceHint),
-    note
+    el("strong", null, `分享「${name}」到社区赚积分`),
+    el("span", { class: "muted", style: { fontSize: "12.5px" } }, "🔒 画风与图型最低 1 积分，核心提示词永久加密隐藏，仅允许通过网站生图模型调用。"),
+    el("div", { class: "field" },
+      el("label", null, "设定解锁积分（预设或自定义 1–500 整数）"),
+      presetWrap,
+      el("div", { class: "row", style: { gap: "8px", alignItems: "center", marginTop: "4px" } },
+        el("span", { class: "muted", style: { fontSize: "12.5px" } }, "自定义积分："),
+        priceInput,
+        el("span", { class: "muted", style: { fontSize: "12px" } }, "积分（1–500）")
+      ),
+      priceHint
+    ),
+    el("div", { class: "field" }, el("label", null, "公开展示简介（选填）"), descIn),
+    coverPickerSection
   );
   const submit = el("button", { type: "button", class: "btn btn-primary", onClick: async () => {
-    if (chosen.length < 3) return toast("请至少选择 3 张图（含封面）");
-    if (descIn.value.trim().length < 8) return toast("简介至少 8 个字");
+    const rawVal = Number(String(priceInput.value || "").trim());
+    if (!Number.isInteger(rawVal) || rawVal < 1 || rawVal > 500) {
+      return toast("画风与图型不允许免费分享，请输入 1–500 之间的整数积分");
+    }
+    const desc = descIn.value.trim();
+    if (desc && (desc.length < 8 || desc.length > 300)) {
+      return toast("若填写公开简介，需要 8 到 300 字（也可留空自动生成）");
+    }
+    if (!hasExistingCover && !chosenCoverPath) {
+      return toast("当前资源尚无封面图，请先补选 1 张封面图");
+    }
     submit.disabled = true;
     try {
-      submit.textContent = "正在压缩图片…";
-      const cover = await toWebp(localImg(chosen[0]), { maxEdge: 1024, square: true });
-      const images = [];
-      for (const p of chosen.slice(1)) {
-        const url = await toWebp(localImg(p));
-        if (url) images.push(url);
+      const reqBody = { price: rawVal };
+      if (desc) reqBody.description = desc;
+      if (!hasExistingCover && chosenCoverPath) {
+        submit.textContent = "正在压缩封面…";
+        const cover = await toWebp(localImg(chosenCoverPath), { maxEdge: 1024, square: true });
+        if (!cover) throw new Error("封面压缩失败，请重试");
+        reqBody.cover = cover;
       }
-      if (!cover || images.length < 2) throw new Error("当前系统无法压缩为 WebP，请更新系统 WebView 后重试");
       submit.textContent = "正在发布…";
-      const r = await api("POST", `/api/mine/${kindPath}/${encodeURIComponent(item.docId)}/publish`, {
-        price: Number(priceSel.value), description: descIn.value.trim(), cover, images,
-      });
+      const r = await api("POST", `/api/mine/${kindPath}/${encodeURIComponent(item.docId)}/publish`, reqBody);
       closeModal();
       const pub = r.published || {};
       const url = (r.siteBase || "").replace(/\/+$/, "") + (pub.url || "");
-      if (pub.status === "approved") {
-        toast("已公开到社区，链接已复制");
-        await copyText(url);
-        openURL(url);
-      } else {
-        toast("已提交社区评审，通过后自动开售");
-      }
+      toast(`已发布上线（${rawVal} 积分，编号 ${pub.code || ""}），链接已复制`);
+      if (url) await copyText(url);
       reload();
     } catch (e) {
-      const byCode = { level_too_low: "你的等级还不能发布收费资源，请选择免费发布", price_above_level_cap: "这个价格超过了你当前等级的上限，请选低一档" };
-      toast(byCode[e.code] || e.message);
+      toast(e.message || "发布失败");
       submit.disabled = false;
-      submit.textContent = "确认发布";
+      submit.textContent = "一键发布上线";
     }
-  } }, "确认发布");
-  showModal(`发布${label}`, body, [el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"), submit]);
+  } }, "一键发布上线");
+  showModal(`分享${label}赚积分`, body, [el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"), submit]);
 }
 
 export function openEditStyleDialog(initial = {}, onSaved) {

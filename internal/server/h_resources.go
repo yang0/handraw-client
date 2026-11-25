@@ -35,10 +35,39 @@ func (s *Server) resSummary(w http.ResponseWriter, r *http.Request) (any, error)
 	for _, t := range p.Tones {
 		toneCats[t.Category] = t.CategoryZh
 	}
+	snap := s.communityCatalog(r.Context(), false)
+	groups := append([]resources.Group{}, p.Groups...)
+	if len(snap.Styles) > 0 {
+		hasUSR := false
+		for i := range groups {
+			if groups[i].Code == "USR" {
+				groups[i].Count += len(snap.Styles)
+				hasUSR = true
+				break
+			}
+		}
+		if !hasUSR {
+			groups = append([]resources.Group{{
+				Code:  "USR",
+				Zh:    "社区共享",
+				En:    "Community",
+				Count: len(snap.Styles),
+			}}, groups...)
+		}
+	}
+	if len(snap.Layouts) > 0 {
+		layoutCats["community"] += len(snap.Layouts)
+	}
 	return map[string]any{
-		"version": p.Version, "groups": p.Groups, "layoutCategories": layoutCats,
+		"version": p.Version, "groups": groups, "layoutCategories": layoutCats,
 		"colorCategories": colorCats, "toneCategories": toneCats,
-		"counts": map[string]int{"styles": len(p.Styles), "layouts": len(p.Layouts), "colors": len(p.Colors), "tones": len(p.Tones), "assets": len(p.Assets)},
+		"counts": map[string]int{
+			"styles":  len(p.Styles) + len(snap.Styles),
+			"layouts": len(p.Layouts) + len(snap.Layouts),
+			"colors":  len(p.Colors),
+			"tones":   len(p.Tones),
+			"assets":  len(p.Assets),
+		},
 	}, nil
 }
 
@@ -64,13 +93,36 @@ func (s *Server) resStyles(w http.ResponseWriter, r *http.Request) (any, error) 
 	group := r.URL.Query().Get("group")
 	source := r.URL.Query().Get("source")
 	var out []resources.Style
+	snap := s.communityCatalog(r.Context(), false)
 	// An exact id typed into search jumps straight to it.
 	if q != "" {
 		if st, ok := p.Style(q); ok && (strings.ContainsAny(q, "-_") || len(q) <= 4) {
 			return map[string]any{"items": []resources.Style{st}, "total": 1}, nil
 		}
+		for _, st := range snap.Styles {
+			if strings.EqualFold(st.Number, q) {
+				return map[string]any{"items": []resources.Style{st}, "total": 1}, nil
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for _, st := range snap.Styles {
+		if group != "" && st.GroupCode != group {
+			continue
+		}
+		if source != "" && st.Source != source {
+			continue
+		}
+		if !match(q, st.Number, st.GenerationName, st.NameZh, st.Description, st.Author, st.AuthorName, st.GroupZh) {
+			continue
+		}
+		seen[strings.ToUpper(st.Number)] = true
+		out = append(out, st)
 	}
 	for _, st := range p.Styles {
+		if seen[strings.ToUpper(st.Number)] {
+			continue
+		}
 		if group != "" && st.GroupCode != group {
 			continue
 		}
@@ -93,12 +145,22 @@ func (s *Server) resStyle(w http.ResponseWriter, r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	st, ok := p.Style(r.PathValue("id"))
-	if !ok {
-		return nil, notFound("找不到画风 " + r.PathValue("id"))
+	id := r.PathValue("id")
+	if st, ok := p.Style(id); ok {
+		model := r.URL.Query().Get("model")
+		return map[string]any{"style": st, "decision": promptDecision(s, p, model, st)}, nil
 	}
-	model := r.URL.Query().Get("model")
-	return map[string]any{"style": st, "decision": promptDecision(s, p, model, st)}, nil
+	if cst, ok := s.findCommunityStyle(r.Context(), id); ok {
+		return map[string]any{
+			"style": cst,
+			"decision": map[string]any{
+				"activation":    "网站模型云端黑盒注入",
+				"siteModelOnly": true,
+				"promptHidden":  true,
+			},
+		}, nil
+	}
+	return nil, notFound("找不到画风 " + id)
 }
 
 func (s *Server) resSimilar(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -122,7 +184,22 @@ func (s *Server) resLayouts(w http.ResponseWriter, r *http.Request) (any, error)
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	cat := r.URL.Query().Get("category")
 	out := []resources.Layout{}
+	snap := s.communityCatalog(r.Context(), false)
+	seen := map[string]bool{}
+	for _, l := range snap.Layouts {
+		if cat != "" && l.Category != cat {
+			continue
+		}
+		if !match(q, l.ID, l.Name, l.Description, l.Author, l.AuthorName) {
+			continue
+		}
+		seen[strings.ToUpper(l.ID)] = true
+		out = append(out, l)
+	}
 	for _, l := range p.Layouts {
+		if seen[strings.ToUpper(l.ID)] {
+			continue
+		}
 		if cat != "" && l.Category != cat {
 			continue
 		}

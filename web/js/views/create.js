@@ -446,7 +446,10 @@ export async function renderCreate(root, ctx, params = {}) {
     applyRecipeObj(r);
   });
 
+  let syncSiteModelGuard = () => {};
+
   const controls = recipeControls(state, { styles, layouts, colors, tones }, () => {
+    syncSiteModelGuard();
     renderSelectedSlot();
     if (!currentTurn()) renderOutput();
     refreshQuote();
@@ -980,10 +983,92 @@ export async function renderCreate(root, ctx, params = {}) {
 
   const submitBtn = el("button", { type: "submit", class: "btn btn-primary make-image-submit-btn" }, "开始生成");
 
+  const siteGuardBanner = el("div", {
+    class: "insp-fork-banner hidden",
+    style: { margin: "0 0 8px", fontSize: "12.5px", justifyContent: "space-between" },
+  });
+
+  function findProtectedSelections() {
+    const picked = [];
+    const check = (list, id, kindLabel) => {
+      if (!id) return;
+      const hit = (list || []).find((x) => String(resourceId(x)).toUpperCase() === String(id).toUpperCase());
+      const looksProt = /^(CS|CL|FX|LX|USR)-/i.test(String(id));
+      if (hit && (hit.siteModelOnly || hit.promptHidden || hit.source === "community" || hit.source === "exclusive")) {
+        picked.push({ item: hit, id: resourceId(hit), name: resourceName(hit), kindLabel });
+      } else if (looksProt) {
+        picked.push({ item: hit || null, id: String(id), name: String(id), kindLabel });
+      }
+    };
+    if (!state.directPrompt) {
+      check(styles, state.style, "画风");
+      if (state.fusion) check(styles, state.style2, "融合画风");
+      check(layouts, state.layout, "图型");
+    }
+    return picked;
+  }
+
+  syncSiteModelGuard = () => {
+    const protectedList = findProtectedSelections();
+    const requireSite = protectedList.length > 0;
+    let firstSiteOpt = null;
+    for (const opt of Array.from(modelSel.options)) {
+      const isSiteOpt = String(opt.value || "").startsWith("site:");
+      if (isSiteOpt && !firstSiteOpt) firstSiteOpt = opt;
+      opt.disabled = requireSite && !isSiteOpt;
+    }
+    if (requireSite && !String(state.modelRef || "").startsWith("site:")) {
+      if (firstSiteOpt) {
+        modelSel.value = firstSiteOpt.value;
+        state.modelRef = firstSiteOpt.value;
+        refreshQuote();
+      }
+    }
+    clear(siteGuardBanner);
+    if (!requireSite) {
+      siteGuardBanner.classList.add("hidden");
+      return;
+    }
+    siteGuardBanner.classList.remove("hidden");
+    const lockedEntry = protectedList.find((p) => p.item && !p.item.unlocked && !p.item.isMine);
+    if (lockedEntry) {
+      const cost = Math.max(1, Number(lockedEntry.item.unlockCost || 1));
+      siteGuardBanner.append(
+        el("span", null, `🔒 已选社区收费${lockedEntry.kindLabel}《${lockedEntry.name}》（需 ${cost} 积分解锁 · 提示词已隐藏 · 仅支持网站生图模型）`),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: async (e) => {
+            const btn = e.currentTarget;
+            btn.disabled = true;
+            btn.textContent = "解锁中…";
+            try {
+              await api("POST", `/api/resources/community/${encodeURIComponent(lockedEntry.id)}/unlock`, {});
+              lockedEntry.item.unlocked = true;
+              toast(`已解锁《${lockedEntry.name}》，现在可直接用网站模型生图`);
+              syncSiteModelGuard();
+            } catch (err) {
+              toast(err.message || "解锁失败");
+              btn.disabled = false;
+              btn.textContent = `🔓 立即解锁 (${cost}积分)`;
+            }
+          },
+        }, `🔓 立即解锁 (${cost}积分)`)
+      );
+    } else {
+      const names = protectedList.map((p) => `《${p.name}》`).join("、");
+      siteGuardBanner.append(
+        el("span", null, `☁ 社区受保护资源 ${names} 已隐藏提示词，出图已自动锁定仅使用网站生图模型。`)
+      );
+    }
+  };
+  syncSiteModelGuard();
+
   const composer = el("form", { class: "make-image-composer", action: "/api/studio/chat-plan", method: "post" },
     expandComposerBtn,
     fileInput,
     composerModesBar,
+    siteGuardBanner,
     refsStrip,
     subjectInput,
     el("div", { class: "make-image-composer-bottom" },

@@ -39,12 +39,19 @@ type Style struct {
 	Images         []string `json:"images,omitempty"`
 	RemoteImageURL string   `json:"remoteImageUrl,omitempty"`
 	Grid           string   `json:"grid,omitempty"`
-	Source         string   `json:"source"` // official | mine | unlocked
+	Source         string   `json:"source"` // official | mine | unlocked | community | exclusive
 	Author         string   `json:"author,omitempty"`
+	AuthorName     string   `json:"authorName,omitempty"`
 	License        string   `json:"license,omitempty"`
 	NameZh         string   `json:"nameZh,omitempty"`
+	Description    string   `json:"description,omitempty"`
 	TraitsEn       string   `json:"traitsEn,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
+	UnlockCost     int      `json:"unlockCost,omitempty"`
+	Unlocked       bool     `json:"unlocked,omitempty"`
+	IsMine         bool     `json:"isMine,omitempty"`
+	PromptHidden   bool     `json:"promptHidden,omitempty"`
+	SiteModelOnly  bool     `json:"siteModelOnly,omitempty"`
 }
 
 type Layout struct {
@@ -59,8 +66,16 @@ type Layout struct {
 	Keywords       []string `json:"keywords"`
 	PromptZh       string   `json:"prompt_zh"`
 	PromptEn       string   `json:"prompt_en"`
+	Description    string   `json:"description,omitempty"`
+	Author         string   `json:"author,omitempty"`
+	AuthorName     string   `json:"authorName,omitempty"`
 	License        string   `json:"license,omitempty"`
 	Source         string   `json:"source"`
+	UnlockCost     int      `json:"unlockCost,omitempty"`
+	Unlocked       bool     `json:"unlocked,omitempty"`
+	IsMine         bool     `json:"isMine,omitempty"`
+	PromptHidden   bool     `json:"promptHidden,omitempty"`
+	SiteModelOnly  bool     `json:"siteModelOnly,omitempty"`
 }
 
 type Color struct {

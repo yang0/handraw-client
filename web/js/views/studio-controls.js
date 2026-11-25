@@ -21,6 +21,7 @@ export const WHITESPACE_OPTIONS = [
 export const SC021_PLAYSTYLES = ["标准四格漫画", "反转三格漫画", "对比双格漫画", "对话分格故事", "人物成长四步"];
 
 const CATEGORY_LABELS = {
+  community: "社区共享",
   infographic: "信息图",
   storyboard: "分镜剧场",
   sketchbook: "手账/笔记",
@@ -274,6 +275,10 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
     } else {
       mediaNode = el("div", { class: "studio-resource-option-empty" }, id || "+");
     }
+    const isProtected = Boolean(item.promptHidden || item.siteModelOnly || item.source === "community" || item.source === "exclusive");
+    const subTag = isProtected
+      ? (item.unlocked || item.isMine ? `${id} · ☁ 网站模型` : `${id} · 🔒 ${Math.max(1, Number(item.unlockCost || 1))}分`)
+      : id;
     return el("button", {
       type: "button",
       class: "studio-resource-option",
@@ -281,7 +286,7 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
       onClick: () => choose(id),
     },
     mediaNode,
-    el("small", { class: "mono" }, id),
+    el("small", { class: "mono" }, subTag),
     el("strong", null, resourceName(item)));
   };
 
