@@ -1,7 +1,13 @@
 import { api, clear, el, toast } from "./api.js";
+import { openLayoutEditorModal, openStyleEditorModal } from "./views/resource-editor.js";
 
 let cachedStyles = null;
 let cachedLayouts = null;
+
+window.addEventListener("handraw:custom-resource-saved", () => {
+  cachedStyles = null;
+  cachedLayouts = null;
+});
 
 async function ensureCatalog() {
   if (!cachedStyles) {
@@ -40,6 +46,24 @@ export function initPalette(ctx) {
   });
 
   const baseActions = () => [
+    {
+      label: "＋ 新建我的画风",
+      hint: "新建 · 画风",
+      run: () => openStyleEditorModal({}, () => {
+        cachedStyles = null;
+        if (location.hash === "#atlas") ctx.go("atlas", { tab: "styles", group: "__mine" });
+      }),
+    },
+    {
+      label: "＋ 新建我的图型",
+      hint: "新建 · 图型",
+      run: () => openLayoutEditorModal({}, () => {
+        cachedLayouts = null;
+        if (location.hash === "#atlas") ctx.go("atlas", { tab: "layouts", group: "mine" });
+      }),
+    },
+    { label: "管理我的画风", hint: "画廊 · 我的", run: () => ctx.go("atlas", { tab: "styles", group: "__mine" }) },
+    { label: "管理我的图型", hint: "画廊 · 我的", run: () => ctx.go("atlas", { tab: "layouts", group: "mine" }) },
     { label: "去首页", hint: "视图", run: () => ctx.go("home") },
     { label: "打开生图工作台", hint: "生图", run: () => ctx.go("create") },
     { label: "管理生图配方", hint: "生图", run: () => ctx.go("create", { openRecipes: true }) },

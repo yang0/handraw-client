@@ -2,6 +2,7 @@ import { api, clear, el, localImg, openURL, remoteThumb, toast } from "../api.js
 import { mountSlotPanels } from "../plugins-host.js";
 import { createCardSizeSwitcher, masonry } from "../masonry.js";
 import { openWorkRemixModal } from "./work-remix-modal.js";
+import { openLayoutEditorModal, openStyleEditorModal } from "./resource-editor.js";
 
 const discoveryLabels = { work: "作品", style: "画风", layout: "图型", topic: "论坛" };
 
@@ -241,7 +242,19 @@ export async function renderHome(container, ctx) {
     el("div", { class: "home-hero-head" },
       el("h1", { id: "home-hero-title", class: "home-hero-title" }, "今天想画什么？"),
       el("div", { class: "home-hero-meta" },
-        el("span", { class: "home-hero-stats" }, `本地画风 ${sumRes.counts?.styles || 0} · 图型 ${sumRes.counts?.layouts || 0} · 主题色 ${sumRes.counts?.colors || 0} · 影调 ${sumRes.counts?.tones || 0}`)
+        el("span", { class: "home-hero-stats" }, `本地画风 ${sumRes.counts?.styles || 0} · 图型 ${sumRes.counts?.layouts || 0} · 主题色 ${sumRes.counts?.colors || 0} · 影调 ${sumRes.counts?.tones || 0}`),
+        el("div", { class: "home-hero-quick-btns" },
+          el("button", {
+            type: "button",
+            class: "btn btn-sm home-quick-create-btn",
+            onClick: () => openStyleEditorModal({}, () => renderHome(container, ctx)),
+          }, "＋ 新建画风"),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm home-quick-create-btn",
+            onClick: () => openLayoutEditorModal({}, () => renderHome(container, ctx)),
+          }, "＋ 新建图型")
+        )
       )
     ),
     composerForm

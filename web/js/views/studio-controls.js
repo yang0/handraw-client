@@ -227,7 +227,13 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
     clear(catBar);
     if (catCounts.size <= 1) { catBar.classList.add("hidden"); return; }
     catBar.classList.remove("hidden");
-    const entries = [["", `全部 (${items.length})`], ...Array.from(catCounts.entries()).map(([k, n]) => [k, `${k} (${n})`])];
+    const sortedCats = Array.from(catCounts.entries()).sort(([a], [b]) => {
+      const aMine = a === "我的画风" || a === "我的图型" || a === "mine";
+      const bMine = b === "我的画风" || b === "我的图型" || b === "mine";
+      if (aMine !== bMine) return aMine ? -1 : 1;
+      return 0;
+    });
+    const entries = [["", `全部 (${items.length})`], ...sortedCats.map(([k, n]) => [k, `${k} (${n})`])];
     entries.forEach(([k, label]) => {
       catBar.appendChild(el("button", {
         type: "button",
@@ -370,24 +376,11 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
       }, "🎲 随机选择")
     : null;
 
-  search.addEventListener("input", () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(renderGrid, 60);
-  });
-  const body = el("div", { class: "studio-picker-dialog-body" },
-    el("search", { class: "studio-picker-search-row" },
-      el("div", { style: { flex: "1 1 auto", minWidth: 0 } }, field("筛选", search)),
-      randomBtn
-    ),
-    catBar,
-    count,
-    grid
-  );
   const createBtn = (createKind === "style" || createKind === "layout")
     ? el("button", {
         type: "button",
-        class: "btn btn-sm btn-primary",
-        style: { marginRight: "auto" },
+        class: "btn btn-sm btn-primary studio-picker-create-btn",
+        title: createKind === "layout" ? "新建自己的图型并立即选用" : "新建自己的画风并立即选用",
         onClick: () => {
           const openEditor = createKind === "layout" ? openLayoutEditorModal : openStyleEditorModal;
           openEditor({}, (saved) => {
@@ -404,8 +397,21 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
       }, createKind === "layout" ? "＋ 新建图型" : "＋ 新建画风")
     : null;
 
+  search.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(renderGrid, 60);
+  });
+  const body = el("div", { class: "studio-picker-dialog-body" },
+    el("search", { class: "studio-picker-search-row" },
+      el("div", { style: { flex: "1 1 auto", minWidth: 0 } }, field("筛选", search)),
+      randomBtn,
+      createBtn
+    ),
+    catBar,
+    count,
+    grid
+  );
   const footer = [
-    createBtn,
     empty ? el("button", { type: "button", class: "btn", onClick: () => choose("") }, empty) : null,
     el("button", { type: "button", class: "btn", onClick: () => closeCurrent() }, "取消"),
   ].filter(Boolean);
@@ -482,6 +488,30 @@ export function resourcePicker(label, items, value, onChange, empty = "不指定
     clearBtn.classList.toggle("hidden", !(allowClear && hasItem));
   };
 
+  const quickNewBtn = (createKind === "style" || createKind === "layout")
+    ? el("button", {
+        type: "button",
+        class: "make-image-picker-create",
+        title: createKind === "layout" ? "直接新建自己的图型并选中" : "直接新建自己的画风并选中",
+        "aria-label": createKind === "layout" ? "新建我的图型" : "新建我的画风",
+        onClick: (e) => {
+          e.stopPropagation();
+          const openEditor = createKind === "layout" ? openLayoutEditorModal : openStyleEditorModal;
+          openEditor({}, (saved) => {
+            if (!saved) return;
+            const newId = resourceId(saved);
+            if (newId) {
+              const existIdx = items.findIndex((x) => resourceId(x) === newId);
+              if (existIdx >= 0) items[existIdx] = saved;
+              else items.unshift(saved);
+              sync(newId);
+              onChange(newId);
+            }
+          });
+        },
+      }, "＋ 自建")
+    : null;
+
   button.addEventListener("click", () => {
     openResourceDialog(caption, items, selected, (id) => {
       sync(id);
@@ -490,7 +520,7 @@ export function resourcePicker(label, items, value, onChange, empty = "不指定
   });
 
   sync();
-  wrap.append(button, clearBtn);
+  wrap.append(...[button, quickNewBtn, clearBtn].filter(Boolean));
   wrap.sync = sync;
   return wrap;
 }

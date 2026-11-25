@@ -538,6 +538,7 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
         });
         toast(isEdit ? "图型已更新并准备同步" : "图型已创建");
         closeThisModal();
+        window.dispatchEvent(new CustomEvent("handraw:custom-resource-saved", { detail: { kind: "layout", item: res?.layout || res } }));
         onSaved?.(res?.layout || res);
       } else {
         const res = await api("POST", "/api/mine/styles", {
@@ -556,6 +557,7 @@ function openResourceEditor(kind, initial = {}, onSaved, opts = {}) {
           toast(isEdit ? "画风已更新并准备同步" : "画风已创建");
         }
         closeThisModal();
+        window.dispatchEvent(new CustomEvent("handraw:custom-resource-saved", { detail: { kind: "style", item: res?.style || res } }));
         onSaved?.(res?.style || res);
       }
     } catch (e) {

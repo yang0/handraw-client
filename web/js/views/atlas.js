@@ -83,6 +83,10 @@ function drawCatalog(stage, { kind, title, allLabel, items, groupKey, groupLabel
 export async function renderAtlas(root, ctx, params = {}) {
   if (params.tab) state.tab = params.tab;
   if (state.tab === "mine") { state.tab = "styles"; state.group = MINE; }
+  if (params.group !== undefined) {
+    if (state.tab === "styles") state.group = params.group;
+    else if (state.tab === "layouts") state.groups.layouts = params.group;
+  }
   if (params.q !== undefined) state.q = params.q;
   clear(root);
 
@@ -141,9 +145,23 @@ export async function renderAtlas(root, ctx, params = {}) {
     ),
   }, "🧩 扩展图库");
 
+  const quickCreateHeadBtn = state.tab === "styles"
+    ? el("button", {
+        type: "button",
+        class: "btn btn-primary btn-sm atlas-create-btn",
+        onClick: () => openEditStyleDialog({}, () => { state.group = MINE; renderAtlas(root, ctx); }),
+      }, "＋ 新建画风")
+    : (state.tab === "layouts"
+      ? el("button", {
+          type: "button",
+          class: "btn btn-primary btn-sm atlas-create-btn",
+          onClick: () => openEditLayoutDialog({}, () => { state.groups.layouts = "mine"; renderAtlas(root, ctx); }),
+        }, "＋ 新建图型")
+      : null);
+
   root.appendChild(el("div", { class: "page-head atlas-head" },
     el("h1", { class: "page-title" }, "风格画廊"),
-    el("div", { class: "row atlas-toolbar" }, tabBar, searchInput, extMarketBtn)
+    el("div", { class: "row atlas-toolbar" }, tabBar, searchInput, quickCreateHeadBtn, extMarketBtn)
   ));
 
   const stage = el("div");
@@ -254,9 +272,7 @@ async function drawStyles(stage, groups, ctx) {
     io.observe(sentinel);
   }
 
-  const toolbar = mineToolbar([
-    el("button", { type: "button", class: "btn btn-primary btn-sm", onClick: () => openEditStyleDialog({}, () => { state.group = MINE; drawStylesWrap(); }) }, "+ 新建画风"),
-  ], drawStylesWrap, mineOnly ? "自建的画风只描述视觉语言；登录后会同步到你的网站账号，满意后可以发布到社区。" : "");
+  const toolbar = mineToolbar([], drawStylesWrap, mineOnly ? "自建的画风只描述视觉语言；登录后会同步到你的网站账号，满意后可以发布到社区。" : "");
   const emptyMine = el("div", { class: "card mine-empty" },
     el("strong", null, "还没有自己的画风"),
     el("span", { class: "muted" }, "上传 1–5 张参考图，自动提取纯视觉特征；或者在任意画风详情里「另存为我的画风」再微调。"),
@@ -337,9 +353,7 @@ async function drawLayouts(stage, ctx) {
     kind: "layouts", title: "图型", allLabel: "全部图型", items,
     groups: [{ key: "mine", label: "我的图型" }],
     groupKey: (l) => l.category, groupLabel: (l) => (l.category === "mine" ? "我的图型" : layoutNames[l.category] || l.category),
-    before: mineToolbar([
-      el("button", { type: "button", class: "btn btn-primary btn-sm", onClick: () => openEditLayoutDialog({}, () => { state.groups.layouts = "mine"; reload(); }) }, "+ 新建图型"),
-    ], reload, ""),
+    before: mineToolbar([], reload, ""),
     empty: (group) => group === "mine" ? el("div", { class: "card mine-empty" },
       el("strong", null, "还没有自己的图型"),
       el("span", { class: "muted" }, "描述区域划分、标题区、配图区和留白，就能在创作时像官方图型一样使用。"),

@@ -29,6 +29,33 @@
         </button>
       </div>
       <div class="topbar-right">
+        <button id="btn-quick-create" class="pill-btn pill-quick-create" type="button" popovertarget="quick-create-popover" title="快速新建画风、图型或开始生图">
+          <span>＋ 新建</span>
+        </button>
+        <div id="quick-create-popover" class="quick-create-popover" popover="auto" role="menu" aria-label="快速新建">
+          <button type="button" class="qc-item" role="menuitem" data-quick-create="style">
+            <span class="qc-ico" aria-hidden="true">🎨</span>
+            <span class="qc-meta">
+              <strong>新建我的画风</strong>
+              <small>从参考图或提示词定义专属视觉风格</small>
+            </span>
+          </button>
+          <button type="button" class="qc-item" role="menuitem" data-quick-create="layout">
+            <span class="qc-ico" aria-hidden="true">📐</span>
+            <span class="qc-meta">
+              <strong>新建我的图型</strong>
+              <small>定义可复用的画面构图与排版结构</small>
+            </span>
+          </button>
+          <div class="qc-sep" role="separator"></div>
+          <button type="button" class="qc-item" role="menuitem" data-quick-create="create">
+            <span class="qc-ico" aria-hidden="true">✨</span>
+            <span class="qc-meta">
+              <strong>去生图工作台</strong>
+              <small>开始单图或系列图创作</small>
+            </span>
+          </button>
+        </div>
         <button id="btn-queue" class="pill-btn hidden" type="button" title="后台任务队列">
           <span class="dot-pulse"></span>
           <span id="queue-count">0</span>

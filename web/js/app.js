@@ -13,6 +13,7 @@ import { renderWorks } from "./views/works.js";
 import { renderInspirations } from "./views/inspirations.js";
 import { renderPlugins } from "./views/plugins.js";
 import { renderSettings } from "./views/settings.js";
+import { openLayoutEditorModal, openStyleEditorModal } from "./views/resource-editor.js";
 
 const VIEWS = {
   home: renderHome,
@@ -85,6 +86,31 @@ async function start() {
     if (expanded) applySavedSidebarWidth();
     try { localStorage.setItem("nav-expanded", expanded ? "1" : "0"); } catch {}
   });
+
+  const qcPop = document.getElementById("quick-create-popover");
+  if (qcPop) {
+    qcPop.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-quick-create]");
+      if (!btn) return;
+      const action = btn.dataset.quickCreate;
+      if (typeof qcPop.hidePopover === "function") {
+        try { qcPop.hidePopover(); } catch {}
+      }
+      if (action === "style") {
+        openStyleEditorModal({}, () => {
+          if (currentView === "atlas") go("atlas", { tab: "styles", group: "__mine" });
+          else if (currentView === "home") go("home");
+        });
+      } else if (action === "layout") {
+        openLayoutEditorModal({}, () => {
+          if (currentView === "atlas") go("atlas", { tab: "layouts", group: "mine" });
+          else if (currentView === "home") go("home");
+        });
+      } else if (action === "create") {
+        go("create");
+      }
+    });
+  }
 
   if (sidebarResizer) {
     sidebarResizer.addEventListener("dblclick", () => {
