@@ -39,7 +39,59 @@ type marketViewPlugin struct {
 	Enabled          bool                   `json:"enabled"`
 	UpdateAvailable  bool                   `json:"updateAvailable"`
 	UpdateReason     string                 `json:"updateReason,omitempty"`
+	Pricing          *plugins.MarketPricing  `json:"pricing,omitempty"`
+	Delivery         *plugins.MarketDelivery `json:"delivery,omitempty"`
 	Versions         []plugins.MarketVersion `json:"versions"`
+}
+
+type pluginMarketSourceStatus struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	ActiveMirror string `json:"activeMirror,omitempty"`
+	ActiveURL    string `json:"activeUrl,omitempty"`
+	Official     bool   `json:"official,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	Count        int    `json:"count"`
+	Error        string `json:"error,omitempty"`
+}
+
+func pluginMarketCandidateURLs(src settings.PluginMarketSource, preferredMirror string) []struct {
+	mirror string
+	url    string
+} {
+	var out []struct {
+		mirror string
+		url    string
+	}
+	seen := map[string]bool{}
+	add := func(m, u string) {
+		u = strings.TrimSpace(u)
+		if u == "" || seen[u] {
+			return
+		}
+		if strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://") {
+			seen[u] = true
+			out = append(out, struct {
+				mirror string
+				url    string
+			}{mirror: m, url: u})
+		}
+	}
+	order := []string{"gitee", "github"}
+	if strings.EqualFold(strings.TrimSpace(preferredMirror), "github") {
+		order = []string{"github", "gitee"}
+	}
+	for _, m := range order {
+		if src.Mirrors != nil {
+			add(m, src.Mirrors[m])
+		}
+	}
+	for m, u := range src.Mirrors {
+		add(m, u)
+	}
+	add("", src.URL)
+	return out
 }
 
 func (s *Server) getMarketCache(key string, ttl time.Duration) (json.RawMessage, bool) {
@@ -57,29 +109,45 @@ func (s *Server) setMarketCache(key string, data json.RawMessage) {
 	s.cacheMu.Unlock()
 }
 
-func (s *Server) fetchMarketCached(ctx context.Context, src settings.PluginMarketSource, force bool) (plugins.MarketIndex, error) {
-	key := "market:" + src.URL
-	if !force {
-		if b, ok := s.getMarketCache(key, 5*time.Minute); ok {
-			var idx plugins.MarketIndex
-			if err := json.Unmarshal(b, &idx); err == nil && idx.Format == 1 {
-				return idx, nil
+func (s *Server) fetchMarketCachedMirror(ctx context.Context, src settings.PluginMarketSource, preferredMirror string, force bool) (plugins.MarketIndex, string, string, error) {
+	cands := pluginMarketCandidateURLs(src, preferredMirror)
+	if len(cands) == 0 {
+		return plugins.MarketIndex{}, "", "", fmt.Errorf("未配置有效的市场地址")
+	}
+	var lastErr error
+	for _, c := range cands {
+		key := "market:" + c.url
+		if !force {
+			if b, ok := s.getMarketCache(key, 5*time.Minute); ok {
+				var idx plugins.MarketIndex
+				if err := json.Unmarshal(b, &idx); err == nil && idx.Format == 1 {
+					return idx, c.mirror, c.url, nil
+				}
 			}
 		}
+		idx, err := plugins.FetchMarketIndex(ctx, c.url)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if b, err := json.Marshal(idx); err == nil {
+			s.setMarketCache(key, b)
+		}
+		return idx, c.mirror, c.url, nil
 	}
-	idx, err := plugins.FetchMarketIndex(ctx, src.URL)
-	if err != nil {
-		return idx, err
-	}
-	if b, err := json.Marshal(idx); err == nil {
-		s.setMarketCache(key, b)
-	}
-	return idx, nil
+	return plugins.MarketIndex{}, "", "", lastErr
+}
+
+func (s *Server) fetchMarketCached(ctx context.Context, src settings.PluginMarketSource, force bool) (plugins.MarketIndex, error) {
+	st := settings.Get()
+	idx, _, _, err := s.fetchMarketCachedMirror(ctx, src, st.PreferredMarketMirror, force)
+	return idx, err
 }
 
 func (s *Server) pluginMarketList(w http.ResponseWriter, r *http.Request) (any, error) {
 	force := r.URL.Query().Get("refresh") == "1"
 	st := settings.Get()
+	mirror := firstStr(strings.TrimSpace(r.URL.Query().Get("mirror")), st.PreferredMarketMirror, "gitee")
 	sources := st.PluginMarkets
 	if len(sources) == 0 {
 		sources = settings.DefaultPluginMarkets()
@@ -97,16 +165,31 @@ func (s *Server) pluginMarketList(w http.ResponseWriter, r *http.Request) (any, 
 	labels := map[string]string{}
 	var items []marketViewPlugin
 	var errs []map[string]string
+	var sourceStatuses []pluginMarketSourceStatus
 
 	for _, src := range sources {
+		sst := pluginMarketSourceStatus{
+			ID:       src.ID,
+			Name:     src.Name,
+			URL:      src.URL,
+			Official: src.Official,
+			Enabled:  src.Enabled,
+		}
 		if !src.Enabled {
+			sourceStatuses = append(sourceStatuses, sst)
 			continue
 		}
-		idx, err := s.fetchMarketCached(r.Context(), src, force)
+		idx, activeMirror, activeURL, err := s.fetchMarketCachedMirror(r.Context(), src, mirror, force)
 		if err != nil {
+			sst.Error = err.Error()
+			sourceStatuses = append(sourceStatuses, sst)
 			errs = append(errs, map[string]string{"sourceId": src.ID, "name": src.Name, "error": err.Error()})
 			continue
 		}
+		sst.ActiveMirror = activeMirror
+		sst.ActiveURL = activeURL
+		sst.Count = len(idx.Plugins)
+		sourceStatuses = append(sourceStatuses, sst)
 		for k, v := range idx.Metadata.Categories {
 			if _, ok := categories[k]; !ok {
 				categories[k] = v.Title.Pick("zh", "zh-CN", "en")
@@ -175,6 +258,8 @@ func (s *Server) pluginMarketList(w http.ResponseWriter, r *http.Request) (any, 
 				Enabled:          hasInst && inst.Enabled,
 				UpdateAvailable:  updateAvail,
 				UpdateReason:     updateReason,
+				Pricing:          p.Pricing,
+				Delivery:         p.Delivery,
 				Versions:         p.Versions,
 			})
 		}
@@ -197,11 +282,12 @@ func (s *Server) pluginMarketList(w http.ResponseWriter, r *http.Request) (any, 
 		errs = []map[string]string{}
 	}
 	return map[string]any{
-		"sources":    sources,
-		"categories": categories,
-		"labels":     labels,
-		"plugins":    items,
-		"errors":     errs,
+		"defaultMirror": mirror,
+		"sources":       sourceStatuses,
+		"categories":    categories,
+		"labels":        labels,
+		"plugins":       items,
+		"errors":        errs,
 	}, nil
 }
 

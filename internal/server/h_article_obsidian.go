@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -10,7 +12,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/yang0/handraw-client/internal/appdir"
 	"github.com/yang0/handraw-client/internal/obsidian"
 	"github.com/yang0/handraw-client/internal/settings"
@@ -50,24 +54,58 @@ func (s *Server) articleObsidianDiscover(w http.ResponseWriter, r *http.Request)
 	}, nil
 }
 
+func obsidianMarketSourcesFromSettings() []obsidian.MarketSource {
+	st := settings.Get()
+	out := make([]obsidian.MarketSource, 0, len(st.ObsidianMarkets))
+	for _, m := range st.ObsidianMarkets {
+		out = append(out, obsidian.MarketSource{
+			ID:       m.ID,
+			Name:     m.Name,
+			URL:      m.URL,
+			Mirrors:  m.Mirrors,
+			Official: m.Official,
+			Enabled:  m.Enabled,
+		})
+	}
+	return out
+}
+
 func (s *Server) articleObsidianMarket(w http.ResponseWriter, r *http.Request) (any, error) {
 	mgr := s.obsidianMgr()
 	force := r.URL.Query().Get("refresh") == "1"
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	cat := strings.TrimSpace(r.URL.Query().Get("category"))
 	featuredOnly := r.URL.Query().Get("featured") == "1"
-	limit := 60
+	includeCommunity := r.URL.Query().Get("community") == "1" || (q != "" && !featuredOnly)
+	st := settings.Get()
+	mirror := firstStr(strings.TrimSpace(r.URL.Query().Get("mirror")), st.PreferredMarketMirror, obsidian.ObsidianMirrorGitee)
+	limit := 80
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 300 {
 			limit = n
 		}
 	}
 
-	items, offline, fetchErr := mgr.FetchCatalog(r.Context(), force)
-	filtered := make([]obsidian.CatalogItem, 0, min(limit, len(items)))
+	ctx, cancel := context.WithTimeout(r.Context(), 18*time.Second)
+	defer cancel()
+	catalog := mgr.ListMarketCatalog(ctx, obsidianMarketSourcesFromSettings(), mirror, includeCommunity, force)
+	filtered := make([]obsidian.CatalogItem, 0, min(limit, len(catalog.Items)))
 	total := 0
-	for _, it := range items {
+	for _, it := range catalog.Items {
 		if featuredOnly && !it.Featured {
 			continue
+		}
+		if cat != "" {
+			matchedCat := false
+			for _, c := range it.Categories {
+				if strings.EqualFold(c, cat) {
+					matchedCat = true
+					break
+				}
+			}
+			if !matchedCat {
+				continue
+			}
 		}
 		if q != "" {
 			hay := strings.ToLower(it.ID + " " + it.Name + " " + it.Author + " " + it.Description + " " + it.Repo + " " + it.FeaturedTag + " " + it.FeaturedSummary)
@@ -87,15 +125,107 @@ func (s *Server) articleObsidianMarket(w http.ResponseWriter, r *http.Request) (
 			filtered = append(filtered, it)
 		}
 	}
-	warn := ""
-	if fetchErr != nil {
-		warn = "无法连接 Obsidian 官方社区源，已显示内置精选推荐列表：" + fetchErr.Error()
-	}
 	return map[string]any{
-		"items":   filtered,
-		"total":   total,
-		"offline": offline,
-		"warning": warn,
+		"ok":            true,
+		"defaultMirror": catalog.DefaultMirror,
+		"sources":       catalog.Sources,
+		"categories":    catalog.Categories,
+		"items":         filtered,
+		"total":         total,
+		"offline":       catalog.Offline,
+		"warning":       catalog.Warning,
+	}, nil
+}
+
+func (s *Server) articleObsidianMarketAddSource(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	rawURL := strings.TrimSpace(body.URL)
+	if !strings.HasPrefix(rawURL, "https://") && !strings.HasPrefix(rawURL, "http://") {
+		return nil, bad("写作插件市场地址必须以 http:// 或 https:// 开头")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	idx, err := obsidian.FetchMarketIndex(ctx, rawURL, true)
+	if err != nil {
+		return nil, bad("无法读取写作插件市场索引：" + err.Error())
+	}
+	name := firstStr(strings.TrimSpace(body.Name), idx.Title.Label(), "自定义写作插件市场")
+	srcID := "obs_mkt_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	_, err = settings.Update(func(st *settings.Settings) error {
+		for _, cur := range st.ObsidianMarkets {
+			if strings.EqualFold(strings.TrimSpace(cur.URL), rawURL) {
+				return fmt.Errorf("已订阅过该写作插件市场源：%s", cur.Name)
+			}
+		}
+		st.ObsidianMarkets = append(st.ObsidianMarkets, settings.ObsidianMarketSource{
+			ID:      srcID,
+			Name:    name,
+			URL:     rawURL,
+			Mirrors: idx.Mirrors,
+			Enabled: true,
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, bad(err.Error())
+	}
+	mirror := firstStr(settings.Get().PreferredMarketMirror, obsidian.ObsidianMirrorGitee)
+	cat := s.obsidianMgr().ListMarketCatalog(ctx, obsidianMarketSourcesFromSettings(), mirror, false, false)
+	return map[string]any{
+		"ok":            true,
+		"id":            srcID,
+		"defaultMirror": cat.DefaultMirror,
+		"sources":       cat.Sources,
+		"categories":    cat.Categories,
+		"items":         cat.Items,
+		"total":         len(cat.Items),
+	}, nil
+}
+
+func (s *Server) articleObsidianMarketRemoveSource(w http.ResponseWriter, r *http.Request) (any, error) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		return nil, bad("缺少写作插件市场源 ID")
+	}
+	_, err := settings.Update(func(st *settings.Settings) error {
+		found := false
+		next := make([]settings.ObsidianMarketSource, 0, len(st.ObsidianMarkets))
+		for _, cur := range st.ObsidianMarkets {
+			if cur.ID == id {
+				if cur.Official {
+					return fmt.Errorf("官方写作插件市场源不可删除")
+				}
+				found = true
+				continue
+			}
+			next = append(next, cur)
+		}
+		if !found {
+			return fmt.Errorf("未找到指定的写作插件市场源")
+		}
+		st.ObsidianMarkets = next
+		return nil
+	})
+	if err != nil {
+		return nil, bad(err.Error())
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	mirror := firstStr(settings.Get().PreferredMarketMirror, obsidian.ObsidianMirrorGitee)
+	cat := s.obsidianMgr().ListMarketCatalog(ctx, obsidianMarketSourcesFromSettings(), mirror, false, false)
+	return map[string]any{
+		"ok":            true,
+		"defaultMirror": cat.DefaultMirror,
+		"sources":       cat.Sources,
+		"categories":    cat.Categories,
+		"items":         cat.Items,
+		"total":         len(cat.Items),
 	}, nil
 }
 
@@ -134,11 +264,15 @@ func (s *Server) articleObsidianInstall(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var body struct {
-		SourceType string `json:"sourceType"` // market | github | local | obsidian-vault
-		Repo       string `json:"repo"`
-		Dir        string `json:"dir"`
-		CopyData   *bool  `json:"copyData"`
-		Enable     bool   `json:"enable"`
+		SourceType      string            `json:"sourceType"` // market | github | local | obsidian-vault
+		ID              string            `json:"id"`
+		Repo            string            `json:"repo"`
+		Dir             string            `json:"dir"`
+		Mirror          string            `json:"mirror"`
+		DownloadMirrors map[string]string `json:"downloadMirrors"`
+		Files           []string          `json:"files"`
+		CopyData        *bool             `json:"copyData"`
+		Enable          bool              `json:"enable"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -147,8 +281,34 @@ func (s *Server) articleObsidianInstall(w http.ResponseWriter, r *http.Request) 
 	var inst obsidian.InstalledPlugin
 	var err error
 	st := strings.TrimSpace(body.SourceType)
+	mirror := firstStr(strings.TrimSpace(body.Mirror), settings.Get().PreferredMarketMirror, obsidian.ObsidianMirrorGitee)
 	switch st {
-	case "market", "github":
+	case "market":
+		dlMirrors := body.DownloadMirrors
+		files := body.Files
+		repo := strings.TrimSpace(body.Repo)
+		if len(dlMirrors) == 0 && strings.TrimSpace(body.ID) != "" {
+			// Look up mirrored dist info from curated market automatically.
+			ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+			cat := mgr.ListMarketCatalog(ctx, obsidianMarketSourcesFromSettings(), mirror, false, false)
+			cancel()
+			for _, it := range cat.Items {
+				if strings.EqualFold(it.ID, strings.TrimSpace(body.ID)) {
+					dlMirrors = it.DownloadMirrors
+					files = it.Files
+					if repo == "" {
+						repo = it.Repo
+					}
+					break
+				}
+			}
+		}
+		if len(dlMirrors) > 0 {
+			inst, err = mgr.InstallFromMirrors(r.Context(), repo, dlMirrors, files, mirror)
+		} else {
+			inst, err = mgr.InstallFromGitHub(r.Context(), repo, st)
+		}
+	case "github":
 		inst, err = mgr.InstallFromGitHub(r.Context(), body.Repo, st)
 	case "local", "obsidian-vault":
 		copyData := true

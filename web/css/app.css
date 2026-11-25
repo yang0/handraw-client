@@ -8645,3 +8645,80 @@ details.ic-links-sec:not([open]) .ic-links-chev {
     animation: none;
   }
 }
+
+/* ==========================================================================
+   Issue #127: Unified Extension & Plugin Hub (4 Markets + Workflow Bundles)
+   ========================================================================== */
+.pm-mirror-switch,
+.pm-seg-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+}
+.pm-seg-btn {
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.pm-seg-btn:hover {
+  color: var(--ink);
+}
+.pm-seg-btn.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+.pm-bundle-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 12px;
+}
+.pm-bundle-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 15px;
+  background: linear-gradient(180deg, var(--surface) 0%, color-mix(in srgb, var(--paper) 65%, var(--surface)) 100%);
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--line));
+}
+.pm-bundle-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pm-bundle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+.pm-bundle-pill.is-done {
+  border-color: color-mix(in srgb, var(--ok, #2e7d32) 38%, var(--line));
+  background: color-mix(in srgb, var(--ok, #2e7d32) 9%, var(--surface));
+  color: var(--ok, #2e7d32);
+}
+.pm-chip.pm-price-pro {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  color: var(--accent);
+  font-weight: 600;
+}
+.pm-chip.pm-price-paid {
+  background: color-mix(in srgb, #b86b00 14%, var(--surface));
+  color: #9a5800;
+  font-weight: 600;
+}

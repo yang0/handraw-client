@@ -78,6 +78,16 @@ type MarketVersion struct {
 	Engines          map[string]string `json:"engines,omitempty"`
 }
 
+type MarketPricing struct {
+	Model      string `json:"model,omitempty"` // free | pro | credits | paid
+	Credits    int    `json:"credits,omitempty"`
+	PriceCents int    `json:"priceCents,omitempty"`
+}
+
+type MarketDelivery struct {
+	Auth string `json:"auth,omitempty"` // none | handraw-account
+}
+
 type MarketPlugin struct {
 	Name        string               `json:"name"`
 	Title       MarketLocalizedText  `json:"title,omitempty"`
@@ -86,6 +96,8 @@ type MarketPlugin struct {
 	Author      string               `json:"author,omitempty"`
 	Homepage    string               `json:"homepage,omitempty"`
 	Repository  *MarketRepository    `json:"repository,omitempty"`
+	Pricing     *MarketPricing       `json:"pricing,omitempty"`
+	Delivery    *MarketDelivery      `json:"delivery,omitempty"`
 	Metadata    MarketPluginMetadata `json:"metadata"`
 	Versions    []MarketVersion      `json:"versions"`
 }
@@ -95,6 +107,7 @@ type MarketIndex struct {
 	Format      int                 `json:"format"`
 	Title       MarketLocalizedText `json:"title"`
 	Description MarketLocalizedText `json:"description,omitempty"`
+	Mirrors     map[string]string   `json:"mirrors,omitempty"`
 	Metadata    MarketIndexMetadata `json:"metadata"`
 	Plugins     []MarketPlugin      `json:"plugins"`
 }

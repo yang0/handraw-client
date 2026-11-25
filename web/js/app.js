@@ -213,6 +213,7 @@ async function start() {
     if (location.hash !== "#" + currentView) {
       history.replaceState(null, "", "#" + currentView);
     }
+    window.__handrawGo = go;
     updateActiveNav();
     const viewKind = currentView.startsWith("dsh:") ? "dsh" : (currentView.startsWith("plugin:") ? "plugin" : currentView);
     main.dataset.view = viewKind;

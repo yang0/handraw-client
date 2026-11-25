@@ -18,22 +18,44 @@ import (
 	"time"
 )
 
-// CatalogItem represents an entry from Obsidian's community-plugins.json registry.
+type MarketPricing struct {
+	Model      string `json:"model,omitempty"` // free | pro | credits | paid
+	Credits    int    `json:"credits,omitempty"`
+	PriceCents int    `json:"priceCents,omitempty"`
+}
+
+type MarketDelivery struct {
+	Auth string `json:"auth,omitempty"` // none | handraw-account
+}
+
+// CatalogItem represents an entry from Handraw's curated Format 1 Obsidian
+// writing plugins market or Obsidian's community-plugins.json registry (#127).
 type CatalogItem struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Author           string   `json:"author"`
-	Description      string   `json:"description"`
-	Repo             string   `json:"repo"` // owner/repo
-	Downloads        int64    `json:"downloads,omitempty"`
-	Featured         bool     `json:"featured,omitempty"`
-	FeaturedTag      string   `json:"featuredTag,omitempty"`
-	FeaturedSummary  string   `json:"featuredSummary,omitempty"`
-	Installed        bool     `json:"installed,omitempty"`
-	InstalledVersion string   `json:"installedVersion,omitempty"`
-	Enabled          bool     `json:"enabled,omitempty"`
-	CompatLevel      string   `json:"compatLevel,omitempty"`
-	Tags             []string `json:"tags,omitempty"`
+	ID               string            `json:"id"`
+	Version          string            `json:"version,omitempty"`
+	Name             string            `json:"name"`
+	Author           string            `json:"author"`
+	License          string            `json:"license,omitempty"`
+	Description      string            `json:"description"`
+	Repo             string            `json:"repo"` // owner/repo
+	Homepage         string            `json:"homepage,omitempty"`
+	Downloads        int64             `json:"downloads,omitempty"`
+	Categories       []string          `json:"categories,omitempty"`
+	Featured         bool              `json:"featured,omitempty"`
+	FeaturedTag      string            `json:"featuredTag,omitempty"`
+	FeaturedSummary  string            `json:"featuredSummary,omitempty"`
+	Installed        bool              `json:"installed,omitempty"`
+	InstalledVersion string            `json:"installedVersion,omitempty"`
+	Enabled          bool              `json:"enabled,omitempty"`
+	CompatLevel      string            `json:"compatLevel,omitempty"`
+	Tags             []string          `json:"tags,omitempty"`
+	DownloadMirrors  map[string]string `json:"downloadMirrors,omitempty"`
+	Files            []string          `json:"files,omitempty"`
+	Pricing          *MarketPricing    `json:"pricing,omitempty"`
+	Delivery         *MarketDelivery   `json:"delivery,omitempty"`
+	MarketSourceID   string            `json:"marketSourceId,omitempty"`
+	MarketSourceName string            `json:"marketSourceName,omitempty"`
+	MirroredFast     bool              `json:"mirroredFast,omitempty"`
 }
 
 type curatedPick struct {

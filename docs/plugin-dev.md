@@ -167,3 +167,19 @@ await hr.galleries.unregister("my-poses");
   - 任何符合 [Format 1 规范](https://github.com/yang0/handraw-galleries/blob/main/docs/spec.md) 的图库均可向 `yang0/handraw-galleries` 提交 PR（CI 自动运行 `node scripts/validate.mjs --check-remote` 校验）；
   - 客户端也支持订阅第三方 Format 1 `index.json` 市场源，或通过 `🔗 链接直装` 直接输入 `.json` / `.zip` 链接安装。
 
+---
+
+## 4. 四大官方扩展市场仓库与商业化预留协议（#127）
+
+手绘风桌面端左侧「扩展与插件中心」统一管理以下 4 套官方市场，均内置 **Gitee 国内镜像（默认优先）+ GitHub 原仓（自动回退）** 双镜像，并支持社区通过 PR 投稿：
+
+| 生态频道 | GitHub 官方原仓 | Gitee 国内镜像（默认优先） | 规范类型 |
+| --- | --- | --- | --- |
+| 功能插件（Handraw / DSH） | <https://github.com/yang0/handraw-plugins> | <https://gitee.com/yang02010/handraw-plugins> | DSH Format 1 |
+| 扩展图库 | <https://github.com/yang0/handraw-galleries> | <https://gitee.com/yang02010/handraw-galleries> | Gallery Format 1 |
+| AI Skills | <https://github.com/yang0/handraw-skills> | <https://gitee.com/yang02010/handraw-skills> | Skills Format 1 |
+| 写作插件（Obsidian 兼容） | <https://github.com/yang0/handraw-obsidian-plugins> | <https://gitee.com/yang02010/handraw-obsidian-plugins> | Obsidian Format 1 |
+
+### 可选商业化扩展字段（向后兼容，免费项可省略）
+4 套市场的条目均支持预留字段 `pricing`（`model`: `free` / `pro` / `credits` / `paid`、`credits`、`priceCents`）与 `delivery`（`auth`: `none` / `handraw-account`），供后续接入会员权益、积分兑换与创作者分成市场使用。
+

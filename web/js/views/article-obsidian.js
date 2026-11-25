@@ -1079,6 +1079,15 @@ export function createArticleObsidianController(opts) {
     renderPanel();
 
     showModal("Obsidian 插件管理（文章工作台）", body, [
+      el("button", {
+        type: "button",
+        class: "btn",
+        onClick: () => {
+          closeModal();
+          if (typeof window.__handrawGo === "function") window.__handrawGo("plugins", { tab: "obsidian" });
+          else location.hash = "#plugins";
+        },
+      }, "在扩展中心管理 ↗"),
       el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
     ]);
   }

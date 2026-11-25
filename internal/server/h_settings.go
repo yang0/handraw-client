@@ -59,6 +59,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		QuickShotHotkey            *string           `json:"quickShotHotkey"`
 		QuickShotEnabled           *bool   `json:"quickShotEnabled"`
 		MinimizeToTray             *bool   `json:"minimizeToTray"`
+		PreferredMarketMirror      *string `json:"preferredMarketMirror"`
 		LastRecipeID               *string `json:"lastRecipeId"`
 		Onboarded                  *bool   `json:"onboarded"`
 	}
@@ -143,6 +144,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		}
 		if body.MinimizeToTray != nil {
 			st.MinimizeToTray = *body.MinimizeToTray
+		}
+		if body.PreferredMarketMirror != nil {
+			m := strings.ToLower(strings.TrimSpace(*body.PreferredMarketMirror))
+			if m == "github" {
+				st.PreferredMarketMirror = "github"
+			} else if m == "gitee" {
+				st.PreferredMarketMirror = "gitee"
+			}
 		}
 		if body.LastRecipeID != nil {
 			st.LastRecipeID = *body.LastRecipeID

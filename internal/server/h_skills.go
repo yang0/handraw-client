@@ -1,12 +1,17 @@
 package server
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/yang0/handraw-client/internal/appdir"
+	"github.com/yang0/handraw-client/internal/settings"
 	"github.com/yang0/handraw-client/internal/skills"
 )
 
@@ -218,5 +223,170 @@ func (s *Server) skillImportLocal(w http.ResponseWriter, r *http.Request) (any, 
 		"imported": imported,
 		"failed":   failed,
 		"items":    all,
+	}, nil
+}
+
+func skillMarketSourcesFromSettings() []skills.MarketSource {
+	st := settings.Get()
+	out := make([]skills.MarketSource, 0, len(st.SkillMarkets))
+	for _, m := range st.SkillMarkets {
+		out = append(out, skills.MarketSource{
+			ID:       m.ID,
+			Name:     m.Name,
+			URL:      m.URL,
+			Mirrors:  m.Mirrors,
+			Official: m.Official,
+			Enabled:  m.Enabled,
+		})
+	}
+	return out
+}
+
+func (s *Server) skillMarketList(w http.ResponseWriter, r *http.Request) (any, error) {
+	refresh := r.URL.Query().Get("refresh") == "1" || strings.EqualFold(r.URL.Query().Get("refresh"), "true")
+	st := settings.Get()
+	mirror := firstStr(strings.TrimSpace(r.URL.Query().Get("mirror")), st.PreferredMarketMirror, skills.SkillMirrorGitee)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	res := s.skillsManager().ListMarketSkills(ctx, skillMarketSourcesFromSettings(), mirror, refresh)
+	return map[string]any{
+		"ok":            true,
+		"defaultMirror": res.DefaultMirror,
+		"sources":       res.Sources,
+		"categories":    res.Categories,
+		"skills":        res.Skills,
+	}, nil
+}
+
+func (s *Server) skillMarketAddSource(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	rawURL := strings.TrimSpace(body.URL)
+	if !strings.HasPrefix(rawURL, "https://") && !strings.HasPrefix(rawURL, "http://") {
+		return nil, bad("Skill 市场地址必须以 http:// 或 https:// 开头")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	idx, err := skills.FetchMarketIndex(ctx, rawURL, true)
+	if err != nil {
+		return nil, bad("无法读取 Skill 市场索引：" + err.Error())
+	}
+	name := firstStr(strings.TrimSpace(body.Name), idx.Title.Label(), "自定义 Skill 市场")
+	srcID := "sk_mkt_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	_, err = settings.Update(func(st *settings.Settings) error {
+		for _, cur := range st.SkillMarkets {
+			if strings.EqualFold(strings.TrimSpace(cur.URL), rawURL) {
+				return fmt.Errorf("已订阅过该 Skill 市场源：%s", cur.Name)
+			}
+		}
+		st.SkillMarkets = append(st.SkillMarkets, settings.SkillMarketSource{
+			ID:      srcID,
+			Name:    name,
+			URL:     rawURL,
+			Mirrors: idx.Mirrors,
+			Enabled: true,
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, bad(err.Error())
+	}
+	mirror := firstStr(settings.Get().PreferredMarketMirror, skills.SkillMirrorGitee)
+	res := s.skillsManager().ListMarketSkills(ctx, skillMarketSourcesFromSettings(), mirror, false)
+	return map[string]any{
+		"ok":            true,
+		"id":            srcID,
+		"defaultMirror": res.DefaultMirror,
+		"sources":       res.Sources,
+		"categories":    res.Categories,
+		"skills":        res.Skills,
+	}, nil
+}
+
+func (s *Server) skillMarketRemoveSource(w http.ResponseWriter, r *http.Request) (any, error) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		return nil, bad("缺少 Skill 市场源 ID")
+	}
+	_, err := settings.Update(func(st *settings.Settings) error {
+		found := false
+		next := make([]settings.SkillMarketSource, 0, len(st.SkillMarkets))
+		for _, cur := range st.SkillMarkets {
+			if cur.ID == id {
+				if cur.Official {
+					return fmt.Errorf("官方 Skill 市场源不可删除")
+				}
+				found = true
+				continue
+			}
+			next = append(next, cur)
+		}
+		if !found {
+			return fmt.Errorf("未找到指定的 Skill 市场源")
+		}
+		st.SkillMarkets = next
+		return nil
+	})
+	if err != nil {
+		return nil, bad(err.Error())
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	mirror := firstStr(settings.Get().PreferredMarketMirror, skills.SkillMirrorGitee)
+	res := s.skillsManager().ListMarketSkills(ctx, skillMarketSourcesFromSettings(), mirror, false)
+	return map[string]any{
+		"ok":            true,
+		"defaultMirror": res.DefaultMirror,
+		"sources":       res.Sources,
+		"categories":    res.Categories,
+		"skills":        res.Skills,
+	}, nil
+}
+
+func (s *Server) skillMarketInstall(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		ID     string `json:"id"`
+		Mirror string `json:"mirror"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	id := skills.SanitizeID(body.ID)
+	if id == "" {
+		return nil, bad("请选择要安装的 Skill")
+	}
+	mirror := firstStr(strings.TrimSpace(body.Mirror), settings.Get().PreferredMarketMirror, skills.SkillMirrorGitee)
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	mgr := s.skillsManager()
+	catalog := mgr.ListMarketSkills(ctx, skillMarketSourcesFromSettings(), mirror, false)
+	var found *skills.MarketSkillStatus
+	for i := range catalog.Skills {
+		if strings.EqualFold(catalog.Skills[i].ID, id) {
+			found = &catalog.Skills[i]
+			break
+		}
+	}
+	if found == nil {
+		return nil, notFound("Skill 市场中未找到：" + id)
+	}
+	sk, err := mgr.InstallMarketSkill(ctx, *found, mirror)
+	if err != nil {
+		return nil, bad(err.Error())
+	}
+	s.Emit("skills", map[string]any{"updated": true, "id": sk.ID})
+	refreshed := mgr.ListMarketSkills(ctx, skillMarketSourcesFromSettings(), mirror, false)
+	return map[string]any{
+		"ok":            true,
+		"skill":         sk,
+		"defaultMirror": refreshed.DefaultMirror,
+		"sources":       refreshed.Sources,
+		"categories":    refreshed.Categories,
+		"skills":        refreshed.Skills,
 	}, nil
 }

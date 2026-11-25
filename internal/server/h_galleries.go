@@ -413,13 +413,13 @@ func galleryMarketSourcesFromSettings() []galleries.MarketSource {
 // (official Gitee/GitHub dual-mirror handraw-galleries + custom subscribed sources + locally installed packs) (#122, #123).
 func (s *Server) galleryMarketList(w http.ResponseWriter, r *http.Request) (any, error) {
 	refresh := r.URL.Query().Get("refresh") == "1" || strings.EqualFold(r.URL.Query().Get("refresh"), "true")
-	mirror := firstStr(strings.TrimSpace(r.URL.Query().Get("mirror")), galleries.RuiCMirrorGitee)
+	mirror := firstStr(strings.TrimSpace(r.URL.Query().Get("mirror")), settings.Get().PreferredMarketMirror, galleries.RuiCMirrorGitee)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	res := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), mirror, refresh)
 	return map[string]any{
 		"ok":            true,
-		"defaultMirror": res.DefaultMirror,
+		"defaultMirror": mirror,
 		"sources":       res.Sources,
 		"categories":    res.Categories,
 		"packs":         res.Packs,

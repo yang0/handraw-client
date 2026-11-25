@@ -81,26 +81,140 @@ func (p Provider) TextModels() []Model {
 	return out
 }
 
-// PluginMarketSource is one subscribed DSH Format 1 plugin market index.json URL.
+// PluginMarketSource is one subscribed DSH Format 1 plugin market index.json URL (#127).
 type PluginMarketSource struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	Official bool   `json:"official,omitempty"`
-	Enabled  bool   `json:"enabled"`
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	URL      string            `json:"url"`
+	Mirrors  map[string]string `json:"mirrors,omitempty"`
+	Official bool              `json:"official,omitempty"`
+	Enabled  bool              `json:"enabled"`
 }
 
-// DefaultPluginMarkets returns the built-in official plugin market sources.
+// DefaultPluginMarkets returns the built-in official plugin market sources
+// with domestic Gitee mirror and GitHub origin kept in sync.
 func DefaultPluginMarkets() []PluginMarketSource {
 	return []PluginMarketSource{
 		{
-			ID:       "handraw-official",
-			Name:     "手绘风官方插件市场",
-			URL:      "https://raw.githubusercontent.com/yang0/handraw-plugins/main/index.json",
+			ID:   "handraw-official",
+			Name: "手绘风官方插件市场",
+			URL:  "https://raw.githubusercontent.com/yang0/handraw-plugins/main/index.json",
+			Mirrors: map[string]string{
+				"gitee":  "https://gitee.com/yang02010/handraw-plugins/raw/main/index.json",
+				"github": "https://raw.githubusercontent.com/yang0/handraw-plugins/main/index.json",
+			},
 			Official: true,
 			Enabled:  true,
 		},
 	}
+}
+
+func backfillOfficialPluginMarkets(markets []PluginMarketSource) []PluginMarketSource {
+	if len(markets) == 0 {
+		return DefaultPluginMarkets()
+	}
+	def := DefaultPluginMarkets()[0]
+	for i := range markets {
+		if markets[i].ID == def.ID && strings.EqualFold(strings.TrimSpace(markets[i].URL), def.URL) {
+			if len(markets[i].Mirrors) == 0 {
+				markets[i].Mirrors = map[string]string{
+					"gitee":  def.Mirrors["gitee"],
+					"github": def.Mirrors["github"],
+				}
+			}
+		}
+	}
+	return markets
+}
+
+// SkillMarketSource is one subscribed Format 1 AI Skills market index.json URL (#127).
+type SkillMarketSource struct {
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	URL      string            `json:"url"`
+	Mirrors  map[string]string `json:"mirrors,omitempty"`
+	Official bool              `json:"official,omitempty"`
+	Enabled  bool              `json:"enabled"`
+}
+
+// DefaultSkillMarkets returns the built-in official AI Skills market sources.
+func DefaultSkillMarkets() []SkillMarketSource {
+	return []SkillMarketSource{
+		{
+			ID:   "handraw-skills-official",
+			Name: "手绘风官方 Skills 市场",
+			URL:  "https://raw.githubusercontent.com/yang0/handraw-skills/main/index.json",
+			Mirrors: map[string]string{
+				"gitee":  "https://gitee.com/yang02010/handraw-skills/raw/main/index.json",
+				"github": "https://raw.githubusercontent.com/yang0/handraw-skills/main/index.json",
+			},
+			Official: true,
+			Enabled:  true,
+		},
+	}
+}
+
+func backfillOfficialSkillMarkets(markets []SkillMarketSource) []SkillMarketSource {
+	if len(markets) == 0 {
+		return DefaultSkillMarkets()
+	}
+	def := DefaultSkillMarkets()[0]
+	for i := range markets {
+		if markets[i].ID == def.ID && strings.EqualFold(strings.TrimSpace(markets[i].URL), def.URL) {
+			if len(markets[i].Mirrors) == 0 {
+				markets[i].Mirrors = map[string]string{
+					"gitee":  def.Mirrors["gitee"],
+					"github": def.Mirrors["github"],
+				}
+			}
+		}
+	}
+	return markets
+}
+
+// ObsidianMarketSource is one subscribed Format 1 Obsidian writing plugins market URL (#127).
+type ObsidianMarketSource struct {
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	URL      string            `json:"url"`
+	Mirrors  map[string]string `json:"mirrors,omitempty"`
+	Official bool              `json:"official,omitempty"`
+	Enabled  bool              `json:"enabled"`
+}
+
+// DefaultObsidianMarkets returns the built-in official Obsidian writing plugins market sources.
+func DefaultObsidianMarkets() []ObsidianMarketSource {
+	return []ObsidianMarketSource{
+		{
+			ID:   "handraw-obsidian-official",
+			Name: "手绘风官方写作插件市场",
+			URL:  "https://raw.githubusercontent.com/yang0/handraw-obsidian-plugins/main/index.json",
+			Mirrors: map[string]string{
+				"gitee":  "https://gitee.com/yang02010/handraw-obsidian-plugins/raw/main/index.json",
+				"github": "https://raw.githubusercontent.com/yang0/handraw-obsidian-plugins/main/index.json",
+			},
+			Official: true,
+			Enabled:  true,
+		},
+	}
+}
+
+func backfillOfficialObsidianMarkets(markets []ObsidianMarketSource) []ObsidianMarketSource {
+	if len(markets) == 0 {
+		return DefaultObsidianMarkets()
+	}
+	def := DefaultObsidianMarkets()[0]
+	for i := range markets {
+		if markets[i].ID == def.ID && strings.EqualFold(strings.TrimSpace(markets[i].URL), def.URL) {
+			if len(markets[i].Mirrors) == 0 {
+				markets[i].Mirrors = map[string]string{
+					"gitee":  def.Mirrors["gitee"],
+					"github": def.Mirrors["github"],
+				}
+			}
+		}
+	}
+	return markets
 }
 
 // GalleryMarketSource is one subscribed Format 1 extension gallery market index.json URL (#122, #123).
@@ -137,7 +251,7 @@ func backfillOfficialGalleryMarkets(markets []GalleryMarketSource) []GalleryMark
 	}
 	def := DefaultGalleryMarkets()[0]
 	for i := range markets {
-		if markets[i].ID == def.ID || markets[i].Official {
+		if markets[i].ID == def.ID && strings.EqualFold(strings.TrimSpace(markets[i].URL), def.URL) {
 			if len(markets[i].Mirrors) == 0 {
 				markets[i].Mirrors = map[string]string{
 					"gitee":  def.Mirrors["gitee"],
@@ -168,11 +282,14 @@ type Settings struct {
 	Providers          []Provider           `json:"providers"`
 	Harnesses          []harnesses.Config   `json:"harnesses,omitempty"`   // local CLI AI harness overrides & custom CLIs (#119)
 	SceneModels        map[string]string    `json:"sceneModels,omitempty"` // per-scene text/planning model overrides (#119)
-	Plugins            map[string]bool      `json:"plugins"`
-	PluginConfig       map[string]any       `json:"pluginConfig"`
-	PluginMarkets      []PluginMarketSource  `json:"pluginMarkets,omitempty"`
-	GalleryMarkets     []GalleryMarketSource `json:"galleryMarkets,omitempty"`
-	LastRecipeID       string                `json:"lastRecipeId"`
+	Plugins               map[string]bool        `json:"plugins"`
+	PluginConfig          map[string]any         `json:"pluginConfig"`
+	PreferredMarketMirror string                 `json:"preferredMarketMirror,omitempty"` // gitee | github (#127)
+	PluginMarkets         []PluginMarketSource   `json:"pluginMarkets,omitempty"`
+	GalleryMarkets        []GalleryMarketSource  `json:"galleryMarkets,omitempty"`
+	SkillMarkets          []SkillMarketSource    `json:"skillMarkets,omitempty"`
+	ObsidianMarkets       []ObsidianMarketSource `json:"obsidianMarkets,omitempty"`
+	LastRecipeID          string                 `json:"lastRecipeId"`
 	Onboarded          bool                 `json:"onboarded"`
 	// KeepSiteGenerationsPrivate stops website-model images from being
 	// published to the community automatically (the website default is public).
@@ -192,11 +309,14 @@ func Defaults() Settings {
 		QuickShotHotkey:   "Alt+Space",
 		QuickShotEnabled:  true,
 		MinimizeToTray:    true,
-		SceneModels:       map[string]string{},
-		Plugins:           map[string]bool{},
-		PluginConfig:      map[string]any{},
-		PluginMarkets:     DefaultPluginMarkets(),
-		GalleryMarkets:    DefaultGalleryMarkets(),
+		SceneModels:           map[string]string{},
+		Plugins:               map[string]bool{},
+		PluginConfig:          map[string]any{},
+		PreferredMarketMirror: "gitee",
+		PluginMarkets:         DefaultPluginMarkets(),
+		GalleryMarkets:        DefaultGalleryMarkets(),
+		SkillMarkets:          DefaultSkillMarkets(),
+		ObsidianMarkets:       DefaultObsidianMarkets(),
 	}
 }
 
@@ -286,10 +406,13 @@ func clone(s Settings) Settings {
 	if out.PluginConfig == nil {
 		out.PluginConfig = map[string]any{}
 	}
-	if len(out.PluginMarkets) == 0 {
-		out.PluginMarkets = DefaultPluginMarkets()
+	if out.PreferredMarketMirror != "github" {
+		out.PreferredMarketMirror = "gitee"
 	}
+	out.PluginMarkets = backfillOfficialPluginMarkets(out.PluginMarkets)
 	out.GalleryMarkets = backfillOfficialGalleryMarkets(out.GalleryMarkets)
+	out.SkillMarkets = backfillOfficialSkillMarkets(out.SkillMarkets)
+	out.ObsidianMarkets = backfillOfficialObsidianMarkets(out.ObsidianMarkets)
 	return out
 }
 
@@ -310,10 +433,13 @@ func load() Settings {
 	if s.WorksDir == "" {
 		s.WorksDir = appdir.DefaultWorks()
 	}
-	if len(s.PluginMarkets) == 0 {
-		s.PluginMarkets = DefaultPluginMarkets()
+	if s.PreferredMarketMirror != "github" {
+		s.PreferredMarketMirror = "gitee"
 	}
+	s.PluginMarkets = backfillOfficialPluginMarkets(s.PluginMarkets)
 	s.GalleryMarkets = backfillOfficialGalleryMarkets(s.GalleryMarkets)
+	s.SkillMarkets = backfillOfficialSkillMarkets(s.SkillMarkets)
+	s.ObsidianMarkets = backfillOfficialObsidianMarkets(s.ObsidianMarkets)
 	return s
 }
 
