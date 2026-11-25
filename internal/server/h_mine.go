@@ -828,7 +828,6 @@ func (s *Server) uploadPrivateResourceCover(ctx context.Context, localPath, labe
 	case ".webp":
 		mime = "image/webp"
 	}
-	assetUID := uuid.NewString()
 	cleanName := strings.TrimSpace(label)
 	if cleanName == "" {
 		cleanName = "自定义封面"
@@ -836,9 +835,9 @@ func (s *Server) uploadPrivateResourceCover(ctx context.Context, localPath, labe
 	if rs := []rune(cleanName); len(rs) > 72 {
 		cleanName = string(rs[:72])
 	}
-	respRaw, err := s.Site.Send(ctx, "PUT", "/api/library/assets/"+assetUID, map[string]any{
-		"uid":     assetUID,
-		"cat":     "other",
+	// Upload private style/layout covers to the dedicated non-gallery endpoint so they
+	// never pollute Web's personal image library ("我的图库") (#159, handraw-web#535).
+	respRaw, err := s.Site.Send(ctx, "POST", "/api/v1/me/resources/cover", map[string]any{
 		"name":    cleanName,
 		"dataUrl": "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw),
 		"origin":  "skill",
@@ -847,13 +846,20 @@ func (s *Server) uploadPrivateResourceCover(ctx context.Context, localPath, labe
 		return ""
 	}
 	var parsed struct {
+		UID      string `json:"uid"`
 		ImageURL string `json:"imageUrl"`
 		Item     struct {
+			UID      string `json:"uid"`
 			ImageURL string `json:"imageUrl"`
 		} `json:"item"`
 	}
 	_ = json.Unmarshal(respRaw, &parsed)
-	return firstStr(parsed.Item.ImageURL, parsed.ImageURL, "/api/library/assets/"+assetUID+"/image")
+	uid := firstStr(parsed.Item.UID, parsed.UID)
+	fallback := ""
+	if uid != "" {
+		fallback = "/api/library/assets/" + uid + "/image"
+	}
+	return firstStr(parsed.Item.ImageURL, parsed.ImageURL, fallback)
 }
 
 func (s *Server) downloadPrivateResourceCover(ctx context.Context, remoteURL string) string {

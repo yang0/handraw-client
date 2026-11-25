@@ -24,7 +24,8 @@ func TestCustomStyleLayoutSingleDescAndBidirectionalSync(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var uploadedAssets atomic.Int32
+	var uploadedCovers atomic.Int32
+	var galleryPutCalls atomic.Int32
 	var pushedExamples []string
 	webStyleID := uuid.NewString()
 	webCoverPath := "/api/library/assets/" + uuid.NewString() + "/image"
@@ -34,9 +35,12 @@ func TestCustomStyleLayoutSingleDescAndBidirectionalSync(t *testing.T) {
 		case r.URL.Path == "/api/auth/me":
 			_, _ = w.Write([]byte(`{"user":{"username":"tester"}}`))
 		case strings.HasPrefix(r.URL.Path, "/api/library/assets/") && r.Method == "PUT":
-			uploadedAssets.Add(1)
-			aid := strings.TrimPrefix(r.URL.Path, "/api/library/assets/")
-			_, _ = w.Write([]byte(`{"ok":true,"item":{"uid":"` + aid + `","imageUrl":"/api/library/assets/` + aid + `/image"}}`))
+			galleryPutCalls.Add(1)
+			w.WriteHeader(500)
+		case r.URL.Path == "/api/v1/me/resources/cover" && r.Method == "POST":
+			uploadedCovers.Add(1)
+			aid := uuid.NewString()
+			_, _ = w.Write([]byte(`{"ok":true,"uid":"` + aid + `","imageUrl":"/api/library/assets/` + aid + `/image","item":{"uid":"` + aid + `","imageUrl":"/api/library/assets/` + aid + `/image"}}`))
 		case r.URL.Path == webCoverPath && r.Method == "GET":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(pngBytes)
@@ -87,8 +91,11 @@ func TestCustomStyleLayoutSingleDescAndBidirectionalSync(t *testing.T) {
 	if rrSync.Code != 200 {
 		t.Fatalf("sync failed: %d %s", rrSync.Code, rrSync.Body.String())
 	}
-	if uploadedAssets.Load() != 1 {
-		t.Fatalf("expected 1 private cover upload, got %d", uploadedAssets.Load())
+	if uploadedCovers.Load() != 1 {
+		t.Fatalf("expected 1 private cover upload via /api/v1/me/resources/cover, got %d", uploadedCovers.Load())
+	}
+	if galleryPutCalls.Load() != 0 {
+		t.Fatalf("resource cover sync must NEVER write to /api/library/assets/ personal gallery, got %d PUT calls", galleryPutCalls.Load())
 	}
 	if len(pushedExamples) != 1 || !strings.HasPrefix(pushedExamples[0], "/api/library/assets/") {
 		t.Fatalf("expected pushed cover example URL, got %v", pushedExamples)
