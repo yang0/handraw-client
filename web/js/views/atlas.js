@@ -1597,14 +1597,23 @@ export async function openExternalPacksModal(onChanged, onOpenPack) {
   };
 
   const loadMarket = async (refresh = false) => {
-    const res = await api("GET", `/api/galleries/market${refresh ? "?refresh=1" : ""}`);
+    const qs = new URLSearchParams();
+    if (mirror) qs.set("mirror", mirror);
+    if (refresh) qs.set("refresh", "1");
+    const res = await api("GET", `/api/galleries/market?${qs.toString()}`);
     applyCatalog(res);
   };
 
   const sourceTypeLabel = (t) => {
+    if (t === "zip") return "离线 ZIP 包";
     if (t === "ruic-poseatlas") return "开源图鉴";
-    if (t === "zip") return "ZIP 图库包";
-    return "JSON 图库";
+    return "标准 JSON 清单";
+  };
+
+  const mirrorTag = (m) => {
+    if (m === "gitee") return "Gitee";
+    if (m === "github") return "GitHub";
+    return "";
   };
 
   const renderModalBody = () => {
@@ -1613,13 +1622,18 @@ export async function openExternalPacksModal(onChanged, onOpenPack) {
     // 1. Subscribed Market Sources & Quick Actions Bar
     const srcChips = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } });
     sources.forEach((s) => {
+      const mTag = mirrorTag(s.activeMirror);
       const chip = el("span", {
         class: "badge" + (s.official ? " badge-accent" : ""),
-        title: s.error ? `${s.url}\n加载失败：${s.error}${s.fallback ? "（已使用内置回退索引）" : ""}` : s.url,
+        title: s.error
+          ? `${s.url}\n加载失败：${s.error}${s.fallback ? "（已使用内置回退索引）" : ""}`
+          : (s.activeUrl || s.url),
         style: { display: "inline-flex", alignItems: "center", gap: "5px", padding: "3px 9px" },
       },
         s.name || s.id,
-        s.fallback ? "（离线索引）" : (s.error ? "（连接失败）" : ` · ${s.count || 0}`),
+        s.fallback
+          ? "（离线索引）"
+          : (s.error ? "（连接失败）" : `${mTag ? " · " + mTag : ""} · ${s.count || 0}`),
         !s.official
           ? el("button", {
               type: "button",
@@ -1648,14 +1662,26 @@ export async function openExternalPacksModal(onChanged, onOpenPack) {
 
     const topSourceCard = el("div", { class: "card col", style: { padding: "11px 13px", gap: "8px", background: "var(--paper)" } },
       el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
-        el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
+        el("div", { class: "row", style: { gap: "8px", alignItems: "center", flexWrap: "wrap" } },
           el("strong", { style: { fontSize: "13px" } }, "图库插件市场源"),
+          el("a", {
+            href: "https://gitee.com/yang02010/handraw-galleries",
+            class: "muted",
+            style: { fontSize: "11.5px" },
+            onClick: (e) => { e.preventDefault(); openURL("https://gitee.com/yang02010/handraw-galleries"); },
+          }, "Gitee 国内镜像 ↗"),
           el("a", {
             href: "https://github.com/yang0/handraw-galleries",
             class: "muted",
             style: { fontSize: "11.5px" },
             onClick: (e) => { e.preventDefault(); openURL("https://github.com/yang0/handraw-galleries"); },
-          }, "官方图库仓库 ↗")
+          }, "GitHub 原仓 ↗"),
+          el("a", {
+            href: "https://github.com/yang0/handraw-galleries/blob/main/CONTRIBUTING.md",
+            class: "muted",
+            style: { fontSize: "11.5px" },
+            onClick: (e) => { e.preventDefault(); openURL("https://github.com/yang0/handraw-galleries/blob/main/CONTRIBUTING.md"); },
+          }, "提交图库 PR ↗")
         ),
         el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
           el("button", {
@@ -1784,6 +1810,21 @@ export async function openExternalPacksModal(onChanged, onOpenPack) {
       }, `${c.name} (${c.count})`))
     );
 
+    const switchMirror = async (nextMirror) => {
+      if (mirror === nextMirror || busyId) return;
+      mirror = nextMirror;
+      busyId = "__mirror__";
+      renderModalBody();
+      try {
+        await loadMarket(false);
+      } catch (e) {
+        toast(e?.message || "切换镜像失败");
+      } finally {
+        busyId = "";
+        renderModalBody();
+      }
+    };
+
     const mirrorBar = el("div", { class: "row ext-mirror-bar", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
       catBar,
       el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
@@ -1792,13 +1833,13 @@ export async function openExternalPacksModal(onChanged, onOpenPack) {
           type: "button",
           class: "pill-btn" + (mirror === "gitee" ? " pill-accent" : ""),
           disabled: Boolean(busyId),
-          onClick: () => { mirror = "gitee"; renderModalBody(); },
+          onClick: () => switchMirror("gitee"),
         }, "Gitee 国内"),
         el("button", {
           type: "button",
           class: "pill-btn" + (mirror === "github" ? " pill-accent" : ""),
           disabled: Boolean(busyId),
-          onClick: () => { mirror = "github"; renderModalBody(); },
+          onClick: () => switchMirror("github"),
         }, "GitHub 原仓")
       )
     );

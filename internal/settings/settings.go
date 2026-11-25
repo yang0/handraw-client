@@ -103,26 +103,50 @@ func DefaultPluginMarkets() []PluginMarketSource {
 	}
 }
 
-// GalleryMarketSource is one subscribed Format 1 extension gallery market index.json URL (#122).
+// GalleryMarketSource is one subscribed Format 1 extension gallery market index.json URL (#122, #123).
 type GalleryMarketSource struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	Official bool   `json:"official,omitempty"`
-	Enabled  bool   `json:"enabled"`
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	URL      string            `json:"url"`
+	Mirrors  map[string]string `json:"mirrors,omitempty"`
+	Official bool              `json:"official,omitempty"`
+	Enabled  bool              `json:"enabled"`
 }
 
-// DefaultGalleryMarkets returns the built-in official extension gallery market sources.
+// DefaultGalleryMarkets returns the built-in official extension gallery market sources
+// with domestic Gitee mirror and GitHub origin kept in sync (#123).
 func DefaultGalleryMarkets() []GalleryMarketSource {
 	return []GalleryMarketSource{
 		{
-			ID:       "handraw-galleries-official",
-			Name:     "手绘风官方图库市场",
-			URL:      "https://raw.githubusercontent.com/yang0/handraw-galleries/main/index.json",
+			ID:   "handraw-galleries-official",
+			Name: "手绘风官方图库市场",
+			URL:  "https://raw.githubusercontent.com/yang0/handraw-galleries/main/index.json",
+			Mirrors: map[string]string{
+				"gitee":  "https://gitee.com/yang02010/handraw-galleries/raw/main/index.json",
+				"github": "https://raw.githubusercontent.com/yang0/handraw-galleries/main/index.json",
+			},
 			Official: true,
 			Enabled:  true,
 		},
 	}
+}
+
+func backfillOfficialGalleryMarkets(markets []GalleryMarketSource) []GalleryMarketSource {
+	if len(markets) == 0 {
+		return DefaultGalleryMarkets()
+	}
+	def := DefaultGalleryMarkets()[0]
+	for i := range markets {
+		if markets[i].ID == def.ID || markets[i].Official {
+			if len(markets[i].Mirrors) == 0 {
+				markets[i].Mirrors = map[string]string{
+					"gitee":  def.Mirrors["gitee"],
+					"github": def.Mirrors["github"],
+				}
+			}
+		}
+	}
+	return markets
 }
 
 type Settings struct {
@@ -265,9 +289,7 @@ func clone(s Settings) Settings {
 	if len(out.PluginMarkets) == 0 {
 		out.PluginMarkets = DefaultPluginMarkets()
 	}
-	if len(out.GalleryMarkets) == 0 {
-		out.GalleryMarkets = DefaultGalleryMarkets()
-	}
+	out.GalleryMarkets = backfillOfficialGalleryMarkets(out.GalleryMarkets)
 	return out
 }
 
@@ -291,9 +313,7 @@ func load() Settings {
 	if len(s.PluginMarkets) == 0 {
 		s.PluginMarkets = DefaultPluginMarkets()
 	}
-	if len(s.GalleryMarkets) == 0 {
-		s.GalleryMarkets = DefaultGalleryMarkets()
-	}
+	s.GalleryMarkets = backfillOfficialGalleryMarkets(s.GalleryMarkets)
 	return s
 }
 

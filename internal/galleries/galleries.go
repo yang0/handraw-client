@@ -46,10 +46,12 @@ type Variant struct {
 
 type Meta struct {
 	ID               string     `json:"id"`
+	Version          string     `json:"version,omitempty"`
 	Name             string     `json:"name"`
 	NameEn           string     `json:"nameEn,omitempty"`
 	Description      string     `json:"description,omitempty"`
 	Icon             string     `json:"icon,omitempty"`
+	Author           string     `json:"author,omitempty"`
 	Source           string     `json:"source"` // official | pack | personal | third-party | plugin:<id>
 	PromptRole       string     `json:"promptRole,omitempty"`
 	SupportsRefImage bool       `json:"supportsRefImage"`
@@ -98,30 +100,36 @@ type Query struct {
 	Offset   int
 }
 
-// Registration describes a declarative or plugin-contributed gallery.
+// Registration describes a Standard Format 1 declarative or plugin-contributed gallery (#123).
 type Registration struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	NameEn           string `json:"nameEn,omitempty"`
-	Description      string `json:"description,omitempty"`
-	Icon             string `json:"icon,omitempty"`
-	Source           string `json:"source,omitempty"`
-	Owner            string `json:"-"` // plugin id when dynamically registered
-	PromptRole       string `json:"promptRole,omitempty"`
-	SupportsRefImage *bool  `json:"supportsRefImage,omitempty"`
-	LocalOnly        bool   `json:"localOnly,omitempty"`
-	MultiVariant     bool   `json:"multiVariant,omitempty"`
-	UpstreamURL      string `json:"upstreamUrl,omitempty"`
-	Mirror           string `json:"mirror,omitempty"`
-	License          string `json:"license,omitempty"`
-	ImageRoot        string `json:"-"`
-	Items            []Item `json:"items"`
+	Format           int               `json:"format,omitempty"`
+	ID               string            `json:"id"`
+	Version          string            `json:"version,omitempty"`
+	Name             string            `json:"name"`
+	NameEn           string            `json:"nameEn,omitempty"`
+	Description      string            `json:"description,omitempty"`
+	Icon             string            `json:"icon,omitempty"`
+	Author           string            `json:"author,omitempty"`
+	Source           string            `json:"source,omitempty"`
+	Owner            string            `json:"-"` // plugin id when dynamically registered
+	PromptRole       string            `json:"promptRole,omitempty"`
+	SupportsRefImage *bool             `json:"supportsRefImage,omitempty"`
+	LocalOnly        bool              `json:"localOnly,omitempty"`
+	MultiVariant     bool              `json:"multiVariant,omitempty"`
+	UpstreamURL      string            `json:"upstreamUrl,omitempty"`
+	Mirror           string            `json:"mirror,omitempty"`
+	ImageBaseURL     string            `json:"imageBaseUrl,omitempty"`
+	ImageMirrors     map[string]string `json:"imageMirrors,omitempty"`
+	License          string            `json:"license,omitempty"`
+	ImageRoot        string            `json:"-"`
+	Items            []Item            `json:"items"`
 }
 
 type galleryEntry struct {
-	meta  Meta
-	owner string
-	items []Item
+	meta         Meta
+	owner        string
+	imageMirrors map[string]string
+	items        []Item
 }
 
 type cachedFileEntry struct {
@@ -352,8 +360,23 @@ func (r *Registry) ResolveImage(pack *resources.Pack, kind, id string, extraDirs
 // ResolveImageTarget resolves an item (and optional variant key + thumb/full)
 // to an existing local file or an on-demand cache target + upstream remote URLs.
 func (r *Registry) ResolveImageTarget(pack *resources.Pack, kind, id, variantKey string, wantThumb bool, extraDirs ...string) (ImageTarget, bool) {
-	it, ok := r.Item(pack, kind, id, extraDirs...)
+	entry, ok := r.findEntry(pack, kind, extraDirs...)
 	if !ok {
+		return ImageTarget{}, false
+	}
+	want := strings.TrimSpace(id)
+	var (
+		it    Item
+		found bool
+	)
+	for _, cand := range entry.items {
+		if strings.EqualFold(cand.ID, want) {
+			it = cand
+			found = true
+			break
+		}
+	}
+	if !found {
 		return ImageTarget{}, false
 	}
 
@@ -428,13 +451,11 @@ func (r *Registry) ResolveImageTarget(pack *resources.Pack, kind, id, variantKey
 		}
 		out.RemoteURLs = append(out.RemoteURLs, u)
 	}
-	addRemote(primaryRemote)
-	for _, alt := range mirrorFallbacks(primaryRemote) {
-		addRemote(alt)
+	for _, u := range expandRemoteWithMirrors(primaryRemote, entry.meta.Mirror, entry.imageMirrors) {
+		addRemote(u)
 	}
-	addRemote(fallbackRemote)
-	for _, alt := range mirrorFallbacks(fallbackRemote) {
-		addRemote(alt)
+	for _, u := range expandRemoteWithMirrors(fallbackRemote, entry.meta.Mirror, entry.imageMirrors) {
+		addRemote(u)
 	}
 
 	if out.LocalPath == "" && len(out.RemoteURLs) == 0 {
@@ -855,14 +876,26 @@ func buildEntry(kind string, reg Registration, builtin bool) galleryEntry {
 		}
 		items = append(items, it)
 	}
+	var imgMirrors map[string]string
+	if len(reg.ImageMirrors) > 0 {
+		imgMirrors = make(map[string]string, len(reg.ImageMirrors))
+		for k, v := range reg.ImageMirrors {
+			if mk := strings.ToLower(strings.TrimSpace(k)); mk != "" && strings.TrimSpace(v) != "" {
+				imgMirrors[mk] = strings.TrimSpace(v)
+			}
+		}
+	}
 	return galleryEntry{
-		owner: reg.Owner,
+		owner:        reg.Owner,
+		imageMirrors: imgMirrors,
 		meta: Meta{
 			ID:               kind,
+			Version:          strings.TrimSpace(reg.Version),
 			Name:             firstNonEmpty(reg.Name, kind),
 			NameEn:           reg.NameEn,
 			Description:      reg.Description,
 			Icon:             reg.Icon,
+			Author:           strings.TrimSpace(reg.Author),
 			Source:           src,
 			PromptRole:       firstNonEmpty(reg.PromptRole, "custom"),
 			SupportsRefImage: supportsRef,
@@ -952,8 +985,99 @@ func resolveSafeTarget(root, rel string) string {
 	return candidate
 }
 
-// mirrorFallbacks maps between Gitee mirror and GitHub raw URLs for RuiC-PoseAtlas
-// so on-demand image caching automatically falls back if one mirror is unreachable.
+// expandRemoteWithMirrors returns ordered candidate remote URLs for a gallery item
+// image/thumb using the gallery's declared Format 1 `imageMirrors` map (#123),
+// with automatic failover across all declared mirrors and backward-compatible
+// fallback for legacy installed packs.
+func expandRemoteWithMirrors(rawURL, preferredMirror string, imageMirrors map[string]string) []string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(u string) {
+		u = strings.TrimSpace(u)
+		if u == "" || seen[u] {
+			return
+		}
+		if strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://") {
+			seen[u] = true
+			out = append(out, u)
+		}
+	}
+
+	orderedMirrorBases := func() []string {
+		if len(imageMirrors) == 0 {
+			return nil
+		}
+		var keys []string
+		seenK := map[string]bool{}
+		addK := func(k string) {
+			k = strings.ToLower(strings.TrimSpace(k))
+			if k == "" || seenK[k] {
+				return
+			}
+			if _, ok := imageMirrors[k]; ok {
+				seenK[k] = true
+				keys = append(keys, k)
+			}
+		}
+		addK(preferredMirror)
+		addK(RuiCMirrorGitee)
+		addK(RuiCMirrorGitHub)
+		var rest []string
+		for k := range imageMirrors {
+			if !seenK[k] {
+				rest = append(rest, k)
+			}
+		}
+		sort.Strings(rest)
+		keys = append(keys, rest...)
+		bases := make([]string, 0, len(keys))
+		for _, k := range keys {
+			if b := strings.TrimSpace(imageMirrors[k]); b != "" {
+				bases = append(bases, b)
+			}
+		}
+		return bases
+	}
+
+	bases := orderedMirrorBases()
+	if strings.HasPrefix(rawURL, "https://") || strings.HasPrefix(rawURL, "http://") {
+		// If rawURL matches any declared mirror base, emit preferred mirror first and then all fallbacks.
+		matchedRel := ""
+		for _, b := range bases {
+			nb := b
+			if !strings.HasSuffix(nb, "/") {
+				nb += "/"
+			}
+			if strings.HasPrefix(rawURL, nb) {
+				matchedRel = strings.TrimPrefix(rawURL, nb)
+				break
+			}
+		}
+		add(rawURL)
+		if matchedRel != "" {
+			for _, b := range bases {
+				add(resolveRemoteURL(b, matchedRel))
+			}
+		}
+		for _, alt := range mirrorFallbacks(rawURL) {
+			add(alt)
+		}
+		return out
+	}
+
+	// Relative remote path: resolve across all declared mirrors in preferred order.
+	for _, b := range bases {
+		add(resolveRemoteURL(b, rawURL))
+	}
+	return out
+}
+
+// mirrorFallbacks preserves backward-compatible failover for legacy packs that
+// did not store an explicit `imageMirrors` map in their local registration JSON.
 func mirrorFallbacks(rawURL string) []string {
 	const (
 		giteePrefix  = "https://gitee.com/mingtian2018/RuiC-PoseAtlas/raw/main/"

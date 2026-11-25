@@ -21,21 +21,28 @@ import (
 )
 
 const (
-	OfficialGalleryMarketURL = "https://raw.githubusercontent.com/yang0/handraw-galleries/main/index.json"
-	maxMarketIndexBytes      = 4 << 20   // 4 MiB max for index.json
-	maxGalleryJSONBytes      = 24 << 20  // 24 MiB max for a single gallery JSON
-	maxGalleryZipBytes       = 150 << 20 // 150 MiB max for a zip gallery pack
-	marketCacheTTL           = 5 * time.Minute
-	marketMetaFile           = ".gallery-market-meta.json"
+	OfficialGalleryMarketGiteeURL  = "https://gitee.com/yang02010/handraw-galleries/raw/main/index.json"
+	OfficialGalleryMarketGitHubURL = "https://raw.githubusercontent.com/yang0/handraw-galleries/main/index.json"
+	OfficialGalleryMarketURL       = OfficialGalleryMarketGitHubURL
+	StandardRuiCRepoGitHubURL      = "https://github.com/yang0/handraw-gallery-ruic-poseatlas"
+	StandardRuiCRepoGiteeURL       = "https://gitee.com/yang02010/handraw-gallery-ruic-poseatlas"
+	StandardRuiCRawBaseGitee       = "https://gitee.com/yang02010/handraw-gallery-ruic-poseatlas/raw/main/galleries/"
+	StandardRuiCRawBaseGitHub      = "https://raw.githubusercontent.com/yang0/handraw-gallery-ruic-poseatlas/main/galleries/"
+	maxMarketIndexBytes            = 4 << 20   // 4 MiB max for index.json
+	maxGalleryJSONBytes            = 24 << 20  // 24 MiB max for a single gallery JSON
+	maxGalleryZipBytes             = 150 << 20 // 150 MiB max for a zip gallery pack
+	marketCacheTTL                 = 5 * time.Minute
+	marketMetaFile                 = ".gallery-market-meta.json"
 )
 
-// MarketSource is one subscribed Format 1 gallery market index URL.
+// MarketSource is one subscribed Format 1 gallery market index URL (with optional mirrors).
 type MarketSource struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	Official bool   `json:"official,omitempty"`
-	Enabled  bool   `json:"enabled"`
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	URL      string            `json:"url"`
+	Mirrors  map[string]string `json:"mirrors,omitempty"`
+	Official bool              `json:"official,omitempty"`
+	Enabled  bool              `json:"enabled"`
 }
 
 // MarketLocalized holds Chinese/English labels.
@@ -48,11 +55,12 @@ func (l MarketLocalized) Label() string {
 	return firstNonEmpty(strings.TrimSpace(l.Zh), strings.TrimSpace(l.En))
 }
 
-// MarketIndex is Format 1 of the Handraw Gallery Market index.json (#122).
+// MarketIndex is Format 1 of the Handraw Gallery Market index.json (#122, #123).
 type MarketIndex struct {
-	Format      int             `json:"format"`
-	Title       MarketLocalized `json:"title,omitempty"`
-	Description MarketLocalized `json:"description,omitempty"`
+	Format      int               `json:"format"`
+	Title       MarketLocalized   `json:"title,omitempty"`
+	Description MarketLocalized   `json:"description,omitempty"`
+	Mirrors     map[string]string `json:"mirrors,omitempty"`
 	Metadata    struct {
 		Categories map[string]struct {
 			Title MarketLocalized `json:"title"`
@@ -98,14 +106,16 @@ type MarketGallery struct {
 
 // MarketSourceStatus reports the live fetch state of one subscribed market source.
 type MarketSourceStatus struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	Official bool   `json:"official,omitempty"`
-	Enabled  bool   `json:"enabled"`
-	Count    int    `json:"count"`
-	Error    string `json:"error,omitempty"`
-	Fallback bool   `json:"fallback,omitempty"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	ActiveMirror string `json:"activeMirror,omitempty"`
+	ActiveURL    string `json:"activeUrl,omitempty"`
+	Official     bool   `json:"official,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	Count        int    `json:"count"`
+	Error        string `json:"error,omitempty"`
+	Fallback     bool   `json:"fallback,omitempty"`
 }
 
 // MarketPackStatus is the merged view returned to the client UI for every
@@ -179,9 +189,10 @@ func ClearMarketCache() {
 	marketCacheMu.Unlock()
 }
 
-// BuiltinFallbackGalleries returns the curated fallback catalog matching
-// yang0/handraw-galleries so users without direct GitHub Raw access can still
-// discover and install the 3 RuiC-PoseAtlas packs via Gitee mirror.
+// BuiltinFallbackGalleries returns the curated Standard Format 1 fallback catalog
+// matching yang0/handraw-galleries (and its Gitee mirror yang02010/handraw-galleries)
+// so users can still discover and install standard gallery manifests if both market
+// index mirrors are temporarily unreachable (#123).
 func BuiltinFallbackGalleries() []MarketGallery {
 	t := true
 	return []MarketGallery{
@@ -202,12 +213,14 @@ func BuiltinFallbackGalleries() []MarketGallery {
 			PromptRole:       "pose",
 			SupportsRefImage: &t,
 			Source: MarketGallerySource{
-				Type:        "ruic-poseatlas",
-				PackID:      "ruic-poses",
-				DataPath:    "data/poses.json",
-				Mirrors:     map[string]string{RuiCMirrorGitee: RuiCRawBaseGitee, RuiCMirrorGitHub: RuiCRawBaseGitHub},
-				UpstreamURL: RuiCRepoGitHubURL,
-				MirrorURL:   RuiCRepoGiteeURL,
+				Type: "json",
+				URL:  StandardRuiCRawBaseGitHub + "ruic-poses.json",
+				Mirrors: map[string]string{
+					RuiCMirrorGitee:  StandardRuiCRawBaseGitee + "ruic-poses.json",
+					RuiCMirrorGitHub: StandardRuiCRawBaseGitHub + "ruic-poses.json",
+				},
+				UpstreamURL: StandardRuiCRepoGitHubURL,
+				MirrorURL:   StandardRuiCRepoGiteeURL,
 			},
 		},
 		{
@@ -226,12 +239,14 @@ func BuiltinFallbackGalleries() []MarketGallery {
 			PromptRole:       "costume",
 			SupportsRefImage: &t,
 			Source: MarketGallerySource{
-				Type:        "ruic-poseatlas",
-				PackID:      "ruic-costumes",
-				DataPath:    "data/costumes.json",
-				Mirrors:     map[string]string{RuiCMirrorGitee: RuiCRawBaseGitee, RuiCMirrorGitHub: RuiCRawBaseGitHub},
-				UpstreamURL: RuiCRepoGitHubURL,
-				MirrorURL:   RuiCRepoGiteeURL,
+				Type: "json",
+				URL:  StandardRuiCRawBaseGitHub + "ruic-costumes.json",
+				Mirrors: map[string]string{
+					RuiCMirrorGitee:  StandardRuiCRawBaseGitee + "ruic-costumes.json",
+					RuiCMirrorGitHub: StandardRuiCRawBaseGitHub + "ruic-costumes.json",
+				},
+				UpstreamURL: StandardRuiCRepoGitHubURL,
+				MirrorURL:   StandardRuiCRepoGiteeURL,
 			},
 		},
 		{
@@ -250,12 +265,14 @@ func BuiltinFallbackGalleries() []MarketGallery {
 			PromptRole:       "face",
 			SupportsRefImage: &t,
 			Source: MarketGallerySource{
-				Type:        "ruic-poseatlas",
-				PackID:      "ruic-faces",
-				DataPath:    "data/faces.json",
-				Mirrors:     map[string]string{RuiCMirrorGitee: RuiCRawBaseGitee, RuiCMirrorGitHub: RuiCRawBaseGitHub},
-				UpstreamURL: RuiCRepoGitHubURL,
-				MirrorURL:   RuiCRepoGiteeURL,
+				Type: "json",
+				URL:  StandardRuiCRawBaseGitHub + "ruic-faces.json",
+				Mirrors: map[string]string{
+					RuiCMirrorGitee:  StandardRuiCRawBaseGitee + "ruic-faces.json",
+					RuiCMirrorGitHub: StandardRuiCRawBaseGitHub + "ruic-faces.json",
+				},
+				UpstreamURL: StandardRuiCRepoGitHubURL,
+				MirrorURL:   StandardRuiCRepoGiteeURL,
 			},
 		},
 	}
@@ -306,17 +323,72 @@ func FetchMarketIndex(ctx context.Context, rawURL string, forceRefresh bool) (Ma
 	return idx, nil
 }
 
+type mirrorCandidate struct {
+	mirror string
+	url    string
+}
+
+func marketSourceCandidates(src MarketSource, preferredMirror string) []mirrorCandidate {
+	var out []mirrorCandidate
+	seen := map[string]bool{}
+	add := func(m, u string) {
+		u = strings.TrimSpace(u)
+		if u == "" || seen[u] {
+			return
+		}
+		if strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://") {
+			seen[u] = true
+			out = append(out, mirrorCandidate{mirror: m, url: u})
+		}
+	}
+	pref := strings.ToLower(strings.TrimSpace(preferredMirror))
+	if pref != RuiCMirrorGitHub {
+		pref = RuiCMirrorGitee
+	}
+	if len(src.Mirrors) > 0 {
+		add(pref, src.Mirrors[pref])
+		for _, k := range mirrorOrder(pref) {
+			add(k, src.Mirrors[k])
+		}
+		for k, v := range src.Mirrors {
+			add(k, v)
+		}
+	}
+	add("", src.URL)
+	return out
+}
+
+// FetchMarketIndexForSource tries the preferred mirror first (default Gitee in China)
+// and falls back across other configured mirrors and the primary URL (#123).
+func FetchMarketIndexForSource(ctx context.Context, src MarketSource, preferredMirror string, forceRefresh bool) (MarketIndex, string, string, error) {
+	cands := marketSourceCandidates(src, preferredMirror)
+	if len(cands) == 0 {
+		return MarketIndex{}, "", "", errors.New("图库市场源未配置有效地址")
+	}
+	var lastErr error
+	for _, c := range cands {
+		idx, err := FetchMarketIndex(ctx, c.url, forceRefresh)
+		if err == nil {
+			return idx, c.mirror, c.url, nil
+		}
+		lastErr = err
+	}
+	return MarketIndex{}, "", "", lastErr
+}
+
 // ListMarketPacks merges all enabled gallery market sources with local install
 // state and any locally installed standalone gallery JSON packs.
-func ListMarketPacks(ctx context.Context, galleriesDir string, sources []MarketSource, forceRefresh bool) MarketCatalogResult {
+func ListMarketPacks(ctx context.Context, galleriesDir string, sources []MarketSource, preferredMirror string, forceRefresh bool) MarketCatalogResult {
 	metaMap := readAllInstallMeta(galleriesDir)
 	catLabels := map[string]string{
-		"pose":     "人体姿态",
-		"costume":  "服装穿搭",
-		"portrait": "人像与造型",
-		"scene":    "场景与道具",
-		"style":    "风格与色彩",
-		"custom":   "本地安装",
+		"pose":      "人体姿态",
+		"costume":   "服装穿搭",
+		"portrait":  "人像与造型",
+		"scene":     "场景与道具",
+		"style":     "风格与色彩",
+		"character": "角色设定",
+		"layout":    "构图与版式",
+		"custom":    "本地安装",
 	}
 
 	var srcStatuses []MarketSourceStatus
@@ -334,9 +406,7 @@ func ListMarketPacks(ctx context.Context, galleriesDir string, sources []MarketS
 		supportsRef := g.SupportsRefImage == nil || *g.SupportsRefImage
 		srcType := strings.ToLower(strings.TrimSpace(g.Source.Type))
 		if srcType == "" {
-			if strings.HasPrefix(id, "ruic-") {
-				srcType = "ruic-poseatlas"
-			} else if strings.HasSuffix(strings.ToLower(g.Source.URL), ".zip") {
+			if strings.HasSuffix(strings.ToLower(g.Source.URL), ".zip") {
 				srcType = "zip"
 			} else {
 				srcType = "json"
@@ -382,7 +452,7 @@ func ListMarketPacks(ctx context.Context, galleriesDir string, sources []MarketS
 			srcStatuses = append(srcStatuses, sst)
 			continue
 		}
-		idx, err := FetchMarketIndex(ctx, src.URL, forceRefresh)
+		idx, activeMirror, activeURL, err := FetchMarketIndexForSource(ctx, src, preferredMirror, forceRefresh)
 		if err != nil {
 			sst.Error = err.Error()
 			if src.Official {
@@ -394,6 +464,8 @@ func ListMarketPacks(ctx context.Context, galleriesDir string, sources []MarketS
 				}
 			}
 		} else {
+			sst.ActiveMirror = activeMirror
+			sst.ActiveURL = activeURL
 			if title := idx.Title.Label(); title != "" && !src.Official {
 				sst.Name = title
 			}
@@ -404,7 +476,7 @@ func ListMarketPacks(ctx context.Context, galleriesDir string, sources []MarketS
 			}
 			sst.Count = len(idx.Galleries)
 			for _, g := range idx.Galleries {
-				addEntry(g, src.ID, sst.Name, src.URL)
+				addEntry(g, src.ID, sst.Name, firstNonEmpty(activeURL, src.URL))
 			}
 		}
 		srcStatuses = append(srcStatuses, sst)
@@ -501,11 +573,13 @@ func ListMarketPacks(ctx context.Context, galleriesDir string, sources []MarketS
 }
 
 func genericPackCacheStats(galleriesDir, packID string) (int, int64) {
-	if _, ok := findExternalPack(packID); ok {
-		return packCacheStats(galleriesDir, packID)
-	}
 	files := 0
 	var totalBytes int64
+	if _, ok := findExternalPack(packID); ok {
+		lf, lb := packCacheStats(galleriesDir, packID)
+		files += lf
+		totalBytes += lb
+	}
 	for _, d := range []string{
 		filepath.Join(galleriesDir, "cache", packID),
 		filepath.Join(galleriesDir, packID),
@@ -614,19 +688,15 @@ func InstallGalleryFromURL(ctx context.Context, galleriesDir, rawURL, idHint, mi
 	return installJSONBytes(galleriesDir, data, rawURL, pack, mirror)
 }
 
-// UninstallAnyPack uninstalls either a RuiC-PoseAtlas pack or any generic
-// JSON/ZIP extension gallery plugin cleanly.
+// UninstallAnyPack uninstalls any standard JSON/ZIP or legacy extension gallery
+// plugin cleanly, removing its manifest, unpacked directory, and local caches.
 func UninstallAnyPack(galleriesDir, packID string, purgeCache bool) error {
 	id := strings.ToLower(strings.TrimSpace(packID))
 	if !ValidKind(id) || isCoreBuiltinKind(id) {
 		return fmt.Errorf("无法卸载内置或无效图库 %q", packID)
 	}
 	if _, ok := findExternalPack(id); ok {
-		if err := UninstallExternalPack(galleriesDir, id, purgeCache); err != nil {
-			return err
-		}
-		deleteInstallMeta(galleriesDir, id)
-		return nil
+		_ = UninstallExternalPack(galleriesDir, id, purgeCache)
 	}
 	manifestPath := filepath.Join(galleriesDir, id+".json")
 	if err := os.Remove(manifestPath); err != nil && !os.IsNotExist(err) {
@@ -728,10 +798,15 @@ func installJSONBytes(galleriesDir string, data []byte, sourceURL string, pack M
 	if isCoreBuiltinKind(id) {
 		return MarketPackStatus{}, fmt.Errorf("图库标识 %q 为系统内置画廊，不能覆盖", id)
 	}
+	if reg.Format == 0 {
+		reg.Format = 1
+	}
 	reg.ID = id
+	reg.Version = firstNonEmpty(strings.TrimSpace(reg.Version), strings.TrimSpace(pack.Version), "1.0.0")
 	reg.Name = firstNonEmpty(strings.TrimSpace(reg.Name), strings.TrimSpace(pack.Name), id)
 	reg.NameEn = firstNonEmpty(strings.TrimSpace(reg.NameEn), strings.TrimSpace(pack.NameEn))
 	reg.Description = firstNonEmpty(strings.TrimSpace(reg.Description), strings.TrimSpace(pack.Description))
+	reg.Author = firstNonEmpty(strings.TrimSpace(reg.Author), strings.TrimSpace(pack.Author))
 	reg.License = firstNonEmpty(strings.TrimSpace(reg.License), strings.TrimSpace(pack.License))
 	reg.PromptRole = firstNonEmpty(strings.TrimSpace(reg.PromptRole), strings.TrimSpace(pack.PromptRole))
 	reg.UpstreamURL = firstNonEmpty(strings.TrimSpace(reg.UpstreamURL), strings.TrimSpace(pack.UpstreamURL), sourceURL)
@@ -743,26 +818,30 @@ func installJSONBytes(galleriesDir string, data []byte, sourceURL string, pack M
 		reg.Mirror = mirror
 	}
 
-	baseURL := firstNonEmpty(strings.TrimSpace(pack.Source.BaseURL), dirOfURL(sourceURL))
+	baseURL := pickGalleryImageBaseURL(reg, pack.Source, sourceURL, mirror)
 	for i := range reg.Items {
 		it := &reg.Items[i]
+		rawImgKey := strings.TrimSpace(it.RemoteImage)
+		rawThumbKey := strings.TrimSpace(it.RemoteThumb)
 		it.RemoteImage = resolveRemoteURL(baseURL, it.RemoteImage)
 		it.RemoteThumb = resolveRemoteURL(baseURL, it.RemoteThumb)
 		if it.RemoteImage != "" && strings.TrimSpace(it.Image) == "" {
-			it.Image = cacheRelPath(id, it.ID, "full", it.RemoteImage)
+			it.Image = cacheRelPath(id, it.ID, "full", firstNonEmpty(rawImgKey, it.RemoteImage))
 		}
 		if it.RemoteThumb != "" && strings.TrimSpace(it.Thumb) == "" {
-			it.Thumb = cacheRelPath(id, it.ID, "thumb", it.RemoteThumb)
+			it.Thumb = cacheRelPath(id, it.ID, "thumb", firstNonEmpty(rawThumbKey, it.RemoteThumb))
 		}
 		for j := range it.Variants {
 			v := &it.Variants[j]
+			vImgKey := strings.TrimSpace(v.RemoteImage)
+			vThumbKey := strings.TrimSpace(v.RemoteThumb)
 			v.RemoteImage = resolveRemoteURL(baseURL, v.RemoteImage)
 			v.RemoteThumb = resolveRemoteURL(baseURL, v.RemoteThumb)
 			if v.RemoteImage != "" && strings.TrimSpace(v.Image) == "" {
-				v.Image = cacheRelPath(id, it.ID+"_"+v.Key, "full", v.RemoteImage)
+				v.Image = cacheRelPath(id, it.ID+"_"+v.Key, "full", firstNonEmpty(vImgKey, v.RemoteImage))
 			}
 			if v.RemoteThumb != "" && strings.TrimSpace(v.Thumb) == "" {
-				v.Thumb = cacheRelPath(id, it.ID+"_"+v.Key, "thumb", v.RemoteThumb)
+				v.Thumb = cacheRelPath(id, it.ID+"_"+v.Key, "thumb", firstNonEmpty(vThumbKey, v.RemoteThumb))
 			}
 		}
 	}
@@ -775,7 +854,7 @@ func installJSONBytes(galleriesDir string, data []byte, sourceURL string, pack M
 		return MarketPackStatus{}, err
 	}
 
-	ver := firstNonEmpty(strings.TrimSpace(pack.Version), "1.0.0")
+	ver := firstNonEmpty(strings.TrimSpace(reg.Version), strings.TrimSpace(pack.Version), "1.0.0")
 	saveInstallMeta(galleriesDir, installedPackMeta{
 		ID:          id,
 		Version:     ver,
@@ -991,6 +1070,22 @@ func installZipBytes(galleriesDir string, data []byte, sourceURL string, pack Ma
 	out.Mirror = mirror
 	out.CachedFiles, out.CachedBytes = genericPackCacheStats(galleriesDir, id)
 	return out, nil
+}
+
+func pickGalleryImageBaseURL(reg Registration, src MarketGallerySource, sourceURL, mirror string) string {
+	if len(reg.ImageMirrors) > 0 {
+		for _, k := range mirrorOrder(mirror) {
+			if u := strings.TrimSpace(reg.ImageMirrors[k]); u != "" {
+				return u
+			}
+		}
+		for _, u := range reg.ImageMirrors {
+			if u = strings.TrimSpace(u); u != "" {
+				return u
+			}
+		}
+	}
+	return firstNonEmpty(strings.TrimSpace(reg.ImageBaseURL), strings.TrimSpace(src.BaseURL), dirOfURL(sourceURL))
 }
 
 func dirOfURL(rawURL string) string {

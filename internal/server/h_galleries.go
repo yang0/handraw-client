@@ -401,6 +401,7 @@ func galleryMarketSourcesFromSettings() []galleries.MarketSource {
 			ID:       m.ID,
 			Name:     m.Name,
 			URL:      m.URL,
+			Mirrors:  m.Mirrors,
 			Official: m.Official,
 			Enabled:  m.Enabled,
 		})
@@ -409,12 +410,13 @@ func galleryMarketSourcesFromSettings() []galleries.MarketSource {
 }
 
 // galleryMarketList returns the merged extension gallery plugin market catalog
-// (official yang0/handraw-galleries + custom subscribed sources + locally installed packs) (#122).
+// (official Gitee/GitHub dual-mirror handraw-galleries + custom subscribed sources + locally installed packs) (#122, #123).
 func (s *Server) galleryMarketList(w http.ResponseWriter, r *http.Request) (any, error) {
 	refresh := r.URL.Query().Get("refresh") == "1" || strings.EqualFold(r.URL.Query().Get("refresh"), "true")
+	mirror := firstStr(strings.TrimSpace(r.URL.Query().Get("mirror")), galleries.RuiCMirrorGitee)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	res := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), refresh)
+	res := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), mirror, refresh)
 	return map[string]any{
 		"ok":            true,
 		"defaultMirror": res.DefaultMirror,
@@ -455,6 +457,7 @@ func (s *Server) galleryMarketAddSource(w http.ResponseWriter, r *http.Request) 
 			ID:      srcID,
 			Name:    name,
 			URL:     rawURL,
+			Mirrors: idx.Mirrors,
 			Enabled: true,
 		})
 		return nil
@@ -462,7 +465,7 @@ func (s *Server) galleryMarketAddSource(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		return nil, bad(err.Error())
 	}
-	res := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
+	res := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), galleries.RuiCMirrorGitee, false)
 	return map[string]any{
 		"ok":            true,
 		"id":            srcID,
@@ -503,7 +506,7 @@ func (s *Server) galleryMarketRemoveSource(w http.ResponseWriter, r *http.Reques
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
-	res := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
+	res := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), galleries.RuiCMirrorGitee, false)
 	return map[string]any{
 		"ok":            true,
 		"defaultMirror": res.DefaultMirror,
@@ -542,7 +545,7 @@ func (s *Server) galleryPacksInstall(w http.ResponseWriter, r *http.Request) (an
 		}
 		s.Galleries.InvalidateFileCache()
 		s.Emit("galleries", map[string]any{"updated": true})
-		catalog := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
+		catalog := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), mirror, false)
 		return map[string]any{
 			"ok":            true,
 			"installed":     []galleries.MarketPackStatus{st},
@@ -561,7 +564,7 @@ func (s *Server) galleryPacksInstall(w http.ResponseWriter, r *http.Request) (an
 		return nil, bad("请选择要安装的扩展图库")
 	}
 
-	catalog := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
+	catalog := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), mirror, false)
 	byID := map[string]galleries.MarketPackStatus{}
 	for _, p := range catalog.Packs {
 		byID[p.ID] = p
@@ -589,7 +592,7 @@ func (s *Server) galleryPacksInstall(w http.ResponseWriter, r *http.Request) (an
 	if len(installed) == 0 && len(errs) > 0 {
 		return nil, bad("安装图库失败：" + strings.Join(errs, "；"))
 	}
-	refreshed := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
+	refreshed := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), mirror, false)
 	return map[string]any{
 		"ok":            true,
 		"installed":     installed,
@@ -615,7 +618,7 @@ func (s *Server) galleryPackUninstall(w http.ResponseWriter, r *http.Request) (a
 	s.Emit("galleries", map[string]any{"updated": true})
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
-	refreshed := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), false)
+	refreshed := galleries.ListMarketPacks(ctx, appdir.Galleries(), galleryMarketSourcesFromSettings(), galleries.RuiCMirrorGitee, false)
 	return map[string]any{
 		"ok":            true,
 		"defaultMirror": refreshed.DefaultMirror,

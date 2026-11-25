@@ -157,12 +157,13 @@ await hr.galleries.unregister("my-poses");
 
 除功能型插件在运行时动态注册画廊外，纯素材/参考图类图库可直接打包为**扩展图库插件**，由用户在 **画廊 → `🧩 扩展图库`** 中按需选装（不随启动自动安装，索引与图片仅缓存在本机）：
 
-- **官方图库插件市场仓库**：<https://github.com/yang0/handraw-galleries>
-- **默认订阅索引**：`https://raw.githubusercontent.com/yang0/handraw-galleries/main/index.json`
-- **内置首批可选图库插件**：`ruic-poses`（姿态图鉴）、`ruic-costumes`（衣装图鉴）、`ruic-faces`（人像图鉴），均基于开源项目 RuiC-PoseAtlas，支持 Gitee / GitHub 镜像切换。
-- **支持的图库插件格式**（详见仓库内 `docs/spec.md`）：
-  1. `json`：声明式图库清单（本地或远程图片按需缓存，无需写代码）。
+- **官方图库插件市场仓库（双镜像同步）**：
+  - Gitee 国内镜像（默认优先）：<https://gitee.com/yang02010/handraw-galleries>（订阅索引：`https://gitee.com/yang02010/handraw-galleries/raw/main/index.json`）
+  - GitHub 官方原仓：<https://github.com/yang0/handraw-galleries>（订阅索引：`https://raw.githubusercontent.com/yang0/handraw-galleries/main/index.json`）
+- **统一标准接口（Format 1）**：所有收录图库（包括已改造迁移至 [handraw-gallery-ruic-poseatlas](https://github.com/yang0/handraw-gallery-ruic-poseatlas) / [Gitee 镜像](https://gitee.com/yang02010/handraw-gallery-ruic-poseatlas) 的 `ruic-poses`、`ruic-costumes`、`ruic-faces` 三套开源图鉴）均采用统一标准格式，无需客户端硬编码适配：
+  1. `json`：标准 Format 1 声明式 `gallery.json`，原生支持单图与 `variants[]` 多视角变体，并支持通过 `imageMirrors` 声明国内/国际多图床自动容错切换。
   2. `zip`：离线图库压缩包（内含 `gallery.json` 与相对路径图片，解压即用）。
-  3. `ruic-poseatlas`：开源多视角/单图图鉴适配器。
-- **扩展方式**：支持订阅第三方 Format 1 `index.json` 市场源，也支持在市场弹窗中通过 `🔗 链接直装` 直接输入 `.json` 或 `.zip` 链接安装。
+- **社区 PR 投稿与自定义扩展**：
+  - 任何符合 [Format 1 规范](https://github.com/yang0/handraw-galleries/blob/main/docs/spec.md) 的图库均可向 `yang0/handraw-galleries` 提交 PR（CI 自动运行 `node scripts/validate.mjs --check-remote` 校验）；
+  - 客户端也支持订阅第三方 Format 1 `index.json` 市场源，或通过 `🔗 链接直装` 直接输入 `.json` / `.zip` 链接安装。
 

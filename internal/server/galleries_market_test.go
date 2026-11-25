@@ -182,3 +182,108 @@ func TestGalleryMarketSourcesJSONZipAndDirectInstall(t *testing.T) {
 		t.Fatalf("DELETE custom gallery market source failed: %d %s", rrDelSrc.Code, rrDelSrc.Body.String())
 	}
 }
+
+func TestGalleryFormat1ImageMirrorsFailoverAndVariants(t *testing.T) {
+	srv, _ := setupTestServer(t, "")
+	h := srv.Handler()
+	galleries.ClearMarketCache()
+	t.Cleanup(galleries.ClearMarketCache)
+
+	pngBytes := tinyPNG(t)
+
+	var giteeHits, githubHits int
+	mockHost := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gitee/poses.json":
+			// Simulate Gitee returning 451 / error on manifest so installer falls back to GitHub.
+			w.WriteHeader(http.StatusUnavailableForLegalReasons)
+			_, _ = w.Write([]byte("blocked"))
+		case "/github/poses.json":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"format":       1,
+				"id":           "std-poses",
+				"version":      "1.2.0",
+				"name":         "标准多视角姿势",
+				"author":       "Tester",
+				"license":      "MIT",
+				"multiVariant": true,
+				"imageMirrors": map[string]string{
+					"gitee":  "http://" + r.Host + "/gitee-img/",
+					"github": "http://" + r.Host + "/github-img/",
+				},
+				"items": []map[string]any{
+					{
+						"id":          "P01",
+						"name":        "回眸站姿",
+						"category":    "standing",
+						"remoteThumb": "thumbs/p01_front.png",
+						"remoteImage": "full/p01_front.png",
+						"variants": []map[string]any{
+							{"key": "front", "label": "正面", "remoteThumb": "thumbs/p01_front.png", "remoteImage": "full/p01_front.png"},
+							{"key": "side", "label": "侧面", "remoteThumb": "thumbs/p01_side.png", "remoteImage": "full/p01_side.png"},
+						},
+					},
+				},
+			})
+		case "/gitee-img/full/p01_side.png":
+			giteeHits++
+			// Primary Gitee image mirror fails; generic imageMirrors must fail over to GitHub!
+			w.WriteHeader(http.StatusBadGateway)
+		case "/github-img/full/p01_side.png":
+			githubHits++
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(pngBytes)
+		case "/index.json":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"format": 1,
+				"title":  map[string]string{"zh": "镜像容错测试市场"},
+				"galleries": []map[string]any{
+					{
+						"id":           "std-poses",
+						"version":      "1.2.0",
+						"name":         "标准多视角姿势",
+						"author":       "Tester",
+						"license":      "MIT",
+						"categories":   []string{"pose"},
+						"multiVariant": true,
+						"source": map[string]any{
+							"type": "json",
+							"url":  "http://" + r.Host + "/github/poses.json",
+							"mirrors": map[string]string{
+								"gitee":  "http://" + r.Host + "/gitee/poses.json",
+								"github": "http://" + r.Host + "/github/poses.json",
+							},
+						},
+					},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockHost.Close()
+
+	// Subscribe test market & install with preferred mirror="gitee" (which fails over to github for poses.json).
+	if rr := doReq(t, h, srv.Token, "POST", "/api/galleries/market/sources", map[string]any{
+		"url": mockHost.URL + "/index.json",
+	}); rr.Code != 200 {
+		t.Fatalf("add market source failed: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doReq(t, h, srv.Token, "POST", "/api/galleries/market/install", map[string]any{
+		"id":     "std-poses",
+		"mirror": "gitee",
+	}); rr.Code != 200 {
+		t.Fatalf("install std-poses failed: %d %s", rr.Code, rr.Body.String())
+	}
+
+	// Fetch variant="side" full image: must try gitee-img first and fail over automatically to github-img.
+	rrImg := doReq(t, h, srv.Token, "GET", "/api/galleries/std-poses/items/P01/image?variant=side", nil)
+	if rrImg.Code != 200 || rrImg.Body.Len() != len(pngBytes) {
+		t.Fatalf("expected multi-mirror failover image 200 len=%d, got %d len=%d", len(pngBytes), rrImg.Code, rrImg.Body.Len())
+	}
+	if giteeHits == 0 || githubHits == 0 {
+		t.Fatalf("expected failover sequence gitee->github, got giteeHits=%d githubHits=%d", giteeHits, githubHits)
+	}
+}
