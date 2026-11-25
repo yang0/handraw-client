@@ -1325,8 +1325,22 @@ class Workspace extends Events {
     this._mdView = new MarkdownView(this._mdLeaf);
     this._mdLeaf.view = this._mdView;
     this.activeLeaf = this._mdLeaf;
-    this.rightSplit = { collapsed: true };
-    this.leftSplit = { collapsed: false };
+    this.containerEl = document.body || document.createElement("div");
+    this.rootSplit = { containerEl: this.containerEl, children: [] };
+    this.rightSplit = {
+      collapsed: true,
+      containerEl: document.createElement("div"),
+      collapse() { this.collapsed = true; },
+      expand() { this.collapsed = false; },
+    };
+    this.leftSplit = {
+      collapsed: false,
+      containerEl: document.createElement("div"),
+      collapse() { this.collapsed = true; },
+      expand() { this.collapsed = false; },
+    };
+    this.activeWindow = window;
+    this.activeDocument = document;
     this._layoutReady = true;
     this._leafSeq = 1;
   }
@@ -1549,6 +1563,7 @@ const openModals = [];
 class Modal {
   constructor(app) {
     this.app = app || appInstance;
+    this.scope = new Scope();
     this.containerEl = document.createElement("div");
     this.containerEl.className = "modal-container";
     this.modalEl = this.containerEl.createDiv({ cls: "modal" });
@@ -1596,34 +1611,51 @@ class Modal {
 class SuggestModal extends Modal {
   constructor(app) {
     super(app);
+    this.limit = 100;
     this.emptyStateText = "无匹配项";
-    this.inputEl = null;
-    this.resultContainerEl = null;
-  }
-  setPlaceholder(p) { this._placeholder = p; if (this.inputEl) this.inputEl.placeholder = p; }
-  setInstructions() {}
-  onOpen() {
-    this.contentEl.empty();
-    this.inputEl = this.contentEl.createEl("input", { cls: "prompt-input", type: "search", placeholder: this._placeholder || "输入关键词筛选…" });
+    this._placeholder = "输入关键词筛选…";
+    this.inputEl = this.contentEl.createEl("input", {
+      cls: "prompt-input",
+      type: "search",
+      placeholder: this._placeholder,
+    });
     this.resultContainerEl = this.contentEl.createDiv({ cls: "prompt-results" });
-    const renderList = async () => {
-      const items = await Promise.resolve(this.getSuggestions(this.inputEl.value || ""));
-      this.resultContainerEl.empty();
-      if (!items || !items.length) {
-        this.resultContainerEl.createDiv({ cls: "obs-empty-view", text: this.emptyStateText });
-        return;
-      }
-      items.forEach((it, idx) => {
-        const row = this.resultContainerEl.createDiv({ cls: "suggestion-item" + (idx === 0 ? " is-selected" : "") });
-        this.renderSuggestion(it, row);
-        row.addEventListener("click", (ev) => {
-          this.onChooseSuggestion(it, ev);
-          this.close();
-        });
+    this.inputEl.addEventListener("input", () => { this._renderSuggestions(); });
+  }
+  setPlaceholder(p) {
+    this._placeholder = String(p ?? "");
+    if (this.inputEl) this.inputEl.placeholder = this._placeholder;
+  }
+  setInstructions() {}
+  async _renderSuggestions() {
+    if (!this.resultContainerEl) return;
+    const raw = await Promise.resolve(this.getSuggestions(this.inputEl?.value || ""));
+    const items = Array.isArray(raw) ? raw.slice(0, this.limit || 100) : [];
+    this.resultContainerEl.empty();
+    if (!items.length) {
+      this.resultContainerEl.createDiv({ cls: "obs-empty-view", text: this.emptyStateText });
+      return;
+    }
+    items.forEach((it, idx) => {
+      const row = this.resultContainerEl.createDiv({ cls: "suggestion-item" + (idx === 0 ? " is-selected" : "") });
+      this.renderSuggestion(it, row);
+      row.addEventListener("click", (ev) => {
+        this.onChooseSuggestion(it, ev);
+        this.close();
       });
-    };
-    this.inputEl.addEventListener("input", renderList);
-    renderList();
+    });
+  }
+  onOpen() {
+    if (this.inputEl && this.inputEl.parentElement !== this.contentEl) {
+      this.contentEl.appendChild(this.inputEl);
+    }
+    if (this.resultContainerEl && this.resultContainerEl.parentElement !== this.contentEl) {
+      this.contentEl.appendChild(this.resultContainerEl);
+    }
+    if (this.inputEl) {
+      this.inputEl.placeholder = this._placeholder || "输入关键词筛选…";
+    }
+    this._renderSuggestions();
     setTimeout(() => this.inputEl?.focus(), 0);
   }
   getSuggestions() { return []; }
@@ -1998,6 +2030,12 @@ class Plugin extends Component {
     if (this.app?.commands?.commands) this.app.commands.commands[fullId] = entry;
     syncRegistryToParent();
     return entry;
+  }
+  removeCommand(cmdId) {
+    const fullId = String(cmdId || "").includes(":") ? String(cmdId) : `${this.manifest.id}:${cmdId}`;
+    this._commands = this._commands.filter((c) => c.fullId !== fullId && c.id !== cmdId);
+    if (this.app?.commands?.commands) delete this.app.commands.commands[fullId];
+    syncRegistryToParent();
   }
   addRibbonIcon(icon, title, callback) {
     const id = `${this.manifest.id}:ribbon:${this._ribbons.length}`;
@@ -2576,8 +2614,22 @@ class App {
       },
     };
     this.commands = {
-      commands: {},
-      executeCommandById: (id) => executePluginCommand(id),
+      commands: {
+        "editor:save-file": {
+          id: "editor:save-file",
+          name: "Save current file",
+          checkCallback: (checking) => Boolean(checking || true),
+        },
+      },
+      executeCommandById: (id) => {
+        const builtin = this.commands.commands[id];
+        if (builtin && !builtin.pluginId) {
+          if (typeof builtin.checkCallback === "function") return builtin.checkCallback(false);
+          if (typeof builtin.callback === "function") return builtin.callback();
+          return true;
+        }
+        return executePluginCommand(id);
+      },
       listCommands: () => Object.values(this.commands.commands),
     };
     this.hotkeyManager = {
@@ -2607,7 +2659,16 @@ class App {
       enabledPlugins: new Set(),
       getPlugin: (id) => loadedPlugins.get(id)?.instance || null,
     };
-    this.internalPlugins = { getPluginById: () => null, plugins: {} };
+    this.internalPlugins = {
+      getPluginById: () => null,
+      plugins: new Proxy({}, {
+        get(target, prop) {
+          if (prop in target) return target[prop];
+          if (typeof prop === "symbol") return undefined;
+          return { enabled: false, instance: null };
+        },
+      }),
+    };
     this.setting = {
       open: () => {},
       openTabById: (id) => openPluginSettings(id),
@@ -2617,6 +2678,15 @@ class App {
 
 const appInstance = new App();
 window.app = appInstance;
+window.activeWindow = window;
+window.activeDocument = document;
+if (!window.CodeMirrorAdapter) {
+  window.CodeMirrorAdapter = {
+    commands: {
+      save: () => appInstance.commands.executeCommandById("editor:save-file"),
+    },
+  };
+}
 
 function buildObsidianExports(pluginId) {
   const reqUrl = makeRequestUrl(pluginId);
