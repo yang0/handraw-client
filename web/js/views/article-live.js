@@ -878,9 +878,18 @@ export function createArticleLiveEditor(opts) {
   let coverSlotBox = null;
   let orphanSlotsBox = null;
   let backlinksBox = null;
+  let tocRailEl = null;
   let rootHostEl = null;
   let lastDocVersionPath = "";
   let suppressDocChange = false;
+
+  // Phase 1 (#126): Slash Command Menu, Selection Floating Toolbar, Floating Outline TOC
+  let slashEl = null;
+  let slashState = null; // { startPos, endPos, query, items, selected }
+  let selBarEl = null;
+  let selBarPaletteOpen = false;
+  let selBarTimer = null;
+  let tocTimer = null;
 
   const liveDecoField = StateField.define({
     create(state) {
@@ -1274,6 +1283,299 @@ export function createArticleLiveEditor(opts) {
     openArticleContextMenu(ev, items);
   }
 
+  // ---------- Phase 1 (#126): Slash Command "/" Popup ----------
+  function closeSlashMenu() {
+    if (slashEl) { slashEl.remove(); slashEl = null; }
+    slashState = null;
+  }
+
+  const SLASH_COMMANDS = [
+    { group: "基础排版", icon: "H1", label: "一级标题", hint: "# ", kw: "h1 title heading 标题 一级", run: () => setParagraphPrefix("# ") },
+    { group: "基础排版", icon: "H2", label: "二级标题", hint: "## ", kw: "h2 subtitle heading 标题 二级", run: () => setParagraphPrefix("## ") },
+    { group: "基础排版", icon: "H3", label: "三级标题", hint: "### ", kw: "h3 heading 标题 三级", run: () => setParagraphPrefix("### ") },
+    { group: "基础排版", icon: "☑", label: "任务清单", hint: "- [ ]", kw: "todo task check 待办 任务 清单", run: () => setParagraphPrefix("- [ ] ") },
+    { group: "基础排版", icon: "•", label: "无序列表", hint: "- ", kw: "ul bullet list 列表 无序", run: () => setParagraphPrefix("- ") },
+    { group: "基础排版", icon: "❝", label: "引用块", hint: "> ", kw: "quote blockquote 引用", run: () => setParagraphPrefix("> ") },
+    { group: "结构块", icon: "⊞", label: "Markdown 表格", hint: "3×2", kw: "table 表格 gfm", run: () => insertBlockSnippet("| 列一 | 列二 | 列三 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |") },
+    { group: "结构块", icon: "💡", label: "提示框 (Tip Callout)", hint: "[!TIP]", kw: "callout tip 提示 提示框 标注", run: () => insertBlockSnippet("> [!TIP] 提示\n> 在此输入实用要点") },
+    { group: "结构块", icon: "⚠️", label: "注意框 (Warning)", hint: "[!WARNING]", kw: "callout warn warning 注意 风险 坑点", run: () => insertBlockSnippet("> [!WARNING] 注意\n> 在此提示关键风险或避坑点") },
+    { group: "结构块", icon: "</>", label: "代码块", hint: "```", kw: "code fence 代码 代码块", run: () => insertBlockSnippet("```text\n\n```") },
+    { group: "结构块", icon: "Σ", label: "数学公式块", hint: "$$", kw: "math latex 公式 数学", run: () => insertBlockSnippet("$$\n\n$$") },
+    { group: "结构块", icon: "—", label: "分割线", hint: "---", kw: "hr divider line 分割线 横线", run: () => insertBlockSnippet("---") },
+    { group: "双链与手绘风 AI", icon: "🔗", label: "插入内部双链", hint: "[[…]]", kw: "link wikilink 双链 链接 笔记", run: () => linksCtrl.triggerInsertWikilinkCM(cmView, false) },
+    { group: "双链与手绘风 AI", icon: "📎", label: "嵌入笔记 / 图片", hint: "![[…]]", kw: "embed image 嵌入 图片", run: () => linksCtrl.triggerInsertWikilinkCM(cmView, true) },
+    { group: "双链与手绘风 AI", icon: "🎨", label: "插入 AI 配图位", hint: "Slot", kw: "illust image ai 配图 插图 画图", run: () => {
+      const ln = cmView ? cmView.state.doc.lineAt(cmView.state.selection.main.to).text.trim() : "";
+      insertSlotAt(ln);
+    } },
+    { group: "双链与手绘风 AI", icon: "✨", label: "让 AI 续写 / 润色当前段", hint: "AI", kw: "ai write continue 续写 润色 改写", run: () => {
+      const ln = cmView ? cmView.state.doc.lineAt(cmView.state.selection.main.to).text.trim() : "";
+      onAskAiSelection?.(ln || "请结合上下文续写下一段内容", "edit");
+    } },
+  ];
+
+  function applySlashItem(item) {
+    if (!slashState || !cmView) return;
+    const { startPos, endPos } = slashState;
+    closeSlashMenu();
+    cmView.dispatch({
+      changes: { from: startPos, to: endPos, insert: "" },
+      selection: { anchor: startPos },
+    });
+    item.run?.();
+    cmView.focus();
+  }
+
+  function renderSlashMenu() {
+    if (!slashState || !cmView) { closeSlashMenu(); return; }
+    if (!slashEl) {
+      slashEl = el("div", { class: "ic-slash-menu", role: "listbox", "aria-label": "斜杠快捷插入菜单" });
+      document.body.appendChild(slashEl);
+    }
+    clear(slashEl);
+    slashEl.appendChild(el("div", { class: "ic-slash-head" },
+      el("span", null, slashState.query ? `命令筛选：/${slashState.query}` : "输入关键词筛选块或 AI 指令"),
+      el("span", { class: "muted", style: { fontSize: "10.5px" } }, "↑↓ · Enter")
+    ));
+    const list = el("div", { class: "ic-slash-list" });
+    let lastGroup = "";
+    let selNode = null;
+    slashState.items.forEach((it, idx) => {
+      if (it.group !== lastGroup) {
+        lastGroup = it.group;
+        list.appendChild(el("div", { class: "ic-slash-group" }, it.group));
+      }
+      const row = el("button", {
+        type: "button",
+        role: "option",
+        class: "ic-slash-item" + (idx === slashState.selected ? " is-selected" : ""),
+        onMouseDown: (ev) => {
+          ev.preventDefault();
+          applySlashItem(it);
+        },
+        onMouseEnter: () => {
+          slashState.selected = idx;
+          Array.from(list.querySelectorAll(".ic-slash-item")).forEach((n, i) => n.classList.toggle("is-selected", i === idx));
+        },
+      },
+        el("span", { class: "ic-slash-ico", "aria-hidden": "true" }, it.icon),
+        el("span", { class: "ic-slash-lbl" }, it.label),
+        it.hint ? el("span", { class: "ic-slash-hint mono" }, it.hint) : null
+      );
+      if (idx === slashState.selected) selNode = row;
+      list.appendChild(row);
+    });
+    slashEl.appendChild(list);
+
+    const coords = cmView.coordsAtPos(slashState.endPos);
+    const popW = slashEl.offsetWidth || 292;
+    const popH = Math.min(330, slashEl.offsetHeight || 160);
+    const left = coords ? Math.max(12, Math.min(coords.left, window.innerWidth - popW - 14)) : 140;
+    const top = coords
+      ? (coords.bottom + popH + 10 > window.innerHeight - 16 ? Math.max(48, coords.top - popH - 6) : Math.max(48, coords.bottom + 6))
+      : 160;
+    slashEl.style.left = `${Math.round(left)}px`;
+    slashEl.style.top = `${Math.round(top)}px`;
+    if (selNode) selNode.scrollIntoView({ block: "nearest" });
+  }
+
+  function updateSlashMenu(view) {
+    if (!view) { closeSlashMenu(); return; }
+    const sel = view.state.selection.main;
+    if (!sel.empty) { closeSlashMenu(); return; }
+    const pos = sel.head;
+    const line = view.state.doc.lineAt(pos);
+    const before = line.text.slice(0, pos - line.from);
+    // Avoid triggering inside URLs or code fences
+    if (/https?:\/\/\S*$/.test(before)) { closeSlashMenu(); return; }
+    const m = before.match(/(?:^|\s)(\/[^\s/]{0,20})$/);
+    if (!m) { closeSlashMenu(); return; }
+    const token = m[1];
+    const query = token.slice(1).trim().toLowerCase();
+    const startPos = pos - token.length;
+    const filtered = query
+      ? SLASH_COMMANDS.filter((c) => `${c.label} ${c.kw} ${c.group}`.toLowerCase().includes(query))
+      : SLASH_COMMANDS;
+    if (!filtered.length) { closeSlashMenu(); return; }
+    slashState = {
+      startPos,
+      endPos: pos,
+      query,
+      items: filtered,
+      selected: slashState && slashState.startPos === startPos ? Math.min(slashState.selected, filtered.length - 1) : 0,
+    };
+    renderSlashMenu();
+  }
+
+  function handleSlashKeydown(ev) {
+    if (!slashState) return false;
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      slashState.selected = (slashState.selected + 1) % slashState.items.length;
+      renderSlashMenu();
+      return true;
+    }
+    if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      slashState.selected = (slashState.selected - 1 + slashState.items.length) % slashState.items.length;
+      renderSlashMenu();
+      return true;
+    }
+    if (ev.key === "Enter" || ev.key === "Tab") {
+      ev.preventDefault();
+      applySlashItem(slashState.items[slashState.selected]);
+      return true;
+    }
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      closeSlashMenu();
+      return true;
+    }
+    return false;
+  }
+
+  // ---------- Phase 1 (#126): Selection Floating Format & AI Toolbar ----------
+  function closeSelectionBar() {
+    if (selBarTimer) { clearTimeout(selBarTimer); selBarTimer = null; }
+    if (selBarEl) { selBarEl.remove(); selBarEl = null; }
+    selBarPaletteOpen = false;
+  }
+
+  function renderSelectionBar() {
+    if (!cmView || !cmView.hasFocus) { closeSelectionBar(); return; }
+    const { from, to } = cmView.state.selection.main;
+    if (to - from < 2) { closeSelectionBar(); return; }
+    const selText = cmView.state.sliceDoc(from, to).trim();
+    if (selText.length < 2) { closeSelectionBar(); return; }
+    if (document.querySelector(".ic-ctx-menu")) { closeSelectionBar(); return; }
+
+    const startCoords = cmView.coordsAtPos(from);
+    const endCoords = cmView.coordsAtPos(to);
+    if (!startCoords || !endCoords) { closeSelectionBar(); return; }
+
+    if (!selBarEl) {
+      selBarEl = el("div", { class: "ic-cm-selbar", role: "toolbar", "aria-label": "划词快捷格式与 AI 工具条" });
+      document.body.appendChild(selBarEl);
+    }
+    clear(selBarEl);
+
+    const mkBtn = (label, title, onClick, cls = "") => el("button", {
+      type: "button",
+      class: "ic-cm-selbar-btn" + (cls ? ` ${cls}` : ""),
+      title,
+      onMouseDown: (ev) => ev.preventDefault(),
+      onClick: (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        onClick();
+      },
+    }, label);
+
+    const row = el("div", { class: "ic-cm-selbar-row" },
+      mkBtn("B", "加粗 (Ctrl+B)", () => { wrapSelection("**", "**"); closeSelectionBar(); }, "is-bold"),
+      mkBtn("I", "斜体 (Ctrl+I)", () => { wrapSelection("*", "*"); closeSelectionBar(); }, "is-italic"),
+      mkBtn("S", "删除线", () => { wrapSelection("~~", "~~"); closeSelectionBar(); }, "is-strike"),
+      mkBtn("</>", "行内代码", () => { wrapSelection("`", "`"); closeSelectionBar(); }),
+      mkBtn("🖍", "彩色高亮", () => { selBarPaletteOpen = !selBarPaletteOpen; renderSelectionBar(); }, selBarPaletteOpen ? "is-active" : ""),
+      el("span", { class: "ic-cm-selbar-sep" }),
+      mkBtn("[[", "转为内部双链", () => { linksCtrl.triggerInsertWikilinkCM(cmView, false); closeSelectionBar(); }),
+      mkBtn("🔗", "添加外部链接 (Ctrl+K)", () => { closeSelectionBar(); openExternalLinkModal(); }),
+      el("span", { class: "ic-cm-selbar-sep" }),
+      mkBtn("✨ AI 改写", "用 AI 局部改写选中片段", () => { closeSelectionBar(); onAskAiSelection?.(selText, "edit"); }, "is-accent"),
+      mkBtn("💬 问 AI", "围绕选中片段提问或诊断", () => { closeSelectionBar(); onAskAiSelection?.(selText, "advise"); }),
+      mkBtn("📄 提取笔记", "提取为新笔记并替换为双链", async () => {
+        closeSelectionBar();
+        const title = await onExtractSelectionToNote?.(selText);
+        if (title && cmView) {
+          const insert = `[[${title}]]`;
+          cmView.dispatch({ changes: { from, to, insert }, selection: { anchor: from + insert.length } });
+        }
+      })
+    );
+    selBarEl.appendChild(row);
+
+    if (selBarPaletteOpen) {
+      selBarEl.appendChild(el("div", { class: "ic-cm-selbar-palette" },
+        ...HIGHLIGHT_SWATCHES.map((sw) => el("button", {
+          type: "button",
+          class: "ic-cm-selbar-dot",
+          title: sw.label,
+          style: { background: sw.swatch },
+          onMouseDown: (ev) => ev.preventDefault(),
+          onClick: () => { applyHighlight(sw); closeSelectionBar(); },
+        }))
+      ));
+    }
+
+    const rect = selBarEl.getBoundingClientRect();
+    const midX = (startCoords.left + endCoords.right) / 2;
+    const left = Math.max(12, Math.min(midX - rect.width / 2, window.innerWidth - rect.width - 12));
+    const topAbove = Math.min(startCoords.top, endCoords.top) - rect.height - 10;
+    const top = topAbove < 52 ? Math.max(startCoords.bottom, endCoords.bottom) + 10 : topAbove;
+    selBarEl.style.left = `${Math.round(left)}px`;
+    selBarEl.style.top = `${Math.round(top)}px`;
+  }
+
+  function scheduleSelectionBar() {
+    if (selBarTimer) clearTimeout(selBarTimer);
+    selBarTimer = setTimeout(() => renderSelectionBar(), 80);
+  }
+
+  // ---------- Phase 1 (#126): Minimalist Floating Outline TOC Rail ----------
+  function renderTocRail() {
+    if (!tocRailEl || !cmView) return;
+    clear(tocRailEl);
+    const doc = cmView.state.doc;
+    const headings = [];
+    let inCode = false;
+    let inFm = doc.lines >= 3 && doc.line(1).text.trim() === "---";
+    for (let ln = 1; ln <= doc.lines; ln++) {
+      const txt = doc.line(ln).text;
+      const tr = txt.trim();
+      if (inFm) {
+        if (ln > 1 && tr === "---") inFm = false;
+        continue;
+      }
+      if (/^(?:`{3,}|~{3,})/.test(tr)) { inCode = !inCode; continue; }
+      if (inCode) continue;
+      const m = txt.match(/^\s*(#{1,4})\s+(.+)$/);
+      if (m) {
+        headings.push({ level: m[1].length, text: m[2].replace(/[*`[\]]/g, "").trim(), lineNo: ln, pos: doc.line(ln).from });
+      }
+    }
+    tocRailEl.classList.toggle("hidden", headings.length < 2);
+    if (headings.length < 2) return;
+
+    const activeLineNo = doc.lineAt(cmView.state.selection.main.head).number;
+    let activeIdx = 0;
+    headings.forEach((h, i) => { if (h.lineNo <= activeLineNo) activeIdx = i; });
+
+    const ticks = el("div", { class: "ic-live-toc-ticks", "aria-hidden": "true" },
+      ...headings.map((h, i) => el("span", {
+        class: `ic-live-toc-tick is-l${h.level}` + (i === activeIdx ? " is-active" : ""),
+      }))
+    );
+    const list = el("div", { class: "ic-live-toc-pop", role: "navigation", "aria-label": "文章目录大纲" },
+      el("div", { class: "ic-live-toc-title" }, `大纲 (${headings.length})`),
+      ...headings.map((h, i) => el("button", {
+        type: "button",
+        class: `ic-live-toc-item is-l${h.level}` + (i === activeIdx ? " is-active" : ""),
+        title: h.text,
+        onClick: () => {
+          cmView.dispatch({ selection: { anchor: h.pos }, scrollIntoView: true });
+          cmView.focus();
+          renderTocRail();
+        },
+      }, h.text))
+    );
+    tocRailEl.append(ticks, list);
+  }
+
+  function scheduleTocRender() {
+    if (tocTimer) clearTimeout(tocTimer);
+    tocTimer = setTimeout(() => renderTocRail(), 160);
+  }
+
   function createCMState(initialText) {
     const docStr = String(initialText || "");
     // If note starts with YAML frontmatter, place initial cursor on the first body line so Properties renders cleanly collapsed!
@@ -1292,11 +1594,62 @@ export function createArticleLiveEditor(opts) {
         indentOnInput(),
         bracketMatching(),
         EditorView.lineWrapping,
-        placeholder("开始自由书写（所见即所得，输入 [[ 关联笔记，支持表格、提示框、任务清单与快捷键）…"),
+        placeholder("开始自由书写（所见即所得，输入 / 唤起快捷命令，输入 [[ 关联笔记）…"),
         markdown({ base: markdownLanguage }),
         syntaxHighlighting(mdHighlightStyle),
         liveDecoField,
-        Prec.high(keymap.of([
+        Prec.highest(keymap.of([
+          {
+            key: "ArrowDown",
+            run: (view) => {
+              if (slashState) {
+                slashState.selected = (slashState.selected + 1) % slashState.items.length;
+                renderSlashMenu();
+                return true;
+              }
+              return linksCtrl.handleCMKeydown(view, { key: "ArrowDown", preventDefault() {} });
+            },
+          },
+          {
+            key: "ArrowUp",
+            run: (view) => {
+              if (slashState) {
+                slashState.selected = (slashState.selected - 1 + slashState.items.length) % slashState.items.length;
+                renderSlashMenu();
+                return true;
+              }
+              return linksCtrl.handleCMKeydown(view, { key: "ArrowUp", preventDefault() {} });
+            },
+          },
+          {
+            key: "Enter",
+            run: (view) => {
+              if (slashState) {
+                applySlashItem(slashState.items[slashState.selected]);
+                return true;
+              }
+              return linksCtrl.handleCMKeydown(view, { key: "Enter", preventDefault() {} });
+            },
+          },
+          {
+            key: "Tab",
+            run: (view) => {
+              if (slashState) {
+                applySlashItem(slashState.items[slashState.selected]);
+                return true;
+              }
+              return linksCtrl.handleCMKeydown(view, { key: "Tab", preventDefault() {} });
+            },
+          },
+          {
+            key: "Escape",
+            run: (view) => {
+              if (slashState) { closeSlashMenu(); return true; }
+              if (linksCtrl.handleCMKeydown(view, { key: "Escape", preventDefault() {} })) return true;
+              if (selBarEl) { closeSelectionBar(); return true; }
+              return false;
+            },
+          },
           {
             key: "Mod-b",
             run: () => { wrapSelection("**", "**", "加粗文本"); return true; },
@@ -1316,8 +1669,16 @@ export function createArticleLiveEditor(opts) {
         ])),
         keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
         EditorView.domEventHandlers({
-          keydown: (ev, view) => linksCtrl.handleCMKeydown(view, ev),
+          mouseup: () => { scheduleSelectionBar(); return false; },
+          blur: () => {
+            setTimeout(() => {
+              if (cmView && !cmView.hasFocus) closeSelectionBar();
+            }, 150);
+            return false;
+          },
           contextmenu: (ev) => {
+            closeSelectionBar();
+            closeSlashMenu();
             openEditorContextMenu(ev);
             return true;
           },
@@ -1326,8 +1687,15 @@ export function createArticleLiveEditor(opts) {
           if (update.docChanged && !suppressDocChange) {
             setContent(update.state.doc.toString());
             linksCtrl.updateAutocompleteFromCM(update.view);
+            updateSlashMenu(update.view);
+            closeSelectionBar();
+            scheduleTocRender();
           } else if (update.selectionSet) {
             linksCtrl.updateAutocompleteFromCM(update.view);
+            updateSlashMenu(update.view);
+            if (update.state.selection.main.empty) closeSelectionBar();
+            else scheduleSelectionBar();
+            scheduleTocRender();
           }
         }),
       ],
@@ -1383,6 +1751,7 @@ export function createArticleLiveEditor(opts) {
         cmView.dispatch({ effects: refreshLiveEffect.of(null) });
       }
       renderAuxiliaryRegions();
+      renderTocRail();
       return;
     }
 
@@ -1396,7 +1765,8 @@ export function createArticleLiveEditor(opts) {
     cmMountBox = el("div", { class: "cm-lp-host" });
     orphanSlotsBox = el("div", { class: "cm-lp-orphans" });
     backlinksBox = el("div", { class: "cm-lp-backlinks" });
-    container.append(coverSlotBox, cmMountBox, orphanSlotsBox, backlinksBox);
+    tocRailEl = el("div", { class: "ic-live-toc-rail hidden" });
+    container.append(coverSlotBox, cmMountBox, orphanSlotsBox, backlinksBox, tocRailEl);
 
     lastDocVersionPath = curPath;
     cmView = new EditorView({
@@ -1404,6 +1774,7 @@ export function createArticleLiveEditor(opts) {
       parent: cmMountBox,
     });
     renderAuxiliaryRegions();
+    renderTocRail();
   }
 
   function applyFormat(fmt) {
@@ -1437,6 +1808,9 @@ export function createArticleLiveEditor(opts) {
   }
 
   function dispose() {
+    closeSlashMenu();
+    closeSelectionBar();
+    if (tocTimer) { clearTimeout(tocTimer); tocTimer = null; }
     if (cmView) {
       cmView.destroy();
       cmView = null;

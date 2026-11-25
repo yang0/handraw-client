@@ -173,6 +173,10 @@ func isMarkdownExt(name string) bool {
 	return ext == ".md" || ext == ".markdown"
 }
 
+func isCanvasExt(name string) bool {
+	return strings.ToLower(filepath.Ext(name)) == ".canvas"
+}
+
 func resolveVaultMarkdownPath(rootDir, relPath string, allowCreate bool) (absPath string, normRel string, err error) {
 	raw := strings.TrimSpace(strings.ReplaceAll(relPath, "\\", "/"))
 	raw = strings.TrimLeft(raw, "/")
@@ -281,7 +285,7 @@ func scanVaultTree(rootAbs string) ([]vaultNode, int) {
 				})
 				continue
 			}
-			if !isMarkdownExt(name) {
+			if !isMarkdownExt(name) && !isCanvasExt(name) {
 				continue
 			}
 			if fileCount >= vaultMaxFiles {
@@ -297,10 +301,14 @@ func scanVaultTree(rootAbs string) ([]vaultNode, int) {
 				sz = info.Size()
 			}
 			fileCount++
+			kind := "file"
+			if isCanvasExt(name) {
+				kind = "canvas"
+			}
 			files = append(files, vaultNode{
 				Name:    name,
 				Path:    subRel,
-				Kind:    "file",
+				Kind:    kind,
 				ModTime: modMs,
 				Size:    sz,
 			})

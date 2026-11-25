@@ -113,6 +113,11 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/article/vault/reveal", s.h(s.articleVaultReveal))
 	m.HandleFunc("GET /api/article/vault/links", s.h(s.articleVaultLinks))
 	m.HandleFunc("POST /api/article/vault/links/linkify", s.h(s.articleVaultLinkify))
+	m.HandleFunc("GET /api/article/vault/table", s.h(s.articleVaultTable))
+	m.HandleFunc("PATCH /api/article/vault/frontmatter", s.h(s.articleVaultPatchFrontmatter))
+	m.HandleFunc("GET /api/article/vault/canvas", s.h(s.articleVaultReadCanvas))
+	m.HandleFunc("PUT /api/article/vault/canvas", s.h(s.articleVaultWriteCanvas))
+	m.HandleFunc("DELETE /api/article/vault/canvas", s.h(s.articleVaultDeleteCanvas))
 
 	// article Obsidian plugin compatibility runtime & installer (#115)
 	m.HandleFunc("GET /api/article/obsidian/plugins", s.h(s.articleObsidianPlugins))
