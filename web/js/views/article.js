@@ -617,6 +617,41 @@ export async function renderArticle(root, ctx, params = {}) {
     placeholder: "请输入文章主标题（留空则自动使用首行标题）",
   });
   const titleCount = el("span", { class: "ic-wechat-title-count" }, `${(state.title || "").length}/64`);
+  const titleBox = el("div", { class: "ic-wechat-title-box" }, titleInput, titleCount);
+  const titleDivider = el("div", { class: "ic-wechat-paper-divider" });
+
+  function extractLeadingMarkdownH1(md) {
+    let text = String(md || "").replace(/\r\n/g, "\n");
+    // Skip optional YAML frontmatter at top of Markdown file
+    if (text.startsWith("---\n")) {
+      const endIdx = text.indexOf("\n---", 4);
+      if (endIdx >= 0) {
+        const after = text.indexOf("\n", endIdx + 4);
+        text = after >= 0 ? text.slice(after + 1) : "";
+      }
+    }
+    const lines = text.split("\n");
+    for (const ln of lines) {
+      const trimmed = ln.trim();
+      if (!trimmed) continue;
+      const m = trimmed.match(/^#\s+(.+)$/);
+      return m ? m[1].trim() : "";
+    }
+    return "";
+  }
+
+  function syncTitleHeaderVisibility() {
+    const leadingH1 = extractLeadingMarkdownH1(state.content);
+    const hasInlineH1 = Boolean(leadingH1);
+    titleBox.classList.toggle("hidden", hasInlineH1);
+    titleDivider.classList.toggle("hidden", hasInlineH1);
+    if (hasInlineH1 && state.title !== leadingH1) {
+      state.title = leadingH1;
+    }
+    titleInput.value = state.title || "";
+    titleCount.textContent = `${(state.title || "").length}/64`;
+  }
+
   titleInput.addEventListener("input", () => {
     state.title = titleInput.value;
     state.dirty = true;
@@ -632,9 +667,9 @@ export async function renderArticle(root, ctx, params = {}) {
 
   const paperLinksBar = el("div", { class: "ic-paper-links-bar" });
   const paperSheet = el("article", { class: "ic-wechat-paper" },
-    el("div", { class: "ic-wechat-title-box" }, titleInput, titleCount),
-    el("div", { class: "ic-wechat-paper-divider" }),
     paperLinksBar,
+    titleBox,
+    titleDivider,
     recStylesBar,
     planNotice,
     batchSummaryBox,
@@ -1048,7 +1083,7 @@ export async function renderArticle(root, ctx, params = {}) {
       renderCopilotPanel();
       session.persist();
     },
-  }, "诊断 / 建议");
+  }, "问 AI / 建议");
 
   const aiClearChatBtn = el("button", {
     type: "button",
@@ -1222,6 +1257,8 @@ export async function renderArticle(root, ctx, params = {}) {
       }
       applyFormat("wikilink");
     },
+    hasCoverSlot: () => (state.slots || []).some((s) => s.role === "cover"),
+    onAddCover: () => insertSlotAt("", "cover"),
     onLinksUpdated: (d) => {
       const cnt = (d.backlinks?.length || 0) + (d.outgoing || []).filter((x) => !x.isImage).length;
       drawerTabLinksBtn.textContent = cnt > 0 ? `🔗 双链 (${cnt})` : "🔗 双链";
@@ -1291,6 +1328,7 @@ export async function renderArticle(root, ctx, params = {}) {
     setContent: (next) => {
       state.content = String(next ?? "");
       state.dirty = true;
+      syncTitleHeaderVisibility();
       charCounter.textContent = `正文字数 ${state.content.length}`;
       syncTopbarBreadcrumb();
       obsidianCtrl.syncDoc(false);
@@ -1958,6 +1996,13 @@ export async function renderArticle(root, ctx, params = {}) {
     { label: "更有画面感", mode: "edit", prompt: "只重写这段选中文字，把抽象表述换成具象画面与动作细节。" },
   ];
 
+  const SELECTION_QA_PRESETS = [
+    { label: "解释概念", mode: "advise", prompt: "用通俗易懂的话解释这段选中内容里的核心概念或专业术语，不要诊断整篇文章。" },
+    { label: "通俗举例", mode: "advise", prompt: "结合这段选中内容，举 2 个贴近日常生活的具体例子帮助读者秒懂。" },
+    { label: "逻辑挑刺", mode: "advise", prompt: "只针对这段选中内容检查逻辑漏洞、表述歧义或事实风险，不点评文章其他段落。" },
+    { label: "延伸背景", mode: "advise", prompt: "补充与这段选中内容相关的关键背景知识或对比维度，帮助我决定要不要展开写。" },
+  ];
+
   function renderCopilotPanel() {
     renderAiSkillsBar();
     const isAdvise = state.aiMode === "advise";
@@ -1965,10 +2010,16 @@ export async function renderArticle(root, ctx, params = {}) {
     aiModeEditBtn.classList.toggle("is-active", !isAdvise);
     aiModeAdviseBtn.classList.toggle("is-active", isAdvise);
     aiInput.placeholder = hasPinnedSel
-      ? (isAdvise ? "围绕选中片段提问或诊断…（Ctrl+Enter）" : "告诉 AI 如何改写这段选中片段（仅改此处）…（Ctrl+Enter）")
-      : (isAdvise ? "让 AI 诊断文章、起标题、查风险或给建议…（Ctrl+Enter）" : "告诉 AI 如何修改这篇文章，或先选好 Skill…（Ctrl+Enter）");
+      ? (isAdvise
+        ? "围绕选中片段自由提问（如「啥是矢量图」「通俗解释一下」）…（Ctrl+Enter）"
+        : "告诉 AI 如何改写这段选中片段（仅改此处）…（Ctrl+Enter）")
+      : (isAdvise
+        ? "问任何知识问题（如「啥是矢量图」），或让 AI 诊断文章、起标题…（Ctrl+Enter）"
+        : "告诉 AI 如何修改这篇文章，或先选好 Skill…（Ctrl+Enter）");
     aiRunBtn.disabled = aiEditing;
-    aiRunBtn.textContent = aiEditing ? "处理中…" : (isAdvise ? "提问" : (hasPinnedSel ? "改写选中片段 ✨" : "全文改稿 ✨"));
+    aiRunBtn.textContent = aiEditing
+      ? "处理中…"
+      : (isAdvise ? (hasPinnedSel ? "针对片段提问 ↗" : "问 AI ↗") : (hasPinnedSel ? "改写选中片段 ✨" : "全文改稿 ✨"));
     aiUndoTopBtn.classList.toggle("hidden", !lastAiUndo);
     aiDrawerToggleBtn.classList.toggle("is-active", Boolean(state.aiDrawerOpen));
     aiDrawerToggleBtn.setAttribute("aria-pressed", String(Boolean(state.aiDrawerOpen)));
@@ -1976,52 +2027,64 @@ export async function renderArticle(root, ctx, params = {}) {
     const chat = Array.isArray(state.aiChat) ? state.aiChat : [];
     aiClearChatBtn.disabled = chat.length === 0 && !aiEditing;
 
-    // Pinned selection context chip + 1-click local rewrite actions (#145)
+    // Pinned selection context chip + 1-click local actions (#145, #148)
     clear(copilotSelectionChip);
     if (hasPinnedSel) {
       copilotSelectionChip.classList.remove("hidden");
       const preview = pinnedSelection.text.replace(/\s+/g, " ");
-      const quickBar = !isAdvise
-        ? el("div", { class: "row", style: { gap: "4px", flexWrap: "wrap", width: "100%", marginTop: "4px" } },
-            ...SELECTION_PRESETS.map((p) => el("button", {
-              type: "button",
-              class: "btn btn-sm",
-              style: { fontSize: "11px", padding: "2px 7px", height: "auto", lineHeight: "1.4" },
-              disabled: aiEditing,
-              onClick: () => runAiArticleEdit({ instructionOverride: p.prompt, modeOverride: "edit", selectionOverride: pinnedSelection }),
-            }, p.label))
-          )
-        : null;
-      copilotSelectionChip.style.flexWrap = "wrap";
-      copilotSelectionChip.append(
-        el("span", { class: "ic-cop-sel-chip-ico", "aria-hidden": "true" }, "📌"),
-        el("span", { class: "ic-cop-sel-chip-text", title: pinnedSelection.text },
-          `仅改选中片段 (${pinnedSelection.text.length} 字)：${preview.slice(0, 28)}${preview.length > 28 ? "…" : ""}`
+      const chipPresets = isAdvise ? SELECTION_QA_PRESETS : SELECTION_PRESETS;
+      const quickBar = el("div", { class: "row", style: { gap: "4px", flexWrap: "wrap", width: "100%", marginTop: "4px" } },
+        ...chipPresets.map((p) => el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          style: { fontSize: "11px", padding: "2px 7px", height: "auto", lineHeight: "1.4" },
+          disabled: aiEditing,
+          onClick: () => runAiArticleEdit({ instructionOverride: p.prompt, modeOverride: p.mode, selectionOverride: pinnedSelection }),
+        }, p.label))
+      );
+      copilotSelectionChip.style.flexDirection = "column";
+      copilotSelectionChip.style.alignItems = "stretch";
+      copilotSelectionChip.style.gap = "5px";
+      const chipHead = el("div", { class: "row", style: { alignItems: "center", gap: "6px", width: "100%", minWidth: "0" } },
+        el("span", { class: "ic-cop-sel-chip-ico", style: { flexShrink: "0" }, "aria-hidden": "true" }, "📌"),
+        el("span", { class: "ic-cop-sel-chip-text", style: { flex: "1", minWidth: "0" }, title: pinnedSelection.text },
+          `${isAdvise ? "围绕选中片段提问" : "仅改选中片段"} (${pinnedSelection.text.length} 字)：${preview.slice(0, 28)}${preview.length > 28 ? "…" : ""}`
         ),
         el("button", {
           type: "button",
           class: "ic-art-skill-chip-x",
-          title: "取消选中，切回全文改稿",
+          style: { flexShrink: "0" },
+          title: isAdvise ? "取消选中，切回自由提问 / 全文建议" : "取消选中，切回全文改稿",
           "aria-label": "取消引用选中片段",
           onClick: () => {
             pinnedSelection = null;
             renderCopilotPanel();
           },
-        }, "×"),
-        quickBar
+        }, "×")
       );
+      copilotSelectionChip.append(chipHead, quickBar);
     } else {
       copilotSelectionChip.classList.add("hidden");
     }
 
     clear(copilotFeed);
     if (!chat.length && !aiEditing) {
-      const presetsToShow = hasPinnedSel ? SELECTION_PRESETS : COPILOT_PRESETS;
+      const presetsToShow = hasPinnedSel
+        ? (isAdvise ? SELECTION_QA_PRESETS : SELECTION_PRESETS)
+        : COPILOT_PRESETS;
+      const emptyTitle = hasPinnedSel
+        ? (isAdvise ? "已锁定选中片段 · 划词问 AI" : "已锁定选中片段 · 局部精准改写")
+        : (isAdvise ? "随时问 AI，查概念或聊文章" : "边写边聊，所见即所得改稿");
+      const emptyDesc = hasPinnedSel
+        ? (isAdvise
+          ? "可直接问概念、查事实、要例子，或只针对这一小段提建议，不会跑去诊断整篇文章。"
+          : "本次改写只会替换你选中的这一小段，不会改动文章其他段落；点下方快捷指令或在输入框补充要求即可。")
+        : (isAdvise
+          ? "支持直接问通用知识问题（如「啥是矢量图」），也支持按需起标题、诊断文章结构。"
+          : "支持调用已安装的写作 / 排雷 Skill；在左侧正文划选任意段落，还能只改局部不伤全文。");
       copilotFeed.appendChild(el("div", { class: "ic-cop-empty" },
-        el("div", { class: "ic-cop-empty-title" }, hasPinnedSel ? "已锁定选中片段 · 局部精准改写" : "边写边聊，所见即所得改稿"),
-        el("p", { class: "muted ic-cop-empty-desc" }, hasPinnedSel
-          ? "本次改写只会替换你选中的这一小段，不会改动文章其他段落；点下方快捷指令或在输入框补充要求即可。"
-          : "支持调用已安装的写作 / 排雷 Skill；在左侧正文划选任意段落，还能只改局部不伤全文。"),
+        el("div", { class: "ic-cop-empty-title" }, emptyTitle),
+        el("p", { class: "muted ic-cop-empty-desc" }, emptyDesc),
         el("div", { class: "ic-cop-presets" },
           ...presetsToShow.map((p) => el("button", {
             type: "button",
@@ -2035,7 +2098,7 @@ export async function renderArticle(root, ctx, params = {}) {
               });
             },
           },
-            el("span", { class: "ic-cop-preset-tag" }, hasPinnedSel ? "局部" : (p.mode === "advise" ? "建议" : "改稿")),
+            el("span", { class: "ic-cop-preset-tag" }, hasPinnedSel ? (isAdvise ? "问答" : "局部") : (p.mode === "advise" ? "问答" : "改稿")),
             el("span", null, p.label)
           ))
         )
@@ -2069,7 +2132,7 @@ export async function renderArticle(root, ctx, params = {}) {
         const metaText = formatEngineMeta(msg);
         copilotFeed.appendChild(el("div", { class: "ic-cop-msg is-ai" },
           el("div", { class: "ic-cop-msg-meta" },
-            el("span", { class: "badge" }, "回复 / 建议"),
+            el("span", { class: "badge" }, msg.selection ? "划词问答" : "AI 回复"),
             ...(msg.usedSkills || []).map((u) => el("span", { class: "badge badge-accent" }, `⚡ ${u.name || u.id}`)),
             metaText ? el("span", { class: "ic-cop-engine-meta mono" }, metaText) : null
           ),
@@ -2081,7 +2144,7 @@ export async function renderArticle(root, ctx, params = {}) {
               onClick: async () => {
                 try {
                   await navigator.clipboard.writeText(msg.reply || "");
-                  toast("已复制建议内容");
+                  toast("已复制回复内容");
                 } catch { toast("复制失败"); }
               },
             }, "复制"),
@@ -2090,12 +2153,17 @@ export async function renderArticle(root, ctx, params = {}) {
               class: "btn btn-sm",
               onClick: () => {
                 state.aiMode = "edit";
-                aiInput.value = "请按照你刚才给出的诊断建议，直接帮我修改文章正文。";
+                if (msg.selection) {
+                  if (!pinnedSelection?.text) pinnedSelection = { text: msg.selection };
+                  aiInput.value = "结合刚才的讨论，帮我优化这段选中内容。";
+                } else {
+                  aiInput.value = "请结合你刚才的回复，帮我修改文章相关段落。";
+                }
                 resizeAiInput();
                 renderCopilotPanel();
                 aiInput.focus();
               },
-            }, "按此建议改稿 →")
+            }, msg.selection ? "按此改选中片段 →" : "按此改稿 →")
           )
         ));
         return;
@@ -2227,12 +2295,11 @@ export async function renderArticle(root, ctx, params = {}) {
       aiInput.focus();
       return;
     }
-    if (!state.content?.trim() && !state.title?.trim()) {
+    const mode = modeOverride || state.aiMode || "edit";
+    if (mode !== "advise" && !state.content?.trim() && !state.title?.trim()) {
       toast("当前文章正文为空，请先打开或输入文章内容");
       return;
     }
-
-    const mode = modeOverride || state.aiMode || "edit";
     const selObj = selectionOverride || pinnedSelection || captureCurrentEditorSelection();
     const selText = selObj?.text || "";
     const skillIds = Array.isArray(state.aiSkillIds) ? state.aiSkillIds : [];
@@ -2301,6 +2368,7 @@ export async function renderArticle(root, ctx, params = {}) {
           id: `a_${Date.now()}`,
           role: "assistant",
           kind: "advise",
+          selection: res.selection || selText || "",
           reply: res.reply || "",
           usedSkills: res.usedSkills || [],
           ...metaFields,
@@ -3934,8 +4002,7 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function syncBottomBar() {
-    titleInput.value = state.title || "";
-    titleCount.textContent = `${(state.title || "").length}/64`;
+    syncTitleHeaderVisibility();
     charCounter.textContent = `正文字数 ${(state.content || "").length}`;
     coverRatioMiniIn.value = state.coverRatio;
     inlineRatioMiniIn.value = state.inlineRatio;
@@ -4231,6 +4298,8 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function renderFlow() {
+    syncTitleHeaderVisibility();
+    linksCtrl.renderPaperLinksBar(paperLinksBar);
     liveEditor.render(flowBox);
   }
 

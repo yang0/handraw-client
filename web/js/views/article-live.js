@@ -1622,7 +1622,7 @@ export function createArticleLiveEditor(opts) {
       mkBtn("🔗", "添加外部链接 (Ctrl+K)", () => { closeSelectionBar(); openExternalLinkModal(); }),
       el("span", { class: "ic-cm-selbar-sep" }),
       mkBtn("✨ AI 改写", "用 AI 局部改写选中片段", () => { closeSelectionBar(); onAskAiSelection?.(selPayload, "edit"); }, "is-accent"),
-      mkBtn("💬 问 AI", "围绕选中片段提问或诊断", () => { closeSelectionBar(); onAskAiSelection?.(selPayload, "advise"); }),
+      mkBtn("💬 问 AI", "针对选中片段自由提问（查概念、举例子或局部建议）", () => { closeSelectionBar(); onAskAiSelection?.(selPayload, "advise"); }),
       mkBtn("📄 提取笔记", "提取为新笔记并替换为双链", async () => {
         closeSelectionBar();
         const title = await onExtractSelectionToNote?.(selText);
@@ -1853,10 +1853,6 @@ export function createArticleLiveEditor(opts) {
       clear(coverSlotBox);
       if (coverSlot) {
         coverSlotBox.appendChild(renderSlotCard(coverSlot, 0, "固定在文章开头"));
-      } else {
-        coverSlotBox.appendChild(el("div", { class: "ic-art-gap" },
-          el("button", { type: "button", class: "ic-art-gap-btn", onClick: () => insertSlotAt("", "cover") }, "＋ 添加文章封面")
-        ));
       }
     }
 

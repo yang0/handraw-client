@@ -1531,15 +1531,23 @@ export function createArticleLinksController(opts) {
       }, `+${noteOutgoing.length - 8} 更多`));
     }
 
-    if (!data.backlinks.length && !noteOutgoing.length) {
-      leftPills.appendChild(el("span", { class: "ic-pl-hint muted" }, "输入 [[ 可建立笔记双链，点击胶囊直接跳转"));
-    }
+    const hasLinks = data.backlinks.length > 0 || noteOutgoing.length > 0;
+    containerEl.classList.toggle("is-empty-links", !hasLinks);
 
+    const hasCover = Boolean(opts.hasCoverSlot?.());
     const rightActs = el("div", { class: "ic-paper-links-acts" },
+      !hasCover && opts.onAddCover
+        ? el("button", {
+            type: "button",
+            class: "ic-pl-act-btn",
+            title: "为本文添加顶部封面配图位",
+            onClick: () => opts.onAddCover?.(),
+          }, "＋ 封面")
+        : null,
       el("button", {
         type: "button",
         class: "ic-pl-act-btn",
-        title: "在正文插入 [[ 双链并打开补全",
+        title: "在正文输入 [[ 建立笔记双链并打开补全",
         onClick: () => opts.onTriggerInsertLink?.(),
       }, "＋ 双链"),
       el("button", {
@@ -1550,7 +1558,11 @@ export function createArticleLinksController(opts) {
       }, "🕸 图谱")
     );
 
-    containerEl.append(leftPills, rightActs);
+    if (hasLinks) {
+      containerEl.append(leftPills, rightActs);
+    } else {
+      containerEl.append(rightActs);
+    }
   }
 
   // ---------- Rich Preview & Embed Renderer ----------

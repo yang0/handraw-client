@@ -333,3 +333,97 @@ func TestArticleEditSelectionScopeIsolationAndEchoGuard(t *testing.T) {
 		t.Fatalf("expected UTF-16 offset to resolve second duplicate occurrence, got before=%q after=%q", before, after)
 	}
 }
+
+func TestArticleAdviseGeneralQAAndSelectionIsolation(t *testing.T) {
+	var mu sync.Mutex
+	var capturedMsgs []map[string]any
+	mockText := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		capturedMsgs = req.Messages
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": "矢量图是用数学曲线描述图形的图像格式（如 SVG），无限放大不失真。"}}},
+		})
+	}))
+	defer mockText.Close()
+
+	srv, _ := setupTestServer(t, "")
+	h := srv.Handler()
+	rrProv := doReq(t, h, srv.Token, "POST", "/api/providers", map[string]any{
+		"id": "mocktxt4", "name": "MockText4", "kind": "openai", "purpose": "text",
+		"baseUrl": mockText.URL + "/v1", "apiKey": "sk-mock4", "enabled": true,
+		"models": []map[string]any{{"id": "qa-helper", "label": "QA Helper"}},
+	})
+	if rrProv.Code != 200 {
+		t.Fatalf("add provider: %d %s", rrProv.Code, rrProv.Body.String())
+	}
+
+	distantIntro := "DISTANT_QA_INTRO_DO_NOT_LEAK " + strings.Repeat("前面是很长的无关铺垫内容。", 30)
+	targetSel := "纯矢量的小狗骑自行车插画，并要求导出标准 SVG 格式"
+	distantOutro := strings.Repeat("后面是很长的无关结尾内容。", 30) + " DISTANT_QA_OUTRO_DO_NOT_LEAK"
+	fullDoc := strings.Join([]string{distantIntro, "紧邻前文说明。", targetSel, "紧邻后文说明。", distantOutro}, "\n\n")
+
+	// 1. Selection-scoped Ask AI: must isolate from full-article history & distant paragraphs.
+	rrSelQA := doReq(t, h, srv.Token, "POST", "/api/article/edit", map[string]any{
+		"mode":        "advise",
+		"title":       "AI 生成矢量插画",
+		"content":     fullDoc,
+		"selection":   targetSel,
+		"instruction": "啥是矢量图？",
+		"sessionKey":  "article-full-session",
+		"history": []map[string]any{
+			{"role": "user", "content": "请诊断整篇文章的结构"},
+			{"role": "assistant", "content": "全文诊断：第一段略长..."},
+		},
+		"textModelRef": "mocktxt4:qa-helper",
+	})
+	if rrSelQA.Code != 200 {
+		t.Fatalf("selection advise failed: %d %s", rrSelQA.Code, rrSelQA.Body.String())
+	}
+	mu.Lock()
+	msgs := capturedMsgs
+	mu.Unlock()
+	if len(msgs) != 2 {
+		t.Fatalf("selection Ask AI must isolate prior full-article history (expected 2 msgs), got %d", len(msgs))
+	}
+	sysPrompt, _ := msgs[0]["content"].(string)
+	userPrompt, _ := msgs[1]["content"].(string)
+	if !strings.Contains(sysPrompt, "不要擅自跑去诊断整篇文章") {
+		t.Fatalf("expected selection Ask AI system prompt to guard against forced full-article diagnosis, got: %s", sysPrompt)
+	}
+	if strings.Contains(userPrompt, "DISTANT_QA_INTRO_DO_NOT_LEAK") || strings.Contains(userPrompt, "DISTANT_QA_OUTRO_DO_NOT_LEAK") {
+		t.Fatalf("selection Ask AI leaked distant full-article paragraphs: %s", userPrompt)
+	}
+	if !strings.Contains(userPrompt, targetSel) || !strings.Contains(userPrompt, "啥是矢量图") {
+		t.Fatalf("selection Ask AI prompt missing selection or user question: %s", userPrompt)
+	}
+	var qaRes struct {
+		Mode      string `json:"mode"`
+		Selection string `json:"selection"`
+		Reply     string `json:"reply"`
+	}
+	_ = json.Unmarshal(rrSelQA.Body.Bytes(), &qaRes)
+	if qaRes.Mode != "advise" || qaRes.Selection != targetSel || !strings.Contains(qaRes.Reply, "矢量图") {
+		t.Fatalf("unexpected selection Ask AI response: %+v", qaRes)
+	}
+
+	// 2. General Q&A on empty draft (no selection, no article content) works seamlessly.
+	rrGeneral := doReq(t, h, srv.Token, "POST", "/api/article/edit", map[string]any{
+		"mode":         "advise",
+		"instruction":  "啥是矢量图？",
+		"textModelRef": "mocktxt4:qa-helper",
+	})
+	if rrGeneral.Code != 200 {
+		t.Fatalf("general Q&A on empty draft failed: %d %s", rrGeneral.Code, rrGeneral.Body.String())
+	}
+	mu.Lock()
+	genSys, _ := capturedMsgs[0]["content"].(string)
+	mu.Unlock()
+	if !strings.Contains(genSys, "不要自作主张输出整篇文章诊断报告") {
+		t.Fatalf("expected general Ask AI system prompt to allow direct Q&A without forced diagnosis, got: %s", genSys)
+	}
+}

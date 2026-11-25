@@ -2749,13 +2749,13 @@ dialog.modal-picker .modal-body {
   background: var(--surface-2);
 }
 
-/* Center Scrollable Writing Paper — spacious Obsidian-style warm paper canvas (#121) */
+/* Center Scrollable Writing Paper — spacious Obsidian-style warm paper canvas (#121, #147) */
 .ic-wechat-scroll-area {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 28px 64px;
+  padding: 10px 24px 56px;
   background: var(--surface);
   overscroll-behavior: contain;
 }
@@ -2767,11 +2767,17 @@ dialog.modal-picker .modal-body {
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  padding: 16px 32px 64px;
+  padding: 6px 28px 56px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 6px;
   transition: max-width 0.18s ease;
+}
+.ic-wechat-paper .studio-notice:empty,
+.cm-lp-cover-box:empty,
+.cm-lp-orphans:empty,
+.cm-lp-backlinks:empty {
+  display: none;
 }
 .ic-wechat-paper.is-wide {
   max-width: none;
@@ -2808,12 +2814,12 @@ dialog.modal-picker .modal-body {
 }
 .ic-wechat-paper-divider {
   border-bottom: 1px solid var(--line);
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 #art-editor-flow {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 .ic-art-seg-ta {
   width: 100%;

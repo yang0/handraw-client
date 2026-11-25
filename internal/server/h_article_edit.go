@@ -104,7 +104,11 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 	activeSkills, _, cleanedInstruction := resolveActiveSkills(allSkills, req.SkillIDs, instruction)
 	if strings.TrimSpace(cleanedInstruction) == "" {
 		if mode == "advise" {
-			cleanedInstruction = "请按照已启用的 Skill 规范，对这篇文章给出结构化诊断与具体改进建议。"
+			if selection != "" {
+				cleanedInstruction = "请结合语境解释或分析这段选中内容。"
+			} else {
+				cleanedInstruction = "请按照已启用的 Skill 规范，对这篇文章给出结构化诊断与具体改进建议。"
+			}
 		} else if selection != "" {
 			cleanedInstruction = "请按照已启用的 Skill 规范优化并润色选中的片段。"
 		} else {
@@ -119,29 +123,70 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 		activeIDs = append(activeIDs, sk.ID)
 	}
 
-	// 1. Advise / Diagnose mode: return structured Markdown feedback without overwriting the article.
+	// 1. Ask AI / Q&A & Consultation mode (#148):
+	// Answer general/conceptual questions directly instead of forcing full-article diagnosis,
+	// and when a passage is selected, strictly scope context to that passage + narrow local window.
 	if mode == "advise" {
-		sysPrompt := strings.TrimSpace(`你是资深中文内容主编与写作教练。请通读用户提供的文章（以及可能选中的重点片段与启用的 Skill 规范），输出清晰、直接、可执行的 Markdown 诊断、改稿建议或标题方案。
-
-要求：
-1. 紧扣文章原文，指出具体位置与问题原因，不要泛泛而谈。
-2. 如用户要求提供标题、开头或句式示例，用清晰的编号列表呈现，方便一键采用。
-3. 直接输出 Markdown 正文，不要包裹 JSON。`)
-
+		var sysPrompt string
 		var userMsg strings.Builder
-		userMsg.WriteString("【用户需求】\n")
-		userMsg.WriteString(cleanedInstruction)
-		userMsg.WriteString("\n\n【当前标题】\n")
-		userMsg.WriteString(firstStr(title, "（未设置标题）"))
-		if selection != "" {
-			userMsg.WriteString("\n\n【重点关注片段】\n")
-			userMsg.WriteString(selection)
-		}
-		userMsg.WriteString("\n\n【文章 Markdown 正文】\n")
-		userMsg.WriteString(content)
+		var msgs []providers.ChatMessage
+		sessionKey := strings.TrimSpace(req.SessionKey)
 
-		msgs := appendArticleHistory(nil, req.History)
-		msgs = append(msgs, providers.ChatMessage{Role: "user", Content: userMsg.String()})
+		if selection != "" {
+			sysPrompt = strings.TrimSpace(`你是文章工作台的智能问答与写作助手。用户选中了文章中的一小段文字并向你提问。
+
+规则（必须严格遵守）：
+1. 优先直接、准确地回答用户的具体问题！
+   - 如果用户问的是概念解释、术语含义、背景知识、对比或事实问题（例如「啥是矢量图」「SVG 和 PNG 区别」「这里提到的 XX 是什么意思」），直接用通俗清晰的语言解释清楚即可；可简短结合选中片段语境，绝对不要擅自跑去诊断整篇文章、点评全文结构或起标题！
+   - 如果用户要求分析、挑刺、延伸或提建议，只围绕【选中片段】本身展开，不要偏题评论文章其他未选中的段落。
+2. 【附近上下文】仅用于帮助你理解选区语境，不要把它当成诊断对象。
+3. 直接输出清晰易读的 Markdown 正文，不要包裹 JSON。`)
+
+			beforeCtx, afterCtx := extractSelectionContextWindow(content, selection, req.SelectionStart, req.SelectionEnd, 220)
+			userMsg.WriteString("【用户问题】\n")
+			userMsg.WriteString(cleanedInstruction)
+			if title != "" {
+				userMsg.WriteString("\n\n【文章标题（仅参考背景）】\n")
+				userMsg.WriteString(title)
+			}
+			userMsg.WriteString("\n\n【选中片段】\n")
+			userMsg.WriteString(selection)
+			if beforeCtx != "" || afterCtx != "" {
+				userMsg.WriteString("\n\n【附近上下文（仅帮助理解语境，不要诊断其他段落）】")
+				if beforeCtx != "" {
+					userMsg.WriteString("\n前文：")
+					userMsg.WriteString(beforeCtx)
+				}
+				if afterCtx != "" {
+					userMsg.WriteString("\n后文：")
+					userMsg.WriteString(afterCtx)
+				}
+			}
+			// Isolate selection Q&A from prior full-article history & warm full-article harness sessions (#148).
+			msgs = []providers.ChatMessage{{Role: "user", Content: userMsg.String()}}
+			sessionKey = ""
+		} else {
+			sysPrompt = strings.TrimSpace(`你是文章工作台的智能问答与写作助手。
+
+规则（必须严格遵守）：
+1. 先判断用户问题的真实意图，再决定回答方式：
+   - 通用知识问答 / 概念解释 / 事实查证 / 举例启发（例如「啥是矢量图」「SVG 和 PNG 有什么区别」「帮我举个例子」）：请直接、通俗、准确地回答问题本身，绝对不要自作主张输出整篇文章诊断报告、改稿意见或起标题！
+   - 文章诊断 / 起标题 / 结构点评 / 写作建议（当用户明确要求诊断文章、指出问题、起标题或给改稿建议时）：再紧扣文章原文，指出具体位置与问题原因，给出可执行的建议或编号方案。
+2. 直接输出清晰易读的 Markdown 正文，不要包裹 JSON。`)
+
+			userMsg.WriteString("【用户问题】\n")
+			userMsg.WriteString(cleanedInstruction)
+			if title != "" {
+				userMsg.WriteString("\n\n【当前文章标题（按需参考）】\n")
+				userMsg.WriteString(title)
+			}
+			if strings.TrimSpace(content) != "" {
+				userMsg.WriteString("\n\n【当前文章正文（仅当问题涉及本文或用户明确要求诊断/起标题时参考；若用户只是问通用知识或概念问题，请直接回答问题本身，不要擅自诊断文章）】\n")
+				userMsg.WriteString(content)
+			}
+			msgs = appendArticleHistory(nil, req.History)
+			msgs = append(msgs, providers.ChatMessage{Role: "user", Content: userMsg.String()})
+		}
 
 		chatRes, err := s.executeHostChat(r.Context(), hostChatRequest{
 			ModelRef:   strings.TrimSpace(req.TextModelRef),
@@ -151,19 +196,20 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 			SkillIDs:   activeIDs,
 			Messages:   msgs,
 			JSONMode:   false,
-			SessionKey: strings.TrimSpace(req.SessionKey),
+			SessionKey: sessionKey,
 		})
 		if err != nil {
 			return nil, err
 		}
 		reply := strings.TrimSpace(asString(chatRes["text"]))
 		if reply == "" {
-			return nil, bad("AI 返回的建议为空，请重试或换个文本模型")
+			return nil, bad("AI 返回的回复为空，请重试或换个文本模型")
 		}
 		return attachChatMeta(map[string]any{
 			"ok":         true,
 			"mode":       "advise",
 			"reply":      reply,
+			"selection":  selection,
 			"usedSkills": usedSkills,
 		}, chatRes), nil
 	}

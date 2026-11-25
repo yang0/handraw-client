@@ -6168,15 +6168,25 @@ dialog.modal-asset-detail {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
-/* Paper Header Quick-Link Bar (1-click link navigation right in Editor mode) */
+/* Paper Header Compact Meta & Quick-Action Bar (#147) */
 .ic-paper-links-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 6px 2px 10px;
-  margin-bottom: 6px;
+  gap: 6px;
+  padding: 0 0 4px;
+  margin-bottom: 0;
+  min-height: 26px;
   flex-wrap: wrap;
+}
+.ic-paper-links-bar.is-empty-links {
+  justify-content: flex-end;
+  opacity: 0.72;
+  transition: opacity 0.15s ease;
+}
+.ic-paper-links-bar.is-empty-links:hover,
+.ic-paper-links-bar.is-empty-links:focus-within {
+  opacity: 1;
 }
 .ic-paper-links-pills {
   display: flex;
@@ -7641,6 +7651,9 @@ details.ic-links-sec:not([open]) .ic-links-chev {
   padding-bottom: 6px;
   margin-bottom: 4px;
   border-bottom: 1px solid var(--line);
+}
+.cm-lp-host .cm-line.cm-lp-h1:first-child {
+  padding-top: 2px;
 }
 .cm-lp-host .cm-line.cm-lp-h2 {
   font-size: 20px;
