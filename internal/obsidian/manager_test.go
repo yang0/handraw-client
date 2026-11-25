@@ -182,3 +182,19 @@ func TestProxyHTTPRequestSSRFGuard(t *testing.T) {
 		t.Fatalf("unexpected proxy response: %+v", resp)
 	}
 }
+
+func TestExecDesktopFSRealpathMissingReturnsError(t *testing.T) {
+	tmp := t.TempDir()
+	existing := filepath.Join(tmp, "note.md")
+	if err := os.WriteFile(existing, []byte("# Hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ExecDesktopFS(DesktopFSRequest{Op: "realpath", Path: existing})
+	if err != nil || res["path"] == "" {
+		t.Fatalf("expected realpath for existing file, got res=%+v err=%v", res, err)
+	}
+	missing := filepath.Join(tmp, "does-not-exist.png")
+	if _, err := ExecDesktopFS(DesktopFSRequest{Op: "realpath", Path: missing}); err == nil {
+		t.Fatalf("expected error for missing file realpath, got nil")
+	}
+}

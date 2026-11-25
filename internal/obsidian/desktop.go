@@ -277,7 +277,7 @@ func SpawnProcess(ctx context.Context, req SpawnRequest) (SpawnResponse, error) 
 	if exe == "" {
 		return SpawnResponse{}, errors.New("缺少可执行文件路径")
 	}
-	timeout := 60 * time.Second
+	timeout := 180 * time.Second
 	if req.TimeoutMs > 0 {
 		t := time.Duration(req.TimeoutMs) * time.Millisecond
 		if t > 5*time.Minute {
@@ -362,8 +362,11 @@ func ExecDesktopFS(req DesktopFSRequest) (map[string]any, error) {
 	case "realpath":
 		real, err := filepath.EvalSymlinks(p)
 		if err != nil {
-			if abs, aErr := filepath.Abs(p); aErr == nil {
-				return map[string]any{"path": abs}, nil
+			// Only fall back to Abs when the path actually exists on disk (#134).
+			if _, stErr := os.Stat(p); stErr == nil {
+				if abs, aErr := filepath.Abs(p); aErr == nil {
+					return map[string]any{"path": abs}, nil
+				}
 			}
 			return nil, err
 		}

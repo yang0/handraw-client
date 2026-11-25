@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, openURL, showModal, toast } from "../api.js";
+import { api, clear, closeModal, el, getToken, openURL, showModal, toast } from "../api.js";
 import { CM6_SINGLETON_MODULES } from "./article-live.js";
 import { openArticleContextMenu, sanitizeSvgElement } from "./article-links.js";
 
@@ -190,6 +190,31 @@ export function createArticleObsidianController(opts) {
       if (!items.length) return;
       openArticleContextMenu({ clientX: x, clientY: y }, items);
     },
+    // Synchronous cached existence probe for trusted desktop plugins calling fs.existsSync() (#134)
+    checkFsExistsSync: (() => {
+      const cache = new Map(); // key -> { ok, ts }
+      return (pluginId, filePath) => {
+        if (disposed || !pluginId || !filePath) return false;
+        const key = `${pluginId}\0${String(filePath)}`;
+        const now = Date.now();
+        const hit = cache.get(key);
+        if (hit && now - hit.ts < 3000) return hit.ok;
+        try {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", "/api/article/obsidian/desktop/fs", false);
+          xhr.setRequestHeader("Content-Type", "application/json");
+          const tok = getToken();
+          if (tok) xhr.setRequestHeader("X-Handraw-Token", tok);
+          xhr.send(JSON.stringify({ pluginId, req: { op: "access", path: String(filePath) } }));
+          const ok = xhr.status >= 200 && xhr.status < 300 && Boolean(JSON.parse(xhr.responseText || "{}").exists);
+          cache.set(key, { ok, ts: now });
+          if (cache.size > 200) cache.clear();
+          return ok;
+        } catch {
+          return false;
+        }
+      };
+    })(),
   };
   window.__HANDRAW_CM6_BRIDGE__ = cm6Bridge;
 

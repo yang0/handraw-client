@@ -148,6 +148,15 @@ function installDomHelpers() {
   EP.setCssStyles = function (styles) { if (styles) Object.assign(this.style, styles); return this; };
   EP.show = function () { this.style.display = ""; return this; };
   EP.hide = function () { this.style.display = "none"; return this; };
+  EP.toggle = function (show) {
+    if (typeof show === "boolean") this.style.display = show ? "" : "none";
+    else this.style.display = this.style.display === "none" ? "" : "none";
+    return this;
+  };
+  EP.toggleVisibility = function (visible) {
+    this.style.visibility = visible ? "" : "hidden";
+    return this;
+  };
   EP.isShown = function () { return this.style.display !== "none" && this.offsetParent !== null; };
   EP.find = function (sel) { return this.querySelector(sel); };
   EP.findAll = function (sel) { return Array.from(this.querySelectorAll(sel)); };
@@ -2171,12 +2180,19 @@ function createPathModule() {
     return idx > 0 ? base.slice(idx) : "";
   };
   const relative = (from, to) => {
-    const a = normalize(from).replace(/\\/g, "/").split("/").filter(Boolean);
-    const b = normalize(to).replace(/\\/g, "/").split("/").filter(Boolean);
+    const nf = normalize(from);
+    const nt = normalize(to);
+    if (isWin) {
+      const df = nf.match(/^([A-Za-z]:)/)?.[1]?.toLowerCase() || "";
+      const dt = nt.match(/^([A-Za-z]:)/)?.[1]?.toLowerCase() || "";
+      if (df && dt && df !== dt) return nt;
+    }
+    const a = nf.replace(/\\/g, "/").split("/").filter(Boolean);
+    const b = nt.replace(/\\/g, "/").split("/").filter(Boolean);
     let i = 0;
     while (i < a.length && i < b.length && (isWin ? a[i].toLowerCase() === b[i].toLowerCase() : a[i] === b[i])) i++;
     const up = new Array(a.length - i).fill("..");
-    return [...up, ...b.slice(i)].join(sep) || ".";
+    return [...up, ...b.slice(i)].join(sep);
   };
   const parse = (p) => {
     const dir = dirname(p);
@@ -2264,11 +2280,19 @@ function createDesktopFsModules(pluginId) {
   const fsMod = {
     promises,
     existsSync(p) {
-      const key = normFsKey(p);
+      const raw = String(p || "").trim();
+      if (!raw) return false;
+      const key = normFsKey(raw);
       if (knownExistingPaths.has(key)) return true;
       // Match known executables by full path
       for (const exePath of Object.values(hostEnv.knownExecutables || {})) {
         if (normFsKey(exePath) === key) return true;
+      }
+      const bridge = getCM6Bridge();
+      if (bridge?.checkFsExistsSync) {
+        const ok = Boolean(bridge.checkFsExistsSync(pluginId, raw));
+        if (ok) knownExistingPaths.add(key);
+        return ok;
       }
       return false;
     },
@@ -2279,10 +2303,16 @@ function createDesktopFsModules(pluginId) {
 }
 
 function createChildProcessModule(pluginId) {
+  const makeChildStream = () => {
+    const st = new NodeEventEmitter();
+    st._enc = null;
+    st.setEncoding = (enc) => { st._enc = enc ? String(enc) : null; return st; };
+    return st;
+  };
   const spawn = (executable, args = [], opts = {}) => {
     const child = new NodeEventEmitter();
-    child.stdout = new NodeEventEmitter();
-    child.stderr = new NodeEventEmitter();
+    child.stdout = makeChildStream();
+    child.stderr = makeChildStream();
     child.stdin = { write() {}, end() {} };
     child.killed = false;
     child.kill = () => { child.killed = true; };
@@ -2306,11 +2336,15 @@ function createChildProcessModule(pluginId) {
         args: (args || []).map((a) => String(a)),
         cwd: opts?.cwd || "",
         env: envOverrides,
-        timeoutMs: opts?.timeout || 60000,
+        timeoutMs: opts?.timeout || 240000,
       },
     }).then((res) => {
-      if (res.stdout) child.stdout.emit("data", BufferPolyfill.from(res.stdout, "utf8"));
-      if (res.stderr) child.stderr.emit("data", BufferPolyfill.from(res.stderr, "utf8"));
+      if (res.stdout) {
+        child.stdout.emit("data", child.stdout._enc ? String(res.stdout) : BufferPolyfill.from(res.stdout, "utf8"));
+      }
+      if (res.stderr) {
+        child.stderr.emit("data", child.stderr._enc ? String(res.stderr) : BufferPolyfill.from(res.stderr, "utf8"));
+      }
       if (res.error && res.exitCode !== 0 && !res.stderr) {
         child.emit("error", new Error(res.error));
       }
@@ -3067,6 +3101,19 @@ window.addEventListener("message", async (ev) => {
     } catch (err) {
       reply(false, null, err?.message || String(err));
     }
+  }
+});
+
+// Intercept external <a href="http(s)://..."> clicks so plugin result links open in system browser
+// instead of navigating away from /obsidian-host.html (#134).
+document.addEventListener("click", (ev) => {
+  const a = ev.target?.closest?.("a[href]");
+  if (!a) return;
+  const href = String(a.getAttribute("href") || "").trim();
+  if (/^https?:\/\//i.test(href)) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    notifyParent("open-url", { url: a.href });
   }
 });
 
