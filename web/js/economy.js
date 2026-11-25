@@ -1,8 +1,19 @@
-import { money } from "./api.js";
+/**
+ * Formats micro-yuan (1 CNY = 1,000,000 micros) consistently with handraw-web.
+ */
+export function formatYuanMicros(micros, minDecimals = 2, maxDecimals = 4) {
+  const n = Number(micros || 0);
+  if (!Number.isFinite(n)) return "¥0.00";
+  const neg = n < 0 ? "-" : "";
+  const fixed = (Math.abs(n) / 1000000).toFixed(maxDecimals).replace(/0+$/, "");
+  const [w, f = ""] = fixed.split(".");
+  return `${neg}¥${w}.${f.padEnd(minDecimals, "0")}`;
+}
 
 /**
  * Normalizes /api/account/balance payloads into a uniform view model,
  * supporting both handraw-web's /api/economy schema and legacy flat fields.
+ * Cash recharge balance and bonus credit are combined into one unified balance (#158).
  */
 export function parseEconomy(balRes) {
   const rawEco = balRes?.economy && typeof balRes.economy === "object" ? balRes.economy : null;
@@ -10,10 +21,29 @@ export function parseEconomy(balRes) {
   const cashObj = rawEco?.cash && typeof rawEco.cash === "object" ? rawEco.cash : {};
 
   const rawBal = cashObj.balanceCents ?? rawEco?.balanceCents ?? rawEco?.walletBalanceCents ?? rawEco?.balance ?? null;
-  const balanceCents = rawBal !== null && rawBal !== undefined && rawBal !== "" && Number.isFinite(Number(rawBal))
-    ? Number(rawBal)
-    : null;
-  const heldCents = Number(cashObj.heldCents ?? rawEco?.heldCents ?? 0) || 0;
+  const rawCashTotalMicros = cashObj.totalMicros !== null && cashObj.totalMicros !== undefined && cashObj.totalMicros !== "" && Number.isFinite(Number(cashObj.totalMicros))
+    ? Number(cashObj.totalMicros)
+    : (rawBal !== null && rawBal !== undefined && rawBal !== "" && Number.isFinite(Number(rawBal))
+      ? Number(rawBal) * 10000
+      : null);
+  const cashHeldCentsMicros = (Number(cashObj.heldCents ?? rawEco?.heldCents ?? 0) || 0) * 10000;
+  const cashHeldAiMicros = Number(cashObj.heldAiMicros ?? 0) || 0;
+
+  const aiBonusObj = rawEco?.aiBonus && typeof rawEco.aiBonus === "object" ? rawEco.aiBonus : null;
+  const bonusHeldMicros = Number(aiBonusObj?.heldMicros ?? 0) || 0;
+  const bonusAvailMicros = aiBonusObj?.availableMicros !== null && aiBonusObj?.availableMicros !== undefined && aiBonusObj?.availableMicros !== ""
+    ? (Number(aiBonusObj.availableMicros) || 0)
+    : Math.max(0, (Number(aiBonusObj?.balanceMicros ?? 0) || 0) - bonusHeldMicros);
+  const bonusTotalMicros = aiBonusObj?.balanceMicros !== null && aiBonusObj?.balanceMicros !== undefined && aiBonusObj?.balanceMicros !== ""
+    ? (Number(aiBonusObj.balanceMicros) || 0)
+    : (bonusAvailMicros + bonusHeldMicros);
+
+  const hasBalance = rawCashTotalMicros !== null || aiBonusObj !== null;
+  const balanceMicros = hasBalance ? (rawCashTotalMicros ?? 0) + bonusTotalMicros : null;
+  const heldMicros = hasBalance ? cashHeldCentsMicros + cashHeldAiMicros + bonusHeldMicros : 0;
+  const availableMicros = hasBalance ? Math.max(0, (rawCashTotalMicros ?? 0) - cashHeldAiMicros) + bonusAvailMicros : null;
+  const balanceCents = balanceMicros !== null ? Math.round(balanceMicros / 10000) : null;
+  const heldCents = Math.round(heldMicros / 10000);
 
   const rawPts = rawEco?.points ?? rawEco?.credits ?? rawEco?.communityPoints ?? null;
   const points = rawPts !== null && rawPts !== undefined && rawPts !== "" && Number.isFinite(Number(rawPts))
@@ -46,10 +76,6 @@ export function parseEconomy(balRes) {
   const tier1k = quotaTiers.find((q) => q.resolution === "1K") || quotaTiers[0] || null;
   const totalFreeRemaining = quotaTiers.reduce((sum, q) => sum + q.remaining, 0);
 
-  const aiBonusObj = rawEco?.aiBonus && typeof rawEco.aiBonus === "object" ? rawEco.aiBonus : null;
-  const aiAvailableMicros = Number(aiBonusObj?.availableMicros ?? aiBonusObj?.balanceMicros ?? 0) || 0;
-  const aiClaimableMicros = Number(aiBonusObj?.claimableMicros ?? 0) || 0;
-
   return {
     loggedIn: Boolean(balRes?.loggedIn),
     hasData,
@@ -57,6 +83,9 @@ export function parseEconomy(balRes) {
     unavailable: Boolean(balRes?.unavailable),
     scopeDenied: Boolean(balRes?.scopeDenied || balRes?.code === "token_scope_denied"),
     error: balRes?.error || "",
+    balanceMicros,
+    availableMicros,
+    heldMicros,
     balanceCents,
     heldCents,
     points,
@@ -65,10 +94,6 @@ export function parseEconomy(balRes) {
     quotaTiers,
     tier1k,
     totalFreeRemaining,
-    aiBonusObj,
-    aiAvailableMicros,
-    aiClaimableMicros,
-    aiBonusCents: aiBonusObj ? Math.round(aiAvailableMicros / 10000) : null,
   };
 }
 
@@ -78,7 +103,11 @@ export function formatEconomyPillText(eco) {
     return eco.scopeDenied ? "资产待授权" : "资产未同步";
   }
   const parts = [];
-  if (eco.balanceCents !== null) parts.push(money(eco.balanceCents));
+  if (eco.balanceMicros !== null && eco.balanceMicros !== undefined) {
+    parts.push(formatYuanMicros(eco.balanceMicros, 2, 2));
+  } else if (eco.balanceCents !== null && eco.balanceCents !== undefined) {
+    parts.push(formatYuanMicros(Number(eco.balanceCents) * 10000, 2, 2));
+  }
   if (eco.points !== null) parts.push(`${eco.points} 积分`);
   if (eco.tier1k) parts.push(`${eco.tier1k.resolution}剩${eco.tier1k.remaining}`);
   if (!parts.length) return "查看资产";

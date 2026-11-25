@@ -1,5 +1,5 @@
 import { api, clear, closeModal, connectEvents, el, getToken, installDialogLightDismiss, money, onEvent, openURL, setColorScheme, setToken, showModal, toast } from "./api.js";
-import { economySyncHint, formatEconomyPillText, parseEconomy } from "./economy.js";
+import { economySyncHint, formatEconomyPillText, formatYuanMicros, parseEconomy } from "./economy.js";
 import { initPalette } from "./palette.js";
 import { fallbackPluginIcon } from "./plugin-icons.js";
 import { mountPluginFrame } from "./plugins-host.js";
@@ -439,9 +439,9 @@ async function start() {
     if (eco.hasData) {
       const grid = el("div", { class: "economy-pop-grid" },
         el("div", { class: "economy-stat" },
-          el("span", { class: "muted" }, "可用余额"),
-          el("strong", null, eco.balanceCents !== null ? money(eco.balanceCents) : "--"),
-          eco.heldCents > 0 ? el("span", { class: "muted" }, `冻结中 ${money(eco.heldCents)}`) : null
+          el("span", { class: "muted" }, "余额"),
+          el("strong", null, eco.balanceMicros !== null ? formatYuanMicros(eco.balanceMicros, 2, 4) : "--"),
+          eco.heldMicros > 0 ? el("span", { class: "muted" }, `冻结中 ${formatYuanMicros(eco.heldMicros, 2, 4)}`) : null
         ),
         el("div", { class: "economy-stat" },
           el("span", { class: "muted" }, "社区积分"),
@@ -458,12 +458,6 @@ async function start() {
         wrap.appendChild(el("div", { class: "col", style: { gap: "4px" } },
           el("span", { class: "muted" }, "免费生图额度"),
           qList
-        ));
-      }
-      if (eco.aiBonusObj) {
-        wrap.appendChild(el("div", { class: "row", style: { justifyContent: "space-between" } },
-          el("span", { class: "muted" }, "AI 体验金"),
-          el("strong", null, money(eco.aiBonusCents))
         ));
       }
     }

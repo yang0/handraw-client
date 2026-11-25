@@ -1,5 +1,5 @@
 import { api, clear, closeModal, copyText, el, money, onEvent, openURL, setColorScheme, showModal, toast } from "../api.js";
-import { economySyncHint, formatQuotaSummary, parseEconomy } from "../economy.js";
+import { economySyncHint, formatQuotaSummary, formatYuanMicros, parseEconomy } from "../economy.js";
 import { createTextModelPicker } from "../skills-ui.js";
 import { openClipperSetupModal } from "./inspirations.js";
 
@@ -444,9 +444,9 @@ export async function renderSettings(root, ctx, params = {}) {
     if (eco.hasData) {
       const assetsGrid = el("div", { class: "settings-economy-grid" },
         el("div", { class: "economy-stat" },
-          el("span", { class: "muted" }, "可用余额"),
-          el("strong", null, eco.balanceCents !== null ? money(eco.balanceCents) : "--"),
-          el("span", { class: "muted" }, eco.heldCents > 0 ? `冻结中 ${money(eco.heldCents)}` : "通用人民币余额")
+          el("span", { class: "muted" }, "余额"),
+          el("strong", null, eco.balanceMicros !== null ? formatYuanMicros(eco.balanceMicros, 2, 4) : "--"),
+          el("span", { class: "muted" }, eco.heldMicros > 0 ? `冻结中 ${formatYuanMicros(eco.heldMicros, 2, 4)}` : "生图与 AI 通用")
         ),
         el("div", { class: "economy-stat" },
           el("span", { class: "muted" }, "社区积分"),
@@ -459,13 +459,6 @@ export async function renderSettings(root, ctx, params = {}) {
           el("span", { class: "muted" }, formatQuotaSummary(eco))
         )
       );
-      if (eco.aiBonusObj) {
-        assetsGrid.appendChild(el("div", { class: "economy-stat" },
-          el("span", { class: "muted" }, "AI 体验金"),
-          el("strong", null, money(eco.aiBonusCents)),
-          el("span", { class: "muted" }, eco.aiClaimableMicros > 0 ? "网页端可领取体验金" : "用于文字与视觉解析")
-        ));
-      }
       accSection.appendChild(assetsGrid);
     }
 
