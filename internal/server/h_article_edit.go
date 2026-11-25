@@ -124,6 +124,7 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 
 		chatRes, err := s.executeHostChat(r.Context(), hostChatRequest{
 			ModelRef:   strings.TrimSpace(req.TextModelRef),
+			Scene:      "articleEdit",
 			Capability: "text",
 			System:     sysPrompt,
 			SkillIDs:   activeIDs,
@@ -178,6 +179,7 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 
 		chatRes, err := s.executeHostChatWithJSONFallback(r.Context(), hostChatRequest{
 			ModelRef:   strings.TrimSpace(req.TextModelRef),
+			Scene:      "articleEdit",
 			Capability: "text",
 			System:     sysPrompt,
 			SkillIDs:   activeIDs,
@@ -234,6 +236,7 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 
 	chatRes, err := s.executeHostChatWithJSONFallback(r.Context(), hostChatRequest{
 		ModelRef:   strings.TrimSpace(req.TextModelRef),
+		Scene:      "articleEdit",
 		Capability: "text",
 		System:     sysPrompt,
 		SkillIDs:   activeIDs,

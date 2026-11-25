@@ -37,18 +37,32 @@ export function formatSkillSourceLabel(sk) {
   return "";
 }
 
-export function buildTextModelSelect(modRes, currentVal) {
-  const sel = el("select", { class: "select select-sm", "aria-label": "选择文本模型", style: { maxWidth: "210px" } });
+export function buildTextModelSelect(modRes, currentVal, scene = "") {
+  const sel = el("select", { class: "select select-sm", "aria-label": "选择文本模型", style: { maxWidth: "240px" } });
   const optVals = [];
 
   const siteGroup = el("optgroup", { label: "手绘风官方文字服务" });
   const siteAI = modRes?.siteAI || {};
-  const siteLabel = siteAI.textAvailable
+  const siteAvailable = Array.isArray(siteAI) ? Boolean(modRes?.loggedIn) : Boolean(siteAI.textAvailable || modRes?.loggedIn);
+  const siteLabel = siteAvailable
     ? `官网智能文字服务${siteAI.textLabel ? " · " + siteAI.textLabel : ""}`
     : "官网智能文字服务（需登录）";
   siteGroup.appendChild(el("option", { value: "site:auto" }, siteLabel));
   optVals.push("site:auto");
   sel.appendChild(siteGroup);
+
+  const harnesses = Array.isArray(modRes?.harnesses) ? modRes.harnesses : [];
+  const readyHarnesses = harnesses.filter((h) => h && h.available);
+  if (readyHarnesses.length) {
+    const hGrp = el("optgroup", { label: "本地 AI Harness（本机 CLI）" });
+    readyHarnesses.forEach((h) => {
+      const val = h.defaultRef || `harness:${h.id}`;
+      const sub = h.model ? ` · ${h.model}` : "";
+      hGrp.appendChild(el("option", { value: val }, `${h.name || h.id}${sub}`));
+      optVals.push(val);
+    });
+    sel.appendChild(hGrp);
+  }
 
   const textProviders = modRes?.textProviders || [];
   textProviders.forEach((p) => {
@@ -63,10 +77,19 @@ export function buildTextModelSelect(modRes, currentVal) {
     sel.appendChild(grp);
   });
 
-  const preferred = currentVal || modRes?.defaultTextModel || "";
+  const sceneRef = scene ? (modRes?.sceneModels?.[scene] || "") : "";
+  const preferred = currentVal || sceneRef || modRes?.defaultTextModel || "";
+  if (preferred && !optVals.includes(preferred) && preferred.startsWith("harness:")) {
+    const hid = preferred.slice(8).split(":")[0];
+    const hit = harnesses.find((h) => h.id === hid);
+    const g = el("optgroup", { label: "当前已选（暂不可用）" });
+    g.appendChild(el("option", { value: preferred }, `${hit?.name || hid}（未检测或已停用）`));
+    sel.appendChild(g);
+    optVals.push(preferred);
+  }
   if (preferred && optVals.includes(preferred)) {
     sel.value = preferred;
-  } else if (optVals.length > 1 && !siteAI.textAvailable) {
+  } else if (optVals.length > 1 && !siteAvailable) {
     sel.value = optVals[1];
   } else {
     sel.value = optVals[0] || "site:auto";

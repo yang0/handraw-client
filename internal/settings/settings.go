@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/yang0/handraw-client/internal/appdir"
+	"github.com/yang0/handraw-client/internal/harnesses"
 )
 
 // Provider is a user-configured image and/or text/vision API. Its key lives in the keyring.
@@ -113,12 +114,14 @@ type Settings struct {
 	AutoCheckUpdate    bool                 `json:"autoCheckUpdate"`
 	CostLimitCents     int                  `json:"costLimitCents"`
 	DefaultModel       string               `json:"defaultModel"`       // "site:<id>" or "<providerId>:<modelId>"
-	DefaultTextModel   string               `json:"defaultTextModel"`   // "", "site:auto", "site:<id>", or "<providerId>:<modelId>"
+	DefaultTextModel   string               `json:"defaultTextModel"`   // "", "site:auto", "site:<id>", "<providerId>:<modelId>", or "harness:<id>"
 	DefaultVisionModel string               `json:"defaultVisionModel"` // "", "site:auto", "site:<id>", or "<providerId>:<modelId>"
 	QuickShotHotkey    string               `json:"quickShotHotkey"`
 	QuickShotEnabled   bool                 `json:"quickShotEnabled"`
 	MinimizeToTray     bool                 `json:"minimizeToTray"`
 	Providers          []Provider           `json:"providers"`
+	Harnesses          []harnesses.Config   `json:"harnesses,omitempty"`   // local CLI AI harness overrides & custom CLIs (#119)
+	SceneModels        map[string]string    `json:"sceneModels,omitempty"` // per-scene text/planning model overrides (#119)
 	Plugins            map[string]bool      `json:"plugins"`
 	PluginConfig       map[string]any       `json:"pluginConfig"`
 	PluginMarkets      []PluginMarketSource `json:"pluginMarkets,omitempty"`
@@ -142,6 +145,7 @@ func Defaults() Settings {
 		QuickShotHotkey:   "Alt+Space",
 		QuickShotEnabled:  true,
 		MinimizeToTray:    true,
+		SceneModels:       map[string]string{},
 		Plugins:           map[string]bool{},
 		PluginConfig:      map[string]any{},
 		PluginMarkets:     DefaultPluginMarkets(),
@@ -227,6 +231,9 @@ func clone(s Settings) Settings {
 	_ = json.Unmarshal(b, &out)
 	if out.Plugins == nil {
 		out.Plugins = map[string]bool{}
+	}
+	if out.SceneModels == nil {
+		out.SceneModels = map[string]string{}
 	}
 	if out.PluginConfig == nil {
 		out.PluginConfig = map[string]any{}

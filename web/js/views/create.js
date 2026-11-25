@@ -62,7 +62,7 @@ export function buildGroupedModelSelect(modelsData = {}, currentRef = "") {
   return sel;
 }
 
-export function buildGroupedAIModelSelect(modelsData = {}, currentRef = "", capability = "text") {
+export function buildGroupedAIModelSelect(modelsData = {}, currentRef = "", capability = "text", scene = "") {
   const isVision = capability === "vision";
   const sel = el("select", {
     class: "select select-sm",
@@ -73,6 +73,18 @@ export function buildGroupedAIModelSelect(modelsData = {}, currentRef = "", capa
   const gSite = el("optgroup", { label: siteHint });
   gSite.appendChild(el("option", { value: "site:auto" }, isVision ? "网站官方接口 · 智能视觉服务（平台自动调度）" : "网站官方接口 · 智能文字服务（平台自动调度）"));
   sel.appendChild(gSite);
+
+  const harnesses = !isVision && Array.isArray(modelsData.harnesses) ? modelsData.harnesses : [];
+  const readyHarnesses = harnesses.filter((h) => h && h.available);
+  if (readyHarnesses.length) {
+    const gHarness = el("optgroup", { label: "本地 AI Harness（本机 CLI）" });
+    for (const h of readyHarnesses) {
+      const ref = h.defaultRef || `harness:${h.id}`;
+      const sub = h.model ? ` · ${h.model}` : "";
+      gHarness.appendChild(el("option", { value: ref }, `${h.name || h.id}${sub}`));
+    }
+    sel.appendChild(gHarness);
+  }
 
   const textProvs = Array.isArray(modelsData.textProviders) ? modelsData.textProviders : [];
   for (const p of textProvs) {
@@ -87,9 +99,17 @@ export function buildGroupedAIModelSelect(modelsData = {}, currentRef = "", capa
     sel.appendChild(g);
   }
 
-  const fallbackRef = isVision ? modelsData.defaultVisionModel : modelsData.defaultTextModel;
+  const sceneRef = !isVision && scene ? (modelsData.sceneModels?.[scene] || "") : "";
+  const fallbackRef = isVision ? modelsData.defaultVisionModel : (sceneRef || modelsData.defaultTextModel);
   const rawTarget = currentRef || fallbackRef || "site:auto";
   const target = rawTarget.startsWith("site:") ? "site:auto" : rawTarget;
+  if (target && !Array.from(sel.options).some((o) => o.value === target) && target.startsWith("harness:")) {
+    const hid = target.slice(8).split(":")[0];
+    const hit = harnesses.find((h) => h.id === hid);
+    const g = el("optgroup", { label: "当前已选（暂不可用）" });
+    g.appendChild(el("option", { value: target }, `${hit?.name || hid}（未检测或已停用）`));
+    sel.appendChild(g);
+  }
   if (target && Array.from(sel.options).some((o) => o.value === target)) {
     sel.value = target;
   } else {
@@ -107,6 +127,7 @@ const MODE_LABELS = {
 const SOURCE_LABELS = {
   site: "网站规划",
   provider: "文本模型规划",
+  harness: "本地 Harness 规划",
   local: "本地规划",
   direct: "提示词直出",
   work: "历史作品",

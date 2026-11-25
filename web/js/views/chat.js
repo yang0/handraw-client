@@ -54,6 +54,16 @@ function formatModelDisplay(rawRef, modRes = {}, { compact = false } = {}) {
     ? rawSite
     : (rawSite?.specifications || rawSite?.models || rawSite?.items || []);
 
+  if (s.startsWith("harness:")) {
+    const rest = s.slice(8);
+    const [hid, sub] = rest.split(":");
+    const list = Array.isArray(modRes?.harnesses) ? modRes.harnesses : [];
+    const hit = list.find((h) => h?.id === hid);
+    const baseName = hit?.name || hid;
+    const full = sub ? `${baseName} · ${sub}` : baseName;
+    return compact ? full : `本地 Harness · ${full}`;
+  }
+
   if (s.startsWith("site:")) {
     const id = s.slice(5);
     const hit = siteModels.find((m) => (m?.model || m?.id) === id);
@@ -325,7 +335,7 @@ export async function renderChat(root, ctx, params = {}) {
         messages: Array.isArray(data.messages) ? data.messages : [],
         skillIds: Array.isArray(data.skillIds) ? data.skillIds : [],
         directPrompt: Boolean(data.directPrompt),
-        textModelRef: data.textModelRef || modRes.defaultTextModel || "site:auto",
+        textModelRef: data.textModelRef || modRes.sceneModels?.chat || modRes.defaultTextModel || "site:auto",
         imageModelRef: data.imageModelRef || modRes.defaultModel || "site:seedream-4.5",
         ratio: data.ratio || "3:4",
       },
@@ -341,7 +351,7 @@ export async function renderChat(root, ctx, params = {}) {
       messages: [],
       skillIds: skillsList.filter((sk) => sk.builtin && sk.enabled !== false).map((sk) => sk.id),
       directPrompt: false,
-      textModelRef: modRes.defaultTextModel || "site:auto",
+      textModelRef: modRes.sceneModels?.chat || modRes.defaultTextModel || "site:auto",
       imageModelRef: modRes.defaultModel || "site:seedream-4.5",
       ratio: "3:4",
     },
@@ -641,7 +651,7 @@ export async function renderChat(root, ctx, params = {}) {
   });
 
   // Model & Ratio selects live inside the dedicated clean floating popover
-  const textModelSel = buildGroupedAIModelSelect(modRes, activeSession().data.textModelRef, "text");
+  const textModelSel = buildGroupedAIModelSelect(modRes, activeSession().data.textModelRef, "text", "chat");
   textModelSel.style.maxWidth = "100%";
   textModelSel.addEventListener("change", () => {
     const s = activeSession();

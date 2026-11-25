@@ -139,9 +139,40 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 		return resp, nil
 	}
 
-	route, err := resolveAIRoute("text", req.TextModelRef)
+	route, err := resolveAIRouteForScene("text", "chat", req.TextModelRef)
 	if err != nil {
 		return nil, err
+	}
+
+	if route.Mode == "harness" {
+		p, _ := s.pack()
+		sysPrompt := buildChatSystemPrompt(p, activeSkills, invokedSkillID, req.DirectPrompt)
+		msgs := make([]providers.ChatMessage, 0, len(req.Messages)+2)
+		msgs = append(msgs, providers.ChatMessage{Role: "system", Content: sysPrompt})
+		start := 0
+		if len(req.Messages) > 20 {
+			start = len(req.Messages) - 20
+		}
+		for i := start; i < len(req.Messages); i++ {
+			m := req.Messages[i]
+			role := strings.TrimSpace(m.Role)
+			content := strings.TrimSpace(m.Content)
+			if content == "" || (role != "user" && role != "assistant") {
+				continue
+			}
+			if i == lastUserIdx && cleanedUserText != "" {
+				content = cleanedUserText
+			}
+			msgs = append(msgs, providers.ChatMessage{Role: role, Content: content})
+		}
+		res, err := s.callHarnessText(r.Context(), route, msgs, false)
+		if err != nil {
+			return nil, err
+		}
+		resp.Source = "harness"
+		resp.TextModel = "harness:" + route.Harness.ID
+		resp.Reply = strings.TrimSpace(res.Text)
+		return resp, nil
 	}
 
 	var tp settings.Provider

@@ -1476,7 +1476,7 @@ export async function renderCanvas(host, ctx, params = {}) {
       rows: "4",
       placeholder: "描述你想生成的组合流程，例如：把清晨咖啡的 4 个步骤做成 2 种不同画风的对比矩阵…",
     });
-    const textSel = buildGroupedAIModelSelect(modRes, modRes.defaultTextModel || "", "text");
+    const textSel = buildGroupedAIModelSelect(modRes, modRes.sceneModels?.canvas || modRes.defaultTextModel || "", "text", "canvas");
     showModal("✨ 画布工作流助手", el("div", { class: "col" },
       promptIn,
       el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center" } },

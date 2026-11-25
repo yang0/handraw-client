@@ -4,14 +4,17 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/yang0/handraw-client/internal/harnesses"
 	"github.com/yang0/handraw-client/internal/providers"
 	"github.com/yang0/handraw-client/internal/settings"
 )
 
 type aiRoute struct {
-	Mode     string // "auto" | "site" | "provider"
-	Provider settings.Provider
-	Model    string
+	Mode            string // "auto" | "site" | "provider" | "harness"
+	Provider        settings.Provider
+	Model           string
+	Harness         harnesses.Status
+	HarnessSubModel string
 }
 
 func isTextOrVisionPurpose(purpose string) bool {
@@ -19,8 +22,17 @@ func isTextOrVisionPurpose(purpose string) bool {
 }
 
 func resolveAIRoute(capability, overrideRef string) (aiRoute, error) {
+	return resolveAIRouteForScene(capability, "", overrideRef)
+}
+
+func resolveAIRouteForScene(capability, scene, overrideRef string) (aiRoute, error) {
 	st := settings.Get()
 	ref := strings.TrimSpace(overrideRef)
+	if ref == "" && scene != "" && capability != "vision" {
+		if v := strings.TrimSpace(st.SceneModels[scene]); v != "" {
+			ref = v
+		}
+	}
 	if ref == "" {
 		if capability == "vision" {
 			ref = strings.TrimSpace(st.DefaultVisionModel)
@@ -30,6 +42,24 @@ func resolveAIRoute(capability, overrideRef string) (aiRoute, error) {
 	}
 	if ref == "" || ref == "site:auto" {
 		return aiRoute{Mode: "auto"}, nil
+	}
+	if hid, subModel, isHarness := harnesses.ParseRef(ref); isHarness {
+		hst, ok := harnesses.Find(st.Harnesses, hid)
+		if !ok {
+			return aiRoute{}, bad("未找到所选本地 Harness：" + hid + "，请在「设置 → 本地 Harness」中检查配置")
+		}
+		if !hst.Detected {
+			return aiRoute{}, bad("本机未检测到 " + hst.Name + "，请先安装或在「设置 → 本地 Harness」中指定可执行路径")
+		}
+		if !hst.Enabled {
+			return aiRoute{}, bad(hst.Name + " 已停用，请在「设置 → 本地 Harness」中开启")
+		}
+		return aiRoute{
+			Mode:            "harness",
+			Harness:         hst,
+			HarnessSubModel: subModel,
+			Model:           firstStr(subModel, hst.Model, hst.ID),
+		}, nil
 	}
 	// Official website text/vision always uses fixed capability endpoints without
 	// exposing or selecting internal site model names (#45). Legacy "site:<model>"

@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/yang0/handraw-client/internal/harnesses"
 	"github.com/yang0/handraw-client/internal/jobs"
 	"github.com/yang0/handraw-client/internal/prompt"
 	"github.com/yang0/handraw-client/internal/providers"
@@ -116,9 +117,23 @@ func (s *Server) expandTheme(w http.ResponseWriter, r *http.Request) (any, error
 	if strings.TrimSpace(body.Theme) == "" {
 		return nil, bad("请输入要扩写的主题")
 	}
-	route, err := resolveAIRoute("text", body.ModelRef)
+	route, err := resolveAIRouteForScene("text", "studioPlan", body.ModelRef)
 	if err != nil {
 		return nil, err
+	}
+	expandWithHarness := func() (string, error) {
+		sys := "你是手绘插画画面构思助手。将用户简短主题扩写成丰富、具体、有画面感的中文场景描述（不超过 120 字），只补充主体动作、环境氛围、视角细节，不要指定画风或色彩术语。"
+		res, err := s.callHarnessText(r.Context(), route, []providers.ChatMessage{
+			{Role: "system", Content: sys},
+			{Role: "user", Content: body.Theme},
+		}, false)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(res.Text) == "" {
+			return "", bad("本地 Harness 返回内容为空")
+		}
+		return strings.TrimSpace(res.Text), nil
 	}
 	expandWithProvider := func(tp settings.Provider, model string) (string, error) {
 		sys := "你是手绘插画画面构思助手。将用户简短主题扩写成丰富、具体、有画面感的中文场景描述（不超过 120 字），只补充主体动作、环境氛围、视角细节，不要指定画风或色彩术语。"
@@ -158,6 +173,12 @@ func (s *Server) expandTheme(w http.ResponseWriter, r *http.Request) (any, error
 		return "", bad("线上接口未能生成扩写内容")
 	}
 	switch route.Mode {
+	case "harness":
+		txt, err := expandWithHarness()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"theme": txt, "source": "harness", "harness": route.Harness.ID}, nil
 	case "provider":
 		txt, err := expandWithProvider(route.Provider, route.Model)
 		if err != nil {
@@ -244,6 +265,8 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) (any, error) {
 		"siteAI":             normalizeSiteAIModels(siteModels),
 		"providers":          imgProvs,
 		"textProviders":      txtProvs,
+		"harnesses":          harnesses.Discover(st.Harnesses),
+		"sceneModels":        st.SceneModels,
 		"defaultModel":       st.DefaultModel,
 		"defaultTextModel":   st.DefaultTextModel,
 		"defaultVisionModel": st.DefaultVisionModel,
@@ -1012,7 +1035,7 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 	if body.LayoutMode != "fixed" {
 		body.LayoutMode = "ai"
 	}
-	route, err := resolveAIRoute("text", body.ModelRef)
+	route, err := resolveAIRouteForScene("text", "studioPlan", body.ModelRef)
 	if err != nil {
 		return nil, err
 	}
@@ -1022,6 +1045,19 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 				c["layout"] = body.FixedLayout
 			}
 		}
+	}
+	planWithHarness := func() (map[string]any, error) {
+		promptTxt := fmt.Sprintf("将主题「%s」拆分为 %d 张连贯系列插画分镜。图型策略 %s，固定图型 %s，图型要求 %s。返回 JSON 数组：[{\"title\":\"\",\"theme\":\"\",\"text\":\"\",\"layout\":\"\"}]", body.Topic, body.Count, body.LayoutMode, body.FixedLayout, body.LayoutRequirement)
+		res, err := s.callHarnessText(r.Context(), route, []providers.ChatMessage{{Role: "user", Content: promptTxt}}, false)
+		if err != nil {
+			return nil, err
+		}
+		cards := seriesCards(json.RawMessage(extractJSON(res.Text)))
+		if len(cards) == 0 {
+			return nil, bad("本地 Harness 返回的分镜格式无法解析")
+		}
+		applyFixed(cards)
+		return map[string]any{"cards": cards, "source": "harness", "harness": route.Harness.ID}, nil
 	}
 	planWithSite := func() (map[string]any, error) {
 		req := map[string]any{
@@ -1053,6 +1089,8 @@ func (s *Server) seriesPlan(w http.ResponseWriter, r *http.Request) (any, error)
 		return map[string]any{"cards": cards, "source": "provider"}, nil
 	}
 	switch route.Mode {
+	case "harness":
+		return planWithHarness()
 	case "provider":
 		return planWithProvider(route.Provider, route.Model)
 	case "site":
@@ -1130,11 +1168,28 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 	body.CoverRatio = firstStr(body.CoverRatio, "2.35:1")
 	body.InlineRatio = firstStr(body.InlineRatio, "4:3")
 	includeCover := body.IncludeCover == nil || *body.IncludeCover
-	route, err := resolveAIRoute("text", body.ModelRef)
+	route, err := resolveAIRouteForScene("text", "articlePlan", body.ModelRef)
 	if err != nil {
 		return nil, err
 	}
 	planMsgs := buildArticlePlanMessages(body.Title, body.Content, includeCover)
+	planWithHarness := func() (map[string]any, error) {
+		res, err := s.callHarnessText(r.Context(), route, planMsgs, true)
+		if err != nil {
+			return nil, err
+		}
+		slots, styles := articleSlots(json.RawMessage(extractJSON(res.Text)), body.Content, body.CoverRatio, body.InlineRatio, includeCover)
+		if len(slots) == 0 {
+			return nil, bad("本地 Harness 返回的配图规划无法解析")
+		}
+		return map[string]any{
+			"slots":             slots,
+			"recommendedStyles": styles,
+			"source":            "harness",
+			"harness":           route.Harness.ID,
+			"model":             firstStr(res.Model, route.Harness.Name),
+		}, nil
+	}
 
 	planWithSiteEndpoint := func() (map[string]any, error) {
 		request := articlePlanRequest(body.Title, body.Content, body.StyleID, body.CoverRatio, body.InlineRatio, includeCover)
@@ -1210,6 +1265,8 @@ func (s *Server) articlePlan(w http.ResponseWriter, r *http.Request) (any, error
 
 	var fallbackReason string
 	switch route.Mode {
+	case "harness":
+		return planWithHarness()
 	case "provider":
 		return planWithProvider(route.Provider, route.Model)
 	case "site":
@@ -1428,9 +1485,23 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 	if strings.TrimSpace(body.Prompt) == "" {
 		return nil, bad("请描述你想搭建的画布流程")
 	}
-	route, err := resolveAIRoute("text", body.ModelRef)
+	route, err := resolveAIRouteForScene("text", "canvas", body.ModelRef)
 	if err != nil {
 		return nil, err
+	}
+	buildWithHarness := func() (map[string]any, error) {
+		ask := fmt.Sprintf("根据用户需求「%s」生成节点画布工作流 JSON：{\"nodes\":[{\"id\":\"n1\",\"type\":\"themes|recipe|styles|generate|export\",\"x\":80,\"y\":120,\"data\":{\"label\":\"\",\"items\":[]}}],\"edges\":[{\"id\":\"e1\",\"from\":\"n1\",\"to\":\"n2\"}]}", body.Prompt)
+		res, err := s.callHarnessText(r.Context(), route, []providers.ChatMessage{{Role: "user", Content: ask}}, true)
+		if err != nil {
+			return nil, err
+		}
+		var g map[string]any
+		if json.Unmarshal([]byte(extractJSON(res.Text)), &g) != nil {
+			return nil, bad("本地 Harness 返回的画布 JSON 无法解析")
+		}
+		g["source"] = "harness"
+		g["harness"] = route.Harness.ID
+		return g, nil
 	}
 	buildWithSite := func() (map[string]any, error) {
 		req := map[string]any{"prompt": body.Prompt}
@@ -1473,6 +1544,8 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 		return g, nil
 	}
 	switch route.Mode {
+	case "harness":
+		return buildWithHarness()
 	case "provider":
 		return buildWithProvider(route.Provider, route.Model)
 	case "site":

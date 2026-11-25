@@ -5,6 +5,7 @@ import { openClipperSetupModal } from "./inspirations.js";
 const VALID_SETTINGS_TABS = new Set([
   "settings-account",
   "settings-models",
+  "settings-harnesses",
   "settings-preferences",
   "settings-updates",
 ]);
@@ -47,13 +48,15 @@ export async function renderSettings(root, ctx, params = {}) {
     activeSettingsTab = requestedTab;
   }
 
-  const [accRes, balRes, settRes, updRes, loginRes, skillsRes] = await Promise.all([
+  const [accRes, balRes, settRes, updRes, loginRes, skillsRes, harnessRes, modRes] = await Promise.all([
     api("GET", "/api/account").catch(() => ({ loggedIn: false })),
     api("GET", "/api/account/balance").catch((e) => ({ loggedIn: false, error: e?.message || "" })),
     api("GET", "/api/settings").catch(() => ({ settings: {}, providers: [] })),
     api("GET", "/api/update").catch(() => ({})),
     api("GET", "/api/account/login").catch(() => null),
     api("GET", "/api/skills").catch(() => ({ items: [] })),
+    api("GET", "/api/harnesses").catch(() => ({ items: [], scenes: [], sceneModels: {} })),
+    api("GET", "/api/models").catch(() => ({ textProviders: [], harnesses: [], loggedIn: false })),
   ]);
   if (!root.isConnected || root._settingsRenderSeq !== seq) return;
 
@@ -612,6 +615,252 @@ export async function renderSettings(root, ctx, params = {}) {
     });
   }
   provSection.appendChild(provList);
+
+  // 2.5 Local AI Harnesses & Per-Scene Routing (#119)
+  const harnesses = Array.isArray(harnessRes?.items) ? harnessRes.items : [];
+  const harnessScenes = Array.isArray(harnessRes?.scenes) ? harnessRes.scenes : [];
+  const sceneModels = Object.assign({}, settings.sceneModels || harnessRes?.sceneModels || {});
+  const readyHarnessCount = harnesses.filter((h) => h && h.available).length;
+
+  function buildSceneModelSelect(currentValue, allowFollowDefault = true) {
+    const sel = el("select", { class: "select select-sm harness-scene-select" });
+    if (allowFollowDefault) {
+      sel.appendChild(el("option", { value: "" }, "跟随通用默认文字引擎"));
+    } else {
+      sel.appendChild(el("option", { value: "" }, "自动调度（优先官网，回退第三方）"));
+    }
+    const gSite = el("optgroup", { label: modRes?.loggedIn ? "手绘风官方服务" : "手绘风官方服务（需先登录）" });
+    gSite.appendChild(el("option", { value: "site:auto" }, "官网智能文字服务"));
+    sel.appendChild(gSite);
+
+    const readyList = harnesses.filter((h) => h && h.available);
+    if (readyList.length) {
+      const gH = el("optgroup", { label: "本地 AI Harness（本机 CLI）" });
+      readyList.forEach((h) => {
+        const ref = h.defaultRef || `harness:${h.id}`;
+        gH.appendChild(el("option", { value: ref }, `${h.name}${h.model ? " · " + h.model : ""}`));
+      });
+      sel.appendChild(gH);
+    }
+
+    const txtProvs = Array.isArray(modRes?.textProviders) ? modRes.textProviders : [];
+    txtProvs.forEach((p) => {
+      const ms = p.models || [];
+      if (!ms.length) return;
+      const gP = el("optgroup", { label: `第三方 OpenAI 接口 · ${p.name || p.id}` });
+      ms.forEach((m) => {
+        gP.appendChild(el("option", { value: `${p.id}:${m.id}` }, m.label || m.name || m.id));
+      });
+      sel.appendChild(gP);
+    });
+
+    const target = String(currentValue || "").trim();
+    if (target && !Array.from(sel.options).some((o) => o.value === target)) {
+      const gKeep = el("optgroup", { label: "当前已配置（暂不可用）" });
+      gKeep.appendChild(el("option", { value: target }, `${target}（未就绪）`));
+      sel.appendChild(gKeep);
+    }
+    sel.value = target;
+    return sel;
+  }
+
+  const sceneRowsWrap = el("div", { class: "harness-scene-list" });
+  const defaultTextSel = buildSceneModelSelect(settings.defaultTextModel || "", false);
+  defaultTextSel.addEventListener("change", async () => {
+    try {
+      await api("PATCH", "/api/settings", { defaultTextModel: defaultTextSel.value });
+      toast("已更新通用默认文字引擎");
+    } catch (e) {
+      toast(e.message || "保存失败");
+    }
+  });
+  sceneRowsWrap.appendChild(el("div", { class: "harness-scene-row" },
+    el("div", { class: "harness-scene-info" },
+      el("strong", null, "通用默认文字引擎"),
+      el("span", { class: "muted" }, "各场景未单独指定时默认使用的文字/规划模型")
+    ),
+    defaultTextSel
+  ));
+
+  harnessScenes.forEach((sc) => {
+    const sel = buildSceneModelSelect(sceneModels[sc.key] || "", true);
+    sel.addEventListener("change", async () => {
+      try {
+        await api("PATCH", "/api/settings", { sceneModels: { [sc.key]: sel.value } });
+        sceneModels[sc.key] = sel.value;
+        toast(`已更新「${sc.label}」引擎`);
+      } catch (e) {
+        toast(e.message || "保存失败");
+      }
+    });
+    sceneRowsWrap.appendChild(el("div", { class: "harness-scene-row" },
+      el("div", { class: "harness-scene-info" },
+        el("strong", null, sc.label),
+        el("span", { class: "muted" }, sc.description)
+      ),
+      sel
+    ));
+  });
+
+  const harnessCardsWrap = el("div", { class: "harness-list" });
+  harnesses.forEach((h) => {
+    const statusBadge = h.available
+      ? el("span", { class: "badge badge-ok" }, "已就绪")
+      : (h.detected
+          ? el("span", { class: "badge" }, "已停用")
+          : el("span", { class: "badge badge-warn" }, "未检测到"));
+
+    const testFeedback = el("div", { class: "provider-test-feedback hidden" });
+    const testBtn = el("button", {
+      type: "button",
+      class: "btn btn-sm",
+      disabled: !h.detected,
+      onClick: async () => {
+        testBtn.disabled = true;
+        const oldTxt = testBtn.textContent;
+        testBtn.textContent = "测试中…";
+        testFeedback.classList.remove("hidden");
+        testFeedback.dataset.state = "loading";
+        testFeedback.replaceChildren(el("div", { role: "status", class: "muted" }, `正在调用本机 ${h.name} 执行最小连通测试（首次可能需 10–30 秒）…`));
+        try {
+          const r = await api("POST", `/api/harnesses/${encodeURIComponent(h.id)}/test`, {});
+          if (r.ok) {
+            testFeedback.dataset.state = "ok";
+            testFeedback.replaceChildren(
+              el("div", { role: "status", style: { color: "var(--ok)", fontWeight: "600" } }, `连通正常（耗时 ${r.elapsedMs || 0} ms）`),
+              el("pre", { class: "provider-test-detail" }, String(r.text || "").slice(0, 400))
+            );
+          } else {
+            testFeedback.dataset.state = "error";
+            testFeedback.replaceChildren(
+              el("div", { role: "status" }, "测试失败"),
+              el("pre", { class: "provider-test-detail" }, r.error || "未知错误")
+            );
+          }
+        } catch (err) {
+          testFeedback.dataset.state = "error";
+          testFeedback.replaceChildren(
+            el("div", { role: "status" }, "测试失败"),
+            el("pre", { class: "provider-test-detail" }, err?.message || "请求异常")
+          );
+        } finally {
+          testBtn.disabled = !h.detected;
+          testBtn.textContent = oldTxt;
+        }
+      },
+    }, "测试");
+
+    const toggleBtn = el("button", {
+      type: "button",
+      class: "btn btn-sm",
+      disabled: !h.detected && !h.enabled,
+      onClick: async () => {
+        try {
+          await api("PUT", `/api/harnesses/${encodeURIComponent(h.id)}`, {
+            id: h.id,
+            name: h.name,
+            driver: h.driver,
+            enabled: !h.enabled,
+            command: h.command || "",
+            model: h.model || "",
+            extraArgs: h.extraArgs || [],
+            workDir: h.workDir || "",
+            timeoutSec: h.timeoutSec || 180,
+          });
+          toast(h.enabled ? `已停用 ${h.name}` : `已启用 ${h.name}`);
+          renderSettings(root, ctx, { tab: "settings-harnesses", preserveScroll: true });
+        } catch (err) {
+          toast(err.message || "操作失败");
+        }
+      },
+    }, h.enabled ? "停用" : "启用");
+
+    const metaBits = [];
+    if (h.model) metaBits.push(`子模型：${h.model}`);
+    if (h.workDir) metaBits.push(`目录：${h.workDir}`);
+    if (h.timeoutSec && h.timeoutSec !== 180) metaBits.push(`超时：${h.timeoutSec}s`);
+
+    const hasOverride = Boolean(h.command || h.model || (h.extraArgs && h.extraArgs.length) || h.workDir || (h.timeoutSec && h.timeoutSec !== 180));
+
+    harnessCardsWrap.appendChild(el("div", { class: "card col harness-card", style: { gap: "8px", padding: "12px 14px", background: "var(--paper)" } },
+      el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "flex-start", gap: "10px", flexWrap: "wrap" } },
+        el("div", { class: "col", style: { gap: "3px", minWidth: "0", flex: "1" } },
+          el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+            el("strong", null, h.name),
+            el("span", { class: "badge mono" }, h.driver),
+            h.custom ? el("span", { class: "badge badge-accent" }, "自定义") : null,
+            statusBadge
+          ),
+          h.description ? el("span", { class: "muted" }, h.description) : null,
+          el("code", { class: "mono muted harness-path", title: h.resolvedPath || "" },
+            h.resolvedPath ? h.resolvedPath : "未在系统 PATH 与常见目录中检测到，可点「配置」手动填写可执行路径"
+          ),
+          metaBits.length ? el("span", { class: "muted", style: { fontSize: "11.5px" } }, metaBits.join(" · ")) : null
+        ),
+        el("div", { class: "row", style: { gap: "6px", flexShrink: "0" } },
+          toggleBtn,
+          testBtn,
+          el("button", {
+            type: "button",
+            class: "btn btn-sm",
+            onClick: () => openHarnessModal(h, () => renderSettings(root, ctx, { tab: "settings-harnesses", preserveScroll: true })),
+          }, "配置"),
+          h.custom
+            ? el("button", {
+                type: "button",
+                class: "btn btn-sm btn-danger",
+                onClick: async () => {
+                  await api("DELETE", `/api/harnesses/${encodeURIComponent(h.id)}`);
+                  toast(`已删除 ${h.name}`);
+                  renderSettings(root, ctx, { tab: "settings-harnesses", preserveScroll: true });
+                },
+              }, "删除")
+            : (hasOverride
+                ? el("button", {
+                    type: "button",
+                    class: "btn btn-sm",
+                    onClick: async () => {
+                      await api("DELETE", `/api/harnesses/${encodeURIComponent(h.id)}`);
+                      toast(`已重置 ${h.name} 为自动检测默认配置`);
+                      renderSettings(root, ctx, { tab: "settings-harnesses", preserveScroll: true });
+                    },
+                  }, "重置")
+                : null)
+        )
+      ),
+      testFeedback
+    ));
+  });
+
+  const harnessSection = el("section", {
+    id: "settings-harnesses",
+    class: "card settings-section settings-tabpanel",
+    role: "tabpanel",
+    "aria-labelledby": "tab-settings-harnesses",
+  },
+    el("div", { class: "settings-section-head" },
+      el("div", null,
+        el("h2", { class: "settings-section-title" }, "本地 AI Harness"),
+        el("p", { class: "muted settings-section-desc" }, "直接调用本机已安装并登录的 AI CLI 客户端（Antigravity、Claude Code、Codex、OpenCode、Gemini CLI、DSH 或自定义 CLI），并按场景自由组合——例如用 agy 写文章、官网接口出图。")
+      ),
+      el("div", { class: "row", style: { gap: "6px" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => renderSettings(root, ctx, { tab: "settings-harnesses", preserveScroll: true }),
+        }, "重新检测"),
+        el("button", {
+          type: "button",
+          class: "btn btn-primary btn-sm",
+          onClick: () => openHarnessModal(null, () => renderSettings(root, ctx, { tab: "settings-harnesses", preserveScroll: true })),
+        }, "+ 添加自定义 CLI")
+      )
+    ),
+    el("div", { class: "settings-subhead" }, "分场景引擎分配（各页面内也可随时临时切换）"),
+    sceneRowsWrap,
+    el("div", { class: "settings-subhead", style: { marginTop: "6px" } }, `本机 Harness 客户端（${readyHarnessCount}/${harnesses.length} 已就绪）`),
+    harnessCardsWrap
+  );
 
   // 3. Preferences & Storage
   const themeSel = el("select", { id: "pref-theme", name: "theme", class: "select select-sm" },
@@ -1259,6 +1508,7 @@ export async function renderSettings(root, ctx, params = {}) {
   const tabDefs = [
     { id: "settings-account", label: "账户与资产", meta: accRes.loggedIn ? "已登录" : "未登录", panel: accSection },
     { id: "settings-models", label: "第三方接口", meta: providers.length ? `${providers.length} 个接口` : "未配置", panel: provSection },
+    { id: "settings-harnesses", label: "本地 Harness", meta: readyHarnessCount ? `${readyHarnessCount} 个就绪` : "未检测", panel: harnessSection },
     { id: "settings-preferences", label: "通用偏好与存储", meta: "", panel: prefSection },
     { id: "settings-updates", label: "版本与资源更新", meta: hasAnyUpdate ? "有更新" : (updRes.current || ""), panel: updSection },
   ];
@@ -1268,6 +1518,7 @@ export async function renderSettings(root, ctx, params = {}) {
   const content = el("div", { class: "settings-content" },
     accSection,
     provSection,
+    harnessSection,
     prefSection,
     updSection
   );
@@ -1987,4 +2238,174 @@ function openProviderModal(existing, onSaved) {
     dialog.classList.remove("modal-provider");
     stopTestClock();
   }, { once: true });
+}
+
+function openHarnessModal(existing, onSaved) {
+  const isNew = !existing;
+  const idIn = el("input", {
+    class: "input mono",
+    type: "text",
+    value: existing?.id || "",
+    disabled: !isNew,
+    placeholder: "如：my-cli（仅小写字母、数字、短横线）",
+  });
+  const nameIn = el("input", {
+    class: "input",
+    type: "text",
+    value: existing?.name || "",
+    placeholder: "显示名称，如：我的本地 Agent",
+  });
+  const driverSel = el("select", { class: "select" },
+    el("option", { value: "agy", selected: existing?.driver === "agy" }, "Antigravity (agy)"),
+    el("option", { value: "claude", selected: existing?.driver === "claude" }, "Claude Code (claude)"),
+    el("option", { value: "codex", selected: existing?.driver === "codex" }, "Codex CLI (codex)"),
+    el("option", { value: "opencode", selected: existing?.driver === "opencode" }, "OpenCode (opencode)"),
+    el("option", { value: "gemini", selected: existing?.driver === "gemini" }, "Gemini CLI (gemini)"),
+    el("option", { value: "dsh", selected: existing?.driver === "dsh" }, "DeepSeek Harness (dsh)"),
+    el("option", { value: "custom", selected: !existing || existing?.driver === "custom" }, "通用自定义 CLI（通过 stdin 或 {{prompt}} 传参）")
+  );
+  const cmdIn = el("input", {
+    class: "input mono",
+    type: "text",
+    value: existing?.command || "",
+    placeholder: existing?.builtin ? `留空则自动探测（当前：${existing?.resolvedPath || "未检测到"}）` : "必填：命令名或完整可执行文件路径",
+  });
+  const modelIn = el("input", {
+    class: "input mono",
+    type: "text",
+    value: existing?.model || "",
+    placeholder: "可选：覆盖默认子模型，如 sonnet / o3 / gemini-2.5-pro",
+  });
+  const extraArgsIn = el("input", {
+    class: "input mono",
+    type: "text",
+    value: (existing?.extraArgs || []).join(" "),
+    placeholder: "可选：额外参数（空格分隔），自定义 CLI 可写 {{prompt}}",
+  });
+  const workDirIn = el("input", {
+    class: "input mono",
+    type: "text",
+    value: existing?.workDir || "",
+    placeholder: "可选：默认使用只读隔离临时目录，如需读特定文件夹可填写路径",
+  });
+  const timeoutIn = el("input", {
+    class: "input",
+    type: "number",
+    min: "15",
+    max: "600",
+    step: "5",
+    value: String(existing?.timeoutSec || 180),
+  });
+  const enabledChk = el("input", {
+    type: "checkbox",
+    checked: existing ? Boolean(existing.enabled) : true,
+  });
+
+  function splitArgs(raw) {
+    const out = [];
+    const s = String(raw || "").trim();
+    if (!s) return out;
+    const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      out.push(m[1] ?? m[2] ?? m[3]);
+    }
+    return out;
+  }
+
+  function buildPayload() {
+    const id = idIn.value.trim().toLowerCase();
+    if (!id) throw new Error("请填写 Harness ID");
+    return {
+      id,
+      name: nameIn.value.trim() || id,
+      driver: driverSel.value,
+      enabled: enabledChk.checked,
+      command: cmdIn.value.trim(),
+      model: modelIn.value.trim(),
+      extraArgs: splitArgs(extraArgsIn.value),
+      workDir: workDirIn.value.trim(),
+      timeoutSec: Number(timeoutIn.value) || 180,
+    };
+  }
+
+  const testBox = el("div", { class: "provider-test-feedback hidden" });
+  const testModalBtn = el("button", {
+    type: "button",
+    class: "btn",
+    onClick: async () => {
+      let payload;
+      try {
+        payload = buildPayload();
+      } catch (e) {
+        toast(e.message);
+        return;
+      }
+      testModalBtn.disabled = true;
+      testModalBtn.textContent = "测试中…";
+      testBox.classList.remove("hidden");
+      testBox.dataset.state = "loading";
+      testBox.replaceChildren(el("div", { role: "status", class: "muted" }, "正在调用本机 CLI 测试连通性…"));
+      try {
+        const r = await api("POST", `/api/harnesses/${encodeURIComponent(payload.id)}/test`, payload);
+        if (r.ok) {
+          testBox.dataset.state = "ok";
+          testBox.replaceChildren(
+            el("div", { role: "status", style: { color: "var(--ok)", fontWeight: "600" } }, `连通成功（${r.elapsedMs || 0} ms）`),
+            el("pre", { class: "provider-test-detail" }, String(r.text || "").slice(0, 400))
+          );
+        } else {
+          testBox.dataset.state = "error";
+          testBox.replaceChildren(
+            el("div", { role: "status" }, "测试失败"),
+            el("pre", { class: "provider-test-detail" }, r.error || "未知错误")
+          );
+        }
+      } catch (err) {
+        testBox.dataset.state = "error";
+        testBox.replaceChildren(
+          el("div", { role: "status" }, "测试失败"),
+          el("pre", { class: "provider-test-detail" }, err?.message || "请求异常")
+        );
+      } finally {
+        testModalBtn.disabled = false;
+        testModalBtn.textContent = "测试连通";
+      }
+    },
+  }, "测试连通");
+
+  showModal(isNew ? "添加自定义本地 Harness" : `配置 ${existing.name}`, el("div", { class: "col", style: { gap: "10px" } },
+    el("div", { class: "split" },
+      el("div", { class: "field" }, el("label", null, "标识 ID"), idIn),
+      el("div", { class: "field" }, el("label", null, "显示名称"), nameIn)
+    ),
+    el("div", { class: "split" },
+      el("div", { class: "field" }, el("label", null, "协议驱动"), driverSel),
+      el("div", { class: "field" }, el("label", null, "单次超时（秒）"), timeoutIn)
+    ),
+    el("div", { class: "field" }, el("label", null, "可执行命令或完整路径"), cmdIn),
+    el("div", { class: "field" }, el("label", null, "默认子模型（可选）"), modelIn),
+    el("div", { class: "field" }, el("label", null, "额外启动参数（可选）"), extraArgsIn),
+    el("div", { class: "field" }, el("label", null, "工作目录（可选，留空为安全只读临时目录）"), workDirIn),
+    el("label", { class: "row", style: { gap: "8px", cursor: "pointer" } }, enabledChk, el("span", null, "启用此本地 Harness（启用后将出现在各工作区的模型选择器中）")),
+    testBox
+  ), [
+    testModalBtn,
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+    el("button", {
+      type: "button",
+      class: "btn btn-primary",
+      onClick: async () => {
+        try {
+          const payload = buildPayload();
+          await api("PUT", `/api/harnesses/${encodeURIComponent(payload.id)}`, payload);
+          closeModal();
+          onSaved?.();
+          toast("本地 Harness 配置已保存");
+        } catch (err) {
+          toast(err.message || "保存失败");
+        }
+      },
+    }, "保存"),
+  ]);
 }

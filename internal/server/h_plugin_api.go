@@ -40,6 +40,8 @@ func (s *Server) hostModelsSummary(ctx context.Context, purpose string) (map[str
 	case "text", "vision":
 		out["siteAI"] = m["siteAI"]
 		out["textProviders"] = m["textProviders"]
+		out["harnesses"] = m["harnesses"]
+		out["sceneModels"] = m["sceneModels"]
 		out["defaultTextModel"] = m["defaultTextModel"]
 		out["defaultVisionModel"] = m["defaultVisionModel"]
 	default:
@@ -50,7 +52,8 @@ func (s *Server) hostModelsSummary(ctx context.Context, purpose string) (map[str
 
 type hostChatRequest struct {
 	ModelRef   string                  `json:"modelRef"`
-	Capability string                  `json:"capability"` // text | vision
+	Scene      string                  `json:"scene,omitempty"` // optional scene key: articleEdit | articlePlan | chat | studioPlan | canvas
+	Capability string                  `json:"capability"`      // text | vision
 	System     string                  `json:"system"`
 	SkillIDs   []string                `json:"skillIds,omitempty"`
 	Messages   []providers.ChatMessage `json:"messages"`
@@ -115,7 +118,7 @@ func (s *Server) executeHostChat(ctx context.Context, req hostChatRequest) (map[
 		return nil, bad("messages 不能为空")
 	}
 
-	route, err := resolveAIRoute(capStr, req.ModelRef)
+	route, err := resolveAIRouteForScene(capStr, req.Scene, req.ModelRef)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +134,22 @@ func (s *Server) executeHostChat(ctx context.Context, req hostChatRequest) (map[
 			"source":   "provider",
 			"provider": tp.ID,
 			"model":    model,
+		}, nil
+	}
+
+	callHarness := func() (map[string]any, error) {
+		res, err := s.callHarnessText(ctx, route, msgs, req.JSONMode)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"text":      res.Text,
+			"content":   res.Text,
+			"source":    "harness",
+			"harness":   res.HarnessID,
+			"driver":    res.Driver,
+			"model":     firstStr(res.Model, route.Harness.Name),
+			"elapsedMs": res.ElapsedMs,
 		}, nil
 	}
 
@@ -158,6 +177,8 @@ func (s *Server) executeHostChat(ctx context.Context, req hostChatRequest) (map[
 	}
 
 	switch route.Mode {
+	case "harness":
+		return callHarness()
 	case "provider":
 		return callProvider(route.Provider, route.Model)
 	case "site":

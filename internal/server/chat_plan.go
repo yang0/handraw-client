@@ -94,7 +94,7 @@ func (s *Server) studioChatPlan(w http.ResponseWriter, r *http.Request) (any, er
 		return nil, bad("请先输入想画的内容或修改意见")
 	}
 	body.Selected = normalizeChatSelected(body.Selected)
-	route, err := resolveAIRoute("text", body.ModelRef)
+	route, err := resolveAIRouteForScene("text", "studioPlan", body.ModelRef)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +198,23 @@ func (s *Server) studioChatPlan(w http.ResponseWriter, r *http.Request) (any, er
 		return resp, nil
 	}
 
+	planWithHarness := func() (*chatPlanResponse, error) {
+		msgs := buildChatPlanMessages(p, body)
+		res, err := s.callHarnessText(r.Context(), route, msgs, true)
+		if err != nil {
+			return nil, err
+		}
+		raw := json.RawMessage(extractJSON(res.Text))
+		resp, err := parseAndNormalizeChatPlan(raw, p, body.Selected, "harness")
+		if err != nil {
+			return nil, bad("本地 Harness 返回的画面规划无法解析")
+		}
+		return resp, nil
+	}
+
 	switch route.Mode {
+	case "harness":
+		return planWithHarness()
 	case "provider":
 		return planWithProvider(route.Provider, route.Model)
 	case "site":

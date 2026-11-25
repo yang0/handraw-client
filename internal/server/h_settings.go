@@ -52,10 +52,11 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		KeepSiteGenerationsPrivate *bool   `json:"keepSiteGenerationsPrivate"`
 		AutoCheckUpdate            *bool   `json:"autoCheckUpdate"`
 		CostLimitCents             *int    `json:"costLimitCents"`
-		DefaultModel               *string `json:"defaultModel"`
-		DefaultTextModel           *string `json:"defaultTextModel"`
-		DefaultVisionModel         *string `json:"defaultVisionModel"`
-		QuickShotHotkey            *string `json:"quickShotHotkey"`
+		DefaultModel               *string           `json:"defaultModel"`
+		DefaultTextModel           *string           `json:"defaultTextModel"`
+		DefaultVisionModel         *string           `json:"defaultVisionModel"`
+		SceneModels                map[string]string `json:"sceneModels"`
+		QuickShotHotkey            *string           `json:"quickShotHotkey"`
 		QuickShotEnabled           *bool   `json:"quickShotEnabled"`
 		MinimizeToTray             *bool   `json:"minimizeToTray"`
 		LastRecipeID               *string `json:"lastRecipeId"`
@@ -109,6 +110,23 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		}
 		if body.DefaultVisionModel != nil {
 			st.DefaultVisionModel = strings.TrimSpace(*body.DefaultVisionModel)
+		}
+		if body.SceneModels != nil {
+			if st.SceneModels == nil {
+				st.SceneModels = map[string]string{}
+			}
+			for k, v := range body.SceneModels {
+				k = strings.TrimSpace(k)
+				if !isKnownHarnessScene(k) {
+					continue
+				}
+				v = strings.TrimSpace(v)
+				if v == "" {
+					delete(st.SceneModels, k)
+				} else {
+					st.SceneModels[k] = v
+				}
+			}
 		}
 		if body.QuickShotHotkey != nil && *body.QuickShotHotkey != st.QuickShotHotkey {
 			st.QuickShotHotkey = *body.QuickShotHotkey
