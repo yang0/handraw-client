@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -33,19 +34,25 @@ const (
 
 // Spec defines a built-in supported local AI harness CLI.
 type Spec struct {
-	ID          string
-	Name        string
-	Driver      string // agy | claude | codex | opencode | gemini | dsh | custom
-	Binaries    []string
-	Description string
-	Homepage    string
+	ID            string
+	Name          string
+	Driver        string
+	Core          bool // flagship harnesses always shown prominently even when not installed
+	Binaries      []string
+	ExtraDirs     func() []string     // per-harness native installer locations
+	ConfigDirs    []string            // relative to $HOME (or absolute)
+	ConfigEnvVars []string            // env vars overriding config directory
+	ConfigShared  bool                // config dir is shared with an editor/IDE (do not warn solely from dir)
+	BinReject     func(string) bool   // optional collision filter (e.g. VS Code copilot-shim, Go goose)
+	Description   string
+	Homepage      string
 }
 
 // Config is the user-persisted configuration for a built-in override or custom harness.
 type Config struct {
 	ID         string   `json:"id"`
 	Name       string   `json:"name,omitempty"`
-	Driver     string   `json:"driver,omitempty"` // agy | claude | codex | opencode | gemini | dsh | custom
+	Driver     string   `json:"driver,omitempty"`
 	Enabled    *bool    `json:"enabled,omitempty"`
 	Command    string   `json:"command,omitempty"`   // optional explicit binary path or command name
 	Model      string   `json:"model,omitempty"`     // optional sub-model flag value
@@ -57,23 +64,29 @@ type Config struct {
 
 // Status describes a harness's live detection, configuration, and availability.
 type Status struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Driver       string   `json:"driver"`
-	Description  string   `json:"description,omitempty"`
-	Homepage     string   `json:"homepage,omitempty"`
-	Builtin      bool     `json:"builtin"`
-	Custom       bool     `json:"custom,omitempty"`
-	Detected     bool     `json:"detected"`
-	Enabled      bool     `json:"enabled"`
-	Available    bool     `json:"available"`
-	ResolvedPath string   `json:"resolvedPath,omitempty"`
-	Command      string   `json:"command,omitempty"`
-	Model        string   `json:"model,omitempty"`
-	ExtraArgs    []string `json:"extraArgs,omitempty"`
-	WorkDir      string   `json:"workDir,omitempty"`
-	TimeoutSec   int      `json:"timeoutSec"`
-	DefaultRef   string   `json:"defaultRef"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Driver          string   `json:"driver"`
+	Description     string   `json:"description,omitempty"`
+	Homepage        string   `json:"homepage,omitempty"`
+	Builtin         bool     `json:"builtin"`
+	Core            bool     `json:"core,omitempty"`
+	Custom          bool     `json:"custom,omitempty"`
+	Detected        bool     `json:"detected"`
+	Enabled         bool     `json:"enabled"`
+	Available       bool     `json:"available"`
+	ResolvedPath    string   `json:"resolvedPath,omitempty"`
+	DetectionSource string   `json:"detectionSource,omitempty"`
+	Candidates      []string `json:"candidates,omitempty"`
+	ConfigDetected  bool     `json:"configDetected,omitempty"`
+	ConfigDir       string   `json:"configDir,omitempty"`
+	DiagnosticHint  string   `json:"diagnosticHint,omitempty"`
+	Command         string   `json:"command,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	ExtraArgs       []string `json:"extraArgs,omitempty"`
+	WorkDir         string   `json:"workDir,omitempty"`
+	TimeoutSec      int      `json:"timeoutSec"`
+	DefaultRef      string   `json:"defaultRef"`
 }
 
 // ChatRequest is a single text/planning turn sent to a local harness.
@@ -93,56 +106,296 @@ type ChatResult struct {
 	ElapsedMs int64  `json:"elapsedMs"`
 }
 
-// BuiltinSpecs returns the catalog of first-class local AI harnesses.
+func envJoin(envKey string, elems ...string) string {
+	base := strings.TrimSpace(os.Getenv(envKey))
+	if base == "" {
+		return ""
+	}
+	parts := append([]string{base}, elems...)
+	return filepath.Join(parts...)
+}
+
+func homeJoin(elems ...string) string {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	parts := append([]string{home}, elems...)
+	return filepath.Join(parts...)
+}
+
+// BuiltinSpecs returns the catalog of first-class local AI harnesses,
+// covering both core flagship CLIs and extended Magpie-catalog CLIs.
 func BuiltinSpecs() []Spec {
 	return []Spec{
+		// ---- Core flagship harnesses (always visible in UI) ----
 		{
-			ID:          "agy",
-			Name:        "Antigravity (agy)",
-			Driver:      "agy",
-			Binaries:    []string{"agy"},
+			ID:       "agy",
+			Name:     "Antigravity (agy)",
+			Driver:   "agy",
+			Core:     true,
+			Binaries: []string{"agy"},
+			ExtraDirs: func() []string {
+				if runtime.GOOS == "windows" {
+					return []string{
+						envJoin("LOCALAPPDATA", "agy", "bin"),
+						envJoin("LOCALAPPDATA", "Programs", "Antigravity", "bin"),
+						envJoin("LOCALAPPDATA", "Programs", "Antigravity IDE", "bin"),
+						envJoin("LOCALAPPDATA", "Programs", "antigravity", "bin"),
+					}
+				}
+				return []string{
+					homeJoin(".local", "bin"),
+					"/Applications/Antigravity.app/Contents/Resources/app/bin",
+				}
+			},
+			ConfigDirs:  []string{".gemini/antigravity", ".antigravity"},
 			Description: "Google Antigravity CLI，支持本地 Skill、思考模式与流式输出",
 			Homepage:    "https://antigravity.google",
 		},
 		{
-			ID:          "claude",
-			Name:        "Claude Code",
-			Driver:      "claude",
-			Binaries:    []string{"claude"},
-			Description: "Anthropic Claude Code CLI，复用本机订阅与 Skills",
-			Homepage:    "https://docs.anthropic.com/en/docs/claude-code",
+			ID:       "claude",
+			Name:     "Claude Code",
+			Driver:   "claude",
+			Core:     true,
+			Binaries: []string{"claude"},
+			ExtraDirs: func() []string {
+				return []string{
+					homeJoin(".local", "bin"),
+					homeJoin(".claude", "local"),
+				}
+			},
+			ConfigDirs:    []string{".claude"},
+			ConfigEnvVars: []string{"CLAUDE_CONFIG_DIR"},
+			Description:   "Anthropic Claude Code CLI，复用本机订阅与 Skills",
+			Homepage:      "https://docs.anthropic.com/en/docs/claude-code",
 		},
 		{
-			ID:          "codex",
-			Name:        "Codex CLI",
-			Driver:      "codex",
-			Binaries:    []string{"codex"},
-			Description: "OpenAI Codex CLI，支持只读沙箱非交互执行",
-			Homepage:    "https://github.com/openai/codex",
+			ID:       "codex",
+			Name:     "Codex CLI",
+			Driver:   "codex",
+			Core:     true,
+			Binaries: []string{"codex"},
+			ExtraDirs: func() []string {
+				if runtime.GOOS == "windows" {
+					return []string{
+						envJoin("LOCALAPPDATA", "Programs", "OpenAI", "Codex", "bin"),
+						homeJoin(".codex", "packages", "standalone", "current", "bin"),
+					}
+				}
+				return []string{
+					homeJoin(".codex", "packages", "standalone", "current", "bin"),
+				}
+			},
+			ConfigDirs:    []string{".codex"},
+			ConfigEnvVars: []string{"CODEX_HOME"},
+			Description:   "OpenAI Codex CLI，支持只读沙箱非交互执行",
+			Homepage:      "https://github.com/openai/codex",
 		},
 		{
-			ID:          "opencode",
-			Name:        "OpenCode",
-			Driver:      "opencode",
-			Binaries:    []string{"opencode"},
-			Description: "开源多模型终端 Agent，支持多提供商切换",
-			Homepage:    "https://opencode.ai",
+			ID:       "opencode",
+			Name:     "OpenCode",
+			Driver:   "opencode",
+			Core:     true,
+			Binaries: []string{"opencode"},
+			ExtraDirs: func() []string {
+				return []string{homeJoin(".opencode", "bin")}
+			},
+			ConfigDirs:    []string{".config/opencode", ".opencode"},
+			ConfigEnvVars: []string{"OPENCODE_CONFIG_DIR"},
+			Description:   "开源多模型终端 Agent，支持多提供商切换",
+			Homepage:      "https://opencode.ai",
 		},
 		{
-			ID:          "gemini",
-			Name:        "Gemini CLI",
-			Driver:      "gemini",
-			Binaries:    []string{"gemini"},
-			Description: "Google Gemini CLI，支持只读计划模式与结构化输出",
-			Homepage:    "https://github.com/google-gemini/gemini-cli",
+			ID:            "gemini",
+			Name:          "Gemini CLI",
+			Driver:        "gemini",
+			Core:          true,
+			Binaries:      []string{"gemini"},
+			ConfigDirs:    []string{".gemini"},
+			ConfigEnvVars: []string{"GEMINI_CLI_HOME"},
+			Description:   "Google Gemini CLI，支持只读计划模式与结构化输出",
+			Homepage:      "https://github.com/google-gemini/gemini-cli",
 		},
 		{
-			ID:          "dsh",
-			Name:        "DeepSeek Harness (DSH)",
-			Driver:      "dsh",
-			Binaries:    []string{"dsh"},
-			Description: "DeepSeek Harness 本地 CLI（可在配置中指定可执行路径与参数）",
-			Homepage:    "https://github.com/deepseek-ai",
+			ID:            "dsh",
+			Name:          "DeepSeek Harness (DSH)",
+			Driver:        "dsh",
+			Core:          true,
+			Binaries:      []string{"dsh"},
+			ConfigDirs:    []string{".dsh"},
+			ConfigEnvVars: []string{"DSH_HOME"},
+			Description:   "DeepSeek Harness 本地 CLI（可在配置中指定可执行路径与参数）",
+			Homepage:      "https://github.com/deepseek-ai",
+		},
+
+		// ---- Extended Magpie-catalog harnesses ----
+		{
+			ID:       "kimi",
+			Name:     "Kimi Code",
+			Driver:   "kimi",
+			Binaries: []string{"kimi"},
+			ExtraDirs: func() []string {
+				return []string{homeJoin(".kimi-code", "bin")}
+			},
+			ConfigDirs:  []string{".kimi", ".kimi-code"},
+			Description: "Moonshot Kimi Code CLI，支持本地配置与非交互提示执行",
+			Homepage:    "https://moonshotai.github.io/kimi-code/",
+		},
+		{
+			ID:       "qwen",
+			Name:     "Qwen Code",
+			Driver:   "qwen",
+			Binaries: []string{"qwen"},
+			ExtraDirs: func() []string {
+				if runtime.GOOS == "windows" {
+					return []string{envJoin("LOCALAPPDATA", "qwen-code", "bin")}
+				}
+				return []string{homeJoin(".qwen", "bin")}
+			},
+			ConfigDirs:  []string{".qwen"},
+			Description: "通义 Qwen Code CLI，支持标准输入与 JSON 结构化输出",
+			Homepage:    "https://github.com/QwenLM/qwen-code",
+		},
+		{
+			ID:            "hermes",
+			Name:          "Hermes Agent",
+			Driver:        "hermes",
+			Binaries:      []string{"hermes"},
+			ConfigDirs:    []string{".hermes"},
+			ConfigEnvVars: []string{"HERMES_HOME"},
+			Description:   "Hermes Agent 本地终端助手，支持单次静默查询与自定义提供商",
+			Homepage:      "https://github.com/NousResearch/hermes-agent",
+		},
+		{
+			ID:       "grok",
+			Name:     "Grok Build",
+			Driver:   "grok",
+			Binaries: []string{"grok"},
+			ExtraDirs: func() []string {
+				return []string{homeJoin(".grok", "bin")}
+			},
+			ConfigDirs:  []string{".grok"},
+			BinReject:   isNonGrokBuildBinary,
+			Description: "xAI Grok Build CLI，支持只读计划模式与 JSON 输出",
+			Homepage:    "https://x.ai",
+		},
+		{
+			ID:       "omp",
+			Name:     "Oh My Pi (omp)",
+			Driver:   "omp",
+			Binaries: []string{"omp"},
+			ExtraDirs: func() []string {
+				if runtime.GOOS == "windows" {
+					return []string{envJoin("LOCALAPPDATA", "omp")}
+				}
+				return []string{homeJoin(".local", "bin")}
+			},
+			ConfigDirs:  []string{".omp"},
+			Description: "Oh My Pi 多模型编程 Agent，支持非交互打印与多提供商路由",
+			Homepage:    "https://omp.sh",
+		},
+		{
+			ID:            "pi",
+			Name:          "Pi Coding Agent",
+			Driver:        "pi",
+			Binaries:      []string{"pi"},
+			ConfigDirs:    []string{".pi"},
+			ConfigEnvVars: []string{"PI_CODING_AGENT_DIR"},
+			Description:   "Pi 终端编程 Agent，支持轻量无头打印模式",
+			Homepage:      "https://github.com/badlogic/pi-mono",
+		},
+		{
+			ID:       "cursor",
+			Name:     "Cursor CLI",
+			Driver:   "cursor",
+			Binaries: []string{"cursor-agent"},
+			ExtraDirs: func() []string {
+				if runtime.GOOS == "windows" {
+					return []string{envJoin("LOCALAPPDATA", "cursor-agent")}
+				}
+				return []string{homeJoin(".local", "bin")}
+			},
+			ConfigDirs:   []string{".cursor"},
+			ConfigShared: true, // shared with Cursor Editor
+			BinReject:    isNonCursorAgentBinary,
+			Description:  "Cursor 官方终端 Agent CLI（cursor-agent）",
+			Homepage:     "https://cursor.com",
+		},
+		{
+			ID:          "codebuddy",
+			Name:        "CodeBuddy CLI",
+			Driver:      "codebuddy",
+			Binaries:    []string{"codebuddy"},
+			ConfigDirs:  []string{".codebuddy"},
+			Description: "腾讯 CodeBuddy 本地 CLI Agent",
+			Homepage:    "https://copilot.tencent.com",
+		},
+		{
+			ID:           "copilot",
+			Name:         "GitHub Copilot CLI",
+			Driver:       "copilot",
+			Binaries:     []string{"copilot"},
+			ConfigDirs:   []string{".copilot"},
+			ConfigShared: true, // shared with VS Code / JetBrains plugin
+			BinReject:    isEditorCopilotShim,
+			Description:  "GitHub Copilot 独立命令行 Agent（自动排除 VS Code shim）",
+			Homepage:     "https://github.com/features/copilot/cli",
+		},
+		{
+			ID:          "goose",
+			Name:        "Goose CLI",
+			Driver:      "goose",
+			Binaries:    []string{"goose"},
+			ConfigDirs:  []string{".config/goose"},
+			BinReject:   isGoBinary, // exclude Go pressly/goose SQL migration tool
+			Description: "Block 开源 Goose 本地 Agent（自动排除同名 Go 数据库迁移工具）",
+			Homepage:    "https://block.github.io/goose/",
+		},
+		{
+			ID:          "cline",
+			Name:        "Cline CLI",
+			Driver:      "cline",
+			Binaries:    []string{"cline"},
+			ConfigDirs:  []string{".cline"},
+			Description: "Cline 命令行编程助手",
+			Homepage:    "https://cline.bot",
+		},
+		{
+			ID:          "droid",
+			Name:        "Factory Droid",
+			Driver:      "droid",
+			Binaries:    []string{"droid"},
+			ConfigDirs:  []string{".factory"},
+			Description: "Factory Droid 本地终端 Agent",
+			Homepage:    "https://factory.ai",
+		},
+		{
+			ID:          "crush",
+			Name:        "Crush",
+			Driver:      "crush",
+			Binaries:    []string{"crush"},
+			ConfigDirs:  []string{".config/crush"},
+			Description: "Charm Crush 多模型终端编程助手",
+			Homepage:    "https://github.com/charmbracelet/crush",
+		},
+		{
+			ID:          "qoder",
+			Name:        "Qoder CLI",
+			Driver:      "qoder",
+			Binaries:    []string{"qodercli", "qoder"},
+			ConfigDirs:  []string{".qoder"},
+			Description: "Qoder 本地终端 Agent CLI",
+			Homepage:    "https://qoder.com",
+		},
+		{
+			ID:          "kiro",
+			Name:        "Kiro CLI",
+			Driver:      "kiro",
+			Binaries:    []string{"kiro-cli", "kiro"},
+			ConfigDirs:  []string{".kiro"},
+			Description: "AWS Kiro 本地终端 Agent CLI",
+			Homepage:    "https://kiro.dev",
 		},
 	}
 }
@@ -166,8 +419,38 @@ func NormalizeDriver(d string) string {
 		return "opencode"
 	case "gemini", "gemini-cli":
 		return "gemini"
-	case "dsh":
+	case "dsh", "deepseek-harness":
 		return "dsh"
+	case "kimi", "kimi-code":
+		return "kimi"
+	case "qwen", "qwen-code":
+		return "qwen"
+	case "hermes", "hermes-agent":
+		return "hermes"
+	case "grok", "grok-build":
+		return "grok"
+	case "omp", "oh-my-pi":
+		return "omp"
+	case "pi":
+		return "pi"
+	case "cursor", "cursor-agent":
+		return "cursor"
+	case "codebuddy", "codebuddy-code":
+		return "codebuddy"
+	case "copilot", "copilot-cli":
+		return "copilot"
+	case "goose":
+		return "goose"
+	case "cline":
+		return "cline"
+	case "droid":
+		return "droid"
+	case "crush":
+		return "crush"
+	case "qoder", "qodercli":
+		return "qoder"
+	case "kiro", "kiro-cli":
+		return "kiro"
 	default:
 		return "custom"
 	}
@@ -187,7 +470,7 @@ func clampTimeout(sec int) int {
 }
 
 // Discover combines built-in specs with user overrides and custom harnesses,
-// probing local executables without invoking them.
+// probing local executables and config directories without invoking CLIs.
 func Discover(configs []Config) []Status {
 	cfgByID := map[string]Config{}
 	cfgOrder := []string{}
@@ -209,8 +492,32 @@ func Discover(configs []Config) []Status {
 	for _, sp := range BuiltinSpecs() {
 		seen[sp.ID] = true
 		cfg := cfgByID[sp.ID]
-		resolved := resolveBinary(cfg.Command, sp.Binaries)
-		detected := resolved != ""
+		var extraDirs []string
+		if sp.ExtraDirs != nil {
+			extraDirs = sp.ExtraDirs()
+		}
+		// If the user provided an explicit command override, bypass binNot so
+		// they can intentionally point to any custom wrapper.
+		reject := sp.BinReject
+		if strings.TrimSpace(cfg.Command) != "" {
+			reject = nil
+		}
+		res := resolveBinaryRich(cfg.Command, sp.Binaries, extraDirs, reject)
+		detected := res.Path != ""
+
+		var configDir string
+		var configDetected bool
+		if !isIsolated() || len(sp.ConfigEnvVars) > 0 {
+			configDir, configDetected = detectConfigDir(sp.ConfigDirs, sp.ConfigEnvVars)
+		}
+
+		var hint string
+		if !detected && configDetected && !sp.ConfigShared {
+			hint = fmt.Sprintf("检测到本地配置目录（%s），但未找到可执行 CLI，请安装对应命令行工具或在「配置」中指定路径", shortenHomePath(configDir))
+		} else if detected && len(res.Candidates) > 1 {
+			hint = fmt.Sprintf("本机发现 %d 个安装版本，当前优先使用 %s", len(res.Candidates), res.Source)
+		}
+
 		enabled := detected
 		if cfg.Enabled != nil {
 			enabled = *cfg.Enabled
@@ -223,23 +530,33 @@ func Discover(configs []Config) []Status {
 		if strings.TrimSpace(cfg.Driver) != "" {
 			driver = NormalizeDriver(cfg.Driver)
 		}
+		source := res.Source
+		if !detected && configDetected && !sp.ConfigShared {
+			source = "仅检测到配置目录"
+		}
 		out = append(out, Status{
-			ID:           sp.ID,
-			Name:         name,
-			Driver:       driver,
-			Description:  sp.Description,
-			Homepage:     sp.Homepage,
-			Builtin:      true,
-			Detected:     detected,
-			Enabled:      enabled,
-			Available:    enabled && detected,
-			ResolvedPath: resolved,
-			Command:      strings.TrimSpace(cfg.Command),
-			Model:        strings.TrimSpace(cfg.Model),
-			ExtraArgs:    cleanArgs(cfg.ExtraArgs),
-			WorkDir:      strings.TrimSpace(cfg.WorkDir),
-			TimeoutSec:   clampTimeout(cfg.TimeoutSec),
-			DefaultRef:   "harness:" + sp.ID,
+			ID:              sp.ID,
+			Name:            name,
+			Driver:          driver,
+			Description:     sp.Description,
+			Homepage:        sp.Homepage,
+			Builtin:         true,
+			Core:            sp.Core,
+			Detected:        detected,
+			Enabled:         enabled,
+			Available:       enabled && detected,
+			ResolvedPath:    res.Path,
+			DetectionSource: source,
+			Candidates:      res.Candidates,
+			ConfigDetected:  configDetected,
+			ConfigDir:       configDir,
+			DiagnosticHint:  hint,
+			Command:         strings.TrimSpace(cfg.Command),
+			Model:           strings.TrimSpace(cfg.Model),
+			ExtraArgs:       cleanArgs(cfg.ExtraArgs),
+			WorkDir:         strings.TrimSpace(cfg.WorkDir),
+			TimeoutSec:      clampTimeout(cfg.TimeoutSec),
+			DefaultRef:      "harness:" + sp.ID,
 		})
 	}
 
@@ -252,11 +569,11 @@ func Discover(configs []Config) []Status {
 			continue
 		}
 		cmdStr := strings.TrimSpace(cfg.Command)
-		var resolved string
+		var res lookupResult
 		if cmdStr != "" {
-			resolved = resolveBinary(cmdStr, nil)
+			res = resolveBinaryRich(cmdStr, nil, nil, nil)
 		}
-		detected := resolved != ""
+		detected := res.Path != ""
 		enabled := true
 		if cfg.Enabled != nil {
 			enabled = *cfg.Enabled
@@ -267,25 +584,72 @@ func Discover(configs []Config) []Status {
 		}
 		driver := NormalizeDriver(cfg.Driver)
 		out = append(out, Status{
-			ID:           id,
-			Name:         name,
-			Driver:       driver,
-			Description:  "用户自定义本地 CLI Harness",
-			Builtin:      false,
-			Custom:       true,
-			Detected:     detected,
-			Enabled:      enabled,
-			Available:    enabled && detected,
-			ResolvedPath: resolved,
-			Command:      cmdStr,
-			Model:        strings.TrimSpace(cfg.Model),
-			ExtraArgs:    cleanArgs(cfg.ExtraArgs),
-			WorkDir:      strings.TrimSpace(cfg.WorkDir),
-			TimeoutSec:   clampTimeout(cfg.TimeoutSec),
-			DefaultRef:   "harness:" + id,
+			ID:              id,
+			Name:            name,
+			Driver:          driver,
+			Description:     "用户自定义本地 CLI Harness",
+			Builtin:         false,
+			Custom:          true,
+			Detected:        detected,
+			Enabled:         enabled,
+			Available:       enabled && detected,
+			ResolvedPath:    res.Path,
+			DetectionSource: res.Source,
+			Candidates:      res.Candidates,
+			Command:         cmdStr,
+			Model:           strings.TrimSpace(cfg.Model),
+			ExtraArgs:       cleanArgs(cfg.ExtraArgs),
+			WorkDir:         strings.TrimSpace(cfg.WorkDir),
+			TimeoutSec:      clampTimeout(cfg.TimeoutSec),
+			DefaultRef:      "harness:" + id,
 		})
 	}
+
+	// Keep detected/ready harnesses at the top while preserving catalog order within each tier.
+	sort.SliceStable(out, func(i, j int) bool {
+		return harnessSortRank(out[i]) < harnessSortRank(out[j])
+	})
 	return out
+}
+
+func harnessSortRank(s Status) int {
+	switch {
+	case s.Available && s.Core:
+		return 0
+	case s.Available && !s.Custom:
+		return 1
+	case s.Available && s.Custom:
+		return 2
+	case s.Detected && s.Core:
+		return 3
+	case s.Detected:
+		return 4
+	case s.Custom:
+		return 5
+	case s.Core && s.ConfigDetected:
+		return 6
+	case s.Core:
+		return 7
+	case s.ConfigDetected && s.DiagnosticHint != "":
+		return 8
+	default:
+		return 9
+	}
+}
+
+func shortenHomePath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || p == "" {
+		return p
+	}
+	if strings.EqualFold(p, home) {
+		return "~"
+	}
+	prefix := home + string(filepath.Separator)
+	if len(p) > len(prefix) && strings.EqualFold(p[:len(prefix)], prefix) {
+		return "~" + string(filepath.Separator) + p[len(prefix):]
+	}
+	return p
 }
 
 // Find looks up one harness status by ID.
@@ -333,94 +697,6 @@ func cleanArgs(in []string) []string {
 	return out
 }
 
-func resolveBinary(customCmd string, candidates []string) string {
-	customCmd = strings.TrimSpace(customCmd)
-	if customCmd != "" {
-		if p := lookupExecutable(customCmd); p != "" {
-			return p
-		}
-		return ""
-	}
-	for _, name := range candidates {
-		if p := lookupExecutable(name); p != "" {
-			return p
-		}
-	}
-	return ""
-}
-
-func lookupExecutable(name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return ""
-	}
-	// Explicit path (absolute or containing separator).
-	if filepath.IsAbs(name) || strings.ContainsAny(name, `/\`) {
-		if st, err := os.Stat(name); err == nil && !st.IsDir() {
-			if abs, err := filepath.Abs(name); err == nil {
-				return abs
-			}
-			return name
-		}
-		if runtime.GOOS == "windows" && filepath.Ext(name) == "" {
-			for _, ext := range []string{".exe", ".cmd", ".bat"} {
-				cand := name + ext
-				if st, err := os.Stat(cand); err == nil && !st.IsDir() {
-					return cand
-				}
-			}
-		}
-		return ""
-	}
-	if p, err := exec.LookPath(name); err == nil && p != "" {
-		return p
-	}
-	// GUI-launched desktop apps (especially macOS .app bundles) often inherit a
-	// minimal PATH. Check common user/package install directories as fallback.
-	for _, dir := range fallbackBinDirs() {
-		if dir == "" {
-			continue
-		}
-		if runtime.GOOS == "windows" {
-			for _, ext := range []string{".exe", ".cmd", ".bat", ""} {
-				cand := filepath.Join(dir, name+ext)
-				if st, err := os.Stat(cand); err == nil && !st.IsDir() {
-					return cand
-				}
-			}
-		} else {
-			cand := filepath.Join(dir, name)
-			if st, err := os.Stat(cand); err == nil && !st.IsDir() && (st.Mode()&0o111) != 0 {
-				return cand
-			}
-		}
-	}
-	return ""
-}
-
-func fallbackBinDirs() []string {
-	home, _ := os.UserHomeDir()
-	if runtime.GOOS == "windows" {
-		localApp := os.Getenv("LOCALAPPDATA")
-		appData := os.Getenv("APPDATA")
-		return []string{
-			filepath.Join(localApp, "agy", "bin"),
-			filepath.Join(appData, "npm"),
-			filepath.Join(home, ".local", "bin"),
-			filepath.Join(home, ".claude", "local"),
-			filepath.Join(home, ".opencode", "bin"),
-		}
-	}
-	return []string{
-		filepath.Join(home, ".local", "bin"),
-		"/opt/homebrew/bin",
-		"/usr/local/bin",
-		filepath.Join(home, ".npm-global", "bin"),
-		filepath.Join(home, ".claude", "local"),
-		filepath.Join(home, ".opencode", "bin"),
-	}
-}
-
 // Chat executes one non-interactive text/planning turn via the resolved local harness.
 func Chat(ctx context.Context, st Status, req ChatRequest) (ChatResult, error) {
 	if !st.Available || st.ResolvedPath == "" {
@@ -458,16 +734,29 @@ func Chat(ctx context.Context, st Status, req ChatRequest) (ChatResult, error) {
 		}
 	}
 
-	var codexOutFile string
-	if st.Driver == "codex" {
+	var auxFile string
+	driver := NormalizeDriver(st.Driver)
+	switch driver {
+	case "codex":
 		if f, err := os.CreateTemp("", "handraw-codex-out-*.txt"); err == nil {
-			codexOutFile = f.Name()
+			auxFile = f.Name()
 			_ = f.Close()
-			defer os.Remove(codexOutFile)
+			defer os.Remove(auxFile)
+		}
+	case "grok", "goose":
+		if f, err := os.CreateTemp("", "handraw-prompt-*.txt"); err == nil {
+			_, _ = f.WriteString(prompt)
+			auxFile = f.Name()
+			_ = f.Close()
+			defer os.Remove(auxFile)
 		}
 	}
+	codexOutFile := ""
+	if driver == "codex" {
+		codexOutFile = auxFile
+	}
 
-	args, stdinPayload := BuildArgs(st.Driver, model, st.ExtraArgs, prompt, codexOutFile)
+	args, stdinPayload := BuildArgs(driver, model, st.ExtraArgs, prompt, auxFile)
 
 	start := time.Now()
 	cmd := exec.CommandContext(runCtx, st.ResolvedPath, args...)
@@ -550,9 +839,9 @@ func Chat(ctx context.Context, st Status, req ChatRequest) (ChatResult, error) {
 }
 
 // BuildArgs constructs CLI flags and optional stdin payload for each supported
-// harness driver. Prompts are passed via stdin by default to avoid Windows .cmd
-// length/escaping issues.
-func BuildArgs(driver, model string, extraArgs []string, prompt, codexOutFile string) (args []string, stdinPayload string) {
+// harness driver. Prompts are passed via stdin or temp prompt file by default
+// to avoid Windows .cmd length/escaping issues.
+func BuildArgs(driver, model string, extraArgs []string, prompt, auxFile string) (args []string, stdinPayload string) {
 	driver = NormalizeDriver(driver)
 	stdinPayload = prompt
 	switch driver {
@@ -578,8 +867,8 @@ func BuildArgs(driver, model string, extraArgs []string, prompt, codexOutFile st
 		if model != "" {
 			args = append(args, "-m", model)
 		}
-		if codexOutFile != "" {
-			args = append(args, "-o", codexOutFile)
+		if auxFile != "" {
+			args = append(args, "-o", auxFile)
 		}
 		// Extra flags go before the trailing "-" stdin sentinel.
 		if len(extraArgs) > 0 {
@@ -597,6 +886,80 @@ func BuildArgs(driver, model string, extraArgs []string, prompt, codexOutFile st
 		args = []string{"-p", "", "--approval-mode", "plan", "--output-format", "json"}
 		if model != "" {
 			args = append(args, "-m", model)
+		}
+	case "qwen":
+		// Qwen Code shares Gemini CLI's stdin + -p "" + -o json convention.
+		args = []string{"-p", "", "-o", "json"}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
+	case "kimi":
+		args = []string{"-p", prompt, "--output-format", "text", "--plan"}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
+		stdinPayload = ""
+	case "hermes":
+		args = []string{"chat", "-Q", "-q", prompt}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
+		stdinPayload = ""
+	case "grok":
+		args = []string{"--output-format", "json", "--permission-mode", "plan"}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
+		if auxFile != "" {
+			args = append(args, "--prompt-file", auxFile)
+		} else {
+			args = append(args, "-p", prompt)
+		}
+		stdinPayload = ""
+	case "omp", "pi":
+		args = []string{"-p", "--mode", "text"}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+	case "cursor", "codebuddy", "qoder":
+		args = []string{"-p", "--output-format", "json"}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+	case "copilot":
+		args = []string{"-p", prompt, "--silent"}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		stdinPayload = ""
+	case "goose":
+		args = []string{"run", "--no-session"}
+		if auxFile != "" {
+			args = append(args, "-i", auxFile)
+			stdinPayload = ""
+		} else {
+			args = append(args, "-t", prompt)
+			stdinPayload = ""
+		}
+	case "cline":
+		args = []string{"-y"}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+	case "droid":
+		args = []string{"exec", "--output-format", "json"}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
+	case "crush":
+		args = []string{"run"}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
+	case "kiro":
+		args = []string{"chat", "--no-interactive"}
+		if model != "" {
+			args = append(args, "--model", model)
 		}
 	default:
 		// dsh / custom: pass user extraArgs; support optional {{prompt}} placeholder.

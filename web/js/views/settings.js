@@ -55,7 +55,7 @@ export async function renderSettings(root, ctx, params = {}) {
     api("GET", "/api/update").catch(() => ({})),
     api("GET", "/api/account/login").catch(() => null),
     api("GET", "/api/skills").catch(() => ({ items: [] })),
-    api("GET", "/api/harnesses").catch(() => ({ items: [], scenes: [], sceneModels: {} })),
+    api("GET", params?.rescanHarnesses ? "/api/harnesses?rescan=1" : "/api/harnesses").catch(() => ({ items: [], scenes: [], sceneModels: {} })),
     api("GET", "/api/models").catch(() => ({ textProviders: [], harnesses: [], loggedIn: false })),
   ]);
   if (!root.isConnected || root._settingsRenderSeq !== seq) return;
@@ -703,12 +703,16 @@ export async function renderSettings(root, ctx, params = {}) {
   });
 
   const harnessCardsWrap = el("div", { class: "harness-list" });
-  harnesses.forEach((h) => {
+  const moreHarnessCardsWrap = el("div", { class: "harness-list", style: { marginTop: "8px" } });
+
+  function renderHarnessCard(h) {
     const statusBadge = h.available
       ? el("span", { class: "badge badge-ok" }, "已就绪")
       : (h.detected
           ? el("span", { class: "badge" }, "已停用")
-          : el("span", { class: "badge badge-warn" }, "未检测到"));
+          : (h.configDetected && h.diagnosticHint
+              ? el("span", { class: "badge badge-warn" }, "仅检测到配置")
+              : el("span", { class: "badge badge-warn" }, "未检测到")));
 
     const testFeedback = el("div", { class: "provider-test-feedback hidden" });
     const testBtn = el("button", {
@@ -779,22 +783,34 @@ export async function renderSettings(root, ctx, params = {}) {
     if (h.model) metaBits.push(`子模型：${h.model}`);
     if (h.workDir) metaBits.push(`目录：${h.workDir}`);
     if (h.timeoutSec && h.timeoutSec !== 180) metaBits.push(`超时：${h.timeoutSec}s`);
+    if (Array.isArray(h.candidates) && h.candidates.length > 1) {
+      metaBits.push(`多路径候选：${h.candidates.length} 处`);
+    }
 
     const hasOverride = Boolean(h.command || h.model || (h.extraArgs && h.extraArgs.length) || h.workDir || (h.timeoutSec && h.timeoutSec !== 180));
+    const candTitle = Array.isArray(h.candidates) && h.candidates.length > 1
+      ? `优先使用：${h.resolvedPath}\n其他发现位置：\n${h.candidates.slice(1).join("\n")}`
+      : (h.resolvedPath || "");
 
-    harnessCardsWrap.appendChild(el("div", { class: "card col harness-card", style: { gap: "8px", padding: "12px 14px", background: "var(--paper)" } },
+    return el("div", { class: "card col harness-card", style: { gap: "8px", padding: "12px 14px", background: "var(--paper)" } },
       el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "flex-start", gap: "10px", flexWrap: "wrap" } },
         el("div", { class: "col", style: { gap: "3px", minWidth: "0", flex: "1" } },
           el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
             el("strong", null, h.name),
             el("span", { class: "badge mono" }, h.driver),
             h.custom ? el("span", { class: "badge badge-accent" }, "自定义") : null,
-            statusBadge
+            statusBadge,
+            h.detected && h.detectionSource
+              ? el("span", { class: "badge", title: "探测来源" }, h.detectionSource)
+              : null
           ),
           h.description ? el("span", { class: "muted" }, h.description) : null,
-          el("code", { class: "mono muted harness-path", title: h.resolvedPath || "" },
-            h.resolvedPath ? h.resolvedPath : "未在系统 PATH 与常见目录中检测到，可点「配置」手动填写可执行路径"
+          el("code", { class: "mono muted harness-path", title: candTitle },
+            h.resolvedPath ? h.resolvedPath : "未在系统 PATH、注册表/登录 Shell 或常见包管理器目录中检测到，可点「配置」手动填写可执行路径"
           ),
+          h.diagnosticHint
+            ? el("span", { class: "muted", style: { fontSize: "12px", color: h.detected ? "var(--ink-2)" : "var(--warn, #9a6700)" } }, h.diagnosticHint)
+            : null,
           metaBits.length ? el("span", { class: "muted", style: { fontSize: "11.5px" } }, metaBits.join(" · ")) : null
         ),
         el("div", { class: "row", style: { gap: "6px", flexShrink: "0" } },
@@ -829,8 +845,32 @@ export async function renderSettings(root, ctx, params = {}) {
         )
       ),
       testFeedback
-    ));
+    );
+  }
+
+  let primaryCount = 0;
+  let moreCount = 0;
+  harnesses.forEach((h) => {
+    const isPrimary = Boolean(h.detected || h.core || h.custom || h.command || (h.configDetected && h.diagnosticHint));
+    if (isPrimary) {
+      primaryCount++;
+      harnessCardsWrap.appendChild(renderHarnessCard(h));
+    } else {
+      moreCount++;
+      moreHarnessCardsWrap.appendChild(renderHarnessCard(h));
+    }
   });
+
+  const moreHarnessesDrawer = moreCount > 0
+    ? el("details", { style: { marginTop: "6px" } },
+        el("summary", { class: "muted", style: { cursor: "pointer", fontSize: "12.5px", userSelect: "none" } },
+          `展开更多内置支持的本地 CLI Harness（另有 ${moreCount} 个未检测到）`
+        ),
+        moreHarnessCardsWrap
+      )
+    : null;
+
+  const detectedHarnessCount = harnesses.filter((h) => h && h.detected).length;
 
   const harnessSection = el("section", {
     id: "settings-harnesses",
@@ -841,13 +881,19 @@ export async function renderSettings(root, ctx, params = {}) {
     el("div", { class: "settings-section-head" },
       el("div", null,
         el("h2", { class: "settings-section-title" }, "本地 AI Harness"),
-        el("p", { class: "muted settings-section-desc" }, "直接调用本机已安装并登录的 AI CLI 客户端（Antigravity、Claude Code、Codex、OpenCode、Gemini CLI、DSH 或自定义 CLI），并按场景自由组合——例如用 agy 写文章、官网接口出图。")
+        el("p", { class: "muted settings-section-desc" }, "自动扫描本机 PATH、实时注册表/登录 Shell、npm/Bun/Volta/pnpm/mise/fnm/nvm/Scoop/WinGet/Homebrew 及各 CLI 默认安装目录（涵盖 Antigravity、Claude Code、Codex、OpenCode、Gemini、Kimi、Qwen、Hermes、Grok、omp、Pi 等 20+ 种主流 CLI），按场景自由组合。")
       ),
       el("div", { class: "row", style: { gap: "6px" } },
         el("button", {
           type: "button",
           class: "btn btn-sm",
-          onClick: () => renderSettings(root, ctx, { tab: "settings-harnesses", preserveScroll: true }),
+          onClick: async () => {
+            try {
+              const r = await api("POST", "/api/harnesses/rescan", {});
+              toast(`已重新扫描本机环境：检测到 ${r?.detectedCount ?? 0} 个可用 CLI Harness`);
+            } catch {}
+            renderSettings(root, ctx, { tab: "settings-harnesses", preserveScroll: true });
+          },
         }, "重新检测"),
         el("button", {
           type: "button",
@@ -858,8 +904,9 @@ export async function renderSettings(root, ctx, params = {}) {
     ),
     el("div", { class: "settings-subhead" }, "分场景引擎分配（各页面内也可随时临时切换）"),
     sceneRowsWrap,
-    el("div", { class: "settings-subhead", style: { marginTop: "6px" } }, `本机 Harness 客户端（${readyHarnessCount}/${harnesses.length} 已就绪）`),
-    harnessCardsWrap
+    el("div", { class: "settings-subhead", style: { marginTop: "6px" } }, `本机 Harness 客户端（已就绪 ${readyHarnessCount} / 已检测 ${detectedHarnessCount} / 内置支持 ${harnesses.length}）`),
+    harnessCardsWrap,
+    moreHarnessesDrawer
   );
 
   // 3. Preferences & Storage
@@ -2262,6 +2309,21 @@ function openHarnessModal(existing, onSaved) {
     el("option", { value: "opencode", selected: existing?.driver === "opencode" }, "OpenCode (opencode)"),
     el("option", { value: "gemini", selected: existing?.driver === "gemini" }, "Gemini CLI (gemini)"),
     el("option", { value: "dsh", selected: existing?.driver === "dsh" }, "DeepSeek Harness (dsh)"),
+    el("option", { value: "kimi", selected: existing?.driver === "kimi" }, "Kimi Code (kimi)"),
+    el("option", { value: "qwen", selected: existing?.driver === "qwen" }, "Qwen Code (qwen)"),
+    el("option", { value: "hermes", selected: existing?.driver === "hermes" }, "Hermes Agent (hermes)"),
+    el("option", { value: "grok", selected: existing?.driver === "grok" }, "Grok Build (grok)"),
+    el("option", { value: "omp", selected: existing?.driver === "omp" }, "Oh My Pi (omp)"),
+    el("option", { value: "pi", selected: existing?.driver === "pi" }, "Pi Coding Agent (pi)"),
+    el("option", { value: "cursor", selected: existing?.driver === "cursor" }, "Cursor CLI (cursor)"),
+    el("option", { value: "codebuddy", selected: existing?.driver === "codebuddy" }, "CodeBuddy CLI (codebuddy)"),
+    el("option", { value: "copilot", selected: existing?.driver === "copilot" }, "GitHub Copilot CLI (copilot)"),
+    el("option", { value: "goose", selected: existing?.driver === "goose" }, "Goose CLI (goose)"),
+    el("option", { value: "cline", selected: existing?.driver === "cline" }, "Cline CLI (cline)"),
+    el("option", { value: "droid", selected: existing?.driver === "droid" }, "Factory Droid (droid)"),
+    el("option", { value: "crush", selected: existing?.driver === "crush" }, "Crush (crush)"),
+    el("option", { value: "qoder", selected: existing?.driver === "qoder" }, "Qoder CLI (qoder)"),
+    el("option", { value: "kiro", selected: existing?.driver === "kiro" }, "Kiro CLI (kiro)"),
     el("option", { value: "custom", selected: !existing || existing?.driver === "custom" }, "通用自定义 CLI（通过 stdin 或 {{prompt}} 传参）")
   );
   const cmdIn = el("input", {

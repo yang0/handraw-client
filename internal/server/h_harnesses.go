@@ -46,9 +46,32 @@ func (s *Server) callHarnessText(ctx context.Context, route aiRoute, msgs []prov
 }
 
 func (s *Server) harnessesList(w http.ResponseWriter, r *http.Request) (any, error) {
+	if q := strings.TrimSpace(r.URL.Query().Get("rescan")); q == "1" || strings.EqualFold(q, "true") {
+		harnesses.Rescan()
+	}
 	st := settings.Get()
 	return map[string]any{
 		"items":            harnesses.Discover(st.Harnesses),
+		"sceneModels":      st.SceneModels,
+		"scenes":           harnessScenes,
+		"defaultTextModel": st.DefaultTextModel,
+	}, nil
+}
+
+func (s *Server) harnessesRescan(w http.ResponseWriter, r *http.Request) (any, error) {
+	harnesses.Rescan()
+	st := settings.Get()
+	items := harnesses.Discover(st.Harnesses)
+	detected := 0
+	for _, it := range items {
+		if it.Detected {
+			detected++
+		}
+	}
+	return map[string]any{
+		"ok":               true,
+		"detectedCount":    detected,
+		"items":            items,
 		"sceneModels":      st.SceneModels,
 		"scenes":           harnessScenes,
 		"defaultTextModel": st.DefaultTextModel,

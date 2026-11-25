@@ -50,8 +50,14 @@ func TestHarnessesAPIPerSceneRoutingAndCleanup(t *testing.T) {
 	if rrList.Code != 200 {
 		t.Fatalf("GET /api/harnesses failed: %d %s", rrList.Code, rrList.Body.String())
 	}
-	if !strings.Contains(rrList.Body.String(), `"id":"agy"`) || !strings.Contains(rrList.Body.String(), `"articleEdit"`) {
+	if !strings.Contains(rrList.Body.String(), `"id":"agy"`) || !strings.Contains(rrList.Body.String(), `"id":"kimi"`) || !strings.Contains(rrList.Body.String(), `"articleEdit"`) {
 		t.Fatalf("unexpected /api/harnesses payload: %s", rrList.Body.String())
+	}
+
+	// 1b. POST /api/harnesses/rescan refreshes discovery cache and returns detectedCount.
+	rrRescan := doReq(t, h, srv.Token, "POST", "/api/harnesses/rescan", map[string]any{})
+	if rrRescan.Code != 200 || !strings.Contains(rrRescan.Body.String(), `"ok":true`) || !strings.Contains(rrRescan.Body.String(), `"detectedCount"`) {
+		t.Fatalf("POST /api/harnesses/rescan failed: %d %s", rrRescan.Code, rrRescan.Body.String())
 	}
 
 	// 2. Register two custom harnesses for two different scenes.

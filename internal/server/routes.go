@@ -215,6 +215,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/settings/works-dir/inspect", s.h(s.inspectWorksDir))
 	m.HandleFunc("POST /api/settings/works-dir/switch", s.h(s.switchWorksDir))
 	m.HandleFunc("GET /api/harnesses", s.h(s.harnessesList))
+	m.HandleFunc("POST /api/harnesses/rescan", s.h(s.harnessesRescan))
 	m.HandleFunc("PUT /api/harnesses/{id}", s.h(s.harnessPut))
 	m.HandleFunc("DELETE /api/harnesses/{id}", s.h(s.harnessDelete))
 	m.HandleFunc("POST /api/harnesses/{id}/test", s.h(s.harnessTest))
