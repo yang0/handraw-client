@@ -1,5 +1,6 @@
 import { clear, closeModal, el, showModal, toast } from "../api.js";
 import {
+  Compartment,
   Decoration,
   EditorSelection,
   EditorState,
@@ -11,6 +12,13 @@ import {
   StateField,
   WidgetType,
   bracketMatching,
+  cmAutocomplete,
+  cmCommands,
+  cmLangMarkdown,
+  cmLanguage,
+  cmSearch,
+  cmState,
+  cmView,
   defaultKeymap,
   drawSelection,
   dropCursor,
@@ -19,6 +27,8 @@ import {
   indentOnInput,
   indentWithTab,
   keymap,
+  lezerCommon,
+  lezerHighlight,
   markdown,
   markdownLanguage,
   placeholder,
@@ -26,6 +36,28 @@ import {
   tags,
 } from "../../vendor/cm6-bundle.js";
 import { openArticleContextMenu } from "./article-links.js";
+
+// Shared CodeMirror 6 & Lezer singletons exposed to Obsidian plugins (#131).
+// Sharing exact module instances guarantees Facet/StateField/Decoration identity checks succeed.
+export const CM6_SINGLETON_MODULES = Object.freeze({
+  "@codemirror/state": cmState,
+  "@codemirror/view": cmView,
+  "@codemirror/commands": cmCommands,
+  "@codemirror/lang-markdown": cmLangMarkdown,
+  "@codemirror/language": cmLanguage,
+  "@codemirror/autocomplete": cmAutocomplete,
+  "@codemirror/search": cmSearch,
+  "@lezer/highlight": lezerHighlight,
+  "@lezer/common": lezerCommon,
+  codemirror: Object.freeze({
+    ...cmState,
+    ...cmView,
+    ...cmCommands,
+    ...cmLanguage,
+    ...cmAutocomplete,
+    ...cmSearch,
+  }),
+});
 
 const CALLOUT_META = {
   note: { icon: "📝", label: "说明", cls: "is-note" },
@@ -885,6 +917,10 @@ export function createArticleLiveEditor(opts) {
   let lastDocVersionPath = "";
   let suppressDocChange = false;
 
+  // Dynamic Compartment for live Obsidian plugin CM6 extensions (#131)
+  const pluginExtCompartment = new Compartment();
+  let activePluginExtensions = [];
+
   // Phase 1 (#126): Slash Command Menu, Selection Floating Toolbar, Floating Outline TOC
   let slashEl = null;
   let slashState = null; // { startPos, endPos, query, items, selected }
@@ -1600,6 +1636,7 @@ export function createArticleLiveEditor(opts) {
         markdown({ base: markdownLanguage }),
         syntaxHighlighting(mdHighlightStyle),
         liveDecoField,
+        pluginExtCompartment.of(activePluginExtensions),
         Prec.highest(keymap.of([
           {
             key: "ArrowDown",
@@ -1819,6 +1856,73 @@ export function createArticleLiveEditor(opts) {
     }
   }
 
+  function setPluginExtensions(entries) {
+    const appliedCounts = new Map();
+    const errors = new Map();
+    const validEntries = [];
+
+    for (const entry of entries || []) {
+      const pluginId = entry?.pluginId;
+      const rawList = Array.isArray(entry?.extensions) ? entry.extensions.filter(Boolean) : [];
+      if (!pluginId || !rawList.length) continue;
+
+      const pluginValid = [];
+      const pluginErrs = [];
+      for (const ext of rawList) {
+        try {
+          // Dry-run validate extension structure against the exact singleton EditorState
+          EditorState.create({ doc: "", extensions: [ext] });
+          pluginValid.push(ext);
+        } catch (err) {
+          pluginErrs.push(err?.message || String(err));
+        }
+      }
+      if (pluginValid.length) {
+        validEntries.push({ pluginId, extensions: pluginValid });
+        appliedCounts.set(pluginId, pluginValid.length);
+      }
+      if (pluginErrs.length) {
+        errors.set(pluginId, `CM6 扩展校验失败：${pluginErrs[0]}`);
+      }
+    }
+
+    const flatValid = validEntries.flatMap((e) => e.extensions);
+    activePluginExtensions = flatValid;
+
+    if (cmView) {
+      try {
+        cmView.dispatch({ effects: pluginExtCompartment.reconfigure(flatValid) });
+      } catch (batchErr) {
+        // Isolate a crashing ViewPlugin/mount-time extension so the live editor never breaks
+        const safeFlat = [];
+        appliedCounts.clear();
+        for (const ve of validEntries) {
+          const candidate = [...safeFlat, ...ve.extensions];
+          try {
+            cmView.dispatch({ effects: pluginExtCompartment.reconfigure(candidate) });
+            safeFlat.push(...ve.extensions);
+            appliedCounts.set(ve.pluginId, ve.extensions.length);
+          } catch (mountErr) {
+            errors.set(ve.pluginId, `CM6 扩展挂载异常：${mountErr?.message || String(mountErr)}`);
+            try {
+              cmView.dispatch({ effects: pluginExtCompartment.reconfigure(safeFlat) });
+            } catch {}
+          }
+        }
+        activePluginExtensions = safeFlat;
+        if (!errors.size) {
+          console.warn("[article-live] CM6 plugin reconfigure fallback:", batchErr);
+        }
+      }
+    }
+
+    return { appliedCounts, errors };
+  }
+
+  function getEditorView() {
+    return cmView;
+  }
+
   function dispose() {
     closeSlashMenu();
     closeSelectionBar();
@@ -1837,6 +1941,8 @@ export function createArticleLiveEditor(opts) {
     getActiveTextarea,
     getSelectionRange,
     setTocVisible,
+    setPluginExtensions,
+    getEditorView,
     dispose,
   };
 }

@@ -1,6 +1,22 @@
-// Sandboxed Obsidian Plugin Runtime & API Compatibility Shim (#115)
-// Runs inside /obsidian-host.html (opaque sandbox iframe, no access to parent token/DOM).
-// Communicates with the Handraw Article Workbench strictly via window.parent.postMessage.
+// Sandboxed Obsidian Plugin Runtime & API Compatibility Shim (#115, #131)
+// Runs inside /obsidian-host.html (same-origin iframe sharing live CodeMirror 6 singletons).
+// Communicates with the Handraw Article Workbench via window.parent.postMessage and __HANDRAW_CM6_BRIDGE__.
+
+// Obsidian global prototype helpers used by many CM6 & community plugins (e.g. obsidian-latex-suite)
+if (typeof String.prototype.contains !== "function") {
+  Object.defineProperty(String.prototype, "contains", {
+    value(target) { return this.includes(target); },
+    configurable: true,
+    writable: true,
+  });
+}
+if (typeof Array.prototype.contains !== "function") {
+  Object.defineProperty(Array.prototype, "contains", {
+    value(target) { return this.includes(target); },
+    configurable: true,
+    writable: true,
+  });
+}
 
 // Provide isolated in-memory localStorage/sessionStorage so plugins never hit SecurityError
 // inside an opaque sandboxed iframe (lacking allow-same-origin).
@@ -38,6 +54,14 @@ try { Object.defineProperty(window, "sessionStorage", { value: memSessionStorage
 const PARENT = window.parent;
 let nextRpcId = 1;
 const pendingRpcs = new Map();
+
+function getCM6Bridge() {
+  try {
+    return PARENT && PARENT !== window ? (PARENT.__HANDRAW_CM6_BRIDGE__ || null) : null;
+  } catch {
+    return null;
+  }
+}
 
 function rpc(action, payload = {}) {
   return new Promise((resolve, reject) => {
@@ -1004,6 +1028,7 @@ class MetadataCache extends Events {
     return this._cache.get(p) || null;
   }
   getCache(p) { return this.getFileCache(p); }
+  getCachedFiles() { return this._vault.getFiles().map((f) => f.path); }
   getFirstLinkpathDest(linkpath, sourcePath = "") {
     let target = getLinkpath(linkpath);
     if (!target) return null;
@@ -1040,6 +1065,9 @@ class MetadataCache extends Events {
 // ---------- Editor & Views ----------
 class Editor {
   constructor() {}
+  get cm() {
+    return getCM6Bridge()?.getEditorView?.() || null;
+  }
   getValue() { return activeDoc.content || ""; }
   setValue(val) {
     activeDoc.content = String(val ?? "");
@@ -1106,7 +1134,9 @@ class Editor {
     this.setValue(s.slice(0, a) + String(replacement ?? "") + s.slice(b));
   }
   listSelections() { return [{ anchor: this.getCursor("from"), head: this.getCursor("to") }]; }
-  focus() {}
+  focus() {
+    try { this.cm?.focus?.(); } catch {}
+  }
   transaction(tx) {
     if (!tx || !Array.isArray(tx.changes)) return;
     // Apply reverse-sorted changes cleanly
@@ -1133,6 +1163,8 @@ class View extends Component {
   getDisplayText() { return "View"; }
   getIcon() { return "file-text"; }
   async onOpen() {}
+  getState() { return { file: this.file?.path || "" }; }
+  async setState() {}
   async onClose() {}
 }
 
@@ -1168,6 +1200,7 @@ class MarkdownView extends FileView {
 class WorkspaceLeaf {
   constructor(workspace, id) {
     this.workspace = workspace;
+    this.id = id;
     this._id = id;
     this.view = null;
     this._state = { type: "empty" };
@@ -1249,6 +1282,10 @@ class Workspace extends Events {
   getLeavesOfType(type) {
     if (type === "markdown") return [this._mdLeaf];
     return this._leaves.filter((l) => l.getViewState().type === type);
+  }
+  getLeafById(id) {
+    if (this._mdLeaf?.id === id) return this._mdLeaf;
+    return this._leaves.find((l) => l.id === id) || null;
   }
   iterateAllLeaves(cb) {
     cb(this._mdLeaf);
@@ -1768,6 +1805,9 @@ class Plugin extends Component {
     this._ribbons = [];
     this._settingTab = null;
     this._viewTypes = [];
+    this._editorExtensions = [];
+    this._editorSuggests = [];
+    this._cm6CleanupRegistered = false;
   }
   addCommand(cmd) {
     const fullId = `${this.manifest.id}:${cmd.id}`;
@@ -1811,8 +1851,33 @@ class Plugin extends Component {
     return pp;
   }
   registerMarkdownCodeBlockProcessor() {}
-  registerEditorExtension() {
-    // Graceful no-op in segmented textarea mode (Phase 1)
+  registerEditorExtension(extension) {
+    if (!extension) return;
+    const list = Array.isArray(extension) ? extension.filter(Boolean) : [extension];
+    if (!list.length) return;
+    this._editorExtensions.push(...list);
+    const id = this.manifest.id;
+    const rec = loadedPlugins.get(id);
+    const bridge = getCM6Bridge();
+    if (bridge?.setPluginExtensions) {
+      bridge.setPluginExtensions(id, this._editorExtensions, rec?.stylesCss || "");
+    }
+    if (!this._cm6CleanupRegistered) {
+      this._cm6CleanupRegistered = true;
+      this.register(() => {
+        this._editorExtensions = [];
+        getCM6Bridge()?.clearPluginExtensions?.(id);
+      });
+    }
+  }
+  registerEditorSuggest(editorSuggest) {
+    if (!editorSuggest) return;
+    this._editorSuggests.push(editorSuggest);
+    this.register(() => {
+      const i = this._editorSuggests.indexOf(editorSuggest);
+      if (i >= 0) this._editorSuggests.splice(i, 1);
+      try { editorSuggest.close?.(); } catch {}
+    });
   }
   registerObsidianProtocolHandler() {}
   registerHoverLinkSource() {}
@@ -2245,7 +2310,21 @@ function createRequireForPlugin(pluginId, obsidianExports) {
     if (norm === "stream") return streamMod;
     if (norm === "assert") return assertFn;
     if (norm === "querystring") return { parse: (s) => Object.fromEntries(new URLSearchParams(s)), stringify: (o) => new URLSearchParams(o).toString() };
-    if (norm.startsWith("@codemirror/") || norm === "codemirror" || norm.startsWith("@lezer/")) return cmStub;
+    if (norm.startsWith("@codemirror/") || norm === "codemirror" || norm.startsWith("@lezer/")) {
+      const realMod = getCM6Bridge()?.modules?.[norm];
+      if (realMod) {
+        return new Proxy(realMod, {
+          get(target, prop, receiver) {
+            if (prop === "__esModule") return true;
+            if (prop === "default") return target;
+            if (Reflect.has(target, prop)) return Reflect.get(target, prop, receiver);
+            if (typeof prop === "symbol") return undefined;
+            return cmStub;
+          },
+        });
+      }
+      return cmStub;
+    }
     console.warn(`[obsidian-shim] Unsupported require("${spec}") requested by ${pluginId}`);
     return createDeepStub();
   };
@@ -2551,7 +2630,7 @@ async function loadPluginBundle(bundle) {
     }
 
     const instance = new PluginClass(appInstance, bundle.manifest);
-    loadedPlugins.set(id, { instance, manifest: bundle.manifest, styleEl, error: "" });
+    loadedPlugins.set(id, { instance, manifest: bundle.manifest, styleEl, stylesCss: bundle.stylesCss || "", error: "" });
     appInstance.plugins.plugins[id] = instance;
     appInstance.plugins.enabledPlugins.add(id);
 
@@ -2561,8 +2640,9 @@ async function loadPluginBundle(bundle) {
   } catch (err) {
     console.error(`[obsidian-shim] Failed loading plugin ${id}:`, err);
     if (styleEl) styleEl.remove();
+    getCM6Bridge()?.clearPluginExtensions?.(id);
     const msg = err?.message || String(err);
-    loadedPlugins.set(id, { instance: null, manifest: bundle.manifest, styleEl: null, error: msg });
+    loadedPlugins.set(id, { instance: null, manifest: bundle.manifest, styleEl: null, stylesCss: "", error: msg });
     syncRegistryToParent();
     return { ok: false, id, error: msg };
   }

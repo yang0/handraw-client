@@ -69,6 +69,24 @@ func TestAnalyzeCompat(t *testing.T) {
 	if c3.Level != "unsupported" {
 		t.Fatalf("expected unsupported for native .node, got %+v", c3)
 	}
+
+	// Tier 1 + CM6: pure CodeMirror 6 ViewPlugin extension is now natively supported (#131)
+	p4 := makeTestPluginDir(t, tmp, "cm6-live-ext", "CM6 Live Ext", "1.0.0",
+		`const { Plugin } = require("obsidian"); const { ViewPlugin, Decoration } = require("@codemirror/view"); const { RangeSetBuilder } = require("@codemirror/state"); module.exports = class extends Plugin { onload() { this.registerEditorExtension(ViewPlugin.fromClass(class {})); } };`, false)
+	mf4, _ := ReadManifest(p4)
+	c4 := AnalyzeCompat(p4, mf4)
+	if c4.Level != "full" || !c4.HasCM6 || len(c4.Reasons) != 0 {
+		t.Fatalf("expected full compat with HasCM6=true and no downgrade warning, got %+v", c4)
+	}
+
+	// Hybrid CM6 + desktop fs: still partial due to fs, with HasCM6=true
+	p5 := makeTestPluginDir(t, tmp, "cm6-fs-ext", "CM6 FS Ext", "1.0.0",
+		`const { Plugin } = require("obsidian"); const fs = require("fs"); const { EditorView } = require("@codemirror/view"); module.exports = class extends Plugin { onload() { this.registerEditorExtension([]); } };`, false)
+	mf5, _ := ReadManifest(p5)
+	c5 := AnalyzeCompat(p5, mf5)
+	if c5.Level != "partial" || !c5.HasCM6 || !c5.NeedsDesktop {
+		t.Fatalf("expected partial+HasCM6+NeedsDesktop, got %+v", c5)
+	}
 }
 
 func TestDiscoverAndImportAndSecrets(t *testing.T) {

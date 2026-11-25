@@ -1647,6 +1647,8 @@ export async function renderArticle(root, ctx, params = {}) {
     openFile: (relPath) => {
       if (relPath) openVaultFile(relPath);
     },
+    getEditorView: () => liveEditor.getEditorView(),
+    setPluginExtensions: (entries) => liveEditor.setPluginExtensions(entries),
     onStateChange: () => syncObsidianBadges(),
     onRevealPluginPane: () => {
       state.rightDrawerTab = "obsidian";

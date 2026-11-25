@@ -1,10 +1,27 @@
 import { api, clear, closeModal, el, openURL, showModal, toast } from "../api.js";
+import { CM6_SINGLETON_MODULES } from "./article-live.js";
 
 function compatBadge(compat) {
   const lvl = compat?.level || "full";
   if (lvl === "unsupported") return el("span", { class: "badge ic-obs-badge-bad" }, "🔴 暂不兼容");
   if (lvl === "partial") return el("span", { class: "badge ic-obs-badge-warn" }, "🟡 部分兼容");
   return el("span", { class: "badge ic-obs-badge-ok" }, "🟢 完整兼容");
+}
+
+function cm6Badge(compat, activeCount = 0) {
+  if (activeCount > 0) {
+    return el("span", {
+      class: "badge ic-obs-badge-cm6",
+      title: `已实时热注入 ${activeCount} 个 CodeMirror 6 编辑器扩展`,
+    }, `⚡ CM6 已接入 (${activeCount})`);
+  }
+  if (compat?.hasCM6) {
+    return el("span", {
+      class: "badge ic-obs-badge-cm6",
+      title: "支持 CodeMirror 6 编辑器扩展实时注入",
+    }, "⚡ CM6 实时扩展");
+  }
+  return null;
 }
 
 function sourceLabel(meta) {
@@ -40,6 +57,8 @@ export function createArticleObsidianController(opts) {
     ribbons: [],
     settingsTabs: [],
     runtimeErrors: new Map(),
+    cm6Counts: new Map(),
+    cm6Errors: new Map(),
     modalOpen: false,
     viewCount: 0,
     activeViewTitle: "",
@@ -49,14 +68,75 @@ export function createArticleObsidianController(opts) {
 
   let nextCallId = 1;
   const pendingCmds = new Map();
+  const pluginCm6Map = new Map(); // pluginId -> { extensions: [], stylesCss: "" }
+  const mainStyleEls = new Map(); // pluginId -> <style>
   let disposed = false;
+
+  function syncMainCm6Styles() {
+    for (const [pid, styleEl] of mainStyleEls.entries()) {
+      const rec = pluginCm6Map.get(pid);
+      if (!rec || !rec.stylesCss) {
+        styleEl.remove();
+        mainStyleEls.delete(pid);
+      }
+    }
+    for (const [pid, rec] of pluginCm6Map.entries()) {
+      if (!rec.stylesCss) continue;
+      let styleEl = mainStyleEls.get(pid);
+      if (!styleEl || !styleEl.isConnected) {
+        styleEl = document.createElement("style");
+        styleEl.dataset.obsCm6Style = pid;
+        document.head.appendChild(styleEl);
+        mainStyleEls.set(pid, styleEl);
+      }
+      if (styleEl.textContent !== rec.stylesCss) {
+        styleEl.textContent = rec.stylesCss;
+      }
+    }
+  }
+
+  function syncPluginCm6Extensions() {
+    const entries = Array.from(pluginCm6Map.entries()).map(([pluginId, rec]) => ({
+      pluginId,
+      extensions: rec.extensions,
+    }));
+    const res = opts.setPluginExtensions?.(entries) || { appliedCounts: new Map(), errors: new Map() };
+    state.cm6Counts = res.appliedCounts instanceof Map ? res.appliedCounts : new Map();
+    state.cm6Errors = res.errors instanceof Map ? res.errors : new Map();
+    syncMainCm6Styles();
+    opts.onStateChange?.();
+    return res;
+  }
+
+  // Expose live CodeMirror 6 singleton bridge for same-origin plugin host (#131).
+  const cm6Bridge = {
+    modules: CM6_SINGLETON_MODULES,
+    getEditorView: () => opts.getEditorView?.() || null,
+    setPluginExtensions: (pluginId, extensions, stylesCss = "") => {
+      if (!pluginId || disposed) return null;
+      const list = Array.isArray(extensions) ? extensions.filter(Boolean) : (extensions ? [extensions] : []);
+      if (list.length) {
+        pluginCm6Map.set(pluginId, { extensions: list, stylesCss: String(stylesCss || "") });
+      } else {
+        pluginCm6Map.delete(pluginId);
+      }
+      return syncPluginCm6Extensions();
+    },
+    clearPluginExtensions: (pluginId) => {
+      if (!pluginId) return;
+      if (pluginCm6Map.delete(pluginId)) {
+        syncPluginCm6Extensions();
+      }
+    },
+  };
+  window.__HANDRAW_CM6_BRIDGE__ = cm6Bridge;
 
   const iframe = el("iframe", {
     src: "/obsidian-host.html",
     class: "ic-obs-host-frame",
-    sandbox: "allow-scripts allow-modals allow-popups allow-downloads",
+    sandbox: "allow-scripts allow-same-origin allow-modals allow-popups allow-downloads",
     allow: "clipboard-write",
-    title: "Obsidian 插件沙箱运行时",
+    title: "Obsidian 插件运行时",
   });
 
   const hostWrap = el("div", { class: "ic-obs-host-wrap is-standby" }, iframe);
@@ -243,6 +323,7 @@ export function createArticleObsidianController(opts) {
   async function unloadPluginFromHost(id) {
     if (!state.hostReady) return;
     state.runtimeErrors.delete(id);
+    cm6Bridge.clearPluginExtensions(id);
     await sendCmd("unload-plugin", { id }).catch(() => {});
   }
 
@@ -503,7 +584,8 @@ export function createArticleObsidianController(opts) {
       state.plugins.forEach((p) => {
         const mf = p.manifest || {};
         const isBusy = busyIds.has(p.id);
-        const runErr = state.runtimeErrors.get(p.id);
+        const runErr = state.runtimeErrors.get(p.id) || state.cm6Errors.get(p.id);
+        const cm6Count = p.enabled ? (state.cm6Counts.get(p.id) || 0) : 0;
         const hasSettings = state.settingsTabs.some((t) => t.pluginId === p.id);
         const pluginCmds = state.commands.filter((c) => c.pluginId === p.id);
 
@@ -514,6 +596,7 @@ export function createArticleObsidianController(opts) {
               el("strong", null, mf.name || p.id),
               el("span", { class: "mono muted", style: { fontSize: "11.5px" } }, `v${mf.version || "?"}`),
               compatBadge(p.compat),
+              cm6Badge(p.compat, cm6Count),
               sourceLabel(p.install) ? el("span", { class: "badge" }, sourceLabel(p.install)) : null
             ),
             el("div", { class: "muted", style: { fontSize: "12px" } },
@@ -779,6 +862,7 @@ export function createArticleObsidianController(opts) {
                 el("strong", null, dp.manifest.name || dp.id),
                 el("span", { class: "mono muted", style: { fontSize: "11.5px" } }, `v${dp.manifest.version}`),
                 compatBadge(dp.compat),
+                cm6Badge(dp.compat, 0),
                 dp.enabledInObsidian ? el("span", { class: "badge" }, "Obsidian 已启用") : null,
                 dp.hasData ? el("span", { class: "badge" }, "含配置") : null,
                 dp.alreadyInstalled ? el("span", { class: "badge badge-accent" }, `已装 v${dp.installedVersion}`) : null
@@ -1099,6 +1183,12 @@ export function createArticleObsidianController(opts) {
     if (dockResizeObs) dockResizeObs.disconnect();
     window.removeEventListener("resize", syncDockedRect);
     window.removeEventListener("message", onWindowMessage);
+    pluginCm6Map.clear();
+    syncMainCm6Styles();
+    opts.setPluginExtensions?.([]);
+    if (window.__HANDRAW_CM6_BRIDGE__ === cm6Bridge) {
+      delete window.__HANDRAW_CM6_BRIDGE__;
+    }
     hostWrap.remove();
   }
 

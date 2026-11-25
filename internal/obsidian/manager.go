@@ -54,6 +54,7 @@ type CompatReport struct {
 	Level        string   `json:"level"` // full | partial | unsupported
 	Reasons      []string `json:"reasons,omitempty"`
 	NeedsDesktop bool     `json:"needsDesktop,omitempty"`
+	HasCM6       bool     `json:"hasCM6,omitempty"`
 	Requires     []string `json:"requires,omitempty"`
 }
 
@@ -286,7 +287,7 @@ func AnalyzeCompat(dir string, mf Manifest) CompatReport {
 			hasChildProc = true
 		case norm == "electron" || strings.HasPrefix(norm, "@electron/"):
 			hasElectron = true
-		case strings.HasPrefix(norm, "@codemirror/") || norm == "codemirror":
+		case strings.HasPrefix(norm, "@codemirror/") || norm == "codemirror" || strings.HasPrefix(norm, "@lezer/"):
 			hasCM6 = true
 		case strings.HasSuffix(norm, ".node"):
 			hasNativeAddon = true
@@ -319,21 +320,8 @@ func AnalyzeCompat(dir string, mf Manifest) CompatReport {
 		reasons = append(reasons, "引用 Electron API（剪贴板/外部打开等常用能力将自动桥接，部分原生窗体 API 不可用）")
 	}
 
+	// CodeMirror 6 extensions are supported natively via the live CM6 singleton bridge (#131).
 	hasCM6Ext := hasCM6 || strings.Contains(src, "registerEditorExtension")
-	hasStandardFeatures := strings.Contains(src, "addCommand") ||
-		strings.Contains(src, "addRibbonIcon") ||
-		strings.Contains(src, "registerView") ||
-		strings.Contains(src, "addSettingTab") ||
-		strings.Contains(src, "registerMarkdownPostProcessor")
-	if hasCM6Ext {
-		if !hasStandardFeatures && strings.Contains(src, "ViewPlugin") {
-			unsupported = true
-			reasons = append(reasons, "核心依赖 CodeMirror 6 实时编辑器扩展，当前文章分段编辑器暂不支持")
-		} else {
-			partial = true
-			reasons = append(reasons, "包含 CodeMirror 6 编辑器扩展（编辑器内实时装饰将降级，命令/面板/设置功能仍可使用）")
-		}
-	}
 
 	if strings.Contains(src, "app.internalPlugins") {
 		partial = true
@@ -355,6 +343,7 @@ func AnalyzeCompat(dir string, mf Manifest) CompatReport {
 		Level:        level,
 		Reasons:      reasons,
 		NeedsDesktop: needsDesktop,
+		HasCM6:       hasCM6Ext,
 		Requires:     reqs,
 	}
 }

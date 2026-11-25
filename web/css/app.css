@@ -5993,6 +5993,10 @@ dialog.modal-asset-detail {
   background: rgba(200, 62, 43, 0.14);
   color: #b43222;
 }
+.ic-obs-badge-cm6 {
+  background: rgba(91, 79, 179, 0.13);
+  color: #4f46a5;
+}
 
 /* =====================================================================
    Article Workbench: Obsidian Wikilinks, Backlinks & Graph View (#116, #120)
