@@ -56,14 +56,33 @@ type Spec struct {
 	Extra      map[string]string `json:"extra,omitempty"`
 }
 
+// DefaultWorkers is the default concurrent image generation limit (#154).
+const DefaultWorkers = 5
+
 type Manager struct {
 	DB              *store.DB
 	Site            *site.Client
 	Emit            func(Event)
 	PluginProviders func() []settings.Provider
+	// Overridable timings for tests (zero uses defaults).
+	BusyRetryBase time.Duration
+	BusyRetryMax  time.Duration
+	MaxBusyWait   time.Duration
+	SiteConfigTTL time.Duration
+
 	queue           chan string
 	mu              sync.Mutex
+	workers         int
 	running         map[string]context.CancelFunc
+	waiting         map[string]context.CancelFunc
+	siteInFlight    int
+	sitePending     []string
+	siteCfgMu       sync.Mutex
+	siteMaxInflight int
+	siteCfgAt       time.Time
+	busyAttempts    map[string]int
+	busyFirstAt     map[string]time.Time
+	slotSignal      chan struct{}
 	wg              sync.WaitGroup
 }
 
@@ -71,14 +90,28 @@ func New(db *store.DB, sc *site.Client, emit func(Event)) *Manager {
 	if emit == nil {
 		emit = func(Event) {}
 	}
-	return &Manager{DB: db, Site: sc, Emit: emit, queue: make(chan string, 1024), running: map[string]context.CancelFunc{}}
+	return &Manager{
+		DB:           db,
+		Site:         sc,
+		Emit:         emit,
+		queue:        make(chan string, 1024),
+		workers:      DefaultWorkers,
+		running:      map[string]context.CancelFunc{},
+		waiting:      map[string]context.CancelFunc{},
+		busyAttempts: map[string]int{},
+		busyFirstAt:  map[string]time.Time{},
+		slotSignal:   make(chan struct{}),
+	}
 }
 
 // Start launches workers and resumes unfinished images.
 func (m *Manager) Start(ctx context.Context, workers int) {
 	if workers <= 0 {
-		workers = 2
+		workers = DefaultWorkers
 	}
+	m.mu.Lock()
+	m.workers = workers
+	m.mu.Unlock()
 	for i := 0; i < workers; i++ {
 		m.wg.Add(1)
 		go m.worker(ctx)
@@ -86,12 +119,20 @@ func (m *Manager) Start(ctx context.Context, workers int) {
 	go func() {
 		active, _ := m.DB.ActiveImages()
 		for _, im := range active {
-			m.queue <- im.ID
+			m.Enqueue(im.ID)
 		}
 	}()
 }
 
-func (m *Manager) Enqueue(imageID string) { m.queue <- imageID }
+func (m *Manager) Enqueue(imageID string) { m.enqueueAsync(imageID) }
+
+func (m *Manager) enqueueAsync(imageID string) {
+	select {
+	case m.queue <- imageID:
+	default:
+		go func() { m.queue <- imageID }()
+	}
+}
 
 // Active reports how many images are queued or running.
 func (m *Manager) Active() int {
@@ -111,9 +152,17 @@ func (m *Manager) Cancel(imageID string) error {
 	}
 	m.mu.Lock()
 	cancel := m.running[imageID]
+	waitCancel := m.waiting[imageID]
+	delete(m.waiting, imageID)
+	m.removeSitePendingLocked(imageID)
+	delete(m.busyAttempts, imageID)
+	delete(m.busyFirstAt, imageID)
 	m.mu.Unlock()
 	if im.Status == "running" && im.RemoteTaskID != "" {
 		return errors.New("网站已受理该任务，无法取消；结果完成后仍会保存")
+	}
+	if waitCancel != nil {
+		waitCancel()
 	}
 	if cancel != nil {
 		cancel()
@@ -136,6 +185,247 @@ func (m *Manager) worker(ctx context.Context) {
 	}
 }
 
+func (m *Manager) removeSitePendingLocked(imageID string) {
+	for i, id := range m.sitePending {
+		if id == imageID {
+			m.sitePending = append(m.sitePending[:i], m.sitePending[i+1:]...)
+			return
+		}
+	}
+}
+
+func (m *Manager) hasSitePendingLocked(imageID string) bool {
+	for _, id := range m.sitePending {
+		if id == imageID {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) notifySlotFreedLocked() {
+	if m.slotSignal != nil {
+		close(m.slotSignal)
+		m.slotSignal = make(chan struct{})
+	}
+}
+
+func (m *Manager) clearBusyState(imageID string) {
+	m.mu.Lock()
+	delete(m.busyAttempts, imageID)
+	delete(m.busyFirstAt, imageID)
+	if wc := m.waiting[imageID]; wc != nil {
+		delete(m.waiting, imageID)
+		wc()
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) busyBaseDelay() time.Duration {
+	if m.BusyRetryBase > 0 {
+		return m.BusyRetryBase
+	}
+	return 2 * time.Second
+}
+
+func (m *Manager) busyMaxDelay() time.Duration {
+	if m.BusyRetryMax > 0 {
+		return m.BusyRetryMax
+	}
+	return 8 * time.Second
+}
+
+func (m *Manager) maxBusyWait() time.Duration {
+	if m.MaxBusyWait > 0 {
+		return m.MaxBusyWait
+	}
+	return 15 * time.Minute
+}
+
+// effectiveSiteLimit fetches and caches /api/studio/config.maxInflightPerUser
+// so desktop batches stay within the site's per-user inflight cap and keep
+// excess items cleanly queued instead of self-triggering HTTP 429 (#154).
+func (m *Manager) effectiveSiteLimit(ctx context.Context) int {
+	m.mu.Lock()
+	limit := m.workers
+	m.mu.Unlock()
+	if limit <= 0 {
+		limit = DefaultWorkers
+	}
+	if m.Site == nil {
+		return limit
+	}
+	ttl := m.SiteConfigTTL
+	if ttl <= 0 {
+		ttl = 60 * time.Second
+	}
+	m.siteCfgMu.Lock()
+	defer m.siteCfgMu.Unlock()
+
+	m.mu.Lock()
+	cached := m.siteMaxInflight
+	fresh := !m.siteCfgAt.IsZero() && time.Since(m.siteCfgAt) < ttl
+	m.mu.Unlock()
+	if !fresh {
+		cfgCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		cfg, err := m.Site.StudioConfig(cfgCtx)
+		cancel()
+		m.mu.Lock()
+		if err == nil {
+			m.siteMaxInflight = cfg.MaxInflightPerUser
+			cached = cfg.MaxInflightPerUser
+		}
+		m.siteCfgAt = time.Now()
+		m.mu.Unlock()
+	}
+	if cached > 0 && cached < limit {
+		return cached
+	}
+	return limit
+}
+
+func (m *Manager) releaseSiteSlot(parent context.Context, serverSlotFreed bool) {
+	var nextNow string
+	var nextDelayed string
+	m.mu.Lock()
+	if m.siteInFlight > 0 {
+		m.siteInFlight--
+	}
+	if serverSlotFreed {
+		if len(m.sitePending) > 0 {
+			nextNow = m.sitePending[0]
+			m.sitePending = m.sitePending[1:]
+		}
+		m.notifySlotFreedLocked()
+	} else if m.siteInFlight == 0 && len(m.sitePending) > 0 {
+		nextDelayed = m.sitePending[0]
+		m.sitePending = m.sitePending[1:]
+	}
+	m.mu.Unlock()
+	if nextNow != "" {
+		m.enqueueAsync(nextNow)
+	}
+	if nextDelayed != "" {
+		m.scheduleBusyRetry(parent, nextDelayed, 1)
+	}
+}
+
+func isConcurrencyBusyError(isSite bool, err error) bool {
+	if err == nil {
+		return false
+	}
+	if isSite {
+		var ae *site.APIError
+		if errors.As(err, &ae) {
+			code := strings.ToLower(strings.TrimSpace(ae.Code))
+			switch code {
+			case "generation_in_progress", "global_generation_busy":
+				return true
+			case "free_concurrency_limited":
+				// Single-item desktop requests only hit free_concurrency_limited
+				// when another free image is currently in flight; waiting frees a slot.
+				msg := ae.Message
+				return strings.Contains(msg, "当前已有") || strings.Contains(msg, "等待") || strings.Contains(msg, "进行中")
+			case "quota_daily_limit_reached", "insufficient_balance", "insufficient_quota":
+				return false
+			}
+			if ae.Status == 429 {
+				low := strings.ToLower(ae.Message)
+				if strings.Contains(low, "余额") || strings.Contains(low, "次日") || strings.Contains(low, "今日免费") || strings.Contains(low, "insufficient") {
+					return false
+				}
+				return true
+			}
+		}
+		return false
+	}
+	var pe *providers.APIError
+	if errors.As(err, &pe) && pe.Status == 429 {
+		low := strings.ToLower(pe.Code + " " + pe.Message)
+		for _, perm := range []string{"insufficient_quota", "billing", "余额不足", "配额用尽", "credit", "quota_exceeded", "exceeded your current quota"} {
+			if strings.Contains(low, perm) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func (m *Manager) recordBusyAttempt(imageID string) (int, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	first, ok := m.busyFirstAt[imageID]
+	if !ok {
+		first = now
+		m.busyFirstAt[imageID] = first
+	}
+	if now.Sub(first) >= m.maxBusyWait() {
+		return 0, false
+	}
+	m.busyAttempts[imageID]++
+	return m.busyAttempts[imageID], true
+}
+
+func (m *Manager) scheduleBusyRetry(parent context.Context, imageID string, attempt int) {
+	base := m.busyBaseDelay()
+	maxD := m.busyMaxDelay()
+	delay := base * time.Duration(attempt)
+	if delay < base {
+		delay = base
+	}
+	if delay > maxD {
+		delay = maxD
+	}
+	settle := base / 8
+	if settle > 250*time.Millisecond {
+		settle = 250 * time.Millisecond
+	}
+	if settle < 10*time.Millisecond {
+		settle = 10 * time.Millisecond
+	}
+
+	waitCtx, waitCancel := context.WithCancel(parent)
+	m.mu.Lock()
+	if prev := m.waiting[imageID]; prev != nil {
+		prev()
+	}
+	m.waiting[imageID] = waitCancel
+	sig := m.slotSignal
+	m.mu.Unlock()
+
+	go func() {
+		defer func() {
+			waitCancel()
+			m.mu.Lock()
+			delete(m.waiting, imageID)
+			m.mu.Unlock()
+		}()
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-waitCtx.Done():
+			return
+		case <-timer.C:
+		case <-sig:
+			select {
+			case <-waitCtx.Done():
+				return
+			case <-time.After(settle):
+			}
+		}
+		if waitCtx.Err() != nil {
+			return
+		}
+		im, err := m.DB.GetImage(imageID)
+		if err != nil || im.Status != "queued" {
+			return
+		}
+		m.enqueueAsync(imageID)
+	}()
+}
+
 func (m *Manager) process(parent context.Context, imageID string) {
 	im, err := m.DB.GetImage(imageID)
 	if err != nil || (im.Status != "queued" && im.Status != "running") {
@@ -146,23 +436,59 @@ func (m *Manager) process(parent context.Context, imageID string) {
 		m.fail(im, "任务参数损坏")
 		return
 	}
+	isSite := strings.HasPrefix(spec.ModelRef, "site:")
+	requeuedBusy := false
+
+	if isSite {
+		siteLimit := m.effectiveSiteLimit(parent)
+		m.mu.Lock()
+		if _, dup := m.running[imageID]; dup {
+			m.mu.Unlock()
+			return
+		}
+		if m.siteInFlight >= siteLimit {
+			if !m.hasSitePendingLocked(imageID) {
+				m.sitePending = append(m.sitePending, imageID)
+			}
+			m.mu.Unlock()
+			return
+		}
+		m.siteInFlight++
+		m.mu.Unlock()
+		defer func() {
+			m.releaseSiteSlot(parent, !requeuedBusy)
+		}()
+	}
+
 	ctx, cancel := context.WithCancel(parent)
 	m.mu.Lock()
+	if _, dup := m.running[imageID]; dup {
+		m.mu.Unlock()
+		cancel()
+		return
+	}
+	if wc := m.waiting[imageID]; wc != nil {
+		delete(m.waiting, imageID)
+		wc()
+	}
 	m.running[imageID] = cancel
 	m.mu.Unlock()
 	defer func() {
 		cancel()
 		m.mu.Lock()
 		delete(m.running, imageID)
+		if !isSite && !requeuedBusy {
+			m.notifySlotFreedLocked()
+		}
 		m.mu.Unlock()
 	}()
-	_ = m.DB.UpdateImage(imageID, map[string]any{"status": "running"})
+	_ = m.DB.UpdateImage(imageID, map[string]any{"status": "running", "error": ""})
 	m.DB.UpdateRun(im.RunID, map[string]any{"status": "running"})
 	m.Emit(Event{Type: "image", RunID: im.RunID, ImageID: imageID, Status: "running"})
 
 	var data []byte
 	var cost int
-	if strings.HasPrefix(spec.ModelRef, "site:") {
+	if isSite {
 		data, cost, err = m.runSite(ctx, im, spec)
 	} else {
 		data, err = m.runProvider(ctx, spec)
@@ -171,16 +497,34 @@ func (m *Manager) process(parent context.Context, imageID string) {
 		if errors.Is(err, context.Canceled) {
 			return
 		}
+		if isConcurrencyBusyError(isSite, err) {
+			if attempt, ok := m.recordBusyAttempt(imageID); ok {
+				requeuedBusy = true
+				if isSite {
+					m.mu.Lock()
+					m.siteCfgAt = time.Time{}
+					m.mu.Unlock()
+				}
+				_ = m.DB.UpdateImage(imageID, map[string]any{"status": "queued", "error": "", "remote_task_id": ""})
+				m.refreshRun(im.RunID)
+				m.Emit(Event{Type: "image", RunID: im.RunID, ImageID: imageID, Status: "queued"})
+				m.scheduleBusyRetry(parent, imageID, attempt)
+				return
+			}
+		}
+		m.clearBusyState(imageID)
 		m.fail(im, err.Error())
 		return
 	}
 	if err := m.save(im, data, cost); err != nil {
+		m.clearBusyState(imageID)
 		m.fail(im, "保存图片失败："+err.Error())
 		return
 	}
+	m.clearBusyState(imageID)
 	m.refreshRun(im.RunID)
 	m.Emit(Event{Type: "image", RunID: im.RunID, ImageID: imageID, Status: "done"})
-	if strings.HasPrefix(spec.ModelRef, "site:") {
+	if isSite {
 		m.Emit(Event{Type: "balance"})
 	}
 }

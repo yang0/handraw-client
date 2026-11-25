@@ -120,12 +120,22 @@ export async function renderArticle(root, ctx, params = {}) {
   function isRunActive(run) {
     return Boolean(run?.images?.some((im) => im.status === "queued" || im.status === "running"));
   }
+  function slotActiveStatus(slotId) {
+    if (!slotId) return "";
+    if (submittingSlotIds.has(slotId)) return "running";
+    let foundQueued = false;
+    for (const entry of (state.activeRuns || [])) {
+      const imgs = entry.run?.images || [];
+      for (let i = 0; i < imgs.length; i++) {
+        if (entry.slotMap?.[i]?.id !== slotId) continue;
+        if (imgs[i]?.status === "running") return "running";
+        if (imgs[i]?.status === "queued") foundQueued = true;
+      }
+    }
+    return foundQueued ? "queued" : "";
+  }
   function isSlotGenerating(slotId) {
-    if (!slotId) return false;
-    if (submittingSlotIds.has(slotId)) return true;
-    return (state.activeRuns || []).some((entry) =>
-      (entry.run?.images || []).some((im, i) => entry.slotMap?.[i]?.id === slotId && (im.status === "queued" || im.status === "running"))
-    );
+    return Boolean(slotActiveStatus(slotId));
   }
   let activeSegTextarea = null;
   let treeQuery = "";
@@ -4090,10 +4100,15 @@ export async function renderArticle(root, ctx, params = {}) {
     const statusParts = [`${done + failed} / ${total} 已处理`, `成功 ${done}`, `失败 ${failed}`];
     if (running > 0) statusParts.push(`绘制中 ${running}`);
     if (queued > 0) statusParts.push(`排队 ${queued}`);
+    const summaryTitle = active > 0
+      ? (queued > 0 && running > 0
+        ? `正在并发生图（绘制中 ${running} · 自动排队 ${queued}）…`
+        : (queued > 0 ? `配图排队等待中（${queued} 张排队）…` : `正在并发生图（${running} 张绘制中）…`))
+      : "本批配图结果";
     batchSummaryBox.className = "hw-article-generation-summary";
     batchSummaryBox.append(
       el("div", { class: "hw-article-summary-head" },
-        el("strong", null, active > 0 ? `正在并发生图（${active} 张进行中）…` : "本批配图结果"),
+        el("strong", null, summaryTitle),
         el("span", null, statusParts.join(" · "))
       ),
       el("div", { class: "hw-article-summary-meter", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(total), "aria-valuenow": String(done + failed) },
@@ -4252,9 +4267,12 @@ export async function renderArticle(root, ctx, params = {}) {
     else if (sl.imagePath && !sl.variants.includes(sl.imagePath)) sl.variants.unshift(sl.imagePath);
 
     const isCover = sl.role === "cover";
-    const isGenerating = isSlotGenerating(sl.id);
-    const status = isGenerating ? "generating" : (sl.imagePath ? "done" : (sl.error ? "error" : "idle"));
-    const statusLabel = { generating: "生成中…", done: "✓ 已完成", error: "! 生成失败", idle: "待生成" }[status];
+    const activeStatus = slotActiveStatus(sl.id);
+    const isGenerating = Boolean(activeStatus);
+    const status = activeStatus === "running"
+      ? "generating"
+      : (activeStatus === "queued" ? "queued" : (sl.imagePath ? "done" : (sl.error ? "error" : "idle")));
+    const statusLabel = { generating: "生成中…", queued: "排队中…", done: "✓ 已完成", error: "! 生成失败", idle: "待生成" }[status];
 
     const ratioText = sl.ratio || (isCover ? state.coverRatio : state.inlineRatio);
     const layoutObj = layouts.find((l) => resourceId(l) === sl.layout);
@@ -4269,8 +4287,8 @@ export async function renderArticle(root, ctx, params = {}) {
     sl.imagePath
       ? el("img", { src: localImg(sl.imagePath), alt: sl.title || "配图" })
       : el("div", { class: "col", style: { alignItems: "center", gap: "4px", padding: "10px", textAlign: "center" } },
-          el("span", { style: { fontSize: "20px", opacity: "0.45", color: "var(--accent)" } }, status === "generating" ? "⏳" : "🖼"),
-          el("span", { class: "muted", style: { fontSize: "11px" } }, status === "generating" ? "正在绘制…" : `${ratioText} · 点击设提示词`)
+          el("span", { style: { fontSize: "20px", opacity: "0.45", color: "var(--accent)" } }, status === "generating" ? "⏳" : (status === "queued" ? "🕒" : "🖼")),
+          el("span", { class: "muted", style: { fontSize: "11px" } }, status === "generating" ? "正在绘制…" : (status === "queued" ? "排队等待空位…" : `${ratioText} · 点击设提示词`))
         )
     );
 
@@ -4861,6 +4879,9 @@ export async function renderArticle(root, ctx, params = {}) {
         const mapped = liveEntry.slotMap?.[i];
         const slot = state.slots.find((sl) => sl.id === mapped?.id);
         if (slot && slotSignature(slot) === mapped.signature) {
+          if (im.status === "queued" || im.status === "running") {
+            slot.error = "";
+          }
           if (im.status === "done" && im.path) {
             if (!Array.isArray(slot.variants)) slot.variants = [];
             if (!slot.variants.includes(im.path)) slot.variants.push(im.path);

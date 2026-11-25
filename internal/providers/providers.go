@@ -354,6 +354,16 @@ func ListModelsWithKey(ctx context.Context, p Provider, apiKey string) ([]ModelI
 	return models, nil
 }
 
+// APIError represents a non-2xx HTTP response from a third-party provider (#154).
+type APIError struct {
+	Status  int
+	Code    string
+	Message string
+	Text    string
+}
+
+func (e *APIError) Error() string { return e.Text }
+
 func apiErr(status int, body []byte) error {
 	var e struct {
 		Error struct {
@@ -373,15 +383,22 @@ func apiErr(status int, body []byte) error {
 			msg = msg[:300]
 		}
 	}
+	codeStr := ""
+	if e.Error.Code != nil {
+		codeStr = strings.TrimSpace(fmt.Sprint(e.Error.Code))
+	}
+	var text string
 	switch status {
 	case 401, 403:
-		return fmt.Errorf("鉴权失败（%d）：%s", status, msg)
+		text = fmt.Errorf("鉴权失败（%d）：%s", status, msg).Error()
 	case 404:
-		return fmt.Errorf("接口或模型不存在（404）：%s", msg)
+		text = fmt.Errorf("接口或模型不存在（404）：%s", msg).Error()
 	case 429:
-		return fmt.Errorf("请求过多或额度不足（429）：%s", msg)
+		text = fmt.Errorf("请求过多或额度不足（429）：%s", msg).Error()
+	default:
+		text = fmt.Errorf("接口返回 %d：%s", status, msg).Error()
 	}
-	return fmt.Errorf("接口返回 %d：%s", status, msg)
+	return &APIError{Status: status, Code: codeStr, Message: msg, Text: text}
 }
 
 // RefImage is an image attached to an edit request.

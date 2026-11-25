@@ -323,6 +323,18 @@ func (c *Client) PublicModels(ctx context.Context) (json.RawMessage, error) {
 	return out, err
 }
 
+// StudioConfig is the subset of /api/studio/config used to align desktop
+// concurrency with the site's per-user inflight limit (#154).
+type StudioConfig struct {
+	MaxInflightPerUser int `json:"maxInflightPerUser"`
+}
+
+func (c *Client) StudioConfig(ctx context.Context) (StudioConfig, error) {
+	var out StudioConfig
+	err := c.Public(ctx, "GET", "/api/studio/config", nil, &out)
+	return out, err
+}
+
 // Quote prices a list of items: [{model, resolution, quality, count}…].
 func (c *Client) Quote(ctx context.Context, items []map[string]any) (json.RawMessage, error) {
 	var out json.RawMessage
