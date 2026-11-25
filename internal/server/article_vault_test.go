@@ -16,12 +16,14 @@ func TestArticleVaultTreeReadWriteEmbedAndSecurity(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(vault, "2026", "随笔"), 0o755)
 	_ = os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o755)
 	_ = os.MkdirAll(filepath.Join(vault, "empty_assets"), 0o755)
+	_ = os.MkdirAll(filepath.Join(vault, "unsupported_only"), 0o755)
 	_ = os.WriteFile(filepath.Join(vault, ".obsidian", "config.md"), []byte("hidden"), 0o644)
 	_ = os.WriteFile(filepath.Join(vault, "empty_assets", "pic.png"), []byte("not-md"), 0o644)
+	_ = os.WriteFile(filepath.Join(vault, "unsupported_only", "archive.zip"), []byte("PK\x03\x04"), 0o644)
 	_ = os.WriteFile(filepath.Join(vault, "README.md"), []byte("# 欢迎来到手绘文章库\n\n第一段正文。"), 0o644)
 	_ = os.WriteFile(filepath.Join(vault, "2026", "随笔", "咖啡日记.md"), []byte("# 秋日咖啡日记\n\n清晨手冲一杯浅烘豆。"), 0o644)
 
-	// 1. Set vault root & verify tree structure (prunes .obsidian and non-md empty_assets).
+	// 1. Set vault root & verify tree structure (includes supported assets like .png; prunes .obsidian and unsupported-only folders).
 	rrRoot := doReq(t, h, srv.Token, "POST", "/api/article/vault/root", map[string]any{"dir": vault})
 	if rrRoot.Code != 200 {
 		t.Fatalf("set root failed: %d %s", rrRoot.Code, rrRoot.Body.String())
@@ -29,14 +31,18 @@ func TestArticleVaultTreeReadWriteEmbedAndSecurity(t *testing.T) {
 	var rootRes struct {
 		Dir       string      `json:"dir"`
 		FileCount int         `json:"fileCount"`
+		NoteCount int         `json:"noteCount"`
 		Tree      []vaultNode `json:"tree"`
 	}
 	_ = json.Unmarshal(rrRoot.Body.Bytes(), &rootRes)
-	if rootRes.FileCount != 2 || len(rootRes.Tree) != 2 {
-		t.Fatalf("expected 2 md files and 2 top nodes (2026 dir + README.md), got count=%d tree=%+v", rootRes.FileCount, rootRes.Tree)
+	if rootRes.FileCount != 3 || rootRes.NoteCount != 2 || len(rootRes.Tree) != 3 {
+		t.Fatalf("expected 3 files (2 md + 1 png) and 3 top nodes (2026, empty_assets, README.md), got fileCount=%d noteCount=%d tree=%+v", rootRes.FileCount, rootRes.NoteCount, rootRes.Tree)
 	}
-	if rootRes.Tree[0].Kind != "dir" || rootRes.Tree[0].Name != "2026" || rootRes.Tree[1].Name != "README.md" {
+	if rootRes.Tree[0].Kind != "dir" || rootRes.Tree[0].Name != "2026" || rootRes.Tree[1].Name != "empty_assets" || rootRes.Tree[2].Name != "README.md" {
 		t.Fatalf("expected dirs sorted before files, got %+v", rootRes.Tree)
+	}
+	if len(rootRes.Tree[1].Children) != 1 || rootRes.Tree[1].Children[0].Kind != "image" || rootRes.Tree[1].Children[0].Ext != "png" {
+		t.Fatalf("expected empty_assets/pic.png classified as image, got %+v", rootRes.Tree[1].Children)
 	}
 
 	// 2. Read nested markdown file.
@@ -264,5 +270,76 @@ func TestArticleVaultFolderMkdirRenameDuplicateDeleteAndSecurity(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(vault, "2026", "已归档")); !os.IsNotExist(err) {
 		t.Fatalf("expected folder removed from disk")
+	}
+}
+
+func TestArticleVaultMultiFormatPreviewRenameAndDelete(t *testing.T) {
+	srv, _ := setupTestServer(t, "http://127.0.0.1:1")
+	h := srv.Handler()
+
+	vault := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(vault, "media"), 0o755)
+	_ = os.WriteFile(filepath.Join(vault, "media", "cover.webp"), []byte("RIFF\x00\x00\x00\x00WEBP"), 0o644)
+	_ = os.WriteFile(filepath.Join(vault, "media", "clip.mp4"), []byte("\x00\x00\x00\x18ftypmp42"), 0o644)
+	_ = os.WriteFile(filepath.Join(vault, "media", "voice.mp3"), []byte("ID3\x03\x00"), 0o644)
+	_ = os.WriteFile(filepath.Join(vault, "media", "paper.pdf"), []byte("%PDF-1.7\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(vault, "media", "data.json"), []byte(`{"ok":true,"count":3}`), 0o644)
+	_ = os.WriteFile(filepath.Join(vault, "media", "raw.bin"), []byte{0x00, 0x01, 0x02}, 0o644)
+
+	rrRoot := doReq(t, h, srv.Token, "POST", "/api/article/vault/root", map[string]any{"dir": vault})
+	if rrRoot.Code != 200 {
+		t.Fatalf("set root failed: %d %s", rrRoot.Code, rrRoot.Body.String())
+	}
+	var rootRes struct {
+		FileCount int         `json:"fileCount"`
+		NoteCount int         `json:"noteCount"`
+		Tree      []vaultNode `json:"tree"`
+	}
+	_ = json.Unmarshal(rrRoot.Body.Bytes(), &rootRes)
+	if rootRes.FileCount != 5 || rootRes.NoteCount != 0 {
+		t.Fatalf("expected 5 supported media/text files (ignoring raw.bin), got fileCount=%d noteCount=%d", rootRes.FileCount, rootRes.NoteCount)
+	}
+
+	// Preview video
+	rrVid := doReq(t, h, srv.Token, "GET", "/api/article/vault/preview?path=media/clip.mp4", nil)
+	if rrVid.Code != 200 || !strings.Contains(rrVid.Body.String(), `"kind":"video"`) || !strings.Contains(rrVid.Body.String(), `/files/vault-asset?path=media%2Fclip.mp4`) {
+		t.Fatalf("video preview failed: %d %s", rrVid.Code, rrVid.Body.String())
+	}
+
+	// Preview JSON text returns inline content
+	rrJSON := doReq(t, h, srv.Token, "GET", "/api/article/vault/preview?path=media/data.json", nil)
+	if rrJSON.Code != 200 || !strings.Contains(rrJSON.Body.String(), `"kind":"text"`) || !strings.Contains(rrJSON.Body.String(), `\"count\":3`) {
+		t.Fatalf("json preview failed: %d %s", rrJSON.Code, rrJSON.Body.String())
+	}
+
+	// Reject unsupported file and traversal in preview
+	if rrBin := doReq(t, h, srv.Token, "GET", "/api/article/vault/preview?path=media/raw.bin", nil); rrBin.Code != 400 {
+		t.Fatalf("expected 400 for unsupported binary preview, got %d", rrBin.Code)
+	}
+	if rrEsc := doReq(t, h, srv.Token, "GET", "/api/article/vault/preview?path=../secret.txt", nil); rrEsc.Code != 400 {
+		t.Fatalf("expected 400 for traversal preview, got %d", rrEsc.Code)
+	}
+
+	// Serve /files/vault-asset sets proper Content-Type for webp & mp4
+	rrAsset := doReq(t, h, srv.Token, "GET", "/files/vault-asset?path=media/clip.mp4", nil)
+	if rrAsset.Code != 200 || !strings.Contains(rrAsset.Header().Get("Content-Type"), "video/mp4") {
+		t.Fatalf("expected video/mp4 Content-Type, got %d %q", rrAsset.Code, rrAsset.Header().Get("Content-Type"))
+	}
+
+	// Rename image without extension keeps .webp (does NOT append .md!)
+	rrRen := doReq(t, h, srv.Token, "POST", "/api/article/vault/rename", map[string]any{
+		"from": "media/cover.webp",
+		"to":   "media/banner",
+	})
+	if rrRen.Code != 200 || !strings.Contains(rrRen.Body.String(), `"to":"media/banner.webp"`) {
+		t.Fatalf("expected media/banner.webp after rename, got %d %s", rrRen.Code, rrRen.Body.String())
+	}
+
+	// Delete media file works cleanly, unsupported binary refused
+	if rrDelBin := doReq(t, h, srv.Token, "DELETE", "/api/article/vault/file?path=media/raw.bin", nil); rrDelBin.Code != 400 {
+		t.Fatalf("expected 400 deleting unsupported binary, got %d", rrDelBin.Code)
+	}
+	if rrDelImg := doReq(t, h, srv.Token, "DELETE", "/api/article/vault/file?path=media/banner.webp", nil); rrDelImg.Code != 200 {
+		t.Fatalf("expected 200 deleting banner.webp, got %d %s", rrDelImg.Code, rrDelImg.Body.String())
 	}
 }

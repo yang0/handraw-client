@@ -766,7 +766,49 @@ func (s *Server) articleVaultLinkify(w http.ResponseWriter, r *http.Request) (an
 	}, nil
 }
 
-// fileVaultAsset serves local attachments (e.g. images referenced by ![[pic.png]] or ![](assets/pic.png))
+func setVaultAssetHeaders(w http.ResponseWriter, absPath string) {
+	w.Header().Set("Cache-Control", "no-cache")
+	ext := strings.ToLower(filepath.Ext(absPath))
+	switch ext {
+	case ".webp":
+		w.Header().Set("Content-Type", "image/webp")
+	case ".avif":
+		w.Header().Set("Content-Type", "image/avif")
+	case ".svg":
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Content-Security-Policy", "sandbox")
+	case ".html", ".htm":
+		w.Header().Set("Content-Security-Policy", "sandbox")
+	case ".mp4", ".m4v":
+		w.Header().Set("Content-Type", "video/mp4")
+	case ".webm":
+		w.Header().Set("Content-Type", "video/webm")
+	case ".mov":
+		w.Header().Set("Content-Type", "video/quicktime")
+	case ".ogv":
+		w.Header().Set("Content-Type", "video/ogg")
+	case ".mkv":
+		w.Header().Set("Content-Type", "video/x-matroska")
+	case ".mp3":
+		w.Header().Set("Content-Type", "audio/mpeg")
+	case ".wav":
+		w.Header().Set("Content-Type", "audio/wav")
+	case ".ogg":
+		w.Header().Set("Content-Type", "audio/ogg")
+	case ".m4a":
+		w.Header().Set("Content-Type", "audio/mp4")
+	case ".flac":
+		w.Header().Set("Content-Type", "audio/flac")
+	case ".aac":
+		w.Header().Set("Content-Type", "audio/aac")
+	case ".opus":
+		w.Header().Set("Content-Type", "audio/opus")
+	case ".pdf":
+		w.Header().Set("Content-Type", "application/pdf")
+	}
+}
+
+// fileVaultAsset serves local attachments (e.g. images, videos, audio, PDFs)
 // strictly inside the active article vault.
 func (s *Server) fileVaultAsset(w http.ResponseWriter, r *http.Request) {
 	rootAbs, err := s.activeArticleVaultDir()
@@ -784,7 +826,7 @@ func (s *Server) fileVaultAsset(w http.ResponseWriter, r *http.Request) {
 	resolved := rawPath
 	if abs, _, rErr := resolveVaultAnyFilePath(rootAbs, rawPath); rErr == nil {
 		if st, sErr := os.Stat(abs); sErr == nil && !st.IsDir() {
-			w.Header().Set("Cache-Control", "no-cache")
+			setVaultAssetHeaders(w, abs)
 			http.ServeFile(w, r, abs)
 			return
 		}
@@ -803,7 +845,7 @@ func (s *Server) fileVaultAsset(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-cache")
+	setVaultAssetHeaders(w, abs)
 	http.ServeFile(w, r, abs)
 }
 

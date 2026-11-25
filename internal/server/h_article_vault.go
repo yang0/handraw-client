@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,15 +19,17 @@ import (
 )
 
 const (
-	vaultMaxDepth = 8
-	vaultMaxFiles = 2000
-	vaultMaxBytes = 8 << 20 // 8 MiB per markdown file
+	vaultMaxDepth        = 8
+	vaultMaxFiles        = 3000
+	vaultMaxBytes        = 8 << 20   // 8 MiB per markdown file
+	vaultPreviewMaxBytes = 512 << 10 // 512 KiB max inline read-only text preview
 )
 
 type vaultNode struct {
 	Name     string      `json:"name"`
 	Path     string      `json:"path"` // vault-relative forward-slash path
-	Kind     string      `json:"kind"` // "dir" | "file"
+	Kind     string      `json:"kind"` // "dir" | "file" | "canvas" | "image" | "video" | "audio" | "pdf" | "text"
+	Ext      string      `json:"ext,omitempty"`
 	ModTime  int64       `json:"modTime,omitempty"`
 	Size     int64       `json:"size,omitempty"`
 	Children []vaultNode `json:"children,omitempty"`
@@ -154,16 +158,19 @@ func (s *Server) vaultTreePayload(activeAbs string) map[string]any {
 			"exists":    false,
 			"tree":      []vaultNode{},
 			"fileCount": 0,
+			"noteCount": 0,
 			"vaults":    vaults,
 		}
 	}
 	tree, count := scanVaultTree(activeAbs)
+	noteCount := countVaultNotes(tree)
 	return map[string]any{
 		"dir":       activeAbs,
 		"name":      filepath.Base(activeAbs),
 		"exists":    true,
 		"tree":      tree,
 		"fileCount": count,
+		"noteCount": noteCount,
 		"vaults":    vaults,
 	}
 }
@@ -175,6 +182,35 @@ func isMarkdownExt(name string) bool {
 
 func isCanvasExt(name string) bool {
 	return strings.ToLower(filepath.Ext(name)) == ".canvas"
+}
+
+// classifyVaultFileKind classifies supported vault files for sidebar display & preview (#140).
+func classifyVaultFileKind(name string) (kind string, ext string) {
+	rawExt := strings.ToLower(filepath.Ext(name))
+	if rawExt == "" {
+		return "", ""
+	}
+	ext = strings.TrimPrefix(rawExt, ".")
+	switch rawExt {
+	case ".md", ".markdown":
+		return "file", ext
+	case ".canvas":
+		return "canvas", ext
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".bmp", ".avif", ".ico":
+		return "image", ext
+	case ".mp4", ".webm", ".mov", ".m4v", ".ogv", ".mkv":
+		return "video", ext
+	case ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus":
+		return "audio", ext
+	case ".pdf":
+		return "pdf", ext
+	case ".txt", ".json", ".yaml", ".yml", ".toml", ".csv", ".tsv",
+		".html", ".htm", ".css", ".js", ".ts", ".jsx", ".tsx",
+		".py", ".go", ".sh", ".sql", ".xml", ".ini", ".conf", ".log":
+		return "text", ext
+	default:
+		return "", ""
+	}
 }
 
 func resolveVaultMarkdownPath(rootDir, relPath string, allowCreate bool) (absPath string, normRel string, err error) {
@@ -239,6 +275,18 @@ func extractMarkdownTitle(content, fileName string) string {
 	return strings.TrimSuffix(filepath.Base(fileName), ext)
 }
 
+func countVaultNotes(nodes []vaultNode) int {
+	n := 0
+	for _, nd := range nodes {
+		if nd.Kind == "dir" {
+			n += countVaultNotes(nd.Children)
+		} else if nd.Kind == "file" {
+			n++
+		}
+	}
+	return n
+}
+
 func scanVaultTree(rootAbs string) ([]vaultNode, int) {
 	fileCount := 0
 	var walk func(dir, relPrefix string, depth int) []vaultNode
@@ -270,9 +318,9 @@ func scanVaultTree(rootAbs string) ([]vaultNode, int) {
 				children := walk(subDir, subRel, depth+1)
 				if len(children) == 0 {
 					// Keep genuinely empty newly-created folders visible so users can select them
-					// and create notes inside, while still pruning non-empty asset-only folders (#71).
+					// and create notes inside, while pruning folders containing only unsupported files (#71, #140).
 					subEntries, rErr := os.ReadDir(subDir)
-					if rErr != nil || len(subEntries) > 0 || low == "assets" || low == "images" || low == "attachments" {
+					if rErr != nil || len(subEntries) > 0 {
 						continue
 					}
 					children = []vaultNode{}
@@ -285,7 +333,8 @@ func scanVaultTree(rootAbs string) ([]vaultNode, int) {
 				})
 				continue
 			}
-			if !isMarkdownExt(name) && !isCanvasExt(name) {
+			kind, ext := classifyVaultFileKind(name)
+			if kind == "" {
 				continue
 			}
 			if fileCount >= vaultMaxFiles {
@@ -301,14 +350,11 @@ func scanVaultTree(rootAbs string) ([]vaultNode, int) {
 				sz = info.Size()
 			}
 			fileCount++
-			kind := "file"
-			if isCanvasExt(name) {
-				kind = "canvas"
-			}
 			files = append(files, vaultNode{
 				Name:    name,
 				Path:    subRel,
 				Kind:    kind,
+				Ext:     ext,
 				ModTime: modMs,
 				Size:    sz,
 			})
@@ -522,6 +568,55 @@ func (s *Server) articleVaultReadFile(w http.ResponseWriter, r *http.Request) (a
 	}, nil
 }
 
+// articleVaultPreviewFile returns metadata (and capped inline text content for text/code/csv/json)
+// for any supported non-hidden file strictly inside the active article vault (#140).
+func (s *Server) articleVaultPreviewFile(w http.ResponseWriter, r *http.Request) (any, error) {
+	dir, err := s.activeArticleVaultDir()
+	if err != nil {
+		return nil, err
+	}
+	absPath, normRel, err := resolveVaultRelPath(dir, r.URL.Query().Get("path"), false)
+	if err != nil {
+		return nil, err
+	}
+	kind, ext := classifyVaultFileKind(absPath)
+	if kind == "" {
+		return nil, bad("暂不支持在线预览该文件格式")
+	}
+	info, err := os.Stat(absPath)
+	if err != nil || info.IsDir() {
+		return nil, notFound("找不到文件：" + normRel)
+	}
+	out := map[string]any{
+		"path":     normRel,
+		"name":     filepath.Base(absPath),
+		"kind":     kind,
+		"ext":      ext,
+		"size":     info.Size(),
+		"modTime":  info.ModTime().UnixMilli(),
+		"assetUrl": "/files/vault-asset?path=" + url.QueryEscape(normRel),
+	}
+	if kind == "text" || kind == "file" {
+		f, oErr := os.Open(absPath)
+		if oErr != nil {
+			return nil, oErr
+		}
+		defer f.Close()
+		buf, rErr := io.ReadAll(io.LimitReader(f, vaultPreviewMaxBytes+1))
+		if rErr != nil {
+			return nil, rErr
+		}
+		truncated := false
+		if len(buf) > vaultPreviewMaxBytes {
+			buf = buf[:vaultPreviewMaxBytes]
+			truncated = true
+		}
+		out["content"] = strings.ReplaceAll(string(buf), "\r\n", "\n")
+		out["truncated"] = truncated
+	}
+	return out, nil
+}
+
 func (s *Server) articleVaultWriteFile(w http.ResponseWriter, r *http.Request) (any, error) {
 	dir, err := s.activeArticleVaultDir()
 	if err != nil {
@@ -661,14 +756,22 @@ func (s *Server) articleVaultDeleteFile(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		return nil, err
 	}
-	absPath, normRel, err := resolveVaultMarkdownPath(dir, r.URL.Query().Get("path"), false)
+	absPath, normRel, err := resolveVaultRelPath(dir, r.URL.Query().Get("path"), false)
 	if err != nil {
 		return nil, err
+	}
+	kind, _ := classifyVaultFileKind(absPath)
+	if kind == "" {
+		return nil, bad("仅支持删除受支持格式的文档或素材文件")
+	}
+	info, err := os.Stat(absPath)
+	if err != nil || info.IsDir() {
+		return nil, notFound("找不到文件：" + normRel)
 	}
 	if err := os.Remove(absPath); err != nil {
 		return nil, bad("删除文件失败：" + err.Error())
 	}
-	if s.DB != nil {
+	if s.DB != nil && kind == "file" {
 		_ = s.DB.DeleteDocHard("article_meta", vaultMetaKey(absPath))
 	}
 	return map[string]any{"ok": true, "deleted": normRel}, nil
@@ -795,8 +898,21 @@ func (s *Server) articleVaultRename(w http.ResponseWriter, r *http.Request) (any
 		return nil, notFound("找不到原路径：" + fromRel)
 	}
 	toInput := strings.TrimSpace(body.To)
-	if !info.IsDir() && toInput != "" && !isMarkdownExt(toInput) {
-		toInput += ".md"
+	if !info.IsDir() && toInput != "" {
+		if isMarkdownExt(fromRel) {
+			if !isMarkdownExt(toInput) {
+				toInput += ".md"
+			}
+		} else {
+			if filepath.Ext(toInput) == "" {
+				if srcExt := filepath.Ext(fromRel); srcExt != "" {
+					toInput += srcExt
+				}
+			}
+			if kind, _ := classifyVaultFileKind(toInput); kind == "" {
+				return nil, bad("目标文件扩展名不在受支持范围内")
+			}
+		}
 	}
 	toAbs, toRel, err := resolveVaultRelPath(dir, toInput, false)
 	if err != nil {
@@ -944,7 +1060,8 @@ func (s *Server) articleVaultReveal(w http.ResponseWriter, r *http.Request) (any
 		return nil, err
 	}
 	var body struct {
-		Path string `json:"path"`
+		Path     string `json:"path"`
+		OpenFile bool   `json:"openFile"`
 	}
 	_ = decode(r, &body)
 	absPath, _, err := resolveVaultRelPath(dir, body.Path, true)
@@ -957,7 +1074,14 @@ func (s *Server) articleVaultReveal(w http.ResponseWriter, r *http.Request) (any
 	}
 	target := absPath
 	if !info.IsDir() {
-		target = filepath.Dir(absPath)
+		if body.OpenFile {
+			if kind, _ := classifyVaultFileKind(absPath); kind == "" {
+				return nil, bad("不支持使用系统程序打开该文件类型")
+			}
+			target = absPath
+		} else {
+			target = filepath.Dir(absPath)
+		}
 	}
 	if s.Host == nil {
 		return nil, bad("当前环境不支持打开系统文件管理器")

@@ -7,6 +7,15 @@ import { closeArticleContextMenu, createArticleLinksController, openArticleConte
 import { createArticleLiveEditor } from "./article-live.js";
 import { createArticleObsidianController } from "./article-obsidian.js";
 import { createArticleTypesetController } from "./article-typeset.js";
+import {
+  getFileExt,
+  inferVaultFileKind,
+  isVaultAssetKind,
+  isVaultAssetPath,
+  renderAssetViewer,
+  vaultFileKindIcon,
+  vaultFileKindLabel,
+} from "./article-asset-viewer.js";
 import { buildGroupedModelSelect } from "./create.js";
 import {
   choices,
@@ -51,6 +60,7 @@ export async function renderArticle(root, ctx, params = {}) {
     docId: params.docId || "",
     activeFile: "",
     activeCanvas: "",
+    activeAsset: "",
     selectedDir: "",
     editorActive: Boolean(params.docId),
     dirty: false,
@@ -94,6 +104,8 @@ export async function renderArticle(root, ctx, params = {}) {
   let graphMounted = false;
   let edgelessMountedKey = "";
   let boardMounted = false;
+  let activeAssetPreview = null;
+  let assetMountedPath = "";
   let submitting = false;
   let planning = false;
   let activeSegTextarea = null;
@@ -491,8 +503,8 @@ export async function renderArticle(root, ctx, params = {}) {
   const vaultFilterIn = el("input", {
     type: "search",
     class: "input ic-vault-search",
-    placeholder: "筛选本地 .md 文件…",
-    "aria-label": "筛选本地 Markdown 文件",
+    placeholder: "筛选文件（MD / 图片 / 视频 / PDF…）",
+    "aria-label": "筛选本地文档与素材文件",
   });
   vaultFilterIn.addEventListener("input", () => {
     treeQuery = vaultFilterIn.value.trim().toLowerCase();
@@ -632,7 +644,8 @@ export async function renderArticle(root, ctx, params = {}) {
   const edgelessStageBox = el("div", { class: "ic-ws-edgeless-stage hidden", "aria-label": "无边白板视图" });
   const boardStageBox = el("div", { class: "ic-ws-board-stage hidden", "aria-label": "文章选题表与进度看板" });
   const typesetStageBox = el("div", { class: "ic-ws-typeset-stage hidden", "aria-label": "多主题公众号排版发布台" });
-  const centerCol = el("div", { class: "ic-wechat-center-col" }, openTabsBar, scrollArea, graphStageBox, edgelessStageBox, boardStageBox, typesetStageBox);
+  const assetStageBox = el("div", { class: "ic-ws-asset-stage hidden", "aria-label": "多格式文件只读预览" });
+  const centerCol = el("div", { class: "ic-wechat-center-col" }, openTabsBar, scrollArea, graphStageBox, edgelessStageBox, boardStageBox, typesetStageBox, assetStageBox);
 
   // 3.5. Right Collapsible AI Writing Copilot + Inline Paper Diff Review + Selection Bubble (#70, #74)
   let aiEditing = false;
@@ -1421,9 +1434,30 @@ export async function renderArticle(root, ctx, params = {}) {
     if (!Array.isArray(state.openTabs)) return;
     const idx = state.openTabs.indexOf(relPath);
     if (idx < 0) return;
+    const isActiveAssetTab = state.viewMode === "asset" && state.activeAsset === relPath;
+    const isActiveNoteTab = state.activeFile === relPath;
     const doClose = async () => {
       state.openTabs.splice(idx, 1);
-      if (state.activeFile === relPath) {
+      if (isActiveAssetTab) {
+        state.activeAsset = "";
+        activeAssetPreview = null;
+        assetMountedPath = "";
+        const nextTab = state.openTabs[idx] || state.openTabs[idx - 1] || "";
+        if (nextTab) {
+          if (nextTab === state.activeFile) {
+            state.viewMode = lastEditorViewMode || "live";
+            renderAll();
+            session.persist();
+          } else {
+            await openVaultFile(nextTab);
+          }
+        } else {
+          state.viewMode = lastEditorViewMode || "live";
+          if (!state.activeFile) state.editorActive = false;
+          renderAll();
+          session.persist();
+        }
+      } else if (isActiveNoteTab) {
         const nextTab = state.openTabs[idx] || state.openTabs[idx - 1] || "";
         if (nextTab) {
           await openVaultFile(nextTab);
@@ -1439,7 +1473,7 @@ export async function renderArticle(root, ctx, params = {}) {
         session.persist();
       }
     };
-    if (state.activeFile === relPath && state.dirty) {
+    if (isActiveNoteTab && state.dirty && !isActiveAssetTab) {
       guardDirtyBeforeSwitch(doClose);
     } else {
       doClose();
@@ -1454,20 +1488,31 @@ export async function renderArticle(root, ctx, params = {}) {
     if (!showBar) return;
 
     tabs.forEach((relPath, idx) => {
-      const base = relPath.split("/").pop().replace(/\.(md|markdown)$/i, "");
-      const isActive = state.viewMode !== "graph" && state.activeFile === relPath;
-      const isDirty = isActive && Boolean(state.dirty);
+      const tabKind = inferVaultFileKind(relPath);
+      const isAssetTab = isVaultAssetKind(tabKind);
+      const leaf = relPath.split("/").pop() || relPath;
+      const base = isAssetTab ? leaf : leaf.replace(/\.(md|markdown)$/i, "");
+      const isActive = isAssetTab
+        ? (state.viewMode === "asset" && state.activeAsset === relPath)
+        : (state.viewMode !== "graph" && state.viewMode !== "asset" && state.activeFile === relPath);
+      const isDirty = !isAssetTab && state.activeFile === relPath && Boolean(state.dirty);
       const tabEl = el("div", {
-        class: "ic-art-tab" + (isActive ? " is-active" : ""),
+        class: "ic-art-tab" + (isActive ? " is-active" : "") + (isAssetTab ? " is-asset" : ""),
         role: "tab",
         "aria-selected": String(isActive),
         title: relPath,
         onClick: () => {
-          if (state.activeFile === relPath && state.viewMode === "graph") {
+          if (isAssetTab) {
+            if (state.viewMode === "asset" && state.activeAsset === relPath) return;
+            openVaultAsset(relPath);
+            return;
+          }
+          if (state.activeFile === relPath && (state.viewMode === "graph" || state.viewMode === "asset")) {
             state.viewMode = lastEditorViewMode || "live";
             state.graphFullscreen = false;
             renderFlow();
             renderStageMode();
+            renderSidebar();
             session.persist();
             return;
           }
@@ -1487,7 +1532,7 @@ export async function renderArticle(root, ctx, params = {}) {
             isFolder: false,
             source: "tab-header",
           });
-          openArticleContextMenu(ev, [
+          const commonClose = [
             { header: relPath },
             { icon: "✕", label: "关闭当前标签", onClick: () => closeOpenTab(relPath) },
             tabs.length > 1 ? {
@@ -1495,8 +1540,15 @@ export async function renderArticle(root, ctx, params = {}) {
               label: "关闭其他标签",
               onClick: () => {
                 state.openTabs = [relPath];
-                if (state.activeFile !== relPath) openVaultFile(relPath);
-                else { renderOpenTabsBar(); session.persist(); }
+                if (isAssetTab) {
+                  if (state.viewMode !== "asset" || state.activeAsset !== relPath) openVaultAsset(relPath);
+                  else { renderOpenTabsBar(); session.persist(); }
+                } else if (state.activeFile !== relPath || state.viewMode === "asset") {
+                  openVaultFile(relPath);
+                } else {
+                  renderOpenTabsBar();
+                  session.persist();
+                }
               },
             } : null,
             idx < tabs.length - 1 ? {
@@ -1504,11 +1556,33 @@ export async function renderArticle(root, ctx, params = {}) {
               label: "关闭右侧标签",
               onClick: () => {
                 state.openTabs = tabs.slice(0, idx + 1);
-                if (state.activeFile && !state.openTabs.includes(state.activeFile)) openVaultFile(relPath);
+                const curPath = state.viewMode === "asset" ? state.activeAsset : state.activeFile;
+                if (curPath && !state.openTabs.includes(curPath)) openVaultFile(relPath);
                 else { renderOpenTabsBar(); session.persist(); }
               },
             } : null,
             { sep: true },
+          ];
+          const extra = isAssetTab ? [
+            {
+              icon: "📌",
+              label: `复制嵌入 ![[${leaf}]]`,
+              onClick: () => {
+                navigator.clipboard?.writeText(`![[${leaf}]]`).catch(() => {});
+                toast(`已复制 ![[${leaf}]]`);
+              },
+            },
+            {
+              icon: "↗",
+              label: "用系统程序打开",
+              onClick: () => openVaultExternal(relPath),
+            },
+            {
+              icon: "📂",
+              label: "在系统文件夹中显示",
+              onClick: () => revealVaultPath(relPath),
+            },
+          ] : [
             {
               icon: "🔗",
               label: `复制双链 [[${base}]]`,
@@ -1535,10 +1609,15 @@ export async function renderArticle(root, ctx, params = {}) {
               label: "在系统文件夹中显示",
               onClick: () => revealVaultPath(relPath),
             },
+          ];
+          openArticleContextMenu(ev, [
+            ...commonClose,
+            ...extra,
             ...(tabPluginItems.length ? [{ sep: true }, { header: "Obsidian 插件" }, ...tabPluginItems] : []),
           ]);
         },
       },
+        isAssetTab ? el("span", { class: "ic-art-tab-ico", "aria-hidden": "true" }, vaultFileKindIcon(tabKind)) : null,
         el("span", { class: "ic-art-tab-name" }, base),
         isDirty ? el("span", { class: "ic-art-tab-dot", title: "有未保存修改" }, "●") : null,
         el("button", {
@@ -2287,18 +2366,25 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function syncTopbarBreadcrumb() {
-    if (state.activeFile) {
+    if (state.viewMode === "asset" && state.activeAsset) {
+      activeBreadcrumb.textContent = `${state.activeAsset}（只读）`;
+      activeBreadcrumb.title = `${vault.dir}/${state.activeAsset}`;
+      saveBtn.classList.add("hidden");
+    } else if (state.activeFile) {
       activeBreadcrumb.textContent = state.activeFile + (state.dirty ? " ●" : "");
       activeBreadcrumb.title = `${vault.dir}/${state.activeFile}`;
       saveBtn.textContent = state.dirty ? "💾 保存 MD ●" : "💾 保存 MD";
+      saveBtn.classList.remove("hidden");
     } else if (state.docId) {
       activeBreadcrumb.textContent = (state.title || "本地草稿") + (state.dirty ? " ●" : "");
       activeBreadcrumb.title = "本地草稿";
       saveBtn.textContent = "💾 保存草稿";
+      saveBtn.classList.remove("hidden");
     } else {
       activeBreadcrumb.textContent = state.dirty ? "未保存文稿 ●" : "";
       activeBreadcrumb.title = "";
       saveBtn.textContent = "💾 存为 MD";
+      saveBtn.classList.remove("hidden");
     }
     renderOpenTabsBar();
   }
@@ -2352,6 +2438,8 @@ export async function renderArticle(root, ctx, params = {}) {
     loadExpandedForVault(vault.dir, vault.tree);
     if (resetEditor) {
       state.activeFile = "";
+      state.activeCanvas = "";
+      state.activeAsset = "";
       state.selectedDir = "";
       state.docId = "";
       state.editorActive = false;
@@ -2362,6 +2450,9 @@ export async function renderArticle(root, ctx, params = {}) {
       activeDiffReview = null;
       pinnedSelection = null;
       lastAiUndo = null;
+      activeAssetPreview = null;
+      assetMountedPath = "";
+      clear(assetStageBox);
       liveEditor.resetEditing();
     }
     renderAll();
@@ -2876,21 +2967,31 @@ export async function renderArticle(root, ctx, params = {}) {
 
   function openRenameModal(target) {
     if (!target?.path) return;
-    const isFile = target.kind === "file";
+    const isMdFile = target.kind === "file";
+    const isAssetFile = isVaultAssetKind(target.kind);
+    const isAnyFile = isMdFile || isAssetFile;
     const parent = parentDirOf(target.path);
     const currentBase = target.name || target.path.split("/").pop() || "";
-    const initialVal = isFile ? currentBase.replace(/\.(md|markdown)$/i, "") : currentBase;
+    const srcExt = isAssetFile ? getFileExt(currentBase) : "";
+    const initialVal = isMdFile ? currentBase.replace(/\.(md|markdown)$/i, "") : currentBase;
     const nameIn = el("input", {
       class: "input",
       value: initialVal,
-      placeholder: isFile ? "输入新文件名（自动保留 .md）" : "输入新文件夹名称",
+      placeholder: isMdFile
+        ? "输入新文件名（自动保留 .md）"
+        : (isAssetFile ? `输入新文件名（不写扩展名则保留 .${srcExt}）` : "输入新文件夹名称"),
     });
 
     const submit = async () => {
       const raw = nameIn.value.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-      if (!raw) return toast(isFile ? "请输入新文件名" : "请输入新文件夹名");
+      if (!raw) return toast(isAnyFile ? "请输入新文件名" : "请输入新文件夹名");
       if (raw.includes("/")) return toast("名称不能包含斜杠 /");
-      const finalLeaf = isFile && !/\.(md|markdown)$/i.test(raw) ? `${raw}.md` : raw;
+      let finalLeaf = raw;
+      if (isMdFile && !/\.(md|markdown)$/i.test(raw)) {
+        finalLeaf = `${raw}.md`;
+      } else if (isAssetFile && !raw.includes(".") && srcExt) {
+        finalLeaf = `${raw}.${srcExt}`;
+      }
       const toPath = parent ? `${parent}/${finalLeaf}` : finalLeaf;
       if (toPath === target.path) {
         closeModal();
@@ -2903,13 +3004,18 @@ export async function renderArticle(root, ctx, params = {}) {
         });
         closeModal();
         const nextPath = res.to || res.path || toPath;
-        if (isFile) {
+        if (isAnyFile) {
           if (Array.isArray(state.openTabs)) {
             state.openTabs = state.openTabs.map((p) => (p === target.path ? nextPath : p));
           }
           if (state.activeFile === target.path) {
             state.activeFile = nextPath;
             syncTopbarBreadcrumb();
+          }
+          if (state.activeAsset === target.path) {
+            state.activeAsset = nextPath;
+            assetMountedPath = "";
+            if (state.viewMode === "asset") await openVaultAsset(nextPath, { fromHistory: true });
           }
         } else {
           const nextExpanded = new Set();
@@ -2925,6 +3031,14 @@ export async function renderArticle(root, ctx, params = {}) {
             if (rewritten !== state.activeFile) {
               state.activeFile = rewritten;
               syncTopbarBreadcrumb();
+            }
+          }
+          if (state.activeAsset) {
+            const rewrittenAsset = rewritePathPrefix(state.activeAsset, target.path, nextPath);
+            if (rewrittenAsset !== state.activeAsset) {
+              state.activeAsset = rewrittenAsset;
+              assetMountedPath = "";
+              if (state.viewMode === "asset") await openVaultAsset(rewrittenAsset, { fromHistory: true });
             }
           }
         }
@@ -2946,7 +3060,8 @@ export async function renderArticle(root, ctx, params = {}) {
       }
     });
 
-    showModal(isFile ? "重命名 Markdown 文件" : "重命名文件夹", el("div", { class: "col", style: { gap: "8px" } },
+    const modalTitle = isMdFile ? "重命名 Markdown 文件" : (isAssetFile ? "重命名素材文件" : "重命名文件夹");
+    showModal(modalTitle, el("div", { class: "col", style: { gap: "8px" } },
       el("p", { class: "muted mono", style: { margin: 0, fontSize: "12px", wordBreak: "break-all" } }, `当前路径：${target.path}`),
       nameIn
     ), [
@@ -2954,7 +3069,11 @@ export async function renderArticle(root, ctx, params = {}) {
       el("button", { type: "button", class: "btn btn-primary", onClick: submit }, "确认重命名"),
     ]);
     nameIn.focus();
-    nameIn.select();
+    if (isAssetFile && initialVal.lastIndexOf(".") > 0) {
+      nameIn.setSelectionRange(0, initialVal.lastIndexOf("."));
+    } else {
+      nameIn.select();
+    }
   }
 
   async function duplicateVaultFile(relPath) {
@@ -2983,6 +3102,16 @@ export async function renderArticle(root, ctx, params = {}) {
     }
   }
 
+  async function openVaultExternal(relPath) {
+    if (!relPath) return;
+    try {
+      await api("POST", "/api/article/vault/reveal", { path: relPath, openFile: true });
+      toast("已调用系统默认程序打开");
+    } catch (e) {
+      toast(e.message || "系统打开文件失败");
+    }
+  }
+
   async function copyVaultRelPath(relPath) {
     const text = relPath || vault.dir || "";
     if (!text) return;
@@ -3004,7 +3133,8 @@ export async function renderArticle(root, ctx, params = {}) {
 
   function confirmDeleteFile(node) {
     if (!node?.path) return;
-    showModal("删除本地 Markdown 文件", el("p", null, `确定删除「${node.path}」吗？该操作会直接从本地目录移除文件。`), [
+    const isAsset = isVaultAssetKind(node.kind || inferVaultFileKind(node.path));
+    showModal(isAsset ? "删除本地文件" : "删除本地 Markdown 文件", el("p", null, `确定删除「${node.path}」吗？该操作会直接从本地目录移除文件。`), [
       el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
       el("button", {
         type: "button",
@@ -3016,9 +3146,18 @@ export async function renderArticle(root, ctx, params = {}) {
             if (Array.isArray(state.openTabs)) {
               state.openTabs = state.openTabs.filter((p) => p !== node.path);
             }
+            if (state.activeAsset === node.path) {
+              state.activeAsset = "";
+              activeAssetPreview = null;
+              assetMountedPath = "";
+              if (state.viewMode === "asset") {
+                state.viewMode = lastEditorViewMode || "live";
+                if (!state.activeFile) state.editorActive = false;
+              }
+            }
             if (state.activeFile === node.path) {
               state.activeFile = "";
-              state.editorActive = false;
+              state.editorActive = Boolean(state.activeAsset && state.viewMode === "asset");
               state.dirty = false;
             }
             await refreshVaultTree();
@@ -3048,6 +3187,12 @@ export async function renderArticle(root, ctx, params = {}) {
             const prefix = `${node.path}/`;
             if (Array.isArray(state.openTabs)) {
               state.openTabs = state.openTabs.filter((p) => p !== node.path && !String(p).startsWith(prefix));
+            }
+            if (state.activeAsset === node.path || String(state.activeAsset || "").startsWith(prefix)) {
+              state.activeAsset = "";
+              activeAssetPreview = null;
+              assetMountedPath = "";
+              if (state.viewMode === "asset") state.viewMode = lastEditorViewMode || "live";
             }
             if (state.activeFile === node.path || String(state.activeFile || "").startsWith(prefix)) {
               state.activeFile = "";
@@ -3183,6 +3328,36 @@ export async function renderArticle(root, ctx, params = {}) {
           },
         }
       );
+    } else if (isVaultAssetKind(kind)) {
+      const leaf = target.name || relPath.split("/").pop() || relPath;
+      const mdLink = kind === "image" ? `![${leaf.replace(/\.[^.]+$/, "")}](${relPath})` : `[${leaf}](${relPath})`;
+      items.push(
+        { label: `打开查看 (${vaultFileKindLabel(kind)})`, icon: ICONS.open, run: () => openVaultAsset(relPath) },
+        { sep: true },
+        {
+          label: `复制嵌入 ![[${leaf}]]`,
+          icon: ICONS.copy,
+          run: () => {
+            navigator.clipboard?.writeText(`![[${leaf}]]`).catch(() => {});
+            toast(`已复制 ![[${leaf}]]`);
+          },
+        },
+        {
+          label: kind === "image" ? "复制 Markdown 图片语法" : "复制 Markdown 链接",
+          icon: ICONS.copy,
+          run: () => {
+            navigator.clipboard?.writeText(mdLink).catch(() => {});
+            toast(`已复制 ${mdLink}`);
+          },
+        },
+        { sep: true },
+        { label: "重命名", icon: ICONS.rename, run: () => openRenameModal(target) },
+        { label: "用系统程序打开", icon: ICONS.open, run: () => openVaultExternal(relPath) },
+        { label: "在文件管理器中打开", icon: ICONS.reveal, run: () => revealVaultPath(relPath) },
+        { label: "复制相对路径", icon: ICONS.copy, run: () => copyVaultRelPath(relPath) },
+        { sep: true },
+        { label: "删除文件", icon: ICONS.trash, danger: true, run: () => confirmDeleteFile(target) }
+      );
     } else {
       const anyExpanded = expandedDirs.size > 0;
       items.push(
@@ -3244,8 +3419,41 @@ export async function renderArticle(root, ctx, params = {}) {
     });
   }
 
+  async function openVaultAsset(relPath, openOpts = {}) {
+    if (!relPath) return;
+    try {
+      const res = await api("GET", `/api/article/vault/preview?path=${encodeURIComponent(relPath)}`);
+      if (!openOpts.fromHistory) pushNavHistory(res.path || relPath);
+      closeSelectionBubble();
+      closeArticleContextMenu();
+      ensureOpenTab(res.path);
+      activeAssetPreview = res;
+      assetMountedPath = "";
+      state.activeAsset = res.path;
+      state.activeCanvas = "";
+      state.selectedDir = parentDirOf(res.path);
+      state.editorActive = true;
+      state.viewMode = "asset";
+      state.graphFullscreen = false;
+      renderSidebar();
+      renderStageMode();
+      session.persist();
+    } catch (e) {
+      toast(e.message || "打开文件预览失败");
+    }
+  }
+
   async function openVaultFile(relPath, openOpts = {}) {
     if (!relPath) return;
+    const guessedKind = inferVaultFileKind(relPath);
+    if (guessedKind === "canvas") {
+      openVaultCanvas(relPath);
+      return;
+    }
+    if (isVaultAssetKind(guessedKind)) {
+      await openVaultAsset(relPath, openOpts);
+      return;
+    }
     try {
       const res = await api("GET", `/api/article/vault/file?path=${encodeURIComponent(relPath)}`);
       if (!openOpts.fromHistory) pushNavHistory(res.path || relPath);
@@ -3257,6 +3465,8 @@ export async function renderArticle(root, ctx, params = {}) {
       activeDiffReview = null;
       pinnedSelection = null;
       lastAiUndo = null;
+      activeAssetPreview = null;
+      assetMountedPath = "";
       closeSelectionBubble();
       closeArticleContextMenu();
       liveEditor.resetEditing();
@@ -3266,6 +3476,7 @@ export async function renderArticle(root, ctx, params = {}) {
         docId: "",
         activeFile: res.path,
         activeCanvas: "",
+        activeAsset: "",
         selectedDir: parentDirOf(res.path),
         editorActive: true,
         dirty: false,
@@ -3418,14 +3629,22 @@ export async function renderArticle(root, ctx, params = {}) {
         return;
       }
 
-      const isCanvas = node.kind === "canvas";
+      const nodeKind = node.kind || inferVaultFileKind(node.path);
+      const isCanvas = nodeKind === "canvas";
+      const isAsset = isVaultAssetKind(nodeKind);
       const isActive = isCanvas
         ? Boolean(state.viewMode === "edgeless" && state.activeCanvas === node.path)
-        : Boolean(state.activeFile && state.activeFile === node.path);
-      const displayName = node.name.replace(/\.(md|markdown|canvas)$/i, "");
+        : (isAsset
+          ? Boolean(state.viewMode === "asset" && state.activeAsset === node.path)
+          : Boolean(state.viewMode !== "asset" && state.activeFile && state.activeFile === node.path));
+      const extLabel = isAsset ? (node.ext || getFileExt(node.name) || "").toUpperCase() : "";
+      const displayName = (isCanvas || !isAsset)
+        ? node.name.replace(/\.(md|markdown|canvas)$/i, "")
+        : (extLabel ? node.name.slice(0, Math.max(1, node.name.length - extLabel.length - 1)) : node.name);
       const row = el("div", {
-        class: "ic-vault-file-wrap" + (isActive ? " is-active" : "") + (isCanvas ? " is-canvas" : ""),
+        class: "ic-vault-file-wrap" + (isActive ? " is-active" : "") + (isCanvas ? " is-canvas" : "") + (isAsset ? ` is-asset is-asset-${nodeKind}` : ""),
         "data-file-path": node.path,
+        "data-file-kind": nodeKind,
       },
         el("button", {
           type: "button",
@@ -3434,10 +3653,25 @@ export async function renderArticle(root, ctx, params = {}) {
           "aria-selected": String(isActive),
           title: node.path,
           style: { paddingLeft: `${22 + depth * 16}px` },
-          onClick: () => (isCanvas ? openVaultCanvas(node.path) : openVaultFile(node.path)),
+          onClick: () => {
+            if (isCanvas) {
+              openVaultCanvas(node.path);
+            } else if (isAsset) {
+              openVaultAsset(node.path);
+            } else if (state.activeFile === node.path && state.viewMode === "asset") {
+              state.viewMode = lastEditorViewMode || "live";
+              renderFlow();
+              renderStageMode();
+              renderSidebar();
+              session.persist();
+            } else {
+              openVaultFile(node.path);
+            }
+          },
         },
-          el("span", { class: "ic-vault-file-ico", "aria-hidden": "true" }, isCanvas ? "🎨" : "📄"),
-          el("span", { class: "ic-vault-node-name" }, displayName)
+          el("span", { class: "ic-vault-file-ico", "aria-hidden": "true" }, vaultFileKindIcon(nodeKind)),
+          el("span", { class: "ic-vault-node-name" }, displayName),
+          extLabel ? el("span", { class: `ic-vault-ext-badge is-${nodeKind}` }, extLabel) : null
         ),
         !isCanvas ? el("button", {
           type: "button",
@@ -3451,7 +3685,7 @@ export async function renderArticle(root, ctx, params = {}) {
         }, "×") : null
       );
       row.addEventListener("contextmenu", (e) => {
-        openTreeContextMenu(e, { kind: isCanvas ? "canvas" : "file", path: node.path, name: node.name }, row);
+        openTreeContextMenu(e, { kind: nodeKind, path: node.path, name: node.name }, row);
       });
       frag.appendChild(row);
     });
@@ -3462,8 +3696,13 @@ export async function renderArticle(root, ctx, params = {}) {
     clear(treeBox);
 
     const visible = filterTreeNodes(vault.tree || [], treeQuery);
-    sidebarCountBadge.textContent = `${vault.fileCount || 0} 篇`;
-    sidebarCountBadge.title = vault.dir || "";
+    const totalCount = Number(vault.fileCount) || 0;
+    const noteCount = typeof vault.noteCount === "number" ? vault.noteCount : totalCount;
+    const assetCount = Math.max(0, totalCount - noteCount);
+    sidebarCountBadge.textContent = assetCount > 0 ? `${totalCount} 项` : `${noteCount} 篇`;
+    sidebarCountBadge.title = assetCount > 0
+      ? `${vault.dir || ""}\n文档 ${noteCount} 篇 · 其他格式素材 ${assetCount} 个`
+      : (vault.dir || "");
 
     const allDirs = collectAllDirPaths(vault.tree || []);
     const dirSet = new Set(allDirs);
@@ -3520,7 +3759,7 @@ export async function renderArticle(root, ctx, params = {}) {
     if (!visible.length) {
       treeBox.appendChild(el("div", { class: "ic-vault-tree-empty" },
         el("p", { class: "muted", style: { margin: 0, fontSize: "12px", lineHeight: "1.55" } },
-          treeQuery ? "没有匹配的 .md 文件" : "当前目录下还没有 .md 文件，可在左下角切换/添加本地目录，或点击顶部新建文件 / 文件夹。"
+          treeQuery ? "没有匹配的文件" : "当前目录下还没有文档或图片/视频等受支持文件，可在左下角切换/添加本地目录，或点击顶部新建文件 / 文件夹。"
         )
       ));
     } else {
@@ -3570,7 +3809,7 @@ export async function renderArticle(root, ctx, params = {}) {
       el("div", { class: "ic-vault-welcome-ico", "aria-hidden": "true" }, "📚"),
       el("h2", { style: { margin: 0, fontSize: "18px" } }, "本地 Markdown 文章库"),
       el("p", { class: "muted", style: { margin: 0, maxWidth: "460px", lineHeight: "1.6", fontSize: "13px" } },
-        "点击左侧目录树中的任意 .md 文件即可进入编辑与配图模式；选中文件夹或右键目录树可快速新建、重命名与管理文件。"
+        "点击左侧目录树中的 .md 文件可进入编辑与配图模式，点击图片、视频、音频、PDF 或文本文件可直接只读预览。"
       ),
       el("div", { class: "ic-vault-path-pill mono", title: vault.dir || "" }, vault.dir || "未选择目录"),
       quickVaultChips,
@@ -3896,7 +4135,8 @@ export async function renderArticle(root, ctx, params = {}) {
     const isEdgeless = active && state.viewMode === "edgeless";
     const isBoard = active && state.viewMode === "board";
     const isPreview = active && state.viewMode === "preview";
-    const isSpatialStage = isGraph || isEdgeless || isBoard || isPreview;
+    const isAsset = active && state.viewMode === "asset";
+    const isSpatialStage = isGraph || isEdgeless || isBoard || isPreview || isAsset;
     const isFocusFs = (isGraph || isEdgeless) && Boolean(state.graphFullscreen);
 
     sidebar.classList.toggle("hidden", Boolean(state.sidebarCollapsed) || isFocusFs);
@@ -3912,11 +4152,13 @@ export async function renderArticle(root, ctx, params = {}) {
       if (graphMounted) { linksCtrl.destroyWorkspaceGraph(); graphMounted = false; }
       if (edgelessMountedKey) { edgelessCtrl.destroy(); edgelessMountedKey = ""; }
       boardMounted = false;
+      if (assetMountedPath) { clear(assetStageBox); assetMountedPath = ""; }
       openTabsBar.classList.add("hidden");
       graphStageBox.classList.add("hidden");
       edgelessStageBox.classList.add("hidden");
       boardStageBox.classList.add("hidden");
       typesetStageBox.classList.add("hidden");
+      assetStageBox.classList.add("hidden");
       scrollArea.classList.remove("hidden");
       paperSheet.classList.add("hidden");
       diffReviewBox.classList.add("hidden");
@@ -3956,9 +4198,28 @@ export async function renderArticle(root, ctx, params = {}) {
     edgelessStageBox.classList.toggle("hidden", !isEdgeless);
     boardStageBox.classList.toggle("hidden", !isBoard);
     typesetStageBox.classList.toggle("hidden", !isPreview);
+    assetStageBox.classList.toggle("hidden", !isAsset);
     paperSheet.classList.toggle("hidden", !isEditor || isReviewing);
     diffReviewBox.classList.toggle("hidden", !isReviewing);
     previewStageBox.classList.add("hidden");
+
+    if (isAsset) {
+      if (activeAssetPreview && assetMountedPath !== activeAssetPreview.path) {
+        assetMountedPath = activeAssetPreview.path;
+        renderAssetViewer(assetStageBox, activeAssetPreview, {
+          onCopyEmbed: (pv) => {
+            const leaf = pv.name || pv.path.split("/").pop() || pv.path;
+            navigator.clipboard?.writeText(`![[${leaf}]]`).catch(() => {});
+            toast(`已复制 ![[${leaf}]]`);
+          },
+          onOpenExternal: (p) => openVaultExternal(p),
+          onReveal: (p) => revealVaultPath(p),
+        });
+      }
+    } else if (assetMountedPath) {
+      clear(assetStageBox);
+      assetMountedPath = "";
+    }
 
     if (isGraph) {
       if (!graphMounted) {
@@ -4386,6 +4647,8 @@ export async function renderArticle(root, ctx, params = {}) {
       closeTreeContextMenu();
       closeArticleContextMenu();
       closeSelectionBubble();
+      clear(assetStageBox);
+      assetMountedPath = "";
       liveEditor.dispose();
       edgelessCtrl.destroy();
       obsidianCtrl.dispose();
@@ -4412,4 +4675,12 @@ export async function renderArticle(root, ctx, params = {}) {
   linksCtrl.refresh(state.activeFile || "");
   refreshRun().catch(() => {});
   if (params.docId) await loadDraft(params.docId);
+  else if (state.viewMode === "asset" && state.activeAsset) {
+    await openVaultAsset(state.activeAsset, { fromHistory: true }).catch(() => {
+      state.activeAsset = "";
+      state.viewMode = "live";
+      if (!state.activeFile) state.editorActive = false;
+      renderAll();
+    });
+  }
 }
