@@ -58,6 +58,7 @@ type hostChatRequest struct {
 	SkillIDs   []string                `json:"skillIds,omitempty"`
 	Messages   []providers.ChatMessage `json:"messages"`
 	JSONMode   bool                    `json:"jsonMode"`
+	SessionKey string                  `json:"sessionKey,omitempty"`
 }
 
 func (s *Server) buildSkillSystemSuffix(skillIDs []string) (string, []map[string]string) {
@@ -138,18 +139,20 @@ func (s *Server) executeHostChat(ctx context.Context, req hostChatRequest) (map[
 	}
 
 	callHarness := func() (map[string]any, error) {
-		res, err := s.callHarnessText(ctx, route, msgs, req.JSONMode)
+		res, err := s.callHarnessText(ctx, route, msgs, req.JSONMode, req.SessionKey)
 		if err != nil {
 			return nil, err
 		}
 		return map[string]any{
-			"text":      res.Text,
-			"content":   res.Text,
-			"source":    "harness",
-			"harness":   res.HarnessID,
-			"driver":    res.Driver,
-			"model":     firstStr(res.Model, route.Harness.Name),
-			"elapsedMs": res.ElapsedMs,
+			"text":        res.Text,
+			"content":     res.Text,
+			"source":      "harness",
+			"harness":     res.HarnessID,
+			"harnessName": route.Harness.Name,
+			"driver":      res.Driver,
+			"model":       firstStr(res.Model, route.Harness.Name),
+			"elapsedMs":   res.ElapsedMs,
+			"warmSession": res.WarmSession,
 		}, nil
 	}
 

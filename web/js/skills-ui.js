@@ -79,22 +79,185 @@ export function buildTextModelSelect(modRes, currentVal, scene = "") {
 
   const sceneRef = scene ? (modRes?.sceneModels?.[scene] || "") : "";
   const preferred = currentVal || sceneRef || modRes?.defaultTextModel || "";
-  if (preferred && !optVals.includes(preferred) && preferred.startsWith("harness:")) {
-    const hid = preferred.slice(8).split(":")[0];
+  const preferredBase = preferred.startsWith("harness:")
+    ? `harness:${preferred.slice(8).split(":")[0]}`
+    : preferred;
+  if (preferredBase && !optVals.includes(preferredBase) && preferredBase.startsWith("harness:")) {
+    const hid = preferredBase.slice(8).split(":")[0];
     const hit = harnesses.find((h) => h.id === hid);
     const g = el("optgroup", { label: "当前已选（暂不可用）" });
-    g.appendChild(el("option", { value: preferred }, `${hit?.name || hid}（未检测或已停用）`));
+    g.appendChild(el("option", { value: preferredBase }, `${hit?.name || hid}（未检测或已停用）`));
     sel.appendChild(g);
-    optVals.push(preferred);
+    optVals.push(preferredBase);
   }
-  if (preferred && optVals.includes(preferred)) {
-    sel.value = preferred;
+  if (preferredBase && optVals.includes(preferredBase)) {
+    sel.value = preferredBase;
   } else if (optVals.length > 1 && !siteAvailable) {
     sel.value = optVals[1];
   } else {
     sel.value = optVals[0] || "site:auto";
   }
   return sel;
+}
+
+const harnessModelsClientCache = new Map(); // harnessId -> [{id, label}]
+
+/**
+ * Composite text model selector: primary engine/provider dropdown +
+ * automatic per-harness sub-model dropdown (live-discovered via GET /api/harnesses/{id}/models). (#136)
+ */
+export function createTextModelPicker(modRes, currentVal, scene = "", onChange = null) {
+  const harnesses = Array.isArray(modRes?.harnesses) ? modRes.harnesses : [];
+  const sceneRef = scene ? (modRes?.sceneModels?.[scene] || "") : "";
+  const initRaw = String(currentVal || sceneRef || modRes?.defaultTextModel || "").trim();
+
+  const parseHarnessRef = (ref) => {
+    const s = String(ref || "").trim();
+    if (!s.startsWith("harness:")) return { isHarness: false, id: "", subModel: "" };
+    const rest = s.slice(8);
+    const idx = rest.indexOf(":");
+    if (idx < 0) return { isHarness: true, id: rest.trim(), subModel: "" };
+    return { isHarness: true, id: rest.slice(0, idx).trim(), subModel: rest.slice(idx + 1).trim() };
+  };
+
+  const primarySel = buildTextModelSelect(modRes, initRaw, scene);
+  primarySel.classList.add("ic-cop-model-sel");
+
+  const subSel = el("select", {
+    class: "select select-sm ic-cop-submodel-sel hidden",
+    "aria-label": "选择 Harness 子模型",
+    title: "选择当前 AI Harness 使用的具体模型",
+  });
+  const customRow = el("div", { class: "ic-cop-custom-model hidden" });
+  const customInput = el("input", {
+    type: "text",
+    class: "input input-sm",
+    placeholder: "输入模型 ID（如 gemini-3.8-flash-low / sonnet）",
+  });
+  const customOkBtn = el("button", { type: "button", class: "btn btn-sm btn-primary" }, "确定");
+  const customCancelBtn = el("button", { type: "button", class: "btn btn-sm" }, "取消");
+  customRow.append(customInput, customOkBtn, customCancelBtn);
+
+  let currentSubModel = parseHarnessRef(initRaw).subModel;
+  let activeFetchSeq = 0;
+
+  const getValue = () => {
+    const base = primarySel.value || "site:auto";
+    if (!base.startsWith("harness:")) return base;
+    const hid = base.slice(8).split(":")[0];
+    return currentSubModel ? `harness:${hid}:${currentSubModel}` : `harness:${hid}`;
+  };
+
+  const emitChange = () => {
+    onChange?.(getValue());
+  };
+
+  const populateSubOptions = (hid, models, selectedSub) => {
+    clear(subSel);
+    const hInfo = harnesses.find((h) => h.id === hid);
+    const defLabel = hInfo?.model ? `默认模型 (${hInfo.model})` : "默认模型（由 CLI 决定）";
+    subSel.appendChild(el("option", { value: "" }, defLabel));
+    const seen = new Set([""]);
+    (models || []).forEach((m) => {
+      const id = String(m?.id || "").trim();
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      subSel.appendChild(el("option", { value: id }, m.label || id));
+    });
+    if (selectedSub && !seen.has(selectedSub)) {
+      subSel.appendChild(el("option", { value: selectedSub }, selectedSub));
+      seen.add(selectedSub);
+    }
+    subSel.appendChild(el("option", { value: "__custom__" }, "＋ 自定义模型 ID…"));
+    subSel.value = selectedSub && seen.has(selectedSub) ? selectedSub : "";
+  };
+
+  const syncSubModelPicker = async (keepSub = true) => {
+    customRow.classList.add("hidden");
+    const parsed = parseHarnessRef(primarySel.value);
+    if (!parsed.isHarness) {
+      currentSubModel = "";
+      subSel.classList.add("hidden");
+      return;
+    }
+    if (!keepSub) currentSubModel = "";
+    const hid = parsed.id;
+    const hInfo = harnesses.find((h) => h.id === hid);
+    const initialModels = harnessModelsClientCache.get(hid) || hInfo?.models || [];
+    populateSubOptions(hid, initialModels, currentSubModel);
+    subSel.classList.remove("hidden");
+
+    if (!harnessModelsClientCache.has(hid)) {
+      const seq = ++activeFetchSeq;
+      try {
+        const res = await api("GET", `/api/harnesses/${encodeURIComponent(hid)}/models`);
+        const live = Array.isArray(res?.models) ? res.models : [];
+        if (live.length) {
+          harnessModelsClientCache.set(hid, live);
+          if (seq === activeFetchSeq && parseHarnessRef(primarySel.value).id === hid) {
+            populateSubOptions(hid, live, currentSubModel);
+          }
+        }
+      } catch {
+        // Keep preset models silently if live CLI probe fails
+      }
+    }
+  };
+
+  primarySel.addEventListener("change", () => {
+    void syncSubModelPicker(false);
+    emitChange();
+  });
+
+  subSel.addEventListener("change", () => {
+    if (subSel.value === "__custom__") {
+      customInput.value = currentSubModel || "";
+      customRow.classList.remove("hidden");
+      customInput.focus();
+      return;
+    }
+    currentSubModel = subSel.value || "";
+    customRow.classList.add("hidden");
+    emitChange();
+  });
+
+  const applyCustomModel = () => {
+    const val = customInput.value.trim();
+    const hid = parseHarnessRef(primarySel.value).id;
+    currentSubModel = val;
+    customRow.classList.add("hidden");
+    const models = harnessModelsClientCache.get(hid) || harnesses.find((h) => h.id === hid)?.models || [];
+    populateSubOptions(hid, models, currentSubModel);
+    emitChange();
+  };
+  customOkBtn.addEventListener("click", applyCustomModel);
+  customInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); applyCustomModel(); }
+    if (e.key === "Escape") { customRow.classList.add("hidden"); subSel.value = currentSubModel || ""; }
+  });
+  customCancelBtn.addEventListener("click", () => {
+    customRow.classList.add("hidden");
+    subSel.value = currentSubModel || "";
+  });
+
+  const wrap = el("div", { class: "ic-cop-model-picker" }, primarySel, subSel, customRow);
+  void syncSubModelPicker(true);
+
+  const getDisplayLabel = () => {
+    const pText = primarySel.selectedOptions?.[0]?.textContent?.trim() || primarySel.value;
+    if (!primarySel.value.startsWith("harness:")) return pText;
+    if (!currentSubModel) return pText;
+    const sText = subSel.selectedOptions?.[0]?.textContent?.trim() || currentSubModel;
+    return `${pText} · ${sText}`;
+  };
+
+  return {
+    el: wrap,
+    primarySel,
+    subSel,
+    getValue,
+    getDisplayLabel,
+  };
 }
 
 /**

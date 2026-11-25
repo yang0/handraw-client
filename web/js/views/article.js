@@ -1,5 +1,5 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
-import { buildTextModelSelect, openSharedSkillPickerModal } from "../skills-ui.js";
+import { createTextModelPicker, openSharedSkillPickerModal } from "../skills-ui.js";
 import { computeParagraphDiff, mergeAcceptedHunks, renderCopilotMarkdown, renderInlineWordDiff } from "./article-diff.js";
 import { createArticleBoardController } from "./article-board.js";
 import { createArticleEdgelessController } from "./article-edgeless.js";
@@ -636,6 +636,8 @@ export async function renderArticle(root, ctx, params = {}) {
 
   // 3.5. Right Collapsible AI Writing Copilot + Inline Paper Diff Review + Selection Bubble (#70, #74)
   let aiEditing = false;
+  let aiEditElapsedSec = 0;
+  let aiEditTimer = null;
   let lastAiUndo = null; // { title, content, msgId }
   let activeDiffReview = null; // { msgId, summary, usedSkills, prevTitle, newTitle, titleAccepted, hunks, isSelection }
   let pinnedSelection = null; // { text, start, end, segIdx }
@@ -963,14 +965,13 @@ export async function renderArticle(root, ctx, params = {}) {
     diffReviewBox.appendChild(bodyFlow);
   }
 
-  // Copilot Sidebar Controls
-  const textModelSel = buildTextModelSelect(modRes, state.textModelRef, "articleEdit");
-  textModelSel.classList.add("ic-cop-model-sel");
-  state.textModelRef = textModelSel.value;
-  textModelSel.addEventListener("change", () => {
-    state.textModelRef = textModelSel.value;
+  // Copilot Sidebar Controls (#136: per-harness sub-model picker)
+  const textModelPicker = createTextModelPicker(modRes, state.textModelRef, "articleEdit", (nextRef) => {
+    state.textModelRef = nextRef;
     session.persist();
   });
+  state.textModelRef = textModelPicker.getValue();
+  const getAiSessionKey = () => `article:${state.activeFile || state.docId || "draft"}`;
 
   const aiModeEditBtn = el("button", {
     type: "button",
@@ -1000,6 +1001,7 @@ export async function renderArticle(root, ctx, params = {}) {
       state.aiChat = [];
       activeDiffReview = null;
       pinnedSelection = null;
+      api("POST", "/api/harnesses/session/reset", { sessionKey: getAiSessionKey() }).catch(() => {});
       renderStageMode();
       renderCopilotPanel();
       session.persist();
@@ -1676,12 +1678,12 @@ export async function renderArticle(root, ctx, params = {}) {
         aiCloseDrawerBtn
       )
     ),
-    el("div", { class: "ic-cop-controls" },
+    el("div", { class: "ic-cop-controls", style: { alignItems: "flex-start" } },
       el("div", { class: "ic-cop-mode-seg", role: "group", "aria-label": "助手工作模式" },
         aiModeEditBtn,
         aiModeAdviseBtn
       ),
-      textModelSel
+      textModelPicker.el
     )
   );
   const aiPaneComposer = el("div", { class: "ic-cop-composer-wrap" },
@@ -1892,12 +1894,22 @@ export async function renderArticle(root, ctx, params = {}) {
       }
 
       // Assistant advice message
+      const formatEngineMeta = (m) => {
+        const parts = [];
+        if (m.harnessName) parts.push(m.harnessName);
+        if (m.model && m.model !== m.harnessName) parts.push(m.model);
+        if (m.elapsedMs > 0) parts.push(`${(m.elapsedMs / 1000).toFixed(1)}s`);
+        if (m.warmSession) parts.push("热会话");
+        return parts.join(" · ");
+      };
+
       if (msg.kind === "advise") {
+        const metaText = formatEngineMeta(msg);
         copilotFeed.appendChild(el("div", { class: "ic-cop-msg is-ai" },
           el("div", { class: "ic-cop-msg-meta" },
-            el("span", { class: "badge" }, "诊断 / 建议"),
+            el("span", { class: "badge" }, "回复 / 建议"),
             ...(msg.usedSkills || []).map((u) => el("span", { class: "badge badge-accent" }, `⚡ ${u.name || u.id}`)),
-            msg.model ? el("span", { class: "muted", style: { fontSize: "11px" } }, msg.model) : null
+            metaText ? el("span", { class: "ic-cop-engine-meta mono" }, metaText) : null
           ),
           renderCopilotMarkdown(msg.reply || ""),
           el("div", { class: "ic-cop-msg-actions" },
@@ -1943,6 +1955,7 @@ export async function renderArticle(root, ctx, params = {}) {
             el("span", { class: "badge badge-accent" }, rev.kind === "selection" ? "局部改写" : "全文修订"),
             ...(rev.usedSkills || []).map((u) => el("span", { class: "badge" }, `⚡ ${u.name || u.id}`)),
             el("span", { class: "muted mono", style: { fontSize: "11px" } }, charDelta),
+            formatEngineMeta(msg) ? el("span", { class: "ic-cop-engine-meta mono" }, formatEngineMeta(msg)) : null,
             msg.applied ? el("span", { class: "badge badge-ok" }, "✓ 已应用") : null,
             msg.discarded ? el("span", { class: "badge" }, "已忽略") : null
           ),
@@ -1997,9 +2010,12 @@ export async function renderArticle(root, ctx, params = {}) {
     });
 
     if (aiEditing) {
+      const thinkSpan = el("span", { class: "ic-cop-think-txt" },
+        `正在调用 ${textModelPicker.getDisplayLabel()}…${aiEditElapsedSec > 0 ? ` (${aiEditElapsedSec}s)` : ""}`
+      );
       copilotFeed.appendChild(el("div", { class: "ic-cop-msg is-ai ic-cop-thinking" },
         el("span", { class: "ic-cop-dot" }),
-        el("span", null, state.aiMode === "advise" ? "正在通读文章并整理诊断建议…" : "正在分析文章并生成修改方案…")
+        thinkSpan
       ));
     }
 
@@ -2056,11 +2072,20 @@ export async function renderArticle(root, ctx, params = {}) {
     }
     state.aiDrawerOpen = true;
     aiEditing = true;
+    aiEditElapsedSec = 0;
+    if (aiEditTimer) clearInterval(aiEditTimer);
+    aiEditTimer = setInterval(() => {
+      aiEditElapsedSec += 1;
+      const span = copilotFeed.querySelector(".ic-cop-think-txt");
+      if (span) span.textContent = `正在调用 ${textModelPicker.getDisplayLabel()}… (${aiEditElapsedSec}s)`;
+    }, 1000);
     renderStageMode();
     renderCopilotPanel();
 
     const prevTitle = state.title || "";
     const prevContent = state.content || "";
+    const activeRef = textModelPicker.getValue();
+    state.textModelRef = activeRef;
     try {
       const res = await api("POST", "/api/article/edit", {
         title: prevTitle,
@@ -2070,8 +2095,18 @@ export async function renderArticle(root, ctx, params = {}) {
         selection: selText,
         history,
         skillIds,
-        textModelRef: state.textModelRef,
+        textModelRef: activeRef,
+        sessionKey: getAiSessionKey(),
       });
+
+      const metaFields = {
+        source: res.source || "",
+        harness: res.harness || "",
+        harnessName: res.harnessName || "",
+        model: res.model || "",
+        elapsedMs: Number(res.elapsedMs || 0),
+        warmSession: Boolean(res.warmSession),
+      };
 
       if (res.mode === "advise") {
         state.aiChat.push({
@@ -2080,9 +2115,9 @@ export async function renderArticle(root, ctx, params = {}) {
           kind: "advise",
           reply: res.reply || "",
           usedSkills: res.usedSkills || [],
-          model: res.model || "",
+          ...metaFields,
         });
-        toast("AI 诊断建议已生成");
+        toast("AI 回复已生成");
       } else if (res.mode === "selection") {
         const replacement = res.replacement ?? selText;
         const nextContent = replaceSelectionInContent(prevContent, selObj, replacement);
@@ -2092,6 +2127,7 @@ export async function renderArticle(root, ctx, params = {}) {
           kind: "selection",
           applied: false,
           discarded: false,
+          ...metaFields,
           revision: {
             kind: "selection",
             title: prevTitle,
@@ -2115,6 +2151,7 @@ export async function renderArticle(root, ctx, params = {}) {
           kind: "edit",
           applied: false,
           discarded: false,
+          ...metaFields,
           revision: {
             kind: "edit",
             title: res.title ?? prevTitle,
@@ -2141,6 +2178,7 @@ export async function renderArticle(root, ctx, params = {}) {
       toast(e.message || "AI 处理失败");
     } finally {
       aiEditing = false;
+      if (aiEditTimer) { clearInterval(aiEditTimer); aiEditTimer = null; }
       if (aiDrawer.isConnected) {
         renderStageMode();
         renderCopilotPanel();

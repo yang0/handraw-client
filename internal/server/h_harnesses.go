@@ -33,16 +33,53 @@ func isKnownHarnessScene(k string) bool {
 	return false
 }
 
-func (s *Server) callHarnessText(ctx context.Context, route aiRoute, msgs []providers.ChatMessage, jsonMode bool) (harnesses.ChatResult, error) {
+func (s *Server) callHarnessText(ctx context.Context, route aiRoute, msgs []providers.ChatMessage, jsonMode bool, sessionKey ...string) (harnesses.ChatResult, error) {
 	hMsgs := make([]harnesses.Message, 0, len(msgs))
 	for _, m := range msgs {
 		hMsgs = append(hMsgs, harnesses.Message{Role: m.Role, Content: m.Content})
 	}
+	sk := ""
+	if len(sessionKey) > 0 {
+		sk = strings.TrimSpace(sessionKey[0])
+	}
 	return harnesses.Chat(ctx, route.Harness, harnesses.ChatRequest{
-		Messages: hMsgs,
-		JSONMode: jsonMode,
-		Model:    route.HarnessSubModel,
+		Messages:   hMsgs,
+		JSONMode:   jsonMode,
+		Model:      route.HarnessSubModel,
+		SessionKey: sk,
 	})
+}
+
+func (s *Server) harnessModels(w http.ResponseWriter, r *http.Request) (any, error) {
+	id := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	if !harnesses.ValidID(id) {
+		return nil, bad("无效的 Harness 标识")
+	}
+	refresh := r.URL.Query().Get("refresh") == "1" || strings.EqualFold(r.URL.Query().Get("refresh"), "true")
+	st := settings.Get()
+	hst, ok := harnesses.Find(st.Harnesses, id)
+	if !ok {
+		return nil, bad("未找到该 Harness：" + id)
+	}
+	models := harnesses.ListModels(r.Context(), hst, refresh)
+	return map[string]any{
+		"ok":     true,
+		"id":     hst.ID,
+		"driver": hst.Driver,
+		"model":  hst.Model,
+		"models": models,
+	}, nil
+}
+
+func (s *Server) harnessResetSession(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		SessionKey string `json:"sessionKey"`
+	}
+	_ = decode(r, &body)
+	if strings.TrimSpace(body.SessionKey) != "" {
+		harnesses.ResetSession(body.SessionKey)
+	}
+	return map[string]any{"ok": true}, nil
 }
 
 func (s *Server) harnessesList(w http.ResponseWriter, r *http.Request) (any, error) {

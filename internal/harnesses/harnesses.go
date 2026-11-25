@@ -81,29 +81,32 @@ type Status struct {
 	ConfigDetected  bool     `json:"configDetected,omitempty"`
 	ConfigDir       string   `json:"configDir,omitempty"`
 	DiagnosticHint  string   `json:"diagnosticHint,omitempty"`
-	Command         string   `json:"command,omitempty"`
-	Model           string   `json:"model,omitempty"`
-	ExtraArgs       []string `json:"extraArgs,omitempty"`
-	WorkDir         string   `json:"workDir,omitempty"`
-	TimeoutSec      int      `json:"timeoutSec"`
-	DefaultRef      string   `json:"defaultRef"`
+	Command         string        `json:"command,omitempty"`
+	Model           string        `json:"model,omitempty"`
+	Models          []ModelOption `json:"models,omitempty"`
+	ExtraArgs       []string      `json:"extraArgs,omitempty"`
+	WorkDir         string        `json:"workDir,omitempty"`
+	TimeoutSec      int           `json:"timeoutSec"`
+	DefaultRef      string        `json:"defaultRef"`
 }
 
 // ChatRequest is a single text/planning turn sent to a local harness.
 type ChatRequest struct {
-	Messages []Message
-	JSONMode bool
-	Model    string // optional per-call sub-model override
-	WorkDir  string // optional per-call workdir override
+	Messages   []Message
+	JSONMode   bool
+	Model      string // optional per-call sub-model override
+	WorkDir    string // optional per-call workdir override
+	SessionKey string // optional session key to reuse a warm persistent subprocess (e.g. agy stream-json)
 }
 
 // ChatResult is the normalized assistant reply from a local harness.
 type ChatResult struct {
-	Text      string `json:"text"`
-	HarnessID string `json:"harnessId"`
-	Driver    string `json:"driver"`
-	Model     string `json:"model,omitempty"`
-	ElapsedMs int64  `json:"elapsedMs"`
+	Text        string `json:"text"`
+	HarnessID   string `json:"harnessId"`
+	Driver      string `json:"driver"`
+	Model       string `json:"model,omitempty"`
+	ElapsedMs   int64  `json:"elapsedMs"`
+	WarmSession bool   `json:"warmSession,omitempty"`
 }
 
 func envJoin(envKey string, elems ...string) string {
@@ -605,6 +608,11 @@ func Discover(configs []Config) []Status {
 		})
 	}
 
+	// Populate fast cached/preset model options for each harness (#136).
+	for i := range out {
+		out[i].Models = CachedOrPresetModels(out[i])
+	}
+
 	// Keep detected/ready harnesses at the top while preserving catalog order within each tier.
 	sort.SliceStable(out, func(i, j int) bool {
 		return harnessSortRank(out[i]) < harnessSortRank(out[j])
@@ -725,6 +733,13 @@ func Chat(ctx context.Context, st Status, req ChatRequest) (ChatResult, error) {
 	if workDir == "" {
 		workDir = strings.TrimSpace(st.WorkDir)
 	}
+	driver := NormalizeDriver(st.Driver)
+
+	// Paseo-style warm persistent subprocess pool for agy stream-json sessions (#136).
+	if driver == "agy" && strings.TrimSpace(req.SessionKey) != "" {
+		return chatViaAgyWarmSession(runCtx, st, model, workDir, prompt, strings.TrimSpace(req.SessionKey))
+	}
+
 	var scratchDir string
 	if workDir == "" {
 		if d, err := os.MkdirTemp("", "handraw-harness-*"); err == nil {
@@ -735,7 +750,6 @@ func Chat(ctx context.Context, st Status, req ChatRequest) (ChatResult, error) {
 	}
 
 	var auxFile string
-	driver := NormalizeDriver(st.Driver)
 	switch driver {
 	case "codex":
 		if f, err := os.CreateTemp("", "handraw-codex-out-*.txt"); err == nil {
@@ -846,7 +860,7 @@ func BuildArgs(driver, model string, extraArgs []string, prompt, auxFile string)
 	stdinPayload = prompt
 	switch driver {
 	case "agy":
-		args = []string{"--input-format=stream-json", "--output-format=stream-json", "--mode=plan"}
+		args = []string{"--input-format=stream-json", "--output-format=stream-json", "--mode=plan", "--disable-slash-commands"}
 		if model != "" {
 			args = append(args, "--model", model)
 		}
@@ -858,7 +872,13 @@ func BuildArgs(driver, model string, extraArgs []string, prompt, auxFile string)
 		})
 		stdinPayload = string(b) + "\n"
 	case "claude":
-		args = []string{"-p", "--output-format", "json", "--permission-mode", "plan", "--no-session-persistence"}
+		args = []string{"-p", "--output-format", "json", "--permission-mode", "plan", "--no-session-persistence", "--disable-slash-commands"}
+		if !containsFlag(extraArgs, "--tools") {
+			args = append(args, "--tools", "")
+		}
+		if !containsFlag(extraArgs, "--mcp-config") && !containsFlag(extraArgs, "--strict-mcp-config") {
+			args = append(args, "--strict-mcp-config")
+		}
 		if model != "" {
 			args = append(args, "--model", model)
 		}

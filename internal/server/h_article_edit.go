@@ -23,6 +23,25 @@ type articleEditRequest struct {
 	History      []articleEditHistoryTurn `json:"history"`   // optional recent multi-turn context
 	SkillIDs     []string                 `json:"skillIds"`
 	TextModelRef string                   `json:"textModelRef"`
+	SessionKey   string                   `json:"sessionKey"`
+}
+
+func attachChatMeta(out map[string]any, chatRes map[string]any) map[string]any {
+	out["source"] = chatRes["source"]
+	out["model"] = firstStr(asString(chatRes["model"]), asString(chatRes["service"]))
+	if h := asString(chatRes["harness"]); h != "" {
+		out["harness"] = h
+	}
+	if hn := asString(chatRes["harnessName"]); hn != "" {
+		out["harnessName"] = hn
+	}
+	if ms, ok := chatRes["elapsedMs"]; ok {
+		out["elapsedMs"] = ms
+	}
+	if ws, ok := chatRes["warmSession"].(bool); ok && ws {
+		out["warmSession"] = true
+	}
+	return out
 }
 
 func appendArticleHistory(msgs []providers.ChatMessage, history []articleEditHistoryTurn) []providers.ChatMessage {
@@ -130,6 +149,7 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 			SkillIDs:   activeIDs,
 			Messages:   msgs,
 			JSONMode:   false,
+			SessionKey: strings.TrimSpace(req.SessionKey),
 		})
 		if err != nil {
 			return nil, err
@@ -138,14 +158,12 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 		if reply == "" {
 			return nil, bad("AI 返回的建议为空，请重试或换个文本模型")
 		}
-		return map[string]any{
+		return attachChatMeta(map[string]any{
 			"ok":         true,
 			"mode":       "advise",
 			"reply":      reply,
 			"usedSkills": usedSkills,
-			"source":     chatRes["source"],
-			"model":      firstStr(asString(chatRes["model"]), asString(chatRes["service"])),
-		}, nil
+		}, chatRes), nil
 	}
 
 	// 2. Surgical selection rewrite mode: modify ONLY the highlighted passage.
@@ -185,6 +203,7 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 			SkillIDs:   activeIDs,
 			Messages:   msgs,
 			JSONMode:   true,
+			SessionKey: strings.TrimSpace(req.SessionKey),
 		})
 		if err != nil {
 			return nil, err
@@ -194,33 +213,49 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 		if strings.TrimSpace(replacement) == "" {
 			return nil, bad("AI 返回的局部改写结果为空，请重试或换个文本模型")
 		}
-		return map[string]any{
+		return attachChatMeta(map[string]any{
 			"ok":          true,
 			"mode":        "selection",
 			"selection":   selection,
 			"replacement": replacement,
 			"summary":     summary,
 			"usedSkills":  usedSkills,
-			"source":      chatRes["source"],
-			"model":       firstStr(asString(chatRes["model"]), asString(chatRes["service"])),
-		}, nil
+		}, chatRes), nil
 	}
 
-	// 3. Full-article edit mode (default).
-	sysPrompt := strings.TrimSpace(`你是专业中文文章编辑与润色助手。请根据用户的修改要求（以及下方启用的 Skill 规范），修改提供的 Markdown 文章。
+	// 3. Smart article edit mode:
+	// - Pure greeting/question -> fast conversational {"noEdit": true, "reply": "..."}
+	// - Targeted edits -> fast incremental {"patches": [{"find": "...", "replace": "..."}]}
+	// - Major rewrite -> {"title": "...", "content": "...", "summary": "..."}
+	sysPrompt := strings.TrimSpace(`你是专业中文文章编辑与润色助手。请根据【用户要求】（以及启用的 Skill 规范）处理提供的 Markdown 文章，并严格只输出一个 JSON 对象，不要包含额外解释。
 
-核心要求：
-1. 忠实保留原文的核心事实、数据、专有名词与已有配图链接（如 ![...](assets/...)），除非用户明确要求删改。
-2. 输出合法 Markdown 正文，段落层次清晰、自然流畅。
-3. 请严格只输出一个 JSON 对象，不要包含额外解释，字段如下：
+根据用户意图选择最轻量的返回格式：
+A. 如果用户只是打招呼（如「你好」）、测试连通性或纯提问咨询，并未要求修改文章，请直接返回：
 {
-  "title": "修改后的文章主标题（如无需修改则保持原标题）",
+  "noEdit": true,
+  "reply": "简短自然的中文回复"
+}
+
+B. 如果只需局部修改文章中的若干句子或段落（推荐，速度最快），请使用增量替换补丁（find 必须是原文中精确存在的连续片段）：
+{
+  "title": "修改后的主标题（不变可省略）",
+  "patches": [
+    { "find": "原文精确片段", "replace": "修改后的片段" }
+  ],
+  "summary": "1~2 句话概括修改点"
+}
+
+C. 如果需要对全文结构大幅重写或通篇润色，请返回完整正文：
+{
+  "title": "修改后的主标题（如无需修改则保持原标题）",
   "content": "修改后的完整 Markdown 正文",
   "summary": "1~2 句话简洁概括本次做了哪些修改"
-}`)
+}
+
+要求：忠实保留原文核心事实、数据、专有名词与已有配图链接（如 ![...](assets/...)），除非用户明确要求删改。`)
 
 	var userMsg strings.Builder
-	userMsg.WriteString("【修改要求】\n")
+	userMsg.WriteString("【用户要求】\n")
 	userMsg.WriteString(cleanedInstruction)
 	userMsg.WriteString("\n\n【当前标题】\n")
 	if title != "" {
@@ -242,27 +277,34 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 		SkillIDs:   activeIDs,
 		Messages:   msgs,
 		JSONMode:   true,
+		SessionKey: strings.TrimSpace(req.SessionKey),
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	rawReply, _ := chatRes["text"].(string)
-	newTitle, newContent, summary := parseArticleEditOutput(rawReply, title)
-	if strings.TrimSpace(newContent) == "" {
+	parsed := parseArticleEditSmartOutput(rawReply, title, content)
+	if parsed.noEdit && strings.TrimSpace(parsed.reply) != "" {
+		return attachChatMeta(map[string]any{
+			"ok":         true,
+			"mode":       "advise",
+			"reply":      strings.TrimSpace(parsed.reply),
+			"usedSkills": usedSkills,
+		}, chatRes), nil
+	}
+	if strings.TrimSpace(parsed.content) == "" {
 		return nil, bad("AI 返回的修改结果为空，请重试或换个文本模型")
 	}
 
-	return map[string]any{
+	return attachChatMeta(map[string]any{
 		"ok":         true,
 		"mode":       "edit",
-		"title":      newTitle,
-		"content":    newContent,
-		"summary":    summary,
+		"title":      parsed.title,
+		"content":    parsed.content,
+		"summary":    parsed.summary,
 		"usedSkills": usedSkills,
-		"source":     chatRes["source"],
-		"model":      firstStr(asString(chatRes["model"]), asString(chatRes["service"])),
-	}, nil
+	}, chatRes), nil
 }
 
 func asString(v any) string {
@@ -314,6 +356,72 @@ func parseArticleSelectionOutput(raw string) (replacement, summary string) {
 		}
 	}
 	return strings.ReplaceAll(trimmed, "\r\n", "\n"), "已完成局部片段改写"
+}
+
+type articleEditSmartResult struct {
+	noEdit  bool
+	reply   string
+	title   string
+	content string
+	summary string
+}
+
+type articleEditPatch struct {
+	Find    string `json:"find"`
+	Replace string `json:"replace"`
+}
+
+func parseArticleEditSmartOutput(raw, fallbackTitle, originalContent string) articleEditSmartResult {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return articleEditSmartResult{title: fallbackTitle}
+	}
+	candidate := stripJSONCandidate(trimmed)
+	var parsed struct {
+		NoEdit  bool               `json:"noEdit"`
+		Reply   string             `json:"reply"`
+		Title   string             `json:"title"`
+		Content string             `json:"content"`
+		Patches []articleEditPatch `json:"patches"`
+		Summary string             `json:"summary"`
+	}
+	if json.Unmarshal([]byte(candidate), &parsed) == nil {
+		if parsed.NoEdit && strings.TrimSpace(parsed.Reply) != "" {
+			return articleEditSmartResult{noEdit: true, reply: strings.TrimSpace(parsed.Reply)}
+		}
+		t := firstStr(strings.TrimSpace(parsed.Title), fallbackTitle)
+		sum := firstStr(strings.TrimSpace(parsed.Summary), "已完成文章修改")
+		if len(parsed.Patches) > 0 && strings.TrimSpace(originalContent) != "" {
+			next := strings.ReplaceAll(originalContent, "\r\n", "\n")
+			applied := 0
+			for _, pt := range parsed.Patches {
+				find := strings.ReplaceAll(pt.Find, "\r\n", "\n")
+				rep := strings.ReplaceAll(pt.Replace, "\r\n", "\n")
+				if find == "" {
+					continue
+				}
+				if strings.Contains(next, find) {
+					next = strings.Replace(next, find, rep, 1)
+					applied++
+				}
+			}
+			if applied > 0 {
+				return articleEditSmartResult{title: t, content: next, summary: sum}
+			}
+		}
+		if strings.TrimSpace(parsed.Content) != "" {
+			return articleEditSmartResult{
+				title:   t,
+				content: strings.ReplaceAll(parsed.Content, "\r\n", "\n"),
+				summary: sum,
+			}
+		}
+		if strings.TrimSpace(parsed.Reply) != "" {
+			return articleEditSmartResult{noEdit: true, reply: strings.TrimSpace(parsed.Reply)}
+		}
+	}
+	t, c, s := parseArticleEditOutput(raw, fallbackTitle)
+	return articleEditSmartResult{title: t, content: c, summary: s}
 }
 
 func parseArticleEditOutput(raw, fallbackTitle string) (title, content, summary string) {

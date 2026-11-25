@@ -208,3 +208,21 @@ func TestChatSubprocess(t *testing.T) {
 		t.Fatalf("unexpected agy reply: %+v", resAgy)
 	}
 }
+
+func TestParseAgyModelsAndFastFlags(t *testing.T) {
+	raw := "Fetching available models...\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\nclaude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n"
+	mods := ParseAgyModelsOutput(raw)
+	if len(mods) != 2 || mods[0].ID != "gemini-3.8-flash-low" || mods[1].Label != "Claude Sonnet 4.6 (Thinking)" {
+		t.Fatalf("unexpected ParseAgyModelsOutput result: %+v", mods)
+	}
+	if len(PresetModels("claude")) < 3 || len(PresetModels("agy")) < 5 {
+		t.Fatalf("expected non-empty presets for claude and agy")
+	}
+	clArgs, _ := BuildArgs("claude", "haiku", nil, "hi", "")
+	clJoined := strings.Join(clArgs, " ")
+	for _, want := range []string{"--disable-slash-commands", "--strict-mcp-config", "--model haiku"} {
+		if !strings.Contains(clJoined, want) {
+			t.Fatalf("claude fast args missing %q: %s", want, clJoined)
+		}
+	}
+}
