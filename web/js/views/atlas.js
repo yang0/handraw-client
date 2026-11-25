@@ -1,5 +1,5 @@
 import { api, clear, closeModal, copyText, el, galleryImg, localImg, openURL, packImg, showModal, toast, toWebp } from "../api.js";
-import { buildGroupedAIModelSelect } from "./create.js";
+import { openLayoutEditorModal, openStyleEditorModal } from "./resource-editor.js";
 import {
   assetCategoryLabel,
   bindPageImagePaste,
@@ -1225,7 +1225,9 @@ function mineStyleCard(s, ctx, reload) {
 function mineLayoutCard(l, ctx, reload) {
   const edit = () => openEditLayoutDialog(l, reload);
   return el("div", { class: "style-card style-card-mine" },
-    l.image ? el("img", { class: "style-thumb", src: localImg(l.image), alt: l.name, loading: "lazy", onClick: edit }) : null,
+    l.image
+      ? el("img", { class: "style-thumb", src: localImg(l.image), alt: l.name, loading: "lazy", onClick: edit })
+      : el("div", { class: "style-thumb style-thumb-empty", onClick: edit, title: "点击添加图型封面与排版约束" }, "📐"),
     el("div", { class: "style-body", onClick: edit },
       el("div", { class: "row", style: { justifyContent: "space-between" } },
         el("span", { class: "style-code" }, l.id),
@@ -1374,128 +1376,11 @@ async function openPublishResourceDialog(kindPath, item, name, reload) {
 }
 
 export function openEditStyleDialog(initial = {}, onSaved) {
-  const nameIn = el("input", { class: "input", value: initial.name || initial.nameZh || initial.generation_name || "", placeholder: "画风名称，如：暖纸淡彩钢笔" });
-  const zhIn = el("textarea", { class: "textarea", placeholder: "只描述视觉语言：媒介、线条、材质、色彩、光影、空间（禁止写人物/服饰/场景）" }, initial.traits || "");
-  const enIn = el("textarea", { class: "textarea", placeholder: "English pure visual-language traits..." }, initial.traitsEn || "");
-  const warnBox = el("div", { class: "badge badge-warn hidden" });
-  const uploadedPaths = [];
-  const fileIn = el("input", { type: "file", accept: "image/*", multiple: true });
-  const previewRow = el("div", { class: "row", style: { marginTop: "6px" } });
-
-  fileIn.addEventListener("change", async () => {
-    for (const f of Array.from(fileIn.files || []).slice(0, 5)) {
-      const fd = new FormData();
-      fd.append("file", f);
-      try {
-        const up = await api("POST", "/api/mine/upload", fd);
-        uploadedPaths.push(up.path);
-        previewRow.appendChild(el("img", { src: up.url, style: { width: "64px", height: "64px", objectFit: "cover", borderRadius: "6px" } }));
-      } catch (e) { toast(e.message); }
-    }
-  });
-
-  let selectedVisionRef = "";
-  const visionWrap = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } },
-    el("span", { class: "muted", style: { fontSize: "12px" } }, "视觉接口：")
-  );
-  api("GET", "/api/models").then((modRes) => {
-    const sel = buildGroupedAIModelSelect(modRes, modRes.defaultVisionModel || "", "vision");
-    selectedVisionRef = sel.value;
-    sel.addEventListener("change", () => { selectedVisionRef = sel.value; });
-    visionWrap.appendChild(sel);
-  }).catch(() => {});
-
-  const analyzeBtn = el("button", {
-    type: "button",
-    class: "btn btn-sm",
-    onClick: async () => {
-      if (uploadedPaths.length === 0) return toast("请先上传 1–5 张风格参考图");
-      analyzeBtn.disabled = true;
-      analyzeBtn.textContent = "提取特征中…";
-      try {
-        const res = await api("POST", "/api/mine/analyze", {
-          images: uploadedPaths,
-          purpose: "create",
-          modelRef: selectedVisionRef,
-        });
-        if (res.traitsZh) zhIn.value = res.traitsZh;
-        if (res.traitsEn) enIn.value = res.traitsEn;
-        if (res.name && !nameIn.value) nameIn.value = res.name;
-        if (res.violations?.length) {
-          warnBox.textContent = "⚠ 检测到可能包含具体主体词，请删改：" + res.violations.join("、");
-          warnBox.classList.remove("hidden");
-        } else {
-          warnBox.classList.add("hidden");
-        }
-      } catch (e) { toast(e.message); }
-      finally { analyzeBtn.disabled = false; analyzeBtn.textContent = "✨ 从参考图提取纯视觉特征"; }
-    },
-  }, "✨ 从参考图提取纯视觉特征");
-
-  showModal(initial.docId ? "编辑我的画风" : "新建我的画风", el("div", null,
-    el("div", { class: "field" },
-      el("label", null, "参考图（可选 1–5 张，用于提取视觉特征）"),
-      fileIn,
-      previewRow,
-      el("div", { class: "row", style: { marginTop: "6px", justifyContent: "space-between", flexWrap: "wrap" } }, analyzeBtn, visionWrap)
-    ),
-    el("div", { class: "field" }, el("label", null, "画风名称"), nameIn),
-    el("div", { class: "field" }, el("label", null, "中文视觉特征（严禁出现具体人物/物品/场景）"), zhIn),
-    el("div", { class: "field" }, el("label", null, "英文视觉特征"), enIn),
-    warnBox
-  ), [
-    el("button", {
-      type: "button",
-      class: "btn btn-primary",
-      onClick: async () => {
-        try {
-          const res = await api("POST", "/api/mine/styles", {
-            docId: initial.docId || "",
-            number: initial.number || "",
-            name: nameIn.value,
-            traits: zhIn.value,
-            traitsEn: enIn.value,
-            image: uploadedPaths[0] || initial.image || "",
-            images: uploadedPaths,
-          });
-          if (res.violations?.length) {
-            toast("已保存，建议后续移除特征中的主体词：" + res.violations.join("、"));
-          } else {
-            toast("画风已保存");
-          }
-          closeModal();
-          if (onSaved) onSaved();
-        } catch (e) { toast(e.message); }
-      },
-    }, "保存画风"),
-  ]);
+  return openStyleEditorModal(initial, onSaved);
 }
 
-function openEditLayoutDialog(initial = {}, onSaved) {
-  const nameIn = el("input", { class: "input", value: initial.name || "", placeholder: "图型名称，如：双栏要点对照卡" });
-  const zhIn = el("textarea", { class: "textarea", placeholder: "描述区域划分、主标题区、配图区与留白约束" }, initial.prompt_zh || "");
-  const enIn = el("textarea", { class: "textarea", placeholder: "English layout instructions..." }, initial.prompt_en || "");
-  showModal(initial.docId ? "编辑我的图型" : "新建我的图型", el("div", null,
-    el("div", { class: "field" }, el("label", null, "图型名称"), nameIn),
-    el("div", { class: "field" }, el("label", null, "中文排版约束"), zhIn),
-    el("div", { class: "field" }, el("label", null, "英文排版约束"), enIn)
-  ), [
-    el("button", {
-      type: "button",
-      class: "btn btn-primary",
-      onClick: async () => {
-        try {
-          await api("POST", "/api/mine/layouts", {
-            docId: initial.docId || "", id: initial.id || "", image: initial.image || "",
-            name: nameIn.value, prompt_zh: zhIn.value, prompt_en: enIn.value,
-          });
-          closeModal();
-          toast("图型已保存");
-          onSaved();
-        } catch (e) { toast(e.message); }
-      },
-    }, "保存图型"),
-  ]);
+export function openEditLayoutDialog(initial = {}, onSaved) {
+  return openLayoutEditorModal(initial, onSaved);
 }
 
 async function drawDice(stage, ctx) {

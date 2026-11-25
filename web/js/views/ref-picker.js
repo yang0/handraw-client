@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, galleryImg, localImg, onEvent, showModal, toast } from "../api.js";
+import { api, clear, closeModal, el, galleryImg, localImg, onEvent, remoteThumb, showModal, showStackedModal, toast } from "../api.js";
 
 const BUILTIN_EXT_IGNORE = new Set(["styles", "layouts", "colors", "tones", "assets", "characters", "props", "scenes"]);
 
@@ -179,6 +179,8 @@ export function openReferencePickerModal({
   currentRefs = [],
   maxCount = MAX_REF_IMAGES,
   title = "选择参考图",
+  initialTab = "mine",
+  stacked = false,
   onConfirm,
 } = {}) {
   const limit = Math.max(1, Number(maxCount) || MAX_REF_IMAGES);
@@ -190,6 +192,8 @@ export function openReferencePickerModal({
 
   let categories = BUILTIN_ASSET_CATEGORIES.map((c) => ({ ...c }));
   let mineItems = [];
+  let workItems = [];
+  let inspItems = [];
   let officialItems = [];
   let extGalleries = []; // merged installed galleries + catalog packs
   const extItemsCache = new Map();
@@ -199,7 +203,7 @@ export function openReferencePickerModal({
   const itemByPath = new Map();
 
   let loading = true;
-  let activeTab = "mine"; // "mine" | "official" | "ext:<kind>" | "upload"
+  let activeTab = initialTab || "mine"; // "mine" | "works" | "inspirations" | "official" | "ext:<kind>" | "upload"
   let activeCategory = "ALL";
   let extSeries = "";
   let extAngle = "front";
@@ -278,10 +282,12 @@ export function openReferencePickerModal({
     },
   }, "清空已选");
 
+  let closeThisModal = () => closeModal();
+
   const cancelBtn = el("button", {
     type: "button",
     class: "btn",
-    onClick: () => closeModal(),
+    onClick: () => closeThisModal(),
   }, "取消");
 
   const confirmBtn = el("button", {
@@ -318,7 +324,7 @@ export function openReferencePickerModal({
           localPath: p,
         };
       });
-      closeModal();
+      closeThisModal();
       if (typeof onConfirm === "function") onConfirm(result, resultMeta);
     },
   }, `✓ 确认选用 (${selectedRefs.length}/${limit})`);
@@ -336,13 +342,44 @@ export function openReferencePickerModal({
   });
 
   function indexItems() {
-    for (const it of [...mineItems, ...officialItems]) {
+    for (const it of [...mineItems, ...workItems, ...inspItems, ...officialItems]) {
       if (it?.image) itemByPath.set(it.image, it);
     }
   }
 
   function currentPool() {
-    return activeTab === "official" ? officialItems : mineItems;
+    if (activeTab === "works") return workItems;
+    if (activeTab === "inspirations") return inspItems;
+    if (activeTab === "official") return officialItems;
+    return mineItems;
+  }
+
+  async function selectGridItem(it) {
+    if (it.image) {
+      toggleSelectPath(it.image);
+      inspected = { mode: "asset", item: it };
+      renderInspector();
+      return;
+    }
+    if (it.remoteUrl) {
+      if (materializingKey) return;
+      materializingKey = `insp:${it.id}`;
+      renderGrid();
+      try {
+        const up = await api("POST", "/api/mine/upload", { url: it.remoteUrl, name: it.name || "inspiration" });
+        if (!up?.path) throw new Error("下载灵感图失败");
+        it.image = up.path;
+        itemByPath.set(up.path, it);
+        toggleSelectPath(up.path);
+        inspected = { mode: "asset", item: it };
+      } catch (e) {
+        toast(e?.message || "加载灵感图片失败");
+      } finally {
+        materializingKey = "";
+        renderGrid();
+        renderInspector();
+      }
+    }
   }
 
   function activeExtGallery() {
@@ -631,6 +668,8 @@ export function openReferencePickerModal({
       myGroup.appendChild(subList);
     }
 
+    myGroup.appendChild(makeSourceBtn("works", "🎨", "我的作品", workItems.length));
+    myGroup.appendChild(makeSourceBtn("inspirations", "💡", "灵感库", inspItems.length));
     if (officialItems.length > 0) {
       myGroup.appendChild(makeSourceBtn("official", "✨", "官方图库", officialItems.length));
     }
@@ -797,10 +836,12 @@ export function openReferencePickerModal({
     const pool = currentPool();
     const q = searchQuery.trim().toLowerCase();
     const visible = pool.filter((it) => {
-      const k = it.kind || "other";
-      if (activeCategory !== "ALL" && k !== activeCategory) return false;
+      if (activeTab === "mine") {
+        const k = it.kind || "other";
+        if (activeCategory !== "ALL" && k !== activeCategory) return false;
+      }
       if (!q) return true;
-      const hay = `${it.id || ""} ${it.name || ""} ${it.nameEn || ""} ${assetCategoryLabel(k, categories)} ${(it.tags || []).join(" ")}`.toLowerCase();
+      const hay = `${it.id || ""} ${it.name || ""} ${it.nameEn || ""} ${it.subLabel || ""} ${it.folder || ""} ${it.prompt || ""} ${assetCategoryLabel(it.kind, categories)} ${(it.tags || []).join(" ")}`.toLowerCase();
       return hay.includes(q);
     });
 
@@ -809,21 +850,37 @@ export function openReferencePickerModal({
     if (!pool.length && activeTab === "mine") {
       grid.appendChild(el("div", { class: "ref-picker-empty" },
         el("strong", null, "自建图库还没有参考图"),
-        el("p", { class: "muted" }, "可在左侧直接切换「姿态图鉴 / 衣装图鉴 / 人像图鉴」选用参考图，或点下方上传/粘贴本地图片。"),
+        el("p", { class: "muted" }, "可在左侧切换「我的作品 / 灵感库」或「姿态 / 衣装 / 人像图鉴」选图，或点下方上传/粘贴本地图片。"),
         el("div", { class: "row", style: { gap: "8px", justifyContent: "center", flexWrap: "wrap" } },
           el("button", {
             type: "button",
             class: "btn btn-primary btn-sm",
             onClick: () => switchTab("upload"),
           }, "＋ 本地上传 / 粘贴图片"),
-          extGalleries.length > 0
+          workItems.length > 0
             ? el("button", {
                 type: "button",
                 class: "btn btn-sm",
-                onClick: () => switchTab(`ext:${extGalleries[0].id}`),
-              }, `${galleryIcon(extGalleries[0])} 浏览${extGalleries[0].name}`)
+                onClick: () => switchTab("works"),
+              }, `🎨 从我的作品选 (${workItems.length})`)
+            : null,
+          inspItems.length > 0
+            ? el("button", {
+                type: "button",
+                class: "btn btn-sm",
+                onClick: () => switchTab("inspirations"),
+              }, `💡 从灵感库选 (${inspItems.length})`)
             : null
         )
+      ));
+      return;
+    }
+
+    if (!pool.length && (activeTab === "works" || activeTab === "inspirations")) {
+      grid.appendChild(el("div", { class: "ref-picker-empty" },
+        el("strong", null, activeTab === "works" ? "还没有本地作品图片" : "灵感库里还没有带图条目"),
+        el("p", { class: "muted" }, "可以切换到「本地上传 / 粘贴」直接拖入或 Ctrl/⌘ + V 粘贴图片。"),
+        el("button", { type: "button", class: "btn btn-primary btn-sm", onClick: () => switchTab("upload") }, "＋ 本地上传 / 粘贴图片")
       ));
       return;
     }
@@ -834,10 +891,12 @@ export function openReferencePickerModal({
     }
 
     visible.forEach((it, idx) => {
-      const isSel = selectedRefs.includes(it.image);
+      const isSel = Boolean(it.image && selectedRefs.includes(it.image));
+      const isBusy = materializingKey === `insp:${it.id}`;
+      const thumbSrc = it.image ? localImg(it.thumb || it.image) : (it.remoteUrl ? remoteThumb(it.remoteUrl) : "");
       const wrap = el("div", { class: "rp-thumb-wrap", dataset: { fallback: it.id || "图" } });
       const img = el("img", {
-        src: localImg(it.image),
+        src: thumbSrc,
         alt: it.name || it.id || "参考图",
         decoding: "async",
         loading: idx < 18 ? "eager" : "lazy",
@@ -846,7 +905,7 @@ export function openReferencePickerModal({
       img.addEventListener("error", () => { img.classList.add("is-error"); wrap.classList.add("is-error"); });
       if (img.complete && img.naturalWidth > 0) img.classList.add("is-loaded", "is-instant");
 
-      const checkBadge = el("span", { class: "rp-check-badge", "aria-hidden": "true" }, isSel ? "✓ 已选" : "");
+      const checkBadge = el("span", { class: "rp-check-badge", "aria-hidden": "true" }, isBusy ? "下载中…" : (isSel ? "✓ 已选" : ""));
       const previewBtn = el("button", {
         type: "button",
         class: "rp-card-quick-btn",
@@ -859,28 +918,28 @@ export function openReferencePickerModal({
       }, "预览");
       wrap.append(img, checkBadge, previewBtn);
 
+      const metaSub = activeTab === "works"
+        ? (it.subLabel || "作品")
+        : (activeTab === "inspirations" ? (it.folder || "灵感") : `${it.id || ""} · ${assetCategoryLabel(it.kind, categories)}`);
+
       const card = el("div", {
         role: "button",
         tabindex: "0",
         class: "rp-card" + (isSel ? " is-selected" : "") + (newlyAddedPath && it.image === newlyAddedPath ? " is-just-added" : ""),
         "aria-pressed": String(isSel),
-        dataset: { refPath: it.image, assetId: it.id || "" },
-        onClick: () => {
-          toggleSelectPath(it.image);
-          inspected = { mode: "asset", item: it };
-          renderInspector();
-        },
+        dataset: { refPath: it.image || "", assetId: it.id || "" },
+        onClick: () => { void selectGridItem(it); },
         onKeydown: (e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            toggleSelectPath(it.image);
+            void selectGridItem(it);
           }
         },
       },
         wrap,
         el("div", { class: "rp-card-meta" },
-          el("small", { class: "mono" }, `${it.id || ""} · ${assetCategoryLabel(it.kind, categories)}`),
-          el("strong", null, it.name || it.id || "参考图")
+          el("small", { class: "mono" }, metaSub),
+          el("strong", null, isBusy ? "正在加载…" : (it.name || it.id || "参考图"))
         )
       );
       grid.appendChild(card);
@@ -1221,14 +1280,18 @@ export function openReferencePickerModal({
       return;
     }
 
-    // Case B: Personal / official asset preview
+    // Case B: Personal / works / inspiration / official asset preview
     const item = inspected.item;
-    const isSel = selectedRefs.includes(item.image);
+    const isSel = Boolean(item.image && selectedRefs.includes(item.image));
+    const stageSrc = item.image ? localImg(item.image) : (item.remoteUrl ? remoteThumb(item.remoteUrl) : "");
+    const subMeta = item.source === "work"
+      ? (item.subLabel || "我的作品")
+      : (item.source === "inspiration" ? (item.folder || "灵感库") : assetCategoryLabel(item.kind, categories));
     inspectorHost.append(
       el("div", { class: "rp-inspect-head" },
         el("div", { class: "col", style: { gap: "2px", minWidth: 0 } },
           el("strong", { class: "rp-inspect-title" }, item.name || item.id || "参考图"),
-          el("span", { class: "muted", style: { fontSize: "11.5px" } }, assetCategoryLabel(item.kind, categories))
+          el("span", { class: "muted", style: { fontSize: "11.5px" } }, subMeta)
         ),
         el("button", {
           type: "button",
@@ -1239,12 +1302,12 @@ export function openReferencePickerModal({
         }, "✕")
       ),
       el("div", { class: "rp-inspect-stage" },
-        el("img", { src: localImg(item.image), alt: item.name || "参考图" })
+        el("img", { src: stageSrc, alt: item.name || "参考图" })
       ),
       el("button", {
         type: "button",
         class: "btn btn-sm rp-inspect-cta" + (isSel ? "" : " btn-primary"),
-        onClick: () => toggleSelectPath(item.image),
+        onClick: () => { void selectGridItem(item); },
       }, isSel ? "✓ 已选用（点击取消）" : "＋ 选用为参考图")
     );
   }
@@ -1635,7 +1698,8 @@ export function openReferencePickerModal({
     }
   });
 
-  const dlg = showModal(title, body, [cancelBtn, confirmBtn], {
+  const openModalFn = stacked ? showStackedModal : showModal;
+  const dlg = openModalFn(title, body, [cancelBtn, confirmBtn], {
     className: "modal-picker modal-ref-picker modal-ref-picker-studio",
     flush: true,
     onClose: () => {
@@ -1645,6 +1709,9 @@ export function openReferencePickerModal({
       document.removeEventListener("keydown", onDialogKeydown);
     },
   });
+  if (stacked && dlg?._closeSelf) {
+    closeThisModal = dlg._closeSelf;
+  }
   document.addEventListener("paste", onDialogPaste);
   document.addEventListener("keydown", onDialogKeydown);
 
@@ -1671,7 +1738,9 @@ export function openReferencePickerModal({
     api("GET", "/api/resources/assets").catch(() => ({ items: [] })),
     api("GET", "/api/galleries").catch(() => ({ galleries: [] })),
     api("GET", "/api/galleries/packs").catch(() => ({ packs: [] })),
-  ]).then(([cats, mineRes, packRes, galRes, packsRes]) => {
+    api("GET", "/api/works?hasImages=1&limit=80").catch(() => ({ items: [] })),
+    api("GET", "/api/inspirations?limit=150").catch(() => ({ items: [] })),
+  ]).then(([cats, mineRes, packRes, galRes, packsRes, worksRes, inspRes]) => {
     if (Array.isArray(cats) && cats.length) categories = cats;
     const mMap = new Map();
     for (const a of (mineRes?.items || [])) {
@@ -1682,6 +1751,49 @@ export function openReferencePickerModal({
     mineItems = Array.from(mMap.values());
     const mineIds = new Set(mineItems.map((x) => x.id).filter(Boolean));
     const mineImgs = new Set(mineItems.map((x) => x.image).filter(Boolean));
+
+    const wSeen = new Set();
+    workItems = [];
+    for (const run of (worksRes?.items || [])) {
+      const doneImgs = (run.images || []).filter((im) => im && im.status === "done" && im.path);
+      doneImgs.forEach((im, idx) => {
+        if (wSeen.has(im.path)) return;
+        wSeen.add(im.path);
+        const titleStr = run.title || im.subject || "本地作品";
+        workItems.push({
+          id: im.id || `${run.id}_${idx}`,
+          name: doneImgs.length > 1 ? `${titleStr} #${idx + 1}` : titleStr,
+          image: im.path,
+          thumb: im.thumb || im.path,
+          kind: "work",
+          subLabel: run.modelLabel || run.mode || "作品",
+          prompt: im.prompt || im.subject || "",
+          source: "work",
+        });
+      });
+    }
+
+    const iSeen = new Set();
+    inspItems = [];
+    for (const it of (inspRes?.items || [])) {
+      const lp = String(it?.imagePath || "").trim();
+      const ru = String(it?.imageUrl || "").trim();
+      if (!lp && !ru) continue;
+      const dedupKey = lp || ru;
+      if (iSeen.has(dedupKey)) continue;
+      iSeen.add(dedupKey);
+      inspItems.push({
+        id: it.id || dedupKey,
+        name: it.title || it.name || "灵感参考",
+        image: lp,
+        remoteUrl: ru,
+        kind: "inspiration",
+        folder: it.folder || it.category || "灵感库",
+        tags: Array.isArray(it.tags) ? it.tags : [],
+        prompt: it.prompt || it.promptZh || "",
+        source: "inspiration",
+      });
+    }
 
     const oMap = new Map();
     for (const a of (packRes?.items || [])) {

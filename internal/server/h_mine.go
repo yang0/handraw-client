@@ -15,9 +15,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/yang0/handraw-client/internal/appdir"
+	"github.com/yang0/handraw-client/internal/harnesses"
 	"github.com/yang0/handraw-client/internal/profile"
 	"github.com/yang0/handraw-client/internal/prompt"
 	"github.com/yang0/handraw-client/internal/providers"
@@ -270,6 +272,30 @@ func (s *Server) minePut(w http.ResponseWriter, r *http.Request) (any, error) {
 	}
 }
 
+func cleanLocalImageList(cover string, list []string) (string, []string) {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(list)+1)
+	add := func(raw string) {
+		p := strings.TrimSpace(raw)
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	add(cover)
+	for _, item := range list {
+		add(item)
+		if len(out) >= 5 {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return "", nil
+	}
+	return out[0], out
+}
+
 func (s *Server) putCustomStyle(r *http.Request) (any, error) {
 	var body struct {
 		DocID          string   `json:"docId"`
@@ -277,6 +303,7 @@ func (s *Server) putCustomStyle(r *http.Request) (any, error) {
 		Name           string   `json:"name"`
 		GenerationName string   `json:"generation_name"`
 		Reference      string   `json:"reference"`
+		Description    string   `json:"description"`
 		Traits         string   `json:"traits"`
 		TraitsEn       string   `json:"traitsEn"`
 		Image          string   `json:"image"`
@@ -288,34 +315,42 @@ func (s *Server) putCustomStyle(r *http.Request) (any, error) {
 	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
-	name := firstStr(body.Name, body.GenerationName)
-	if strings.TrimSpace(name) == "" {
+	name := strings.TrimSpace(firstStr(body.Name, body.GenerationName))
+	if name == "" {
 		return nil, bad("画风名称不能为空")
 	}
-	if strings.TrimSpace(body.Traits) == "" {
-		return nil, bad("请填写画风特征描述")
+	traits := strings.TrimSpace(firstStr(body.Description, body.Traits, body.TraitsEn))
+	if traits == "" {
+		return nil, bad("请填写画风视觉特征描述")
 	}
-	if strings.TrimSpace(body.TraitsEn) == "" {
-		body.TraitsEn = body.Traits
-	}
-	violations := prompt.CheckTraitViolations(body.Traits + "\n" + body.TraitsEn)
+	traitsEn := strings.TrimSpace(firstStr(body.TraitsEn, traits))
+	violations := prompt.CheckTraitViolations(traits)
 	if body.Strict && len(violations) > 0 {
 		return nil, &apiError{Status: 400, Code: "trait_subject_violation", Msg: "画风特征不能包含具体人物、服饰或场景：" + strings.Join(violations, "、")}
 	}
-	docID := body.DocID
+	docID := strings.TrimSpace(body.DocID)
 	if docID == "" {
 		docID = "mine:" + uuid.NewString()
 	}
-	num := body.Number
+	var oldStyle resources.Style
+	var oldDoc store.Doc
+	hasOld := false
+	if existing, err := s.DB.GetDoc("style", docID); err == nil {
+		oldDoc = existing
+		hasOld = true
+		_ = json.Unmarshal(existing.Data, &oldStyle)
+	}
+	num := strings.TrimSpace(firstStr(body.Number, oldStyle.Number))
 	if num == "" {
 		num = s.nextCustomCode("style", "MY-S-")
 	}
 	if strings.TrimSpace(body.License) == "" {
-		body.License = "个人与商业创作输出允许，原包不允许再次分发"
+		body.License = firstStr(oldStyle.License, "个人与商业创作输出允许，原包不允许再次分发")
 	}
-	img := body.Image
-	if img == "" && len(body.Images) > 0 {
-		img = body.Images[0]
+	cover, imgList := cleanLocalImageList(body.Image, body.Images)
+	remoteImgURL := ""
+	if cover != "" && cover == oldStyle.Image {
+		remoteImgURL = oldStyle.RemoteImageURL
 	}
 	st := resources.Style{
 		Number:         num,
@@ -323,22 +358,24 @@ func (s *Server) putCustomStyle(r *http.Request) (any, error) {
 		GroupCode:      "MY",
 		GroupZh:        "我的画风",
 		GroupEn:        "My Styles",
-		Reference:      firstStr(body.Reference, "自建画风"),
+		Reference:      firstStr(body.Reference, oldStyle.Reference, "自建画风"),
 		GenerationName: firstStr(body.GenerationName, name),
 		NameZh:         name,
-		Traits:         strings.TrimSpace(body.Traits),
-		TraitsEn:       strings.TrimSpace(body.TraitsEn),
-		Image:          img,
+		Traits:         traits,
+		TraitsEn:       traitsEn,
+		Image:          cover,
+		Images:         imgList,
+		RemoteImageURL: remoteImgURL,
 		License:        body.License,
 		Tags:           body.Tags,
 		Source:         "mine",
 	}
 	b, _ := json.Marshal(st)
 	doc := store.Doc{Kind: "style", ID: docID, Name: name, Data: b, Dirty: true}
-	if old, err := s.DB.GetDoc("style", docID); err == nil {
-		doc.CreatedAt = old.CreatedAt
-		doc.RemoteID = old.RemoteID
-		doc.RemoteRev = old.RemoteRev
+	if hasOld {
+		doc.CreatedAt = oldDoc.CreatedAt
+		doc.RemoteID = oldDoc.RemoteID
+		doc.RemoteRev = oldDoc.RemoteRev
 	}
 	if err := s.DB.PutDoc(&doc); err != nil {
 		return nil, err
@@ -352,7 +389,7 @@ func (s *Server) putCustomStyle(r *http.Request) (any, error) {
 		PromptEn: st.TraitsEn,
 		License:  st.License,
 		Section:  "owned",
-		Examples: body.Images,
+		Examples: imgList,
 		Extra:    map[string]json.RawMessage{"local_number": numRaw},
 	})
 	if settings.Get().AutoSyncResources && s.Site.LoggedIn() {
@@ -363,51 +400,69 @@ func (s *Server) putCustomStyle(r *http.Request) (any, error) {
 
 func (s *Server) putCustomLayout(r *http.Request) (any, error) {
 	var body struct {
-		DocID    string   `json:"docId"`
-		ID       string   `json:"id"`
-		Name     string   `json:"name"`
-		NameEn   string   `json:"name_en"`
-		PromptZh string   `json:"prompt_zh"`
-		PromptEn string   `json:"prompt_en"`
-		Image    string   `json:"image"`
-		Keywords []string `json:"keywords"`
-		License  string   `json:"license"`
+		DocID       string   `json:"docId"`
+		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		NameEn      string   `json:"name_en"`
+		Description string   `json:"description"`
+		PromptZh    string   `json:"prompt_zh"`
+		PromptEn    string   `json:"prompt_en"`
+		Image       string   `json:"image"`
+		Images      []string `json:"images"`
+		Keywords    []string `json:"keywords"`
+		License     string   `json:"license"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(body.Name) == "" || strings.TrimSpace(body.PromptZh) == "" {
-		return nil, bad("图型名称与布局约束不能为空")
+	name := strings.TrimSpace(body.Name)
+	desc := strings.TrimSpace(firstStr(body.Description, body.PromptZh, body.PromptEn))
+	if name == "" || desc == "" {
+		return nil, bad("图型名称与排版约束不能为空")
 	}
-	if strings.TrimSpace(body.PromptEn) == "" {
-		body.PromptEn = body.PromptZh
-	}
-	docID := body.DocID
+	promptEn := strings.TrimSpace(firstStr(body.PromptEn, desc))
+	docID := strings.TrimSpace(body.DocID)
 	if docID == "" {
 		docID = "mine:" + uuid.NewString()
 	}
-	lid := body.ID
+	var oldLay resources.Layout
+	var oldDoc store.Doc
+	hasOld := false
+	if existing, err := s.DB.GetDoc("layout", docID); err == nil {
+		oldDoc = existing
+		hasOld = true
+		_ = json.Unmarshal(existing.Data, &oldLay)
+	}
+	lid := strings.TrimSpace(firstStr(body.ID, oldLay.ID))
 	if lid == "" {
 		lid = s.nextCustomCode("layout", "MY-L-")
 	}
-	lic := firstStr(body.License, "个人与商业创作输出允许，原包不允许再次分发")
+	lic := firstStr(body.License, oldLay.License, "个人与商业创作输出允许，原包不允许再次分发")
+	cover, imgList := cleanLocalImageList(body.Image, body.Images)
+	remoteImgURL := ""
+	if cover != "" && cover == oldLay.Image {
+		remoteImgURL = oldLay.RemoteImageURL
+	}
 	lay := resources.Layout{
-		ID:       lid,
-		Category: "mine",
-		Name:     strings.TrimSpace(body.Name),
-		NameEn:   firstStr(body.NameEn, body.Name),
-		Image:    body.Image,
-		Keywords: body.Keywords,
-		PromptZh: strings.TrimSpace(body.PromptZh),
-		PromptEn: strings.TrimSpace(body.PromptEn),
-		Source:   "mine",
+		ID:             lid,
+		Category:       "mine",
+		Name:           name,
+		NameEn:         firstStr(body.NameEn, name),
+		Image:          cover,
+		Images:         imgList,
+		RemoteImageURL: remoteImgURL,
+		Keywords:       body.Keywords,
+		PromptZh:       desc,
+		PromptEn:       promptEn,
+		License:        lic,
+		Source:         "mine",
 	}
 	b, _ := json.Marshal(lay)
 	doc := store.Doc{Kind: "layout", ID: docID, Name: lay.Name, Data: b, Dirty: true}
-	if old, err := s.DB.GetDoc("layout", docID); err == nil {
-		doc.CreatedAt = old.CreatedAt
-		doc.RemoteID = old.RemoteID
-		doc.RemoteRev = old.RemoteRev
+	if hasOld {
+		doc.CreatedAt = oldDoc.CreatedAt
+		doc.RemoteID = oldDoc.RemoteID
+		doc.RemoteRev = oldDoc.RemoteRev
 	}
 	if err := s.DB.PutDoc(&doc); err != nil {
 		return nil, err
@@ -421,6 +476,7 @@ func (s *Server) putCustomLayout(r *http.Request) (any, error) {
 		PromptEn: lay.PromptEn,
 		License:  lic,
 		Section:  "owned",
+		Examples: imgList,
 		Extra:    map[string]json.RawMessage{"local_number": numRaw},
 	})
 	if settings.Get().AutoSyncResources && s.Site.LoggedIn() {
@@ -704,17 +760,22 @@ func (s *Server) mineDelete(w http.ResponseWriter, r *http.Request) (any, error)
 		}
 		return okv, nil
 	}
+	needSync := false
 	if doc, err := s.DB.GetDoc(kind, id); err == nil {
 		if doc.RemoteID != "" {
 			doc.Deleted = true
 			doc.Dirty = true
 			_ = s.DB.PutDoc(&doc)
+			needSync = true
 		} else {
 			_ = s.DB.DeleteDocHard(kind, id)
 		}
 	}
 	if kind == "style" || kind == "layout" {
 		_ = profile.DeleteLibrary(id)
+		if needSync && settings.Get().AutoSyncResources && s.Site.LoggedIn() {
+			go func() { _, _ = s.syncResourcesInternal(context.Background()) }()
+		}
 	}
 	return okv, nil
 }
@@ -729,6 +790,85 @@ func (s *Server) mineSync(w http.ResponseWriter, r *http.Request) (any, error) {
 	}
 	_ = decode(r, &body)
 	return s.syncResourcesInternal(r.Context())
+}
+
+func isRemoteResourceImageURL(s string) bool {
+	u := strings.TrimSpace(s)
+	return strings.HasPrefix(u, "/api/library/assets/") ||
+		strings.HasPrefix(u, "/uploads/") ||
+		strings.HasPrefix(u, "/generated/") ||
+		strings.HasPrefix(u, "/images/")
+}
+
+func firstRemoteCoverURL(examples []string) string {
+	for _, ex := range examples {
+		if isRemoteResourceImageURL(ex) {
+			return strings.TrimSpace(ex)
+		}
+	}
+	return ""
+}
+
+func (s *Server) uploadPrivateResourceCover(ctx context.Context, localPath, label string) string {
+	path := normalizeLocalRef(localPath)
+	if path == "" {
+		path = strings.TrimSpace(localPath)
+	}
+	if path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) == 0 || len(raw) > 10<<20 {
+		return ""
+	}
+	mime := "image/png"
+	switch strings.ToLower(sniffImageExt(raw)) {
+	case ".jpg", ".jpeg":
+		mime = "image/jpeg"
+	case ".webp":
+		mime = "image/webp"
+	}
+	assetUID := uuid.NewString()
+	cleanName := strings.TrimSpace(label)
+	if cleanName == "" {
+		cleanName = "自定义封面"
+	}
+	if rs := []rune(cleanName); len(rs) > 72 {
+		cleanName = string(rs[:72])
+	}
+	respRaw, err := s.Site.Send(ctx, "PUT", "/api/library/assets/"+assetUID, map[string]any{
+		"uid":     assetUID,
+		"cat":     "other",
+		"name":    cleanName,
+		"dataUrl": "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw),
+		"origin":  "skill",
+	})
+	if err != nil {
+		return ""
+	}
+	var parsed struct {
+		ImageURL string `json:"imageUrl"`
+		Item     struct {
+			ImageURL string `json:"imageUrl"`
+		} `json:"item"`
+	}
+	_ = json.Unmarshal(respRaw, &parsed)
+	return firstStr(parsed.Item.ImageURL, parsed.ImageURL, "/api/library/assets/"+assetUID+"/image")
+}
+
+func (s *Server) downloadPrivateResourceCover(ctx context.Context, remoteURL string) string {
+	if !isRemoteResourceImageURL(remoteURL) {
+		return ""
+	}
+	raw, err := s.Site.Get(ctx, remoteURL)
+	if err != nil || len(raw) == 0 || len(raw) > 15<<20 {
+		return ""
+	}
+	up, err := saveUploadedBytes(raw, filepath.Base(remoteURL))
+	if err != nil {
+		return ""
+	}
+	return up.Path
 }
 
 func (s *Server) syncResourcesInternal(ctx context.Context) (map[string]any, error) {
@@ -766,16 +906,37 @@ func (s *Server) syncResourcesInternal(ctx context.Context) (map[string]any, err
 				}
 				continue
 			}
-			var zh, en, lic string
+			var zh, en, lic, localCover, remoteCover string
 			examples := []string{} // never null: the site rejects a null list
+			var st resources.Style
+			var lay resources.Layout
 			if kind == "style" {
-				var st resources.Style
 				_ = json.Unmarshal(d.Data, &st)
-				zh, en, lic = st.Traits, firstStr(st.TraitsEn, st.Traits), firstStr(st.License, "private")
+				zh, en, lic = st.Traits, firstStr(st.TraitsEn, st.Traits), firstStr(st.License, "个人使用")
+				localCover, remoteCover = st.Image, st.RemoteImageURL
 			} else {
-				var lay resources.Layout
 				_ = json.Unmarshal(d.Data, &lay)
-				zh, en, lic = lay.PromptZh, firstStr(lay.PromptEn, lay.PromptZh), "private"
+				zh, en, lic = lay.PromptZh, firstStr(lay.PromptEn, lay.PromptZh), firstStr(lay.License, "个人使用")
+				localCover, remoteCover = lay.Image, lay.RemoteImageURL
+			}
+			if localCover != "" && remoteCover == "" {
+				if uploadedURL := s.uploadPrivateResourceCover(ctx, localCover, d.Name); uploadedURL != "" {
+					remoteCover = uploadedURL
+					if kind == "style" {
+						st.RemoteImageURL = remoteCover
+						if nb, mErr := json.Marshal(st); mErr == nil {
+							d.Data = nb
+						}
+					} else {
+						lay.RemoteImageURL = remoteCover
+						if nb, mErr := json.Marshal(lay); mErr == nil {
+							d.Data = nb
+						}
+					}
+				}
+			}
+			if remoteCover != "" {
+				examples = append(examples, remoteCover)
 			}
 			payload := map[string]any{
 				"id":            uid,
@@ -829,8 +990,11 @@ func (s *Server) syncResourcesInternal(ctx context.Context) (map[string]any, err
 	if since == "" {
 		since = "0"
 	}
-	raw, err := s.Site.Get(ctx, "/api/v1/me/resources?limit=100&since="+url.QueryEscape(since))
-	if err == nil {
+	for pageIdx := 0; pageIdx < 10; pageIdx++ {
+		raw, err := s.Site.Get(ctx, "/api/v1/me/resources?limit=100&since="+url.QueryEscape(since))
+		if err != nil {
+			break
+		}
 		var page struct {
 			Items []struct {
 				ID         string            `json:"id"`
@@ -838,50 +1002,97 @@ func (s *Server) syncResourcesInternal(ctx context.Context) (map[string]any, err
 				Name       string            `json:"name"`
 				Definition map[string]string `json:"definition"`
 				License    string            `json:"license"`
+				Examples   []string          `json:"examples"`
 				Version    string            `json:"version"`
 				Revision   int               `json:"revision"`
 				DeletedAt  string            `json:"deletedAt"`
+				Published  json.RawMessage   `json:"published"`
 			} `json:"items"`
+			HasMore    bool   `json:"hasMore"`
 			NextCursor string `json:"nextCursor"`
 		}
-		if json.Unmarshal(raw, &page) == nil {
-			for _, it := range page.Items {
-				docID := "mine:" + it.ID
-				if it.DeletedAt != "" {
-					_ = s.DB.DeleteDocHard(it.Kind, docID)
-					_ = profile.DeleteLibrary(docID)
-					continue
-				}
-				if old, err := s.DB.GetDoc(it.Kind, docID); err == nil && old.Dirty && old.RemoteRev != it.Revision {
-					conflicts = append(conflicts, map[string]any{"id": docID, "kind": it.Kind, "name": it.Name, "remoteRev": it.Revision})
-					continue
-				}
-				var data []byte
-				if it.Kind == "style" {
-					num := s.nextCustomCode("style", "MY-S-")
-					st := resources.Style{
-						Number: num, Group: "MY 我的画风 / My Styles", GroupCode: "MY", GroupZh: "我的画风", GroupEn: "My Styles",
-						GenerationName: it.Name, NameZh: it.Name, Traits: it.Definition["zh"], TraitsEn: it.Definition["en"],
-						License: it.License, Source: "mine",
-					}
-					data, _ = json.Marshal(st)
-				} else {
-					lid := s.nextCustomCode("layout", "MY-L-")
-					lay := resources.Layout{
-						ID: lid, Category: "mine", Name: it.Name, PromptZh: it.Definition["zh"], PromptEn: it.Definition["en"], Source: "mine",
-					}
-					data, _ = json.Marshal(lay)
-				}
-				_ = s.DB.PutDoc(&store.Doc{Kind: it.Kind, ID: docID, Name: it.Name, Data: data, RemoteID: it.ID, RemoteRev: it.Revision, Dirty: false})
-				_ = profile.UpsertLibrary(profile.PersonalResource{
-					ID: docID, Kind: it.Kind, Name: it.Name, PromptZh: it.Definition["zh"], PromptEn: it.Definition["en"],
-					License: firstStr(it.License, "private"), Version: firstStr(it.Version, "1.0.0"), Section: "owned",
-				})
-				pulled++
+		if json.Unmarshal(raw, &page) != nil {
+			break
+		}
+		for _, it := range page.Items {
+			docID := "mine:" + it.ID
+			if it.DeletedAt != "" {
+				_ = s.DB.DeleteDocHard(it.Kind, docID)
+				_ = profile.DeleteLibrary(docID)
+				continue
 			}
-			if page.NextCursor != "" {
-				syncState.Cursors["resources"] = page.NextCursor
+			oldDoc, oldErr := s.DB.GetDoc(it.Kind, docID)
+			if oldErr == nil && oldDoc.Dirty && oldDoc.RemoteRev != it.Revision {
+				conflicts = append(conflicts, map[string]any{"id": docID, "kind": it.Kind, "name": it.Name, "remoteRev": it.Revision})
+				continue
 			}
+			zh := strings.TrimSpace(firstStr(it.Definition["zh"], it.Definition["en"]))
+			en := strings.TrimSpace(firstStr(it.Definition["en"], zh))
+			remoteCover := firstRemoteCoverURL(it.Examples)
+			var data []byte
+			var localCode string
+			var imgList []string
+			if it.Kind == "style" {
+				var prev resources.Style
+				if oldErr == nil {
+					_ = json.Unmarshal(oldDoc.Data, &prev)
+				}
+				num := firstStr(prev.Number, s.nextCustomCode("style", "MY-S-"))
+				localCode = num
+				cover := prev.Image
+				if remoteCover != "" && (remoteCover != prev.RemoteImageURL || cover == "" || !fileExists(cover)) {
+					if dl := s.downloadPrivateResourceCover(ctx, remoteCover); dl != "" {
+						cover = dl
+					}
+				}
+				cover, imgList = cleanLocalImageList(cover, prev.Images)
+				st := resources.Style{
+					Number: num, Group: "MY 我的画风 / My Styles", GroupCode: "MY", GroupZh: "我的画风", GroupEn: "My Styles",
+					Reference: firstStr(prev.Reference, "自建画风"),
+					GenerationName: it.Name, NameZh: it.Name, Traits: zh, TraitsEn: en,
+					Image: cover, Images: imgList, RemoteImageURL: firstStr(remoteCover, prev.RemoteImageURL),
+					License: it.License, Source: "mine",
+				}
+				data, _ = json.Marshal(st)
+			} else {
+				var prev resources.Layout
+				if oldErr == nil {
+					_ = json.Unmarshal(oldDoc.Data, &prev)
+				}
+				lid := firstStr(prev.ID, s.nextCustomCode("layout", "MY-L-"))
+				localCode = lid
+				cover := prev.Image
+				if remoteCover != "" && (remoteCover != prev.RemoteImageURL || cover == "" || !fileExists(cover)) {
+					if dl := s.downloadPrivateResourceCover(ctx, remoteCover); dl != "" {
+						cover = dl
+					}
+				}
+				cover, imgList = cleanLocalImageList(cover, prev.Images)
+				lay := resources.Layout{
+					ID: lid, Category: "mine", Name: it.Name, NameEn: firstStr(prev.NameEn, it.Name),
+					Image: cover, Images: imgList, RemoteImageURL: firstStr(remoteCover, prev.RemoteImageURL),
+					PromptZh: zh, PromptEn: en, License: it.License, Source: "mine",
+				}
+				data, _ = json.Marshal(lay)
+			}
+			_ = s.DB.PutDoc(&store.Doc{Kind: it.Kind, ID: docID, Name: it.Name, Data: data, RemoteID: it.ID, RemoteRev: it.Revision, Dirty: false})
+			if len(it.Published) > 2 && string(it.Published) != "null" {
+				_ = s.DB.PutDoc(&store.Doc{Kind: publishStateKind, ID: docID, Name: it.Name, Data: it.Published})
+			}
+			numRaw, _ := json.Marshal(localCode)
+			_ = profile.UpsertLibrary(profile.PersonalResource{
+				ID: docID, Kind: it.Kind, Name: it.Name, PromptZh: zh, PromptEn: en,
+				License: firstStr(it.License, "个人使用"), Version: firstStr(it.Version, "1.0.0"), Section: "owned",
+				Examples: imgList, Extra: map[string]json.RawMessage{"local_number": numRaw},
+			})
+			pulled++
+		}
+		if page.NextCursor != "" {
+			since = page.NextCursor
+			syncState.Cursors["resources"] = page.NextCursor
+		}
+		if !page.HasMore || len(page.Items) == 0 {
+			break
 		}
 	}
 	_ = profile.WriteSyncState(username, syncState)
@@ -896,9 +1107,18 @@ func (s *Server) syncResourcesInternal(ctx context.Context) (map[string]any, err
 	return map[string]any{"ok": true, "pushed": pushed, "pulled": pulled, "conflicts": conflicts}, nil
 }
 
+func fileExists(p string) bool {
+	if strings.TrimSpace(p) == "" {
+		return false
+	}
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
+}
+
 func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
 		Images   []string `json:"images"`
+		Kind     string   `json:"kind"`    // style | layout
 		Purpose  string   `json:"purpose"` // find | create
 		ModelRef string   `json:"modelRef"`
 	}
@@ -906,16 +1126,35 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 		return nil, err
 	}
 	if len(body.Images) == 0 {
-		return nil, bad("请先选择或拖入参考图")
+		return nil, bad("请先选择、粘贴或拖入参考图")
+	}
+	kind := strings.ToLower(strings.TrimSpace(body.Kind))
+	if kind != "layout" {
+		kind = "style"
 	}
 	route, err := resolveAIRoute("vision", body.ModelRef)
 	if err != nil {
 		return nil, err
 	}
 	dataURLs := make([]string, 0, len(body.Images))
+	localPaths := make([]string, 0, len(body.Images))
+	var tempPaths []string
+	defer func() {
+		for _, tp := range tempPaths {
+			_ = os.Remove(tp)
+		}
+	}()
 	for _, img := range body.Images {
 		if strings.HasPrefix(img, "data:image/") {
 			dataURLs = append(dataURLs, img)
+			if raw, dErr := decodeDataURL(img); dErr == nil && len(raw) > 0 {
+				if tf, tErr := os.CreateTemp("", "handraw-analyze-*"+sniffImageExt(raw)); tErr == nil {
+					_, _ = tf.Write(raw)
+					_ = tf.Close()
+					localPaths = append(localPaths, tf.Name())
+					tempPaths = append(tempPaths, tf.Name())
+				}
+			}
 			continue
 		}
 		path := normalizeLocalRef(img)
@@ -925,6 +1164,11 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("无法读取图片 %s：%w", filepath.Base(path), err)
+		}
+		if abs, aErr := filepath.Abs(path); aErr == nil {
+			localPaths = append(localPaths, abs)
+		} else {
+			localPaths = append(localPaths, path)
 		}
 		mime := "image/png"
 		switch strings.ToLower(filepath.Ext(path)) {
@@ -942,80 +1186,110 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 	}
 	purpose := firstStr(body.Purpose, "find")
 
+	promptText := "请仅提取以下参考图的纯粹视觉艺术语言（媒介、笔触线条、纸张材质肌理、色彩倾向、光影质感、空间氛围）。严禁描述任何具体人物、性别、发型、服饰、动物、道具、建筑或场景故事。只用一段精炼清晰的中文概括视觉特征即可。返回严格 JSON: {\"name\":\"画风名称（4-12字）\",\"description\":\"纯视觉艺术语言描述\"}"
+	if kind == "layout" {
+		promptText = "请仅提取以下参考图的画面构图与版面排版结构（视觉动线、区域网格划分、标题区/主体配图区/说明文案区位置与比例、边框分隔与留白机制）。不要描述具体画风笔触、不要描述具体人物或故事题材。只用一段清晰可复用的中文排版约束描述。返回严格 JSON: {\"name\":\"图型名称（4-12字）\",\"description\":\"构图与版面排版约束描述\"}"
+	}
+
+	buildResult := func(source, service, modelName, rawReply string) (map[string]any, error) {
+		var out struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			TraitsZh    string `json:"traitsZh"`
+			TraitsEn    string `json:"traitsEn"`
+			PromptZh    string `json:"promptZh"`
+			PromptEn    string `json:"promptEn"`
+		}
+		if json.Unmarshal([]byte(extractJSON(rawReply)), &out) != nil {
+			return nil, bad("视觉解析模型返回格式无法解析，请确认所选模型支持看图（Vision）并重试")
+		}
+		desc := strings.TrimSpace(firstStr(out.Description, out.TraitsZh, out.PromptZh, out.TraitsEn, out.PromptEn))
+		if desc == "" {
+			return nil, bad("视觉解析模型未返回有效特征描述，请重试或切换支持视觉识图的模型")
+		}
+		res := map[string]any{
+			"source":      source,
+			"kind":        kind,
+			"name":        strings.TrimSpace(out.Name),
+			"description": desc,
+			"traitsZh":    desc,
+			"traitsEn":    firstStr(strings.TrimSpace(out.TraitsEn), desc),
+			"promptZh":    desc,
+			"promptEn":    firstStr(strings.TrimSpace(out.PromptEn), desc),
+		}
+		if service != "" {
+			res["service"] = service
+		}
+		if modelName != "" {
+			res["model"] = modelName
+		}
+		if kind == "style" {
+			res["matches"] = p.SearchStyles(desc, 5)
+			res["violations"] = prompt.CheckTraitViolations(desc)
+		} else {
+			res["violations"] = []string{}
+		}
+		return res, nil
+	}
+
 	analyzeWithSite := func() (map[string]any, error) {
-		raw, err := s.Site.AnalyzeStyle(r.Context(), dataURLs, purpose)
-		if err != nil {
-			var ae *site.APIError
-			if errors.As(err, &ae) && (ae.Status == 404 || ae.Status == 403) {
-				// Use the unified website vision AI gateway (/api/ai/chat) without model names.
-				parts := []any{map[string]any{
-					"type": "text",
-					"text": "请仅提取以下参考图的纯粹视觉艺术语言（媒介、线条、材质、色彩倾向、光影质感、空间构图机制）。严禁描述任何具体人物、性别、发型、服饰、动物、道具、建筑或场景故事。返回严格 JSON: {\"name\":\"\",\"traitsZh\":\"\",\"traitsEn\":\"\"}",
-				}}
-				for _, du := range dataURLs {
-					parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": du}})
+		if kind == "style" {
+			raw, err := s.Site.AnalyzeStyle(r.Context(), dataURLs, purpose)
+			if err == nil {
+				var parsed struct {
+					Name     string   `json:"name"`
+					TraitsZh string   `json:"traitsZh"`
+					TraitsEn string   `json:"traitsEn"`
+					Matches  []string `json:"matches"`
 				}
-				aiRes, aiErr := s.Site.AIChat(r.Context(), site.AIChatRequest{
-					Capability:   "vision",
-					Messages:     []providers.ChatMessage{{Role: "user", Content: parts}},
-					JSONMode:     true,
-					FeatureScope: "vision_extract",
-				})
-				if aiErr != nil {
-					return nil, aiErr
+				_ = json.Unmarshal(raw, &parsed)
+				desc := strings.TrimSpace(firstStr(parsed.TraitsZh, parsed.TraitsEn))
+				if desc != "" {
+					var matched []resources.Style
+					for _, id := range parsed.Matches {
+						if st, ok := p.Style(id); ok {
+							matched = append(matched, st)
+						}
+					}
+					if len(matched) == 0 {
+						matched = p.SearchStyles(desc, 5)
+					}
+					return map[string]any{
+						"source":      "site",
+						"kind":        kind,
+						"name":        strings.TrimSpace(parsed.Name),
+						"description": desc,
+						"traitsZh":    desc,
+						"traitsEn":    firstStr(strings.TrimSpace(parsed.TraitsEn), desc),
+						"matches":     matched,
+						"violations":  prompt.CheckTraitViolations(desc),
+					}, nil
 				}
-				var out struct {
-					Name     string `json:"name"`
-					TraitsZh string `json:"traitsZh"`
-					TraitsEn string `json:"traitsEn"`
+			} else {
+				var ae *site.APIError
+				if !errors.As(err, &ae) || (ae.Status != 404 && ae.Status != 403) {
+					return nil, err
 				}
-				if json.Unmarshal([]byte(extractJSON(aiRes.Content)), &out) != nil || (out.TraitsZh == "" && out.TraitsEn == "") {
-					return nil, bad("视觉理解服务返回格式无法解析，请重试")
-				}
-				matched := p.SearchStyles(out.TraitsZh+" "+out.TraitsEn, 5)
-				return map[string]any{
-					"source":     "site",
-					"service":    aiRes.Service,
-					"name":       out.Name,
-					"traitsZh":   out.TraitsZh,
-					"traitsEn":   out.TraitsEn,
-					"matches":    matched,
-					"violations": prompt.CheckTraitViolations(out.TraitsZh + " " + out.TraitsEn),
-				}, nil
-			}
-			return nil, err
-		}
-		var parsed struct {
-			Name     string   `json:"name"`
-			TraitsZh string   `json:"traitsZh"`
-			TraitsEn string   `json:"traitsEn"`
-			Matches  []string `json:"matches"`
-		}
-		_ = json.Unmarshal(raw, &parsed)
-		var matched []resources.Style
-		for _, id := range parsed.Matches {
-			if st, ok := p.Style(id); ok {
-				matched = append(matched, st)
 			}
 		}
-		if len(matched) == 0 && parsed.TraitsZh+parsed.TraitsEn != "" {
-			matched = p.SearchStyles(parsed.TraitsZh+" "+parsed.TraitsEn, 5)
+		parts := []any{map[string]any{"type": "text", "text": promptText}}
+		for _, du := range dataURLs {
+			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": du}})
 		}
-		return map[string]any{
-			"source":     "site",
-			"name":       parsed.Name,
-			"traitsZh":   parsed.TraitsZh,
-			"traitsEn":   parsed.TraitsEn,
-			"matches":    matched,
-			"violations": prompt.CheckTraitViolations(parsed.TraitsZh + " " + parsed.TraitsEn),
-		}, nil
+		aiRes, aiErr := s.Site.AIChat(r.Context(), site.AIChatRequest{
+			Capability:   "vision",
+			Messages:     []providers.ChatMessage{{Role: "user", Content: parts}},
+			JSONMode:     true,
+			FeatureScope: "vision_extract",
+		})
+		if aiErr != nil {
+			return nil, aiErr
+		}
+		return buildResult("site", aiRes.Service, "", aiRes.Content)
 	}
 
 	analyzeWithProvider := func(tp settings.Provider, model string) (map[string]any, error) {
-		parts := []any{map[string]any{
-			"type": "text",
-			"text": "请仅提取以下参考图的纯粹视觉艺术语言（媒介、线条、材质、色彩倾向、光影质感、空间构图机制）。严禁描述任何具体人物、性别、发型、服饰、动物、道具、建筑或场景故事。返回严格 JSON: {\"name\":\"\",\"traitsZh\":\"\",\"traitsEn\":\"\"}",
-		}}
+		parts := []any{map[string]any{"type": "text", "text": promptText}}
 		for _, du := range dataURLs {
 			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": du}})
 		}
@@ -1023,27 +1297,29 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 		if err != nil {
 			return nil, err
 		}
-		var out struct {
-			Name     string `json:"name"`
-			TraitsZh string `json:"traitsZh"`
-			TraitsEn string `json:"traitsEn"`
+		return buildResult("provider", "", tp.Name+":"+model, reply)
+	}
+
+	analyzeWithHarness := func(hst harnesses.Status, subModel string) (map[string]any, error) {
+		res, err := harnesses.Chat(r.Context(), hst, harnesses.ChatRequest{
+			Messages: []harnesses.Message{{Role: "user", Content: promptText}},
+			Images:   localPaths,
+			JSONMode: true,
+			Model:    subModel,
+		})
+		if err != nil {
+			return nil, err
 		}
-		if json.Unmarshal([]byte(extractJSON(reply)), &out) != nil || (out.TraitsZh == "" && out.TraitsEn == "") {
-			return nil, bad("视觉解析模型返回格式无法解析，请确认所选模型支持视觉识图（Vision）")
+		modelLabel := hst.Name
+		if res.Model != "" {
+			modelLabel += " · " + res.Model
 		}
-		matched := p.SearchStyles(out.TraitsZh+" "+out.TraitsEn, 5)
-		return map[string]any{
-			"source":     "provider",
-			"model":      tp.Name + ":" + model,
-			"name":       out.Name,
-			"traitsZh":   out.TraitsZh,
-			"traitsEn":   out.TraitsEn,
-			"matches":    matched,
-			"violations": prompt.CheckTraitViolations(out.TraitsZh + " " + out.TraitsEn),
-		}, nil
+		return buildResult("harness", "", modelLabel, res.Text)
 	}
 
 	switch route.Mode {
+	case "harness":
+		return analyzeWithHarness(route.Harness, route.HarnessSubModel)
 	case "provider":
 		return analyzeWithProvider(route.Provider, route.Model)
 	case "site":
@@ -1079,7 +1355,7 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 		return nil, &apiError{
 			Status: 503,
 			Code:   "analyze_unavailable",
-			Msg:    "请先登录手绘风账号（使用网站线上视觉接口），或在「设置 → 模型与接口配置」添加支持视觉识图的第三方中转站",
+			Msg:    "请先登录手绘风账号，或选择第三方接口 / 本地 AI Harness 进行识别提取",
 		}
 	}
 }
@@ -1159,12 +1435,38 @@ func (s *Server) uploadImage(w http.ResponseWriter, r *http.Request) (any, error
 	var body struct {
 		Name    string `json:"name"`
 		DataURL string `json:"dataUrl"`
+		URL     string `json:"url"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(body.URL) != "" {
+		rawURL := strings.TrimSpace(body.URL)
+		if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+			return nil, bad("仅支持 http/https 图片链接")
+		}
+		hc := &http.Client{Timeout: 20 * time.Second}
+		req, err := http.NewRequestWithContext(r.Context(), "GET", rawURL, nil)
+		if err != nil {
+			return nil, bad("图片链接无效")
+		}
+		req.Header.Set("User-Agent", "HandrawClient/1.0")
+		resp, err := hc.Do(req)
+		if err != nil {
+			return nil, bad("下载远端图片失败：" + err.Error())
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return nil, bad(fmt.Sprintf("远端图片返回状态 %d", resp.StatusCode))
+		}
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 25<<20))
+		if err != nil || len(b) == 0 {
+			return nil, bad("读取远端图片失败")
+		}
+		return saveUploadedBytes(b, firstStr(body.Name, "remote"))
+	}
 	if body.DataURL == "" {
-		return nil, bad("缺少 dataUrl")
+		return nil, bad("缺少 dataUrl 或 url")
 	}
 	return saveUploadedDataURL(body.DataURL, body.Name)
 }

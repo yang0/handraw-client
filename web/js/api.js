@@ -239,6 +239,31 @@ export function closeModal() {
   }
 }
 
+export function showStackedModal(title, bodyNode, footerNodes = [], opts = {}) {
+  const dlg = el("dialog", { class: "modal" + (opts.className ? " " + opts.className : "") });
+  const closeSelf = () => { if (dlg.open) dlg.close(); };
+  const closeBtn = el("button", { type: "button", class: "icon-btn modal-close", "aria-label": "关闭", onClick: closeSelf }, "✕");
+  const head = el("header", { class: "modal-head" },
+    el("h2", { class: "modal-title" }, title || ""),
+    closeBtn
+  );
+  if (opts.hideHeader) head.hidden = true;
+  const body = el("div", { class: "modal-body" + (opts.flush ? " modal-body-flush" : "") });
+  if (bodyNode) body.appendChild(bodyNode);
+  const foot = el("footer", { class: "modal-foot" });
+  if (opts.hideFooter) foot.hidden = true;
+  for (const fn of footerNodes) foot.appendChild(fn);
+  dlg.appendChild(el("div", { class: "modal-inner" }, head, body, foot));
+  dlg.addEventListener("close", () => {
+    try { opts.onClose?.(); } catch {}
+    dlg.remove();
+  }, { once: true });
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  dlg._closeSelf = closeSelf;
+  return dlg;
+}
+
 const listeners = new Set();
 export function onEvent(fn) {
   listeners.add(fn);

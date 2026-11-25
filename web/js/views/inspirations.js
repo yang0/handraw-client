@@ -1,6 +1,7 @@
 import { api, clear, closeModal, copyText, el, localImg, onEvent, openURL, remoteThumb, showModal, toast } from "../api.js";
 import { createCardSizeSwitcher, masonry } from "../masonry.js";
 import { openBatchShareInspirationsModal, openInspirationRemixModal, openShareInspirationModal } from "./work-remix-modal.js";
+import { openLayoutEditorModal, openStyleEditorModal } from "./resource-editor.js";
 
 const SOURCE_LABELS = {
   x: "X 采集",
@@ -1349,6 +1350,7 @@ function openLocalInspirationDetail(item, ctx, onChanged, availableFolders = [])
       )
     );
 
+    const hasAnyImg = Boolean(cur.imagePath || cur.imageUrl);
     showModal("灵感详情", body, [
       el("button", {
         type: "button",
@@ -1363,6 +1365,22 @@ function openLocalInspirationDetail(item, ctx, onChanged, availableFolders = [])
           } catch (e) { toast(e.message); }
         },
       }, "删除"),
+      hasAnyImg ? el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: () => openStyleEditorModal({
+          image: cur.imagePath || "",
+          remoteImageUrl: cur.imageUrl || "",
+        }, null, { stacked: true }),
+      }, "🎨 提取画风") : null,
+      hasAnyImg ? el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: () => openLayoutEditorModal({
+          image: cur.imagePath || "",
+          remoteImageUrl: cur.imageUrl || "",
+        }, null, { stacked: true }),
+      }, "📐 提取图型") : null,
       cur.publishedUrl ? el("button", { type: "button", class: "btn", onClick: () => openURL(cur.publishedUrl) }, "查看社区页 ↗") : null,
       el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
     ].filter(Boolean));

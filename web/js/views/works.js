@@ -1,5 +1,6 @@
 import { api, clear, closeModal, copyText, el, localImg, onEvent, openURL, remoteThumb, showModal, toast, toWebp } from "../api.js";
 import { createCardSizeSwitcher, masonry } from "../masonry.js";
+import { openLayoutEditorModal, openStyleEditorModal } from "./resource-editor.js";
 
 const state = {
   tab: "local", // local | history | collections
@@ -469,11 +470,35 @@ async function openRunDetail(runId, ctx, onChanged) {
     });
   });
 
+  const extractStyleBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    title: "以当前作品为参考图提取自建画风",
+    onClick: () => {
+      const im = doneImages[activeIdx] || doneImages[0];
+      if (!im?.path) return;
+      openStyleEditorModal({ image: im.path }, null, { stacked: true });
+    },
+  }, "🎨 提取画风");
+
+  const extractLayoutBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    title: "以当前作品为参考图提取自建图型",
+    onClick: () => {
+      const im = doneImages[activeIdx] || doneImages[0];
+      if (!im?.path) return;
+      openLayoutEditorModal({ image: im.path }, null, { stacked: true });
+    },
+  }, "📐 提取图型");
+
   const stageDock = el("div", { class: "wd-dock" },
     el("div", { class: "wd-dock-group" },
       doneImages.length ? copyImgBtn : null,
       doneImages.length ? editImgBtn : null,
-      remixRecipeBtn
+      remixRecipeBtn,
+      doneImages.length ? extractStyleBtn : null,
+      doneImages.length ? extractLayoutBtn : null
     ),
     el("div", { class: "wd-dock-group" }, revealBtn, exportBtn)
   );

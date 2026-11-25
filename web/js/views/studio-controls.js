@@ -1,4 +1,5 @@
-import { clear, closeModal, el, packImg, showModal, toast } from "../api.js";
+import { clear, closeModal, el, localImg, packImg, showModal, toast } from "../api.js";
+import { openLayoutEditorModal, openStyleEditorModal } from "./resource-editor.js";
 
 const css = el("link", { rel: "stylesheet", href: new URL("../../css/studio.css", import.meta.url).href });
 document.head.appendChild(css);
@@ -149,6 +150,17 @@ export function ratioControl(label, value, onChange, { compact = false } = {}) {
 
 export function resourceId(item) { return item?.number || item?.id || ""; }
 export function resourceName(item) { return item?.nameZh || item?.name_zh || item?.name || item?.generation_name || item?.name_en || resourceId(item); }
+export function resourceThumbUrl(item) {
+  const raw = String(item?.image || "").trim();
+  if (!raw) return "";
+  if (raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("/files/") || raw.startsWith("data:")) {
+    return raw;
+  }
+  if (item?.source === "mine" || /^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith("/") || raw.includes("\\")) {
+    return localImg(raw);
+  }
+  return packImg(raw);
+}
 function resourceCategory(item) {
   const raw = item?.groupZh || item?.category_zh || item?.group || item?.category || "";
   return CATEGORY_LABELS[raw] || raw;
@@ -160,9 +172,7 @@ export function warmResourceThumbs(items, limit = 24) {
   if (!Array.isArray(items) || !items.length || typeof Image === "undefined") return;
   const urls = [];
   for (let i = 0; i < items.length && urls.length < limit; i++) {
-    const raw = items[i]?.image;
-    if (!raw) continue;
-    const url = packImg(raw);
+    const url = resourceThumbUrl(items[i]);
     if (!url || _warmedStudioThumbs.has(url)) continue;
     _warmedStudioThumbs.add(url);
     urls.push(url);
@@ -183,7 +193,7 @@ export function warmResourceThumbs(items, limit = 24) {
   }
 }
 
-export function openResourceDialog(title, items, selected, onSelect, { empty = "不指定", allowRandom = true } = {}) {
+export function openResourceDialog(title, items, selected, onSelect, { empty = "不指定", allowRandom = true, createKind = "" } = {}) {
   const search = el("input", { class: "input", type: "search", placeholder: "搜索编号、名称或关键词…", autofocus: true });
   const catBar = el("div", { class: "studio-cat-tabs", role: "group", "aria-label": `${title}分类` });
   const grid = el("div", { class: "studio-resource-grid" });
@@ -234,7 +244,7 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
     if (item.image) {
       const wrap = el("div", { class: "studio-resource-thumb-wrap", dataset: { fallback: id || "+" } });
       const img = el("img", {
-        src: packImg(item.image),
+        src: resourceThumbUrl(item),
         alt: "",
         decoding: "async",
         loading: idx < 18 ? "eager" : "lazy",
@@ -373,7 +383,29 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
     count,
     grid
   );
+  const createBtn = (createKind === "style" || createKind === "layout")
+    ? el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        style: { marginRight: "auto" },
+        onClick: () => {
+          const openEditor = createKind === "layout" ? openLayoutEditorModal : openStyleEditorModal;
+          openEditor({}, (saved) => {
+            if (!saved) return;
+            const newId = resourceId(saved);
+            if (newId) {
+              const existIdx = items.findIndex((x) => resourceId(x) === newId);
+              if (existIdx >= 0) items[existIdx] = saved;
+              else items.unshift(saved);
+              choose(newId);
+            }
+          }, { stacked: true });
+        },
+      }, createKind === "layout" ? "＋ 新建图型" : "＋ 新建画风")
+    : null;
+
   const footer = [
+    createBtn,
     empty ? el("button", { type: "button", class: "btn", onClick: () => choose("") }, empty) : null,
     el("button", { type: "button", class: "btn", onClick: () => closeCurrent() }, "取消"),
   ].filter(Boolean);
@@ -414,7 +446,7 @@ export function openResourceDialog(title, items, selected, onSelect, { empty = "
   requestAnimationFrame(() => search.focus({ preventScroll: true }));
 }
 
-export function resourcePicker(label, items, value, onChange, empty = "不指定", { allowClear = true } = {}) {
+export function resourcePicker(label, items, value, onChange, empty = "不指定", { allowClear = true, createKind = "" } = {}) {
   let selected = value;
   let caption = label;
   const wrap = el("div", { class: "studio-picker-wrap" });
@@ -441,7 +473,7 @@ export function resourcePicker(label, items, value, onChange, empty = "不指定
     clear(button);
     button.append(
       el("div", { class: "make-image-picker-thumb" },
-        item?.image ? el("img", { src: packImg(item.image), alt: "" }) : el("span", { class: "make-image-picker-placeholder", "aria-hidden": "true" }, "＋")),
+        item?.image ? el("img", { src: resourceThumbUrl(item), alt: "" }) : el("span", { class: "make-image-picker-placeholder", "aria-hidden": "true" }, "＋")),
       el("div", { class: "make-image-picker-info" },
         el("span", { class: "make-image-picker-badge" }, caption + (item ? ` · ${resourceId(item)}` : "")),
         el("strong", { class: "make-image-picker-name" }, item ? resourceName(item) : empty),
@@ -454,7 +486,7 @@ export function resourcePicker(label, items, value, onChange, empty = "不指定
     openResourceDialog(caption, items, selected, (id) => {
       sync(id);
       onChange(id);
-    }, { empty: allowClear ? empty : "" });
+    }, { empty: allowClear ? empty : "", createKind });
   });
 
   sync();
@@ -512,9 +544,9 @@ export function recipeControls(state, catalog, onChange = () => {}, { article = 
 
   const topRow = el("div", { class: "make-image-top-row" }, modes, fusion);
 
-  const primary = resourcePicker("画风", catalog.styles || [], state.style, (v) => { state.style = v; change(); }, hasDefaultStyle ? "选择画风" : "AI 推荐", { allowClear: !hasDefaultStyle });
-  const secondary = resourcePicker("场景画风", catalog.styles || [], state.style2, (v) => { state.style2 = v; change(); }, "选择场景画风", { allowClear: true });
-  const layoutPicker = resourcePicker("图型", catalog.layouts || [], state.layout, (v) => { state.layout = v; syncSpecialLayoutFields(); change(); }, "自由构图", { allowClear: true });
+  const primary = resourcePicker("画风", catalog.styles || [], state.style, (v) => { state.style = v; change(); }, hasDefaultStyle ? "选择画风" : "AI 推荐", { allowClear: !hasDefaultStyle, createKind: "style" });
+  const secondary = resourcePicker("场景画风", catalog.styles || [], state.style2, (v) => { state.style2 = v; change(); }, "选择场景画风", { allowClear: true, createKind: "style" });
+  const layoutPicker = resourcePicker("图型", catalog.layouts || [], state.layout, (v) => { state.layout = v; syncSpecialLayoutFields(); change(); }, "自由构图", { allowClear: true, createKind: "layout" });
   const color = resourcePicker("主题色", catalog.colors || [], state.color, (v) => { state.color = v; change(); }, "随画风", { allowClear: true });
   warmResourceThumbs(catalog.styles || [], 24);
   warmResourceThumbs(catalog.layouts || [], 24);

@@ -511,7 +511,7 @@ export function createTextModelPicker(modRes, currentVal, scene = "", onChange =
       if (popEl && !popEl.contains(e.target) && !wrap.contains(e.target)) closePopover();
     };
     const onKey = (e) => {
-      if (e.key === "Escape") { e.stopPropagation(); closePopover(); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePopover(); }
     };
     const onResize = () => closePopover();
     document.addEventListener("pointerdown", onDown, true);

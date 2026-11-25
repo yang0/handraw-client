@@ -35,7 +35,9 @@ type Style struct {
 	Reference      string   `json:"reference"`
 	GenerationName string   `json:"generation_name"`
 	Traits         string   `json:"traits"`
-	Image          string   `json:"image"` // pack-relative
+	Image          string   `json:"image"` // pack-relative or local path for custom
+	Images         []string `json:"images,omitempty"`
+	RemoteImageURL string   `json:"remoteImageUrl,omitempty"`
 	Grid           string   `json:"grid,omitempty"`
 	Source         string   `json:"source"` // official | mine | unlocked
 	Author         string   `json:"author,omitempty"`
@@ -46,16 +48,19 @@ type Style struct {
 }
 
 type Layout struct {
-	ID         string   `json:"id"`
-	Category   string   `json:"category"`
-	Name       string   `json:"name"`
-	NameEn     string   `json:"name_en"`
-	Image      string   `json:"image"`
-	PromptFile string   `json:"prompt_file,omitempty"`
-	Keywords   []string `json:"keywords"`
-	PromptZh   string   `json:"prompt_zh"`
-	PromptEn   string   `json:"prompt_en"`
-	Source     string   `json:"source"`
+	ID             string   `json:"id"`
+	Category       string   `json:"category"`
+	Name           string   `json:"name"`
+	NameEn         string   `json:"name_en"`
+	Image          string   `json:"image"`
+	Images         []string `json:"images,omitempty"`
+	RemoteImageURL string   `json:"remoteImageUrl,omitempty"`
+	PromptFile     string   `json:"prompt_file,omitempty"`
+	Keywords       []string `json:"keywords"`
+	PromptZh       string   `json:"prompt_zh"`
+	PromptEn       string   `json:"prompt_en"`
+	License        string   `json:"license,omitempty"`
+	Source         string   `json:"source"`
 }
 
 type Color struct {

@@ -90,9 +90,10 @@ type Status struct {
 	DefaultRef      string        `json:"defaultRef"`
 }
 
-// ChatRequest is a single text/planning turn sent to a local harness.
+// ChatRequest is a single text/planning/vision turn sent to a local harness.
 type ChatRequest struct {
 	Messages   []Message
+	Images     []string // optional absolute local image file paths for multimodal CLIs
 	JSONMode   bool
 	Model      string // optional per-call sub-model override
 	WorkDir    string // optional per-call workdir override
@@ -718,6 +719,20 @@ func Chat(ctx context.Context, st Status, req ChatRequest) (ChatResult, error) {
 		return ChatResult{}, errors.New("消息内容不能为空")
 	}
 
+	var validImages []string
+	for _, raw := range req.Images {
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			validImages = append(validImages, p)
+		}
+	}
+
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
 		model = strings.TrimSpace(st.Model)
@@ -736,8 +751,23 @@ func Chat(ctx context.Context, st Status, req ChatRequest) (ChatResult, error) {
 	driver := NormalizeDriver(st.Driver)
 
 	// Paseo-style warm persistent subprocess pool for agy stream-json sessions (#136).
-	if driver == "agy" && strings.TrimSpace(req.SessionKey) != "" {
+	if driver == "agy" && strings.TrimSpace(req.SessionKey) != "" && len(validImages) == 0 {
 		return chatViaAgyWarmSession(runCtx, st, model, workDir, prompt, strings.TrimSpace(req.SessionKey))
+	}
+
+	// For drivers that read images via path references in prompt, prepend clear file instructions.
+	effectivePrompt := prompt
+	if len(validImages) > 0 && driver != "codex" && driver != "opencode" {
+		var sb strings.Builder
+		sb.WriteString("请先读取并仔细观察以下本地参考图文件，再严格按要求作答：\n")
+		for _, imgPath := range validImages {
+			sb.WriteString("- ")
+			sb.WriteString(imgPath)
+			sb.WriteByte('\n')
+		}
+		sb.WriteByte('\n')
+		sb.WriteString(prompt)
+		effectivePrompt = sb.String()
 	}
 
 	var scratchDir string
@@ -759,7 +789,7 @@ func Chat(ctx context.Context, st Status, req ChatRequest) (ChatResult, error) {
 		}
 	case "grok", "goose":
 		if f, err := os.CreateTemp("", "handraw-prompt-*.txt"); err == nil {
-			_, _ = f.WriteString(prompt)
+			_, _ = f.WriteString(effectivePrompt)
 			auxFile = f.Name()
 			_ = f.Close()
 			defer os.Remove(auxFile)
@@ -770,7 +800,7 @@ func Chat(ctx context.Context, st Status, req ChatRequest) (ChatResult, error) {
 		codexOutFile = auxFile
 	}
 
-	args, stdinPayload := BuildArgs(driver, model, st.ExtraArgs, prompt, auxFile)
+	args, stdinPayload := BuildArgsWithImages(driver, model, st.ExtraArgs, effectivePrompt, auxFile, validImages)
 
 	start := time.Now()
 	cmd := exec.CommandContext(runCtx, st.ResolvedPath, args...)
@@ -856,6 +886,12 @@ func Chat(ctx context.Context, st Status, req ChatRequest) (ChatResult, error) {
 // harness driver. Prompts are passed via stdin or temp prompt file by default
 // to avoid Windows .cmd length/escaping issues.
 func BuildArgs(driver, model string, extraArgs []string, prompt, auxFile string) (args []string, stdinPayload string) {
+	return BuildArgsWithImages(driver, model, extraArgs, prompt, auxFile, nil)
+}
+
+// BuildArgsWithImages constructs CLI flags with optional local image attachments
+// for multimodal-capable local AI harnesses (#149).
+func BuildArgsWithImages(driver, model string, extraArgs []string, prompt, auxFile string, images []string) (args []string, stdinPayload string) {
 	driver = NormalizeDriver(driver)
 	stdinPayload = prompt
 	switch driver {
@@ -874,7 +910,21 @@ func BuildArgs(driver, model string, extraArgs []string, prompt, auxFile string)
 	case "claude":
 		args = []string{"-p", "--output-format", "json", "--permission-mode", "plan", "--no-session-persistence", "--disable-slash-commands"}
 		if !containsFlag(extraArgs, "--tools") {
-			args = append(args, "--tools", "")
+			if len(images) > 0 {
+				args = append(args, "--tools", "Read")
+			} else {
+				args = append(args, "--tools", "")
+			}
+		}
+		if len(images) > 0 {
+			seenDirs := map[string]bool{}
+			for _, img := range images {
+				dir := filepath.Dir(img)
+				if dir != "" && !seenDirs[dir] {
+					seenDirs[dir] = true
+					args = append(args, "--add-dir", dir)
+				}
+			}
 		}
 		if !containsFlag(extraArgs, "--mcp-config") && !containsFlag(extraArgs, "--strict-mcp-config") {
 			args = append(args, "--strict-mcp-config")
@@ -890,6 +940,9 @@ func BuildArgs(driver, model string, extraArgs []string, prompt, auxFile string)
 		if auxFile != "" {
 			args = append(args, "-o", auxFile)
 		}
+		for _, img := range images {
+			args = append(args, "-i", img)
+		}
 		// Extra flags go before the trailing "-" stdin sentinel.
 		if len(extraArgs) > 0 {
 			args = append(args, extraArgs...)
@@ -900,6 +953,9 @@ func BuildArgs(driver, model string, extraArgs []string, prompt, auxFile string)
 		args = []string{"run", "--format", "json"}
 		if model != "" {
 			args = append(args, "-m", model)
+		}
+		for _, img := range images {
+			args = append(args, "-f", img)
 		}
 	case "gemini":
 		// Gemini CLI appends -p value after stdin when stdin is piped.
