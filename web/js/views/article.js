@@ -6,6 +6,7 @@ import { createArticleEdgelessController } from "./article-edgeless.js";
 import { closeArticleContextMenu, createArticleLinksController, openArticleContextMenu } from "./article-links.js";
 import { createArticleLiveEditor } from "./article-live.js";
 import { createArticleObsidianController } from "./article-obsidian.js";
+import { createArticleTypesetController } from "./article-typeset.js";
 import { buildGroupedModelSelect } from "./create.js";
 import {
   choices,
@@ -644,7 +645,8 @@ export async function renderArticle(root, ctx, params = {}) {
   const graphStageBox = el("div", { class: "ic-ws-graph-stage hidden", "aria-label": "全工作区知识库关系图谱" });
   const edgelessStageBox = el("div", { class: "ic-ws-edgeless-stage hidden", "aria-label": "无边白板视图" });
   const boardStageBox = el("div", { class: "ic-ws-board-stage hidden", "aria-label": "文章选题表与进度看板" });
-  const centerCol = el("div", { class: "ic-wechat-center-col" }, openTabsBar, scrollArea, graphStageBox, edgelessStageBox, boardStageBox);
+  const typesetStageBox = el("div", { class: "ic-ws-typeset-stage hidden", "aria-label": "多主题公众号排版发布台" });
+  const centerCol = el("div", { class: "ic-wechat-center-col" }, openTabsBar, scrollArea, graphStageBox, edgelessStageBox, boardStageBox, typesetStageBox);
 
   // 3.5. Right Collapsible AI Writing Copilot + Inline Paper Diff Review + Selection Bubble (#70, #74)
   let aiEditing = false;
@@ -1403,6 +1405,14 @@ export async function renderArticle(root, ctx, params = {}) {
       }
     },
     onVaultMutated: () => refreshVaultTree(),
+  });
+
+  const typesetCtrl = createArticleTypesetController({
+    getTitle: () => state.title || "",
+    getContent: () => state.content || "",
+    getSlots: () => state.slots || [],
+    getActivePath: () => state.activeFile || "",
+    onExport: (fmt, copy) => doExport(fmt, copy),
   });
 
   function ensureOpenTab(relPath) {
@@ -4097,74 +4107,7 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function renderPreviewStage() {
-    clear(previewStageBox);
-    const tabBar = el("div", { class: "tabs" },
-      ...[
-        ["wechat_desktop", "公众号桌面排版"],
-        ["wechat_mobile", "手机预览 (430px)"],
-        ["markdown", "Markdown 源码"],
-      ].map(([k, lbl]) => el("button", {
-        type: "button",
-        class: "tab" + (state.previewKind === k ? " active" : ""),
-        onClick: () => { state.previewKind = k; renderPreviewStage(); },
-      }, lbl))
-    );
-
-    const previewActions = el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", maxWidth: "820px", margin: "0 auto", width: "100%" } },
-      tabBar,
-      el("div", { class: "row" },
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => doExport("wechat_html", true) }, "📋 复制公众号 HTML"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => doExport("markdown_zip", false) }, "📦 MD+图 ZIP"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => doExport("images_zip", false) }, "🖼 配图包")
-      )
-    );
-    previewStageBox.appendChild(previewActions);
-
-    const previewSource = (state.content || "").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
-    const paras = previewSource.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const coverSlot = state.slots.find((s) => s.role === "cover");
-
-    if (state.previewKind === "markdown") {
-      const lines = [];
-      if (state.title) lines.push(`# ${state.title}\n`);
-      if (coverSlot) lines.push(`![${coverSlot.title || "封面"}](${coverSlot.imagePath || "待生成封面"})\n`);
-      paras.forEach((p) => {
-        lines.push(p + "\n");
-        state.slots.forEach((sl) => {
-          if (sl.role !== "cover" && sl.anchor && p.includes(sl.anchor)) {
-            lines.push(`![${sl.title || "配图"}](${sl.imagePath || "待生成：" + sl.theme})\n`);
-          }
-        });
-      });
-      previewStageBox.appendChild(el("div", { class: "ic-pv-article-sheet" },
-        el("pre", { class: "mono", style: { margin: "0", whiteSpace: "pre-wrap", fontSize: "12.5px" } }, lines.join("\n"))
-      ));
-      return;
-    }
-
-    const sheet = el("article", { class: "ic-pv-article-sheet" + (state.previewKind === "wechat_mobile" ? " is-mobile" : "") });
-    if (state.title) sheet.appendChild(el("h2", { style: { margin: "0 0 8px" } }, state.title));
-    linksCtrl.renderPropertiesBar(sheet, state.content || "");
-    if (coverSlot) {
-      sheet.appendChild(coverSlot.imagePath
-        ? el("img", { src: localImg(coverSlot.imagePath), alt: coverSlot.title || "封面", style: { width: "100%", borderRadius: "8px" } })
-        : el("div", { class: "badge badge-accent" }, `封面配图位：${coverSlot.theme || coverSlot.title || "待生成"}`));
-    }
-    paras.forEach((p) => {
-      linksCtrl.renderPreviewBlock(sheet, p, state.activeFile || "");
-      state.slots.forEach((sl) => {
-        if (sl.role !== "cover" && sl.anchor && p.includes(sl.anchor)) {
-          sheet.appendChild(sl.imagePath
-            ? el("img", { src: localImg(sl.imagePath), alt: sl.title || "", style: { width: "100%", borderRadius: "8px" } })
-            : el("div", { class: "badge" }, `正文配图位：${sl.theme || sl.title || "待生成"}`));
-        }
-      });
-    });
-    if (!state.title && paras.length === 0) {
-      sheet.appendChild(el("p", { class: "muted", style: { textAlign: "center", padding: "32px 0" } }, "导入或输入文章正文后，这里将实时预览公众号图文效果。"));
-    }
-    linksCtrl.renderPreviewBacklinksFooter(sheet);
-    previewStageBox.appendChild(sheet);
+    typesetCtrl.render(typesetStageBox);
   }
 
   function renderStageMode() {
@@ -4172,7 +4115,8 @@ export async function renderArticle(root, ctx, params = {}) {
     const isGraph = active && state.viewMode === "graph";
     const isEdgeless = active && state.viewMode === "edgeless";
     const isBoard = active && state.viewMode === "board";
-    const isSpatialStage = isGraph || isEdgeless || isBoard;
+    const isPreview = active && state.viewMode === "preview";
+    const isSpatialStage = isGraph || isEdgeless || isBoard || isPreview;
     const isFocusFs = (isGraph || isEdgeless) && Boolean(state.graphFullscreen);
 
     sidebar.classList.toggle("hidden", Boolean(state.sidebarCollapsed) || isFocusFs);
@@ -4191,6 +4135,7 @@ export async function renderArticle(root, ctx, params = {}) {
       graphStageBox.classList.add("hidden");
       edgelessStageBox.classList.add("hidden");
       boardStageBox.classList.add("hidden");
+      typesetStageBox.classList.add("hidden");
       scrollArea.classList.remove("hidden");
       paperSheet.classList.add("hidden");
       diffReviewBox.classList.add("hidden");
@@ -4207,7 +4152,6 @@ export async function renderArticle(root, ctx, params = {}) {
     syncTopbarBreadcrumb();
     const isLive = state.viewMode === "live";
     const isSource = state.viewMode === "source";
-    const isPreview = state.viewMode === "preview";
     const isEditor = isLive || isSource;
     const isReviewing = isEditor && Boolean(activeDiffReview);
     const drawerOpen = Boolean(state.aiDrawerOpen) && !isFocusFs;
@@ -4230,9 +4174,10 @@ export async function renderArticle(root, ctx, params = {}) {
     graphStageBox.classList.toggle("hidden", !isGraph);
     edgelessStageBox.classList.toggle("hidden", !isEdgeless);
     boardStageBox.classList.toggle("hidden", !isBoard);
+    typesetStageBox.classList.toggle("hidden", !isPreview);
     paperSheet.classList.toggle("hidden", !isEditor || isReviewing);
     diffReviewBox.classList.toggle("hidden", !isReviewing);
-    previewStageBox.classList.toggle("hidden", !isPreview);
+    previewStageBox.classList.add("hidden");
 
     if (isGraph) {
       if (!graphMounted) {
