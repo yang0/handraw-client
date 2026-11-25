@@ -1,6 +1,7 @@
 import { api, clear, closeModal, el, galleryImg, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
 import { openRecipeEditor, openRecipeManagerModal } from "./recipes.js";
 import { mountSlotPanels } from "../plugins-host.js";
+import { createTextModelPicker } from "../skills-ui.js";
 import { bindPageImagePaste, importTempReferenceFile, MAX_REF_IMAGES, openReferencePickerModal } from "./ref-picker.js";
 import {
   RATIOS,
@@ -43,7 +44,7 @@ export function buildGroupedModelSelect(modelsData = {}, currentRef = "") {
   for (const p of providers) {
     const models = p.models || [];
     if (!models.length) continue;
-    const g = el("optgroup", { label: `自定义 · ${p.name}` });
+    const g = el("optgroup", { label: `第三方生图接口 · ${p.name}` });
     for (const m of models) {
       const ref = `${p.id}:${m.id}`;
       g.appendChild(el("option", { value: ref }, m.label || m.name || m.id));
@@ -263,6 +264,7 @@ export async function renderCreate(root, ctx, params = {}) {
     quality: "standard",
     redraw: false,
     modelRef: modRes.defaultModel || "site:seedream-4.5",
+    textModelRef: modRes.sceneModels?.studioPlan || modRes.defaultTextModel || "",
     refs: [],
     refMeta: [],
     galleryRefs: [],
@@ -290,7 +292,7 @@ export async function renderCreate(root, ctx, params = {}) {
     } else if (params.recipe || params.style || params.preset) {
       state.directPrompt = false;
     }
-    for (const key of ["style", "style2", "layout", "color", "tone", "mood", "mode", "ratio", "resolution", "modelRef", "parentId", "groupId", "forkOf", "forkTitle"]) {
+    for (const key of ["style", "style2", "layout", "color", "tone", "mood", "mode", "ratio", "resolution", "modelRef", "textModelRef", "parentId", "groupId", "forkOf", "forkTitle"]) {
       const value = params[key] ?? p[key];
       if (value !== undefined) state[key] = value;
     }
@@ -890,6 +892,19 @@ export async function renderCreate(root, ctx, params = {}) {
     }),
   }, "+");
 
+  const textModelPicker = createTextModelPicker(modRes, state.textModelRef, "studioPlan", (nextRef) => {
+    state.textModelRef = nextRef;
+    session.persist();
+  }, {
+    ariaLabel: "生图规划模型（网站 / 第三方接口 / 本地 AI Harness）",
+    className: "hm-trigger-sm",
+  });
+  state.textModelRef = textModelPicker.value;
+  const planModelField = el("div", { class: "make-image-model-field", title: "对话规划与画面分镜引擎（支持第三方接口与本地 AI Harness）" },
+    el("span", { class: "make-image-model-lbl" }, "规划"),
+    textModelPicker.el
+  );
+
   const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
   state.modelRef = modelSel.value;
   modelSel.addEventListener("change", () => {
@@ -897,6 +912,10 @@ export async function renderCreate(root, ctx, params = {}) {
     refreshQuote();
     session.persist();
   });
+  const imageModelField = el("div", { class: "make-image-model-field", title: "出图渲染模型（支持网站模型与第三方生图接口）" },
+    el("span", { class: "make-image-model-lbl" }, "出图"),
+    modelSel
+  );
 
   const quoteBadge = el("span", { class: "badge", title: "生成前预估费用" }, "报价计算中…");
 
@@ -936,7 +955,8 @@ export async function renderCreate(root, ctx, params = {}) {
     subjectInput,
     el("div", { class: "make-image-composer-bottom" },
       addRefBtn,
-      modelSel,
+      planModelField,
+      imageModelField,
       quoteBadge,
       el("div", { class: "make-image-composer-actions" }, clearBtn, stopBtn, submitBtn)
     )
@@ -1062,6 +1082,7 @@ export async function renderCreate(root, ctx, params = {}) {
 
     submitBtn.disabled = isPlanning || isSubmitting;
     stopBtn.classList.toggle("hidden", !turnHasRunning(turn));
+    planModelField.classList.toggle("hidden", isDirect);
     autoResizeTextarea();
     refreshQuote();
   }
@@ -1883,6 +1904,7 @@ export async function renderCreate(root, ctx, params = {}) {
       const plan = await api("POST", "/api/studio/chat-plan", {
         message,
         history,
+        modelRef: state.textModelRef || "",
         selected: {
           style1: state.style || "",
           style2: state.fusion ? (state.style2 || "") : "",

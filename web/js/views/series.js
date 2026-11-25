@@ -1,5 +1,6 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, showModal, toast } from "../api.js";
 import { buildGroupedModelSelect } from "./create.js";
+import { createTextModelPicker } from "../skills-ui.js";
 import { choices, extraInstructions, field, ratioToCss, recipeControls, resourceId, resourcePicker, studioMount, studioSession } from "./studio-controls.js";
 
 export async function renderSeries(host, ctx, params = {}) {
@@ -20,6 +21,7 @@ export async function renderSeries(host, ctx, params = {}) {
     docId: "", title: "", topic: "", count: 3, style: styles[0]?.number || "FA-013", style2: "",
     layout: "", layoutMode: "ai", layoutRequirement: "", color: "", tone: "", mood: "",
     ratio: "3:4", mode: "graphic-text", resolution: "2k", modelRef: modRes.defaultModel || "",
+    textModelRef: modRes.sceneModels?.studioPlan || modRes.defaultTextModel || "",
     cards: [], selected: 0, composerMode: "series", activeRun: null,
   });
   const { root, state } = session;
@@ -218,6 +220,15 @@ export async function renderSeries(host, ctx, params = {}) {
   const countIn = el("input", { class: "input", type: "number", min: "1", max: "20", value: String(state.count), style: { width: "68px", padding: "4px 8px" }, "aria-label": "规划张数" });
   countIn.addEventListener("input", () => { state.count = Number(countIn.value); });
 
+  const textModelPicker = createTextModelPicker(modRes, state.textModelRef, "studioPlan", (nextRef) => {
+    state.textModelRef = nextRef;
+    session.persist();
+  }, {
+    ariaLabel: "系列图规划模型（网站 / 第三方接口 / 本地 AI Harness）",
+    className: "hm-trigger-sm",
+  });
+  state.textModelRef = textModelPicker.value;
+
   const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
   state.modelRef = modelSel.value;
   modelSel.addEventListener("change", () => { state.modelRef = modelSel.value; refreshQuote(); });
@@ -232,8 +243,9 @@ export async function renderSeries(host, ctx, params = {}) {
     composerModesBar,
     composerInput,
     el("div", { class: "batch-series-dock-footer" },
-      el("div", { class: "row" },
-        modelSel,
+      el("div", { class: "row", style: { flexWrap: "wrap", gap: "8px" } },
+        el("div", { class: "make-image-model-field" }, el("span", { class: "make-image-model-lbl" }, "规划"), textModelPicker.el),
+        el("div", { class: "make-image-model-field" }, el("span", { class: "make-image-model-lbl" }, "出图"), modelSel),
         el("label", { class: "row", style: { gap: "4px", fontSize: "12px" } }, "张数", countIn),
         planBtn,
         quoteSpan
@@ -442,6 +454,7 @@ export async function renderSeries(host, ctx, params = {}) {
       const res = await api("POST", "/api/series/plan", {
         topic, count, layoutMode,
         fixedLayout: state.layout, layoutRequirement: state.layoutRequirement, styleId: state.style,
+        modelRef: state.textModelRef || "",
       });
       if (requestKey !== JSON.stringify([state.topic, state.layoutMode, state.count, state.layout, state.layoutRequirement, state.style])) {
         planNotice.textContent = "规划期间设置已变更，请按新设置重新规划。"; return;
