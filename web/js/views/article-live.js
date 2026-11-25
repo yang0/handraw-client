@@ -1,132 +1,31 @@
-import { clear, el, toast } from "../api.js";
+import { clear, closeModal, el, showModal, toast } from "../api.js";
+import {
+  Decoration,
+  EditorSelection,
+  EditorState,
+  EditorView,
+  HighlightStyle,
+  Prec,
+  RangeSetBuilder,
+  StateEffect,
+  StateField,
+  WidgetType,
+  bracketMatching,
+  defaultKeymap,
+  drawSelection,
+  dropCursor,
+  history,
+  historyKeymap,
+  indentOnInput,
+  indentWithTab,
+  keymap,
+  markdown,
+  markdownLanguage,
+  placeholder,
+  syntaxHighlighting,
+  tags,
+} from "../../vendor/cm6-bundle.js";
 import { openArticleContextMenu } from "./article-links.js";
-
-// Lossless Markdown block parser preserving exact line numbers and raw text (#121).
-export function parseMarkdownBlocks(rawText) {
-  const lines = String(rawText || "").replace(/\r\n/g, "\n").split("\n");
-  const blocks = [];
-  let i = 0;
-
-  // 1. Optional YAML frontmatter at line 0
-  if (lines.length >= 3 && lines[0].trim() === "---") {
-    let end = -1;
-    for (let j = 1; j < lines.length; j++) {
-      if (lines[j].trim() === "---") { end = j; break; }
-    }
-    if (end > 0) {
-      blocks.push({ type: "frontmatter", startLine: 0, endLine: end, raw: lines.slice(0, end + 1).join("\n") });
-      i = end + 1;
-    }
-  }
-
-  const isTableSep = (ln) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(ln || "");
-  const isListLine = (ln) => /^\s*(?:[-*+]\s+|\d+\.\s+)/.test(ln || "");
-  const isHrLine = (ln) => /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(ln || "");
-  const isHeadingLine = (ln) => /^\s*#{1,6}\s+/.test(ln || "");
-  const isFenceLine = (ln) => /^\s*(?:`{3,}|~{3,})/.test(ln || "");
-  const isQuoteLine = (ln) => /^\s*>\s?/.test(ln || "");
-  const isEmbedLine = (ln) => /^\s*!(?:\[\[[^\[\]]+\]\]|\[[^\]]*\]\([^)]+\))\s*$/.test(ln || "");
-
-  while (i < lines.length) {
-    if (!lines[i].trim()) { i++; continue; }
-
-    // Fenced code block
-    if (isFenceLine(lines[i])) {
-      const start = i;
-      const fence = lines[i].trim().startsWith("~~~") ? "~~~" : "```";
-      i++;
-      while (i < lines.length && !lines[i].trim().startsWith(fence)) i++;
-      if (i < lines.length) i++;
-      blocks.push({ type: "code", startLine: start, endLine: i - 1, raw: lines.slice(start, i).join("\n") });
-      continue;
-    }
-
-    // GFM Markdown table
-    if (lines[i].includes("|") && i + 1 < lines.length && isTableSep(lines[i + 1])) {
-      const start = i;
-      i += 2;
-      while (i < lines.length && lines[i].trim() && lines[i].includes("|")) i++;
-      blocks.push({ type: "table", startLine: start, endLine: i - 1, raw: lines.slice(start, i).join("\n") });
-      continue;
-    }
-
-    // Heading
-    if (isHeadingLine(lines[i])) {
-      blocks.push({ type: "heading", startLine: i, endLine: i, raw: lines[i] });
-      i++;
-      continue;
-    }
-
-    // Horizontal rule
-    if (isHrLine(lines[i])) {
-      blocks.push({ type: "hr", startLine: i, endLine: i, raw: lines[i] });
-      i++;
-      continue;
-    }
-
-    // Blockquote / Obsidian Callout
-    if (isQuoteLine(lines[i])) {
-      const start = i;
-      i++;
-      while (i < lines.length && isQuoteLine(lines[i])) i++;
-      blocks.push({ type: "blockquote", startLine: start, endLine: i - 1, raw: lines.slice(start, i).join("\n") });
-      continue;
-    }
-
-    // List (bullet, ordered, task checkboxes)
-    if (isListLine(lines[i])) {
-      const start = i;
-      i++;
-      while (i < lines.length && (isListLine(lines[i]) || (/^\s{2,}\S/.test(lines[i]) && !isFenceLine(lines[i])))) i++;
-      blocks.push({ type: "list", startLine: start, endLine: i - 1, raw: lines.slice(start, i).join("\n") });
-      continue;
-    }
-
-    // Standalone image/note embed
-    if (isEmbedLine(lines[i])) {
-      blocks.push({ type: "embed", startLine: i, endLine: i, raw: lines[i] });
-      i++;
-      continue;
-    }
-
-    // Normal paragraph
-    const start = i;
-    i++;
-    while (
-      i < lines.length &&
-      lines[i].trim() &&
-      !isFenceLine(lines[i]) &&
-      !isHeadingLine(lines[i]) &&
-      !isHrLine(lines[i]) &&
-      !isQuoteLine(lines[i]) &&
-      !isListLine(lines[i]) &&
-      !isEmbedLine(lines[i]) &&
-      !(lines[i].includes("|") && i + 1 < lines.length && isTableSep(lines[i + 1]))
-    ) {
-      i++;
-    }
-    blocks.push({ type: "paragraph", startLine: start, endLine: i - 1, raw: lines.slice(start, i).join("\n") });
-  }
-
-  return { lines, blocks };
-}
-
-function splitTableRow(row) {
-  let s = String(row || "").trim();
-  if (s.startsWith("|")) s = s.slice(1);
-  if (s.endsWith("|")) s = s.slice(0, -1);
-  return s.split("|").map((c) => c.trim());
-}
-
-function parseTableAlignments(sepRow) {
-  return splitTableRow(sepRow).map((c) => {
-    const left = c.startsWith(":");
-    const right = c.endsWith(":");
-    if (left && right) return "center";
-    if (right) return "right";
-    return "left";
-  });
-}
 
 const CALLOUT_META = {
   note: { icon: "📝", label: "说明", cls: "is-note" },
@@ -140,6 +39,825 @@ const CALLOUT_META = {
   quote: { icon: "❝", label: "引用", cls: "is-note" },
   example: { icon: "✨", label: "示例", cls: "is-tip" },
 };
+
+const HIGHLIGHT_SWATCHES = [
+  { id: "default", label: "默认高亮", swatch: "#fde047", kind: "eq" },
+  { id: "red", label: "红色", swatch: "#ef4444", bg: "#ffd6d6" },
+  { id: "orange", label: "橙色", swatch: "#f97316", bg: "#ffe4c4" },
+  { id: "yellow", label: "黄色", swatch: "#eab308", bg: "#fff3b0" },
+  { id: "green", label: "绿色", swatch: "#22c55e", bg: "#d3f4d8" },
+  { id: "blue", label: "蓝色", swatch: "#3b82f6", bg: "#d4e8ff" },
+  { id: "purple", label: "紫色", swatch: "#8b5cf6", bg: "#e8dcff" },
+];
+
+const refreshLiveEffect = StateEffect.define();
+
+function splitTableRow(line) {
+  let s = String(line || "").trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((c) => c.trim());
+}
+
+function parseTableAlignments(sepLine) {
+  return splitTableRow(sepLine).map((cell) => {
+    const l = cell.startsWith(":");
+    const r = cell.endsWith(":");
+    if (l && r) return "center";
+    if (r) return "right";
+    return "left";
+  });
+}
+
+const isTableSepLine = (ln) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(ln || "");
+
+// ---------- CodeMirror 6 Custom Live Preview Widgets ----------
+
+class FrontmatterWidget extends WidgetType {
+  constructor(raw, from, to, linksCtrl) {
+    super();
+    this.raw = raw;
+    this.from = from;
+    this.to = to;
+    this.linksCtrl = linksCtrl;
+  }
+  eq(other) {
+    return other.raw === this.raw && other.from === this.from && other.to === this.to;
+  }
+  toDOM(view) {
+    const entries = this.linksCtrl.parseFrontmatterEntries(this.raw);
+    const keyLabels = { aliases: "别名", alias: "别名", tags: "标签", tag: "标签", author: "作者", date: "日期", title: "标题" };
+    const grid = el("div", { class: "ic-pv-props-grid" });
+    entries.forEach((e) => {
+      grid.appendChild(el("div", { class: "ic-pv-prop-row" },
+        el("span", { class: "ic-pv-prop-key" }, keyLabels[e.key.toLowerCase()] || e.key),
+        el("div", { class: "ic-pv-prop-vals" }, ...e.values.map((v) => el("span", { class: "ic-pv-prop-chip" }, v)))
+      ));
+    });
+    const tagEntry = entries.find((e) => /^tags?$/i.test(e.key));
+    const previewChips = tagEntry
+      ? tagEntry.values.slice(0, 5).map((v) => el("span", { class: "ic-pv-prop-chip" }, `#${v}`))
+      : [];
+    const editBtn = el("button", {
+      type: "button",
+      class: "btn btn-sm",
+      style: { marginLeft: "auto" },
+      onMouseDown: (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const targetPos = Math.min(this.from + 4, this.to);
+        view.dispatch({ selection: { anchor: targetPos }, scrollIntoView: true });
+        view.focus();
+      },
+    }, "✎ 编辑 YAML");
+
+    const det = el("details", { class: "ic-pv-props ic-live-props" },
+      el("summary", { class: "ic-pv-props-head ic-live-props-head" },
+        el("span", null, `文档属性 (${entries.length})`),
+        ...previewChips,
+        editBtn
+      ),
+      grid
+    );
+    return el("div", { class: "cm-lp-block-widget cm-lp-frontmatter-widget" }, det);
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+class TableWidget extends WidgetType {
+  constructor(raw, from, to, sourcePath, linksCtrl) {
+    super();
+    this.raw = raw;
+    this.from = from;
+    this.to = to;
+    this.sourcePath = sourcePath;
+    this.linksCtrl = linksCtrl;
+  }
+  eq(other) {
+    return other.raw === this.raw && other.from === this.from && other.to === this.to && other.sourcePath === this.sourcePath;
+  }
+  toDOM(view) {
+    const ls = this.raw.split("\n");
+    const headers = splitTableRow(ls[0] || "");
+    const aligns = parseTableAlignments(ls[1] || "");
+    const bodyRows = ls.slice(2).map(splitTableRow);
+
+    const thead = el("thead", null,
+      el("tr", null, ...headers.map((h, i) => {
+        const th = el("th", { style: { textAlign: aligns[i] || "left" } });
+        this.linksCtrl.appendInlineWithLinks(th, h, this.sourcePath, 0);
+        return th;
+      }))
+    );
+    const tbody = el("tbody", null, ...bodyRows.map((cells, rIdx) =>
+      el("tr", { dataset: { row: String(rIdx) } }, ...headers.map((_, i) => {
+        const td = el("td", { style: { textAlign: aligns[i] || "left" } });
+        this.linksCtrl.appendInlineWithLinks(td, cells[i] || "", this.sourcePath, 0);
+        return td;
+      }))
+    ));
+    const wrap = el("div", {
+      class: "ic-live-table-wrap cm-lp-table-widget",
+      title: "点击表格可原地编辑 Markdown 表格",
+    }, el("table", { class: "ic-live-table" }, thead, tbody));
+
+    wrap.addEventListener("mousedown", (ev) => {
+      if (ev.button !== 0) return;
+      if (ev.target.closest("a, button, .ic-wikilink")) return;
+      ev.preventDefault();
+      // Place cursor right on the clicked row's Markdown line!
+      const tr = ev.target.closest("tbody tr");
+      const rowOffset = tr ? Number(tr.dataset.row || 0) + 2 : 0;
+      const startLine = view.state.doc.lineAt(this.from).number;
+      const targetLineNo = Math.min(view.state.doc.lines, startLine + rowOffset);
+      const line = view.state.doc.line(targetLineNo);
+      view.dispatch({ selection: { anchor: line.from + 2 }, scrollIntoView: true });
+      view.focus();
+    });
+    return wrap;
+  }
+  ignoreEvent(ev) {
+    return ev.type !== "contextmenu";
+  }
+}
+
+class WikilinkWidget extends WidgetType {
+  constructor(inner, from, to, sourcePath, linksCtrl, onOpenNewTab) {
+    super();
+    this.inner = inner;
+    this.from = from;
+    this.to = to;
+    this.sourcePath = sourcePath;
+    this.linksCtrl = linksCtrl;
+    this.onOpenNewTab = onOpenNewTab;
+  }
+  eq(other) {
+    return other.inner === this.inner && other.from === this.from && other.to === this.to && other.sourcePath === this.sourcePath;
+  }
+  toDOM(view) {
+    const pipeIdx = this.inner.indexOf("|");
+    const targetPart = (pipeIdx >= 0 ? this.inner.slice(0, pipeIdx) : this.inner).trim();
+    const alias = pipeIdx >= 0 ? this.inner.slice(pipeIdx + 1).trim() : "";
+    const resolved = this.linksCtrl.resolveLocalTarget(targetPart, this.sourcePath);
+    const exists = Boolean(resolved);
+    const display = alias || targetPart;
+
+    const span = el("span", {
+      class: "ic-wikilink cm-lp-wikilink" + (exists ? "" : " is-unresolved"),
+      role: "link",
+      tabindex: "-1",
+      dataset: { target: targetPart, from: String(this.from), to: String(this.to) },
+      title: exists
+        ? `点击打开「${targetPart}」（Ctrl+点击新标签，方向键移入可编辑）`
+        : `待建笔记「${targetPart}」：点击一键新建`,
+    }, display);
+
+    if (exists) {
+      this.linksCtrl.bindHoverPreview(span, targetPart, this.sourcePath);
+    }
+
+    span.addEventListener("mousedown", (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.altKey) {
+        // Alt+Click enters inline editing of the wikilink syntax directly
+        view.dispatch({ selection: { anchor: this.from + 2 } });
+        view.focus();
+        return;
+      }
+      if ((ev.ctrlKey || ev.metaKey) && resolved?.kind === "note") {
+        this.onOpenNewTab?.(resolved.item.path);
+        return;
+      }
+      this.linksCtrl.navigateToLink(targetPart, this.sourcePath);
+    });
+    return span;
+  }
+  ignoreEvent(ev) {
+    return ev.type !== "contextmenu";
+  }
+}
+
+class ExtLinkWidget extends WidgetType {
+  constructor(label, url, from) {
+    super();
+    this.label = label;
+    this.url = url;
+    this.from = from;
+  }
+  eq(other) {
+    return other.label === this.label && other.url === this.url && other.from === this.from;
+  }
+  toDOM(view) {
+    const a = el("a", {
+      class: "cm-lp-extlink",
+      href: this.url,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      title: `${this.url}（点击打开链接，Alt+点击编辑）`,
+    }, this.label);
+    a.addEventListener("mousedown", (ev) => {
+      if (ev.button === 0 && ev.altKey) {
+        ev.preventDefault();
+        view.dispatch({ selection: { anchor: this.from + 1 } });
+        view.focus();
+      }
+    });
+    return a;
+  }
+  ignoreEvent(ev) {
+    return ev.type !== "contextmenu";
+  }
+}
+
+class CheckboxWidget extends WidgetType {
+  constructor(checked, pos) {
+    super();
+    this.checked = checked;
+    this.pos = pos;
+  }
+  eq(other) {
+    return other.checked === this.checked && other.pos === this.pos;
+  }
+  toDOM(view) {
+    const cb = el("input", {
+      type: "checkbox",
+      class: "ic-live-task-cb cm-lp-cb",
+      checked: this.checked,
+      "aria-label": "切换任务完成状态",
+    });
+    cb.checked = this.checked;
+    cb.addEventListener("mousedown", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const next = this.checked ? "[ ]" : "[x]";
+      view.dispatch({
+        changes: { from: this.pos, to: this.pos + 3, insert: next },
+      });
+    });
+    return cb;
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+class BulletWidget extends WidgetType {
+  eq() { return true; }
+  toDOM() {
+    return el("span", { class: "cm-lp-bullet", "aria-hidden": "true" }, "•");
+  }
+}
+
+class HrWidget extends WidgetType {
+  eq() { return true; }
+  toDOM() {
+    return el("div", { class: "cm-lp-hr-wrap" }, el("hr", { class: "ic-live-hr" }));
+  }
+}
+
+class CalloutHeaderWidget extends WidgetType {
+  constructor(kind, title) {
+    super();
+    this.kind = kind;
+    this.title = title;
+  }
+  eq(other) {
+    return other.kind === this.kind && other.title === this.title;
+  }
+  toDOM() {
+    const meta = CALLOUT_META[this.kind] || CALLOUT_META.note;
+    return el("span", { class: `cm-lp-callout-badge ${meta.cls}` },
+      el("span", { "aria-hidden": "true" }, meta.icon),
+      el("strong", null, this.title || meta.label)
+    );
+  }
+}
+
+class CodeHeaderWidget extends WidgetType {
+  constructor(lang, codeText) {
+    super();
+    this.lang = lang;
+    this.codeText = codeText;
+  }
+  eq(other) {
+    return other.lang === this.lang && other.codeText === this.codeText;
+  }
+  toDOM() {
+    return el("div", { class: "cm-lp-code-header" },
+      el("span", { class: "mono" }, this.lang || "code"),
+      el("button", {
+        type: "button",
+        class: "ic-live-code-copy",
+        onMouseDown: (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          navigator.clipboard?.writeText(this.codeText).catch(() => {});
+          toast("已复制代码块");
+        },
+      }, "复制")
+    );
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+class EmbedWidget extends WidgetType {
+  constructor(rawLine, sourcePath, linksCtrl) {
+    super();
+    this.rawLine = rawLine;
+    this.sourcePath = sourcePath;
+    this.linksCtrl = linksCtrl;
+  }
+  eq(other) {
+    return other.rawLine === this.rawLine && other.sourcePath === this.sourcePath;
+  }
+  toDOM() {
+    const box = el("div", { class: "cm-lp-embed-widget" });
+    this.linksCtrl.renderPreviewBlock(box, this.rawLine.trim(), this.sourcePath);
+    return box;
+  }
+  ignoreEvent(ev) {
+    return ev.type !== "contextmenu";
+  }
+}
+
+class SlotCardWidget extends WidgetType {
+  constructor(slot, inlineNo, desc, renderSlotCard) {
+    super();
+    this.slot = slot;
+    this.inlineNo = inlineNo;
+    this.desc = desc;
+    this.renderSlotCard = renderSlotCard;
+    this.sig = `${slot.id}:${slot.imagePath || ""}:${slot.theme || ""}:${slot.error || ""}:${inlineNo}:${desc}`;
+  }
+  eq(other) {
+    return other.sig === this.sig;
+  }
+  toDOM() {
+    return el("div", { class: "cm-lp-slot-widget" }, this.renderSlotCard(this.slot, this.inlineNo, this.desc));
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+// ---------- Obsidian Live Preview Decoration Builder ----------
+
+function overlapsSelection(sel, from, to) {
+  for (const r of sel.ranges) {
+    if (r.from <= to && r.to >= from) return true;
+  }
+  return false;
+}
+
+function buildLiveDecorations(state, env) {
+  const { linksCtrl, getActivePath, getSlots, renderSlotCard, onOpenNoteNewTab } = env;
+  const sourcePath = getActivePath() || "";
+  const doc = state.doc;
+  const sel = state.selection;
+  const lineCount = doc.lines;
+  const ops = []; // { from, to, deco, order }
+
+  const addOp = (from, to, deco, order = 0) => {
+    ops.push({ from, to, deco, order });
+  };
+
+  // Pre-compute inline AI slot anchors by line number
+  const inlineSlots = (getSlots() || []).filter((s) => s.role !== "cover");
+  const slotsByLine = new Map();
+  let slotSeq = 0;
+  inlineSlots.forEach((sl) => {
+    if (!sl.anchor) return;
+    for (let ln = 1; ln <= lineCount; ln++) {
+      const txt = doc.line(ln).text;
+      if (txt.trim() && txt.includes(sl.anchor)) {
+        slotSeq += 1;
+        if (!slotsByLine.has(ln)) slotsByLine.set(ln, []);
+        slotsByLine.get(ln).push({ slot: sl, no: slotSeq, preview: txt.trim().slice(0, 26) });
+        break;
+      }
+    }
+  });
+
+  // Track skipped line ranges (multi-line block replacements: frontmatter, tables)
+  const replacedLines = new Set();
+
+  // 1. Optional YAML frontmatter starting at line 1
+  let startScanLine = 1;
+  if (lineCount >= 3 && doc.line(1).text.trim() === "---") {
+    let fmEnd = -1;
+    for (let j = 2; j <= lineCount; j++) {
+      if (doc.line(j).text.trim() === "---") { fmEnd = j; break; }
+    }
+    if (fmEnd > 1) {
+      const fmFrom = doc.line(1).from;
+      const fmTo = doc.line(fmEnd).to;
+      if (!overlapsSelection(sel, fmFrom, fmTo)) {
+        const raw = doc.sliceString(fmFrom, fmTo);
+        addOp(fmFrom, fmTo, Decoration.replace({
+          widget: new FrontmatterWidget(raw, fmFrom, fmTo, linksCtrl),
+          block: true,
+        }), -10);
+        for (let k = 1; k <= fmEnd; k++) replacedLines.add(k);
+      } else {
+        for (let k = 1; k <= fmEnd; k++) {
+          addOp(doc.line(k).from, doc.line(k).from, Decoration.line({ class: "cm-lp-yaml-line" }), -5);
+        }
+      }
+      startScanLine = fmEnd + 1;
+    }
+  }
+
+  // 2. Scan lines for fenced code blocks, tables, callouts, headings, lists, HR, embeds, and inline formatting
+  let inCode = false;
+  let codeFence = "```";
+  let codeStartLine = 0;
+  let codeLang = "";
+  let inCallout = false;
+  let calloutCls = "is-note";
+
+  for (let ln = startScanLine; ln <= lineCount; ln++) {
+    if (replacedLines.has(ln)) continue;
+    const line = doc.line(ln);
+    const text = line.text;
+    const trimmed = text.trim();
+    const lineActive = overlapsSelection(sel, line.from, line.to);
+
+    // Attach any bound AI illustration slot card after this line
+    if (slotsByLine.has(ln)) {
+      slotsByLine.get(ln).forEach((entry) => {
+        addOp(line.to, line.to, Decoration.widget({
+          widget: new SlotCardWidget(entry.slot, entry.no, `§ 位于「${entry.preview}」之后`, renderSlotCard),
+          block: true,
+          side: 1,
+        }), 100);
+      });
+    }
+
+    // Fenced code block handling
+    if (!inCode && /^(?:`{3,}|~{3,})/.test(trimmed)) {
+      inCode = true;
+      codeFence = trimmed.startsWith("~~~") ? "~~~" : "```";
+      codeStartLine = ln;
+      codeLang = trimmed.replace(/^(`{3,}|~{3,})/, "").trim();
+      // Gather full code text for Copy button
+      let endCodeLn = lineCount;
+      for (let k = ln + 1; k <= lineCount; k++) {
+        if (doc.line(k).text.trim().startsWith(codeFence)) { endCodeLn = k; break; }
+      }
+      const codeBody = endCodeLn > ln + 1
+        ? doc.sliceString(doc.line(ln + 1).from, doc.line(endCodeLn - 1).to)
+        : "";
+      addOp(line.from, line.from, Decoration.line({ class: "cm-lp-code-line cm-lp-code-first" }), -5);
+      if (!lineActive) {
+        addOp(line.from, line.to, Decoration.replace({ widget: new CodeHeaderWidget(codeLang, codeBody) }), 0);
+      }
+      continue;
+    }
+    if (inCode) {
+      if (trimmed.startsWith(codeFence)) {
+        addOp(line.from, line.from, Decoration.line({ class: "cm-lp-code-line cm-lp-code-last" }), -5);
+        if (!lineActive) {
+          addOp(line.from, line.to, Decoration.mark({ class: "cm-lp-syntax-dim" }), 0);
+        }
+        inCode = false;
+      } else {
+        addOp(line.from, line.from, Decoration.line({ class: "cm-lp-code-line" }), -5);
+      }
+      continue;
+    }
+
+    // GFM Markdown Table block
+    if (text.includes("|") && ln + 1 <= lineCount && isTableSepLine(doc.line(ln + 1).text)) {
+      let tblEnd = ln + 1;
+      while (tblEnd + 1 <= lineCount && doc.line(tblEnd + 1).text.trim() && doc.line(tblEnd + 1).text.includes("|")) {
+        tblEnd++;
+      }
+      const tFrom = line.from;
+      const tTo = doc.line(tblEnd).to;
+      if (!overlapsSelection(sel, tFrom, tTo)) {
+        const rawTbl = doc.sliceString(tFrom, tTo);
+        addOp(tFrom, tTo, Decoration.replace({
+          widget: new TableWidget(rawTbl, tFrom, tTo, sourcePath, linksCtrl),
+          block: true,
+        }), -10);
+        for (let k = ln; k <= tblEnd; k++) replacedLines.add(k);
+        ln = tblEnd;
+        continue;
+      } else {
+        for (let k = ln; k <= tblEnd; k++) {
+          const tl = doc.line(k);
+          addOp(tl.from, tl.from, Decoration.line({ class: "cm-lp-table-src-line" }), -5);
+        }
+        ln = tblEnd;
+        continue;
+      }
+    }
+
+    // Horizontal rule
+    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(text)) {
+      if (!lineActive) {
+        addOp(line.from, line.to, Decoration.replace({ widget: new HrWidget() }), 0);
+      } else {
+        addOp(line.from, line.to, Decoration.mark({ class: "cm-lp-syntax-dim" }), 0);
+      }
+      inCallout = false;
+      continue;
+    }
+
+    // Standalone embed line ![[...]] or ![alt](url)
+    if (/^\s*!(?:\[\[[^\[\]]+\]\]|\[[^\]]*\]\([^)]+\))\s*$/.test(text)) {
+      inCallout = false;
+      addOp(line.to, line.to, Decoration.widget({
+        widget: new EmbedWidget(text, sourcePath, linksCtrl),
+        block: true,
+        side: 1,
+      }), 50);
+      if (!lineActive) {
+        addOp(line.from, line.to, Decoration.mark({ class: "cm-lp-embed-src-dim" }), 0);
+      }
+      continue;
+    }
+
+    // Blockquote / Obsidian Callout
+    const qm = text.match(/^(\s*>\s?)(.*)$/);
+    if (qm) {
+      const prefixLen = qm[1].length;
+      const cm = qm[2].match(/^\[!([a-zA-Z]+)\](?:[+-])?\s*(.*)$/);
+      if (cm) {
+        inCallout = true;
+        const kind = cm[1].toLowerCase();
+        const meta = CALLOUT_META[kind] || CALLOUT_META.note;
+        calloutCls = meta.cls;
+        addOp(line.from, line.from, Decoration.line({ class: `cm-lp-callout ${calloutCls} is-first` }), -5);
+        if (!lineActive) {
+          addOp(line.from, line.to, Decoration.replace({ widget: new CalloutHeaderWidget(kind, cm[2].trim()) }), 0);
+          continue;
+        }
+      } else if (inCallout) {
+        addOp(line.from, line.from, Decoration.line({ class: `cm-lp-callout ${calloutCls}` }), -5);
+        if (!lineActive) addOp(line.from, line.from + prefixLen, Decoration.replace({}), 0);
+      } else {
+        addOp(line.from, line.from, Decoration.line({ class: "cm-lp-quote-line" }), -5);
+        if (!lineActive) addOp(line.from, line.from + prefixLen, Decoration.replace({}), 0);
+      }
+    } else {
+      inCallout = false;
+    }
+
+    // Headings (# .. ######)
+    const hm = text.match(/^(\s*)(#{1,6})(\s+)/);
+    if (hm) {
+      const lvl = hm[2].length;
+      addOp(line.from, line.from, Decoration.line({ class: `cm-lp-h cm-lp-h${lvl}` }), -5);
+      const prefEnd = line.from + hm[0].length;
+      if (!overlapsSelection(sel, line.from, prefEnd)) {
+        addOp(line.from, prefEnd, Decoration.replace({}), 0);
+      } else {
+        addOp(line.from, prefEnd, Decoration.mark({ class: "cm-lp-syntax-dim" }), 0);
+      }
+    }
+
+    // Task checkboxes & bullet lists
+    const taskM = text.match(/^(\s*[-*+]\s+)(\[[ xX]\])(\s+)/);
+    if (taskM) {
+      const checked = taskM[2].toLowerCase() === "[x]";
+      const markerFrom = line.from + taskM[1].length;
+      const fullPrefEnd = markerFrom + 3;
+      addOp(line.from, line.from, Decoration.line({ class: "cm-lp-list-line" + (checked ? " cm-lp-task-done" : "") }), -5);
+      if (!overlapsSelection(sel, line.from, fullPrefEnd)) {
+        addOp(line.from, fullPrefEnd, Decoration.replace({ widget: new CheckboxWidget(checked, markerFrom) }), 0);
+      }
+    } else {
+      const ulM = text.match(/^(\s*)([-*+])(\s+)/);
+      if (ulM) {
+        const dashFrom = line.from + ulM[1].length;
+        const dashTo = dashFrom + 1;
+        addOp(line.from, line.from, Decoration.line({ class: "cm-lp-list-line" }), -5);
+        if (!overlapsSelection(sel, dashFrom, dashTo + 1)) {
+          addOp(dashFrom, dashTo, Decoration.replace({ widget: new BulletWidget() }), 0);
+        }
+      }
+    }
+
+    // Inline Markdown decorations within this line
+    decorateInlineLine(text, line.from, sel, sourcePath, linksCtrl, onOpenNoteNewTab, addOp);
+  }
+
+  // Sort strictly by (from asc, startSide/order asc, to asc) as required by RangeSetBuilder
+  ops.sort((a, b) => (a.from - b.from) || (a.order - b.order) || (a.to - b.to));
+
+  const builder = new RangeSetBuilder();
+  let lastReplaceTo = -1;
+  for (const op of ops) {
+    // Skip any inline decoration that falls inside an already-added replace range
+    const isLine = op.deco.spec && !op.deco.spec.widget && op.from === op.to && op.deco.spec.attributes;
+    if (!isLine && op.from < lastReplaceTo) continue;
+    try {
+      builder.add(op.from, op.to, op.deco);
+      if (op.deco.spec && op.deco.spec.inclusive === undefined && op.to > op.from && !op.deco.spec.class && !op.deco.spec.attributes) {
+        lastReplaceTo = Math.max(lastReplaceTo, op.to);
+      }
+    } catch {
+      // Ignore any rare overlapping edge decoration cleanly without breaking editor
+    }
+  }
+  return builder.finish();
+}
+
+function decorateInlineLine(text, lineFrom, sel, sourcePath, linksCtrl, onOpenNoteNewTab, addOp) {
+  // Helper to claim non-overlapping inline spans cleanly
+  const claimed = [];
+  const isClaimed = (a, b) => claimed.some(([s, e]) => a < e && b > s);
+  const claim = (a, b) => claimed.push([a, b]);
+
+  // 1. Wikilinks [[target|alias]] (non-embed)
+  {
+    const re = /(?<!!)\[\[([^\[\]\r\n]+)\]\]/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const f = lineFrom + m.index;
+      const t = f + m[0].length;
+      if (isClaimed(f, t)) continue;
+      claim(f, t);
+      if (!overlapsSelection(sel, f, t)) {
+        addOp(f, t, Decoration.replace({
+          widget: new WikilinkWidget(m[1], f, t, sourcePath, linksCtrl, onOpenNoteNewTab),
+        }), 1);
+      } else {
+        addOp(f, f + 2, Decoration.mark({ class: "cm-lp-syntax-dim" }), 1);
+        addOp(f + 2, t - 2, Decoration.mark({ class: "cm-lp-wikilink-editing" }), 2);
+        addOp(t - 2, t, Decoration.mark({ class: "cm-lp-syntax-dim" }), 3);
+      }
+    }
+  }
+
+  // 2. External links [label](https://...)
+  {
+    const re = /(?<!!)\[([^\[\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const f = lineFrom + m.index;
+      const t = f + m[0].length;
+      if (isClaimed(f, t)) continue;
+      claim(f, t);
+      if (!overlapsSelection(sel, f, t)) {
+        addOp(f, t, Decoration.replace({ widget: new ExtLinkWidget(m[1], m[2], f) }), 1);
+      }
+    }
+  }
+
+  // 3. Inline code `...`
+  {
+    const re = /`([^`\r\n]+)`/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const f = lineFrom + m.index;
+      const t = f + m[0].length;
+      if (isClaimed(f, t)) continue;
+      claim(f, t);
+      const active = overlapsSelection(sel, f, t);
+      if (!active) addOp(f, f + 1, Decoration.replace({}), 1);
+      else addOp(f, f + 1, Decoration.mark({ class: "cm-lp-syntax-dim" }), 1);
+      addOp(f + 1, t - 1, Decoration.mark({ class: "cm-lp-code" }), 2);
+      if (!active) addOp(t - 1, t, Decoration.replace({}), 3);
+      else addOp(t - 1, t, Decoration.mark({ class: "cm-lp-syntax-dim" }), 3);
+    }
+  }
+
+  // 4. Colored HTML highlight <mark style="background:#...">...</mark>
+  {
+    const re = /<mark\s+style="background:\s*([^";]+);?"\s*>([\s\S]*?)<\/mark>/gi;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const f = lineFrom + m.index;
+      const t = f + m[0].length;
+      if (isClaimed(f, t)) continue;
+      claim(f, t);
+      const openLen = m[0].indexOf(">") + 1;
+      const closeLen = 7; // </mark>
+      const active = overlapsSelection(sel, f, t);
+      if (!active) addOp(f, f + openLen, Decoration.replace({}), 1);
+      else addOp(f, f + openLen, Decoration.mark({ class: "cm-lp-syntax-dim" }), 1);
+      addOp(f + openLen, t - closeLen, Decoration.mark({
+        class: "cm-lp-mark",
+        attributes: { style: `background:${m[1]}` },
+      }), 2);
+      if (!active) addOp(t - closeLen, t, Decoration.replace({}), 3);
+      else addOp(t - closeLen, t, Decoration.mark({ class: "cm-lp-syntax-dim" }), 3);
+    }
+  }
+
+  // 5. Default Obsidian highlight ==...==
+  {
+    const re = /==([^=\r\n]+)==/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const f = lineFrom + m.index;
+      const t = f + m[0].length;
+      if (isClaimed(f, t)) continue;
+      claim(f, t);
+      const active = overlapsSelection(sel, f, t);
+      if (!active) addOp(f, f + 2, Decoration.replace({}), 1);
+      else addOp(f, f + 2, Decoration.mark({ class: "cm-lp-syntax-dim" }), 1);
+      addOp(f + 2, t - 2, Decoration.mark({ class: "cm-lp-mark is-default" }), 2);
+      if (!active) addOp(t - 2, t, Decoration.replace({}), 3);
+      else addOp(t - 2, t, Decoration.mark({ class: "cm-lp-syntax-dim" }), 3);
+    }
+  }
+
+  // 6. Bold **...**
+  {
+    const re = /\*\*([^\*\r\n]+)\*\*/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const f = lineFrom + m.index;
+      const t = f + m[0].length;
+      if (isClaimed(f, t)) continue;
+      claim(f, t);
+      const active = overlapsSelection(sel, f, t);
+      if (!active) addOp(f, f + 2, Decoration.replace({}), 1);
+      else addOp(f, f + 2, Decoration.mark({ class: "cm-lp-syntax-dim" }), 1);
+      addOp(f + 2, t - 2, Decoration.mark({ class: "cm-lp-strong" }), 2);
+      if (!active) addOp(t - 2, t, Decoration.replace({}), 3);
+      else addOp(t - 2, t, Decoration.mark({ class: "cm-lp-syntax-dim" }), 3);
+    }
+  }
+
+  // 7. Strikethrough ~~...~~
+  {
+    const re = /~~([^~\r\n]+)~~/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const f = lineFrom + m.index;
+      const t = f + m[0].length;
+      if (isClaimed(f, t)) continue;
+      claim(f, t);
+      const active = overlapsSelection(sel, f, t);
+      if (!active) addOp(f, f + 2, Decoration.replace({}), 1);
+      else addOp(f, f + 2, Decoration.mark({ class: "cm-lp-syntax-dim" }), 1);
+      addOp(f + 2, t - 2, Decoration.mark({ class: "cm-lp-strike" }), 2);
+      if (!active) addOp(t - 2, t, Decoration.replace({}), 3);
+      else addOp(t - 2, t, Decoration.mark({ class: "cm-lp-syntax-dim" }), 3);
+    }
+  }
+
+  // 8. Italic *...*
+  {
+    const re = /(?<!\*)\*([^\*\r\n]+)\*(?!\*)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const f = lineFrom + m.index;
+      const t = f + m[0].length;
+      if (isClaimed(f, t)) continue;
+      claim(f, t);
+      const active = overlapsSelection(sel, f, t);
+      if (!active) addOp(f, f + 1, Decoration.replace({}), 1);
+      else addOp(f, f + 1, Decoration.mark({ class: "cm-lp-syntax-dim" }), 1);
+      addOp(f + 1, t - 1, Decoration.mark({ class: "cm-lp-em" }), 2);
+      if (!active) addOp(t - 1, t, Decoration.replace({}), 3);
+      else addOp(t - 1, t, Decoration.mark({ class: "cm-lp-syntax-dim" }), 3);
+    }
+  }
+
+  // 9. Inline Math $...$
+  {
+    const re = /(?<!\$)\$([^$\r\n]+)\$(?!\$)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const f = lineFrom + m.index;
+      const t = f + m[0].length;
+      if (isClaimed(f, t)) continue;
+      claim(f, t);
+      const active = overlapsSelection(sel, f, t);
+      if (!active) addOp(f, f + 1, Decoration.replace({}), 1);
+      else addOp(f, f + 1, Decoration.mark({ class: "cm-lp-syntax-dim" }), 1);
+      addOp(f + 1, t - 1, Decoration.mark({ class: "cm-lp-math" }), 2);
+      if (!active) addOp(t - 1, t, Decoration.replace({}), 3);
+      else addOp(t - 1, t, Decoration.mark({ class: "cm-lp-syntax-dim" }), 3);
+    }
+  }
+
+  // 10. Obsidian Comment %%...%%
+  {
+    const re = /%%([^%\r\n]+)%%/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const f = lineFrom + m.index;
+      const t = f + m[0].length;
+      if (isClaimed(f, t)) continue;
+      claim(f, t);
+      addOp(f, t, Decoration.mark({ class: "cm-lp-comment" }), 2);
+    }
+  }
+}
+
+// ---------- Main Controller Factory ----------
 
 export function createArticleLiveEditor(opts) {
   const {
@@ -155,67 +873,182 @@ export function createArticleLiveEditor(opts) {
     onOpenNoteNewTab,
   } = opts;
 
-  let editingIdx = -1;
-  let activeLiveTa = null;
-  let hostEl = null;
+  let cmView = null;
+  let cmMountBox = null;
+  let coverSlotBox = null;
+  let orphanSlotsBox = null;
+  let backlinksBox = null;
+  let rootHostEl = null;
+  let lastDocVersionPath = "";
+  let suppressDocChange = false;
 
-  function autoResize(ta) {
-    if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${Math.max(30, ta.scrollHeight + 2)}px`;
+  const liveDecoField = StateField.define({
+    create(state) {
+      return buildLiveDecorations(state, opts);
+    },
+    update(deco, tr) {
+      if (tr.docChanged || tr.selection || tr.effects.some((e) => e.is(refreshLiveEffect))) {
+        return buildLiveDecorations(tr.state, opts);
+      }
+      return deco;
+    },
+    provide: (f) => EditorView.decorations.from(f),
+  });
+
+  const mdHighlightStyle = HighlightStyle.define([
+    { tag: tags.heading, fontWeight: "750" },
+    { tag: tags.strong, fontWeight: "700" },
+    { tag: tags.emphasis, fontStyle: "italic" },
+    { tag: tags.monospace, fontFamily: "var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)" },
+  ]);
+
+  // ---------- Editing Helpers on CodeMirror 6 ----------
+
+  function wrapSelection(prefix, suffix = prefix, fallback = "") {
+    if (!cmView) return;
+    const { from, to } = cmView.state.selection.main;
+    const sel = cmView.state.sliceDoc(from, to);
+    const body = sel || fallback;
+    const insert = `${prefix}${body}${suffix}`;
+    const anchor = sel ? from + insert.length : from + prefix.length;
+    const head = sel ? anchor : anchor + body.length;
+    cmView.dispatch({
+      changes: { from, to, insert },
+      selection: EditorSelection.range(anchor, head),
+    });
+    cmView.focus();
   }
 
-  function replaceBlockRaw(parsed, blockIdx, nextRaw) {
-    const blk = parsed.blocks[blockIdx];
-    if (!blk) return;
-    const nextLines = [...parsed.lines];
-    const repLines = nextRaw === null ? [] : String(nextRaw).replace(/\r\n/g, "\n").split("\n");
-    nextLines.splice(blk.startLine, blk.endLine - blk.startLine + 1, ...repLines);
-    setContent(nextLines.join("\n"));
+  function applyHighlight(swatch) {
+    if (!swatch) return;
+    if (swatch.kind === "eq") {
+      wrapSelection("==", "==", "高亮文本");
+    } else {
+      wrapSelection(`<mark style="background:${swatch.bg}">`, "</mark>", "高亮文本");
+    }
   }
 
-  function insertRawAfterBlock(parsed, blockIdx, snippet) {
-    const nextLines = [...parsed.lines];
-    const insertAt = blockIdx >= 0 && parsed.blocks[blockIdx]
-      ? parsed.blocks[blockIdx].endLine + 1
-      : nextLines.length;
-    const toAdd = ["", ...String(snippet || "").split("\n")];
-    nextLines.splice(insertAt, 0, ...toAdd);
-    setContent(nextLines.join("\n"));
-    return blockIdx + 1;
+  function clearFormatting() {
+    if (!cmView) return;
+    const { from, to } = cmView.state.selection.main;
+    if (from === to) {
+      toast("请先选中需要清除格式的文本");
+      return;
+    }
+    const sel = cmView.state.sliceDoc(from, to);
+    const cleaned = sel
+      .replace(/<\/?mark(?:\s+[^>]*)?>/gi, "")
+      .replace(/(\*\*|__|~~|==|%%)/g, "")
+      .replace(/(?<!\*)\*([^\*\r\n]+)\*(?!\*)/g, "$1")
+      .replace(/`([^`\r\n]+)`/g, "$1")
+      .replace(/(?<!\$)\$([^$\r\n]+)\$(?!\$)/g, "$1");
+    cmView.dispatch({
+      changes: { from, to, insert: cleaned },
+      selection: EditorSelection.range(from, from + cleaned.length),
+    });
+    cmView.focus();
   }
 
-  function openBlockContextMenu(ev, parsed, blockIdx) {
-    const blk = parsed.blocks[blockIdx];
-    const selText = activeLiveTa && activeLiveTa.isConnected
-      ? activeLiveTa.value.slice(activeLiveTa.selectionStart ?? 0, activeLiveTa.selectionEnd ?? 0).trim()
-      : (window.getSelection?.()?.toString() || "").trim();
+  function setParagraphPrefix(prefix) {
+    if (!cmView) return;
+    const { from, to } = cmView.state.selection.main;
+    const startLine = cmView.state.doc.lineAt(from).number;
+    const endLine = cmView.state.doc.lineAt(to).number;
+    const changes = [];
+    for (let ln = startLine; ln <= endLine; ln++) {
+      const line = cmView.state.doc.line(ln);
+      const stripped = line.text.replace(/^\s*(?:#{1,6}\s+|[-*+]\s+\[[ xX]\]\s+|[-*+]\s+|\d+\.\s+|>\s?)/, "");
+      const next = prefix ? `${prefix}${stripped}` : stripped;
+      changes.push({ from: line.from, to: line.to, insert: next });
+    }
+    cmView.dispatch({ changes });
+    cmView.focus();
+  }
 
-    // Check if user right-clicked directly on a wikilink pill
-    const wikiBtn = ev.target?.closest?.(".ic-wikilink");
-    if (wikiBtn) {
-      const linkLabel = wikiBtn.textContent?.trim() || "";
-      const targetMatch = (wikiBtn.title || "").match(/「([^」]+)」/);
-      const target = targetMatch ? targetMatch[1] : linkLabel;
-      const resolved = linksCtrl.resolveLocalTarget(target, getActivePath());
-      openArticleContextMenu(ev, [
+  function insertBlockSnippet(snippet) {
+    if (!cmView) return;
+    const { to } = cmView.state.selection.main;
+    const line = cmView.state.doc.lineAt(to);
+    const prefix = line.text.trim() ? "\n\n" : "";
+    const insert = `${prefix}${snippet}\n`;
+    const pos = line.to;
+    cmView.dispatch({
+      changes: { from: pos, to: pos, insert },
+      selection: { anchor: pos + prefix.length + snippet.length },
+      scrollIntoView: true,
+    });
+    cmView.focus();
+  }
+
+  function openExternalLinkModal() {
+    if (!cmView) return;
+    const { from, to } = cmView.state.selection.main;
+    const sel = cmView.state.sliceDoc(from, to).trim();
+    const isUrl = /^https?:\/\//i.test(sel);
+    const labelIn = el("input", { class: "input", value: isUrl ? "" : sel, placeholder: "链接显示文字" });
+    const urlIn = el("input", { class: "input mono", value: isUrl ? sel : "https://", placeholder: "https://example.com" });
+    const submit = () => {
+      const u = urlIn.value.trim();
+      if (!u) return toast("请输入链接地址");
+      const lbl = labelIn.value.trim() || u;
+      const insert = `[${lbl}](${u})`;
+      cmView.dispatch({ changes: { from, to, insert }, selection: { anchor: from + insert.length } });
+      closeModal();
+      cmView.focus();
+    };
+    urlIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+    showModal("添加外部链接", el("div", { class: "col", style: { gap: "10px" } },
+      el("div", { class: "field" }, el("label", null, "显示文字"), labelIn),
+      el("div", { class: "field" }, el("label", null, "链接 URL"), urlIn)
+    ), [
+      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+      el("button", { type: "button", class: "btn btn-primary", onClick: submit }, "插入链接"),
+    ]);
+    (isUrl ? labelIn : urlIn).focus();
+  }
+
+  function openEditorContextMenu(ev) {
+    if (!cmView) return;
+    const sourcePath = getActivePath() || "";
+    const { from, to } = cmView.state.selection.main;
+    const hasSel = to > from;
+    const selText = hasSel ? cmView.state.sliceDoc(from, to) : "";
+    const activeLine = cmView.state.doc.lineAt(to);
+    const aiTargetText = selText.trim() || activeLine.text.trim();
+
+    // Check if right-clicked directly on a wikilink widget
+    const wikiEl = ev.target?.closest?.(".cm-lp-wikilink");
+    const items = [];
+
+    if (wikiEl) {
+      const target = wikiEl.dataset.target || wikiEl.textContent?.trim() || "";
+      const wFrom = Number(wikiEl.dataset.from || 0);
+      const resolved = linksCtrl.resolveLocalTarget(target, sourcePath);
+      items.push(
         { header: `双链：${target}` },
         {
           icon: "↗",
-          label: resolved?.kind === "note" ? "在当前标签打开" : "一键新建并打开",
-          onClick: () => linksCtrl.navigateToLink(target, getActivePath()),
+          label: resolved?.kind === "note" ? "打开此笔记" : "一键新建并打开",
+          onClick: () => linksCtrl.navigateToLink(target, sourcePath),
         },
         resolved?.kind === "note" ? {
           icon: "📑",
           label: "在新标签页打开",
           onClick: () => onOpenNoteNewTab?.(resolved.item.path),
         } : null,
+        {
+          icon: "✎",
+          label: "编辑双链文字",
+          onClick: () => {
+            cmView.dispatch({ selection: { anchor: wFrom + 2 } });
+            cmView.focus();
+          },
+        },
         resolved?.kind === "note" ? {
           icon: "🕸",
-          label: "查看该笔记的局部图谱",
+          label: "查看该笔记局部图谱",
           onClick: () => linksCtrl.openGraphModal("local", resolved.item.path),
         } : null,
-        { sep: true },
         {
           icon: "📋",
           label: `复制 [[${target}]]`,
@@ -224,568 +1057,390 @@ export function createArticleLiveEditor(opts) {
             toast(`已复制 [[${target}]]`);
           },
         },
-      ]);
-      return;
-    }
-
-    const anchorLine = blk ? blk.raw.split("\n").find((l) => l.trim())?.trim() || "" : "";
-    const items = [];
-
-    if (selText && selText.length >= 2) {
-      items.push(
-        { header: `选中文本 (${selText.length} 字)` },
-        {
-          icon: "✨",
-          label: "让 AI 改写选中片段",
-          onClick: () => onAskAiSelection?.(selText, "edit"),
-        },
-        {
-          icon: "💬",
-          label: "向 AI 提问 / 诊断这段",
-          onClick: () => onAskAiSelection?.(selText, "advise"),
-        },
-        {
-          icon: "🔗",
-          label: `转为双链 [[${selText.slice(0, 14)}${selText.length > 14 ? "…" : ""}]]`,
-          onClick: () => {
-            if (activeLiveTa && activeLiveTa.isConnected) {
-              linksCtrl.triggerInsertWikilink(activeLiveTa);
-            } else if (blk) {
-              const nextRaw = blk.raw.replace(selText, `[[${selText}]]`);
-              replaceBlockRaw(parsed, blockIdx, nextRaw);
-              render(hostEl);
-            }
-          },
-        },
-        {
-          icon: "📄",
-          label: "提取为新笔记并替换为双链",
-          onClick: async () => {
-            const createdName = await onExtractSelectionToNote?.(selText);
-            if (!createdName) return;
-            if (activeLiveTa && activeLiveTa.isConnected) {
-              const a = activeLiveTa.selectionStart ?? 0;
-              const b = activeLiveTa.selectionEnd ?? a;
-              activeLiveTa.setRangeText(`[[${createdName}]]`, a, b, "end");
-              activeLiveTa.dispatchEvent(new Event("input", { bubbles: true }));
-            } else if (blk) {
-              replaceBlockRaw(parsed, blockIdx, blk.raw.replace(selText, `[[${createdName}]]`));
-              render(hostEl);
-            }
-          },
-        },
         { sep: true }
       );
     }
 
+    // Top Obsidian Link Actions
     items.push(
-      blk ? {
-        icon: "✎",
-        label: "原位编辑此段 Markdown",
-        onClick: () => { editingIdx = blockIdx; render(hostEl); },
-      } : null,
       {
         icon: "🔗",
-        label: "插入双链笔记 [[…]]",
+        label: hasSel ? "转为内部双链" : "添加内部双链",
         shortcut: "[[",
-        onClick: () => {
-          if (activeLiveTa && activeLiveTa.isConnected) {
-            linksCtrl.triggerInsertWikilink(activeLiveTa);
-          } else {
-            const nextIdx = insertRawAfterBlock(parsed, blockIdx, "[[");
-            editingIdx = nextIdx;
-            render(hostEl, { caretEnd: true, openAc: true });
-          }
-        },
+        onClick: () => linksCtrl.triggerInsertWikilinkCM(cmView, false),
       },
       {
-        icon: "🎨",
-        label: "在此段后插入 AI 配图位",
-        onClick: () => insertSlotAt?.(anchorLine, "inline"),
+        icon: "🌐",
+        label: "添加外部链接",
+        shortcut: "Ctrl+K",
+        onClick: () => openExternalLinkModal(),
       },
       { sep: true },
+
+      // Format > (with 3rd-level Highlight color palette — matches Obsidian screenshot!)
       {
-        icon: "📊",
-        label: "在下方插入 Markdown 表格",
+        icon: "🖌",
+        label: "格式 (Format)",
+        children: [
+          { icon: "B", label: "加粗", shortcut: "Ctrl+B", onClick: () => wrapSelection("**", "**", "加粗文本") },
+          { icon: "I", label: "斜体", shortcut: "Ctrl+I", onClick: () => wrapSelection("*", "*", "斜体文本") },
+          { icon: "S", label: "删除线", onClick: () => wrapSelection("~~", "~~", "删除线文本") },
+          {
+            icon: "🖍",
+            label: "高亮 (Highlight)",
+            children: HIGHLIGHT_SWATCHES.map((sw) => ({
+              swatch: sw.id === "default" ? undefined : sw.swatch,
+              icon: sw.id === "default" ? "🖍" : undefined,
+              label: sw.label,
+              onClick: () => applyHighlight(sw),
+            })),
+          },
+          { sep: true },
+          { icon: "</>", label: "行内代码", onClick: () => wrapSelection("`", "`", "code") },
+          { icon: "Σ", label: "行内公式", onClick: () => wrapSelection("$", "$", "E = mc^2") },
+          { icon: "%", label: "注释 (%%)", onClick: () => wrapSelection("%% ", " %%", "仅编辑可见注释") },
+          { sep: true },
+          { icon: "🧹", label: "清除格式", disabled: !hasSel, onClick: () => clearFormatting() },
+        ],
+      },
+
+      // Paragraph >
+      {
+        icon: "¶",
+        label: "段落 (Paragraph)",
+        children: [
+          { icon: "H1", label: "一级标题", onClick: () => setParagraphPrefix("# ") },
+          { icon: "H2", label: "二级标题", onClick: () => setParagraphPrefix("## ") },
+          { icon: "H3", label: "三级标题", onClick: () => setParagraphPrefix("### ") },
+          { icon: "H4", label: "四级标题", onClick: () => setParagraphPrefix("#### ") },
+          { sep: true },
+          { icon: "•", label: "无序列表", onClick: () => setParagraphPrefix("- ") },
+          { icon: "1.", label: "有序列表", onClick: () => setParagraphPrefix("1. ") },
+          { icon: "☑", label: "任务列表", onClick: () => setParagraphPrefix("- [ ] ") },
+          { sep: true },
+          { icon: "❝", label: "引用块", onClick: () => setParagraphPrefix("> ") },
+          { icon: "📄", label: "普通正文", onClick: () => setParagraphPrefix("") },
+        ],
+      },
+
+      // Insert >
+      {
+        icon: "≡+",
+        label: "插入 (Insert)",
+        children: [
+          {
+            icon: "⊞",
+            label: "Markdown 表格",
+            onClick: () => insertBlockSnippet("| 列一 | 列二 | 列三 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |"),
+          },
+          {
+            icon: "💡",
+            label: "提示框 (Callout)",
+            children: [
+              { icon: "📝", label: "说明 (Note)", onClick: () => insertBlockSnippet("> [!NOTE] 说明\n> 在此输入说明内容") },
+              { icon: "💡", label: "提示 (Tip)", onClick: () => insertBlockSnippet("> [!TIP] 提示\n> 在此输入实用建议") },
+              { icon: "📌", label: "重要 (Important)", onClick: () => insertBlockSnippet("> [!IMPORTANT] 重要\n> 在此强调关键结论") },
+              { icon: "⚠️", label: "注意 (Warning)", onClick: () => insertBlockSnippet("> [!WARNING] 注意\n> 在此提示潜在风险") },
+              { icon: "🚨", label: "警示 (Caution)", onClick: () => insertBlockSnippet("> [!CAUTION] 警示\n> 在此提醒关键坑点") },
+              { icon: "❝", label: "引用 (Quote)", onClick: () => insertBlockSnippet("> [!QUOTE] 引用\n> 在此引用原话") },
+            ],
+          },
+          { icon: "—", label: "分割线", onClick: () => insertBlockSnippet("---") },
+          { icon: "</>", label: "代码块", onClick: () => insertBlockSnippet("```text\n\n```") },
+          { icon: "Σ", label: "数学公式块", onClick: () => insertBlockSnippet("$$\n\n$$") },
+          {
+            icon: "🏷",
+            label: "文档属性 (YAML)",
+            onClick: () => {
+              const cur = cmView.state.doc.toString();
+              if (cur.startsWith("---\n")) {
+                cmView.dispatch({ selection: { anchor: 4 }, scrollIntoView: true });
+                cmView.focus();
+                return;
+              }
+              const fm = "---\ntags: []\n---\n\n";
+              cmView.dispatch({ changes: { from: 0, to: 0, insert: fm }, selection: { anchor: 11 } });
+              cmView.focus();
+            },
+          },
+          { sep: true },
+          { icon: "📎", label: "嵌入笔记 / 图片 (![[…]])", onClick: () => linksCtrl.triggerInsertWikilinkCM(cmView, true) },
+          { icon: "🎨", label: "AI 配图位", onClick: () => insertSlotAt(activeLine.text.trim()) },
+        ],
+      },
+
+      // AI Assistant >
+      {
+        icon: "✨",
+        label: "AI 写作助手",
+        children: [
+          {
+            icon: "✨",
+            label: hasSel ? "改写选中片段" : "改写当前段落",
+            disabled: !aiTargetText,
+            onClick: () => onAskAiSelection?.(aiTargetText, "edit"),
+          },
+          {
+            icon: "💬",
+            label: hasSel ? "诊断 / 提问这段" : "诊断当前段落",
+            disabled: !aiTargetText,
+            onClick: () => onAskAiSelection?.(aiTargetText, "advise"),
+          },
+          { sep: true },
+          {
+            icon: "📄",
+            label: "提取选中为新笔记并转双链…",
+            disabled: !hasSel || selText.trim().length < 2,
+            onClick: async () => {
+              const title = await onExtractSelectionToNote?.(selText.trim());
+              if (title && cmView) {
+                const insert = `[[${title}]]`;
+                cmView.dispatch({ changes: { from, to, insert }, selection: { anchor: from + insert.length } });
+              }
+            },
+          },
+        ],
+      },
+
+      { sep: true },
+
+      // Standard Clipboard Section (matches Obsidian screenshot!)
+      {
+        icon: "✂",
+        label: "剪切",
+        shortcut: "Ctrl+X",
+        disabled: !hasSel,
         onClick: () => {
-          const nextIdx = insertRawAfterBlock(parsed, blockIdx, "| 列 1 | 列 2 | 列 3 |\n| --- | --- | --- |\n| 内容 A | 内容 B | 内容 C |");
-          editingIdx = nextIdx;
-          render(hostEl);
+          navigator.clipboard?.writeText(selText).catch(() => {});
+          cmView.dispatch({ changes: { from, to, insert: "" }, selection: { anchor: from } });
+          cmView.focus();
         },
       },
       {
-        icon: "💡",
-        label: "在下方插入提示框 (Callout)",
-        onClick: () => {
-          const nextIdx = insertRawAfterBlock(parsed, blockIdx, "> [!TIP] 提示\n> 在这里写重点提示内容…");
-          editingIdx = nextIdx;
-          render(hostEl);
-        },
-      },
-      blk ? { sep: true } : null,
-      blk ? {
         icon: "📋",
-        label: "复制此段 Markdown",
+        label: "复制",
+        shortcut: "Ctrl+C",
+        disabled: !hasSel,
         onClick: () => {
-          navigator.clipboard?.writeText(blk.raw).catch(() => {});
-          toast("已复制此段 Markdown");
+          navigator.clipboard?.writeText(selText).catch(() => {});
+          toast("已复制选中文本");
+          cmView.focus();
         },
-      } : null,
-      blk ? {
-        icon: "🗑",
-        label: "删除此段",
-        danger: true,
+      },
+      {
+        icon: "📥",
+        label: "粘贴",
+        shortcut: "Ctrl+V",
+        onClick: async () => {
+          try {
+            const clip = await navigator.clipboard.readText();
+            if (clip) {
+              cmView.dispatch({ changes: { from, to, insert: clip }, selection: { anchor: from + clip.length } });
+            }
+          } catch {
+            toast("请使用 Ctrl+V 粘贴");
+          }
+          cmView.focus();
+        },
+      },
+      {
+        icon: "📄",
+        label: "粘贴为纯文本",
+        shortcut: "Ctrl+Shift+V",
+        onClick: async () => {
+          try {
+            const clip = await navigator.clipboard.readText();
+            if (clip) {
+              const plain = clip.replace(/\r\n/g, "\n").replace(/<[^>]+>/g, "");
+              cmView.dispatch({ changes: { from, to, insert: plain }, selection: { anchor: from + plain.length } });
+            }
+          } catch {
+            toast("请使用 Ctrl+Shift+V 粘贴纯文本");
+          }
+          cmView.focus();
+        },
+      },
+      {
+        icon: "☐",
+        label: "全选",
+        shortcut: "Ctrl+A",
         onClick: () => {
-          editingIdx = -1;
-          replaceBlockRaw(parsed, blockIdx, null);
-          render(hostEl);
+          cmView.dispatch({ selection: EditorSelection.range(0, cmView.state.doc.length) });
+          cmView.focus();
         },
-      } : null
+      }
     );
 
     openArticleContextMenu(ev, items);
   }
 
-  function renderRenderedBlock(parsed, blk, idx, sourcePath) {
-    if (blk.type === "frontmatter") {
-      const entries = linksCtrl.parseFrontmatterEntries(blk.raw);
-      const keyLabels = { aliases: "别名", alias: "别名", tags: "标签", tag: "标签", author: "作者", date: "日期", title: "标题" };
-      const grid = el("div", { class: "ic-pv-props-grid" });
-      entries.forEach((e) => {
-        grid.appendChild(el("div", { class: "ic-pv-prop-row" },
-          el("span", { class: "ic-pv-prop-key" }, keyLabels[e.key.toLowerCase()] || e.key),
-          el("div", { class: "ic-pv-prop-vals" }, ...e.values.map((v) => el("span", { class: "ic-pv-prop-chip" }, v)))
-        ));
-      });
-      const tagEntry = entries.find((e) => /^tags?$/i.test(e.key));
-      const previewChips = tagEntry
-        ? tagEntry.values.slice(0, 4).map((v) => el("span", { class: "ic-pv-prop-chip" }, `#${v}`))
-        : [];
-      const det = el("details", { class: "ic-pv-props ic-live-props" },
-        el("summary", { class: "ic-pv-props-head ic-live-props-head" },
-          el("span", null, `文档属性 (${entries.length})`),
-          ...previewChips,
-          el("button", {
-            type: "button",
-            class: "btn btn-sm",
-            style: { marginLeft: "auto" },
-            onClick: (ev) => { ev.preventDefault(); ev.stopPropagation(); editingIdx = idx; render(hostEl); },
-          }, "✎ 编辑 YAML")
-        ),
-        grid
-      );
-      return det;
+  function createCMState(initialText) {
+    const docStr = String(initialText || "");
+    // If note starts with YAML frontmatter, place initial cursor on the first body line so Properties renders cleanly collapsed!
+    let initAnchor = 0;
+    const fmMatch = docStr.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n)*/);
+    if (fmMatch && fmMatch[0].length < docStr.length) {
+      initAnchor = fmMatch[0].length;
     }
-
-    if (blk.type === "heading") {
-      const m = blk.raw.trim().match(/^(#{1,6})\s+(.+)$/);
-      const lvl = m ? m[1].length : 2;
-      const tag = `h${Math.min(4, lvl)}`;
-      const h = el(tag, { class: `ic-live-h ic-live-h${lvl}` });
-      linksCtrl.appendInlineWithLinks(h, m ? m[2] : blk.raw, sourcePath, 0);
-      return h;
-    }
-
-    if (blk.type === "hr") {
-      return el("hr", { class: "ic-live-hr" });
-    }
-
-    if (blk.type === "code") {
-      const ls = blk.raw.split("\n");
-      const lang = ls[0].trim().replace(/^(`{3,}|~{3,})/, "").trim() || "text";
-      const codeBody = ls.slice(1, ls[ls.length - 1].trim().startsWith("```") || ls[ls.length - 1].trim().startsWith("~~~") ? -1 : undefined).join("\n");
-      return el("div", { class: "ic-live-code-card" },
-        el("div", { class: "ic-live-code-head" },
-          el("span", { class: "mono" }, lang),
-          el("button", {
-            type: "button",
-            class: "btn btn-sm",
-            onClick: (ev) => {
-              ev.stopPropagation();
-              navigator.clipboard?.writeText(codeBody).catch(() => {});
-              toast("已复制代码");
-            },
-          }, "📋 复制")
-        ),
-        el("pre", { class: "ic-live-pre" }, el("code", null, codeBody))
-      );
-    }
-
-    if (blk.type === "table") {
-      const ls = blk.raw.split("\n").filter((l) => l.trim());
-      const headers = splitTableRow(ls[0]);
-      const aligns = parseTableAlignments(ls[1] || "");
-      const bodyRows = ls.slice(2).map(splitTableRow);
-      const thead = el("thead", null,
-        el("tr", null, ...headers.map((cell, ci) => {
-          const th = el("th", { style: { textAlign: aligns[ci] || "left" } });
-          linksCtrl.appendInlineWithLinks(th, cell, sourcePath, 0);
-          return th;
-        }))
-      );
-      const tbody = el("tbody", null, ...bodyRows.map((row) =>
-        el("tr", null, ...headers.map((_, ci) => {
-          const td = el("td", { style: { textAlign: aligns[ci] || "left" } });
-          linksCtrl.appendInlineWithLinks(td, row[ci] || "", sourcePath, 0);
-          return td;
-        }))
-      ));
-      return el("div", { class: "ic-live-table-wrap" }, el("table", { class: "ic-live-table" }, thead, tbody));
-    }
-
-    if (blk.type === "blockquote") {
-      const rawLines = blk.raw.split("\n").map((l) => l.replace(/^\s*>\s?/, ""));
-      const cm = rawLines[0].trim().match(/^\[!([A-Za-z]+)\]\s*(.*)$/);
-      if (cm) {
-        const meta = CALLOUT_META[cm[1].toLowerCase()] || CALLOUT_META.note;
-        const titleText = cm[2]?.trim() || meta.label;
-        const body = el("div", { class: "ic-callout-body" });
-        rawLines.slice(1).forEach((ln) => {
-          const p = el("p", { style: { margin: "3px 0" } });
-          linksCtrl.appendInlineWithLinks(p, ln, sourcePath, 0);
-          body.appendChild(p);
-        });
-        return el("div", { class: `ic-callout ${meta.cls}` },
-          el("div", { class: "ic-callout-head" }, el("span", null, meta.icon), el("strong", null, titleText)),
-          body
-        );
-      }
-      const bq = el("blockquote", { class: "ic-pv-quote ic-live-quote" });
-      rawLines.forEach((ln) => {
-        const p = el("p", { style: { margin: "3px 0" } });
-        linksCtrl.appendInlineWithLinks(p, ln, sourcePath, 0);
-        bq.appendChild(p);
-      });
-      return bq;
-    }
-
-    if (blk.type === "list") {
-      const ls = blk.raw.split("\n");
-      const firstOrdered = /^\s*\d+\.\s+/.test(ls[0]);
-      const listEl = el(firstOrdered ? "ol" : "ul", { class: "ic-live-list" });
-      ls.forEach((ln, liOffset) => {
-        const indentMatch = ln.match(/^(\s*)/);
-        const indentLevel = Math.min(4, Math.floor((indentMatch?.[1]?.length || 0) / 2));
-        const taskMatch = ln.match(/^(\s*[-*+]\s+)\[([ xX])\]\s*(.*)$/);
-        if (taskMatch) {
-          const checked = taskMatch[2].toLowerCase() === "x";
-          const cb = el("input", { type: "checkbox", class: "ic-live-task-cb" });
-          cb.checked = checked;
-          cb.addEventListener("click", (ev) => ev.stopPropagation());
-          cb.addEventListener("change", () => {
-            const nextListLines = blk.raw.split("\n");
-            nextListLines[liOffset] = `${taskMatch[1]}[${cb.checked ? "x" : " "}] ${taskMatch[3]}`;
-            replaceBlockRaw(parsed, idx, nextListLines.join("\n"));
-            render(hostEl);
-          });
-          const textSpan = el("span", { class: checked ? "ic-live-task-done" : "" });
-          linksCtrl.appendInlineWithLinks(textSpan, taskMatch[3], sourcePath, 0);
-          listEl.appendChild(el("li", {
-            class: "ic-live-task-li",
-            style: indentLevel ? { marginLeft: `${indentLevel * 18}px` } : null,
-          }, cb, textSpan));
-          return;
-        }
-        const stripped = ln.replace(/^\s*(?:[-*+]\s+|\d+\.\s+)/, "");
-        const li = el("li", { style: indentLevel ? { marginLeft: `${indentLevel * 18}px` } : null });
-        linksCtrl.appendInlineWithLinks(li, stripped, sourcePath, 0);
-        listEl.appendChild(li);
-      });
-      return listEl;
-    }
-
-    if (blk.type === "embed") {
-      const wrap = el("div", { class: "ic-live-embed" });
-      linksCtrl.appendInlineWithLinks(wrap, blk.raw.trim(), sourcePath, 0);
-      return wrap;
-    }
-
-    // Normal paragraph
-    const p = el("p", { class: "ic-live-p" });
-    const pLines = blk.raw.split("\n");
-    pLines.forEach((ln, k) => {
-      if (k > 0) p.appendChild(document.createElement("br"));
-      linksCtrl.appendInlineWithLinks(p, ln, sourcePath, 0);
+    return EditorState.create({
+      doc: docStr,
+      selection: { anchor: initAnchor },
+      extensions: [
+        history(),
+        drawSelection(),
+        dropCursor(),
+        indentOnInput(),
+        bracketMatching(),
+        EditorView.lineWrapping,
+        placeholder("开始自由书写（所见即所得，输入 [[ 关联笔记，支持表格、提示框、任务清单与快捷键）…"),
+        markdown({ base: markdownLanguage }),
+        syntaxHighlighting(mdHighlightStyle),
+        liveDecoField,
+        Prec.high(keymap.of([
+          {
+            key: "Mod-b",
+            run: () => { wrapSelection("**", "**", "加粗文本"); return true; },
+          },
+          {
+            key: "Mod-i",
+            run: () => { wrapSelection("*", "*", "斜体文本"); return true; },
+          },
+          {
+            key: "Mod-k",
+            run: () => { openExternalLinkModal(); return true; },
+          },
+          {
+            key: "Mod-Shift-h",
+            run: () => { wrapSelection("==", "==", "高亮文本"); return true; },
+          },
+        ])),
+        keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+        EditorView.domEventHandlers({
+          keydown: (ev, view) => linksCtrl.handleCMKeydown(view, ev),
+          contextmenu: (ev) => {
+            openEditorContextMenu(ev);
+            return true;
+          },
+        }),
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged && !suppressDocChange) {
+            setContent(update.state.doc.toString());
+            linksCtrl.updateAutocompleteFromCM(update.view);
+          } else if (update.selectionSet) {
+            linksCtrl.updateAutocompleteFromCM(update.view);
+          }
+        }),
+      ],
     });
-    return p;
   }
 
-  function render(container, focusOpts = {}) {
-    if (!container) return;
-    hostEl = container;
-    clear(container);
-    activeLiveTa = null;
-
-    const rawContent = getContent() || "";
-    const sourcePath = getActivePath() || "";
-    const parsed = parseMarkdownBlocks(rawContent);
+  function renderAuxiliaryRegions() {
     const slots = getSlots() || [];
     const coverSlot = slots.find((s) => s.role === "cover");
     const inlineSlots = slots.filter((s) => s.role !== "cover");
+    const content = getContent() || "";
 
-    // 1. Cover slot card (or subtle add cover button)
-    if (coverSlot) {
-      container.appendChild(renderSlotCard(coverSlot, 0, "固定在文章开头"));
-    } else {
-      container.appendChild(el("div", { class: "ic-art-gap" },
-        el("button", { type: "button", class: "ic-art-gap-btn", onClick: () => insertSlotAt("", "cover") }, "＋ 添加文章封面")
-      ));
-    }
-
-    // Map inline illustration slots to the block containing their anchor
-    const blockSlots = new Map();
-    const orphans = [];
-    inlineSlots.forEach((sl) => {
-      let matchedBlockIdx = -1;
-      if (sl.anchor) {
-        matchedBlockIdx = parsed.blocks.findIndex((b) => b.raw.includes(sl.anchor));
-      }
-      if (matchedBlockIdx >= 0) {
-        if (!blockSlots.has(matchedBlockIdx)) blockSlots.set(matchedBlockIdx, []);
-        blockSlots.get(matchedBlockIdx).push(sl);
+    if (coverSlotBox) {
+      clear(coverSlotBox);
+      if (coverSlot) {
+        coverSlotBox.appendChild(renderSlotCard(coverSlot, 0, "固定在文章开头"));
       } else {
-        orphans.push(sl);
+        coverSlotBox.appendChild(el("div", { class: "ic-art-gap" },
+          el("button", { type: "button", class: "ic-art-gap-btn", onClick: () => insertSlotAt("", "cover") }, "＋ 添加文章封面")
+        ));
       }
-    });
-
-    let inlineNo = 0;
-
-    if (!parsed.blocks.length) {
-      // Empty note -> open initial seamless editor immediately
-      const emptyTa = el("textarea", {
-        class: "ic-live-ta is-paragraph",
-        rows: "10",
-        placeholder: "开始撰写你的文章（所见即所得，输入 [[ 关联笔记，支持表格、任务清单与代码块）…",
-      });
-      emptyTa.value = rawContent;
-      linksCtrl.attachTextarea(emptyTa);
-      emptyTa.addEventListener("input", () => {
-        setContent(emptyTa.value);
-        autoResize(emptyTa);
-      });
-      emptyTa.addEventListener("blur", () => {
-        if (emptyTa.value.trim()) render(container);
-      });
-      activeLiveTa = emptyTa;
-      container.appendChild(emptyTa);
-      requestAnimationFrame(() => autoResize(emptyTa));
-    } else {
-      parsed.blocks.forEach((blk, idx) => {
-        const isEditing = editingIdx === idx;
-        const rowWrap = el("div", {
-          class: "ic-live-block" + (isEditing ? " is-editing" : "") + ` is-type-${blk.type}`,
-          onContextMenu: (ev) => openBlockContextMenu(ev, parsed, idx),
-        });
-
-        // Subtle left-margin '+' insert handle on hover
-        const addHandle = el("button", {
-          type: "button",
-          class: "ic-live-gutter-add",
-          title: "在此段下方插入新段落（右键可插表格/提示框/配图）",
-          onClick: (ev) => {
-            ev.stopPropagation();
-            const nextIdx = insertRawAfterBlock(parsed, idx, "");
-            editingIdx = nextIdx;
-            render(container, { caretEnd: true });
-          },
-        }, "＋");
-        rowWrap.appendChild(addHandle);
-
-        if (isEditing) {
-          const ta = el("textarea", {
-            class: `ic-live-ta is-${blk.type}`,
-            spellcheck: "false",
-          });
-          ta.value = blk.raw;
-          linksCtrl.attachTextarea(ta);
-          let committed = false;
-          const commitAndClose = (nextEditIdx = -1) => {
-            if (committed) return;
-            committed = true;
-            if (ta.value !== blk.raw) {
-              replaceBlockRaw(parsed, idx, ta.value);
-            }
-            editingIdx = nextEditIdx;
-            render(container);
-          };
-
-          ta.addEventListener("input", () => {
-            autoResize(ta);
-            replaceBlockRaw(parsed, idx, ta.value);
-            // Update parsed block reference in place so subsequent edits stay synced
-            const nextParsed = parseMarkdownBlocks(getContent() || "");
-            parsed.lines = nextParsed.lines;
-            parsed.blocks = nextParsed.blocks;
-          });
-          ta.addEventListener("keydown", (ev) => {
-            if (ev.key === "Escape") {
-              ev.preventDefault();
-              commitAndClose(-1);
-              return;
-            }
-            if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "b") {
-              ev.preventDefault();
-              const a = ta.selectionStart ?? 0, b = ta.selectionEnd ?? a;
-              ta.setRangeText(`**${ta.value.slice(a, b) || "加粗"}**`, a, b, "end");
-              ta.dispatchEvent(new Event("input", { bubbles: true }));
-              return;
-            }
-            if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "i") {
-              ev.preventDefault();
-              const a = ta.selectionStart ?? 0, b = ta.selectionEnd ?? a;
-              ta.setRangeText(`*${ta.value.slice(a, b) || "斜体"}*`, a, b, "end");
-              ta.dispatchEvent(new Event("input", { bubbles: true }));
-              return;
-            }
-            if (ev.key === "Tab") {
-              ev.preventDefault();
-              const a = ta.selectionStart ?? 0, b = ta.selectionEnd ?? a;
-              ta.setRangeText("  ", a, b, "end");
-              ta.dispatchEvent(new Event("input", { bubbles: true }));
-              return;
-            }
-            // Seamless cross-block ArrowUp / ArrowDown navigation!
-            if (ev.key === "ArrowUp" && !ev.shiftKey && !document.querySelector(".ic-link-ac")) {
-              const before = ta.value.slice(0, ta.selectionStart ?? 0);
-              if (!before.includes("\n") && idx > 0) {
-                ev.preventDefault();
-                commitAndClose(idx - 1);
-              }
-            } else if (ev.key === "ArrowDown" && !ev.shiftKey && !document.querySelector(".ic-link-ac")) {
-              const after = ta.value.slice(ta.selectionEnd ?? ta.value.length);
-              if (!after.includes("\n") && idx < parsed.blocks.length - 1) {
-                ev.preventDefault();
-                commitAndClose(idx + 1);
-              }
-            }
-          });
-          ta.addEventListener("blur", () => {
-            // Delay briefly so autocomplete clicks / toolbar clicks can settle
-            setTimeout(() => {
-              if (document.activeElement === ta) return;
-              if (document.querySelector(".ic-link-ac")) return;
-              if (editingIdx === idx) commitAndClose(-1);
-            }, 140);
-          });
-
-          activeLiveTa = ta;
-          rowWrap.appendChild(ta);
-          requestAnimationFrame(() => {
-            autoResize(ta);
-            ta.focus();
-            if (focusOpts.caretEnd) {
-              ta.setSelectionRange(ta.value.length, ta.value.length);
-            }
-            if (focusOpts.openAc) {
-              ta.dispatchEvent(new Event("input", { bubbles: true }));
-            }
-          });
-        } else {
-          const rendered = renderRenderedBlock(parsed, blk, idx, sourcePath);
-          const contentWrap = el("div", { class: "ic-live-rendered" }, rendered);
-          contentWrap.addEventListener("click", (ev) => {
-            // Don't hijack interactive links, buttons, checkboxes, or details summary!
-            if (ev.target.closest("a, button, input, summary, .ic-wikilink, .ic-embed-note-head")) return;
-            const sel = window.getSelection?.()?.toString() || "";
-            if (sel.length >= 2) return; // user is selecting text (for copy or AI)
-            editingIdx = idx;
-            render(container, { caretEnd: true });
-          });
-          rowWrap.appendChild(contentWrap);
-        }
-
-        container.appendChild(rowWrap);
-
-        // Interleave any AI illustration slot cards bound to this block
-        const boundSlots = blockSlots.get(idx) || [];
-        boundSlots.forEach((sl) => {
-          inlineNo += 1;
-          const anchorPreview = blk.raw.split("\n")[0].trim().slice(0, 26);
-          container.appendChild(renderSlotCard(sl, inlineNo, `§ 位于「${anchorPreview}」之后`));
-        });
-      });
-
-      // Orphan illustration slots
-      orphans.forEach((sl, oIdx) => {
-        container.appendChild(renderSlotCard(sl, inlineNo + oIdx + 1, sl.anchor ? `原位置「${sl.anchor.slice(0, 20)}」未匹配` : "尚未绑定段落", true));
-      });
-
-      // Clickable empty canvas tail -> click to append & keep writing naturally!
-      const tailPad = el("div", {
-        class: "ic-live-tail",
-        title: "点击此处继续追加新段落",
-        onClick: () => {
-          const nextIdx = insertRawAfterBlock(parsed, parsed.blocks.length - 1, "");
-          editingIdx = nextIdx;
-          render(container, { caretEnd: true });
-        },
-        onContextMenu: (ev) => openBlockContextMenu(ev, parsed, parsed.blocks.length - 1),
-      },
-        el("span", { class: "ic-live-tail-hint muted" }, "点击此处继续书写，或右键插入双链 / 表格 / 配图位…")
-      );
-      container.appendChild(tailPad);
     }
 
-    // Append subtle Backlinks Footer right at the bottom of Live Preview too!
-    linksCtrl.renderPreviewBacklinksFooter(container);
+    if (orphanSlotsBox) {
+      clear(orphanSlotsBox);
+      const orphans = inlineSlots.filter((sl) => !sl.anchor || !content.includes(sl.anchor));
+      orphans.forEach((sl, idx) => {
+        orphanSlotsBox.appendChild(renderSlotCard(sl, inlineSlots.length - orphans.length + idx + 1, sl.anchor ? `原位置「${sl.anchor.slice(0, 20)}」未匹配` : "尚未绑定段落", true));
+      });
+    }
+
+    if (backlinksBox) {
+      clear(backlinksBox);
+      linksCtrl.renderPreviewBacklinksFooter(backlinksBox);
+    }
+  }
+
+  function render(container) {
+    if (!container) return;
+    rootHostEl = container;
+    const rawContent = getContent() || "";
+    const curPath = getActivePath() || "";
+
+    // Reuse existing mounted CodeMirror 6 view whenever possible so cursor & undo history stay 100% intact!
+    if (cmView && cmMountBox && cmMountBox.isConnected && container.contains(cmMountBox)) {
+      const sameText = cmView.state.doc.toString() === rawContent;
+      if (!sameText || curPath !== lastDocVersionPath) {
+        suppressDocChange = true;
+        cmView.setState(createCMState(rawContent));
+        suppressDocChange = false;
+        lastDocVersionPath = curPath;
+      } else {
+        cmView.dispatch({ effects: refreshLiveEffect.of(null) });
+      }
+      renderAuxiliaryRegions();
+      return;
+    }
+
+    // Fresh mount inside container
+    if (cmView) {
+      cmView.destroy();
+      cmView = null;
+    }
+    clear(container);
+    coverSlotBox = el("div", { class: "cm-lp-cover-box" });
+    cmMountBox = el("div", { class: "cm-lp-host" });
+    orphanSlotsBox = el("div", { class: "cm-lp-orphans" });
+    backlinksBox = el("div", { class: "cm-lp-backlinks" });
+    container.append(coverSlotBox, cmMountBox, orphanSlotsBox, backlinksBox);
+
+    lastDocVersionPath = curPath;
+    cmView = new EditorView({
+      state: createCMState(rawContent),
+      parent: cmMountBox,
+    });
+    renderAuxiliaryRegions();
   }
 
   function applyFormat(fmt) {
-    if (activeLiveTa && activeLiveTa.isConnected) {
-      if (fmt === "wikilink") {
-        linksCtrl.triggerInsertWikilink(activeLiveTa);
-        return true;
-      }
-      const ta = activeLiveTa;
-      const start = ta.selectionStart ?? ta.value.length;
-      const end = ta.selectionEnd ?? ta.value.length;
-      const sel = ta.value.slice(start, end);
-      const wrapLine = (prefix) => {
-        const ls = ta.value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
-        ta.setRangeText(prefix, ls, ls, "end");
-      };
-      if (fmt === "h1") wrapLine("# ");
-      else if (fmt === "h2") wrapLine("## ");
-      else if (fmt === "h3") wrapLine("### ");
-      else if (fmt === "quote") wrapLine("> ");
-      else if (fmt === "ul") wrapLine("- ");
-      else if (fmt === "ol") wrapLine("1. ");
-      else if (fmt === "hr") ta.setRangeText("\n---\n", start, end, "end");
-      else if (fmt === "bold") ta.setRangeText(`**${sel || "加粗文本"}**`, start, end, "end");
-      else if (fmt === "italic") ta.setRangeText(`*${sel || "斜体文本"}*`, start, end, "end");
-      else if (fmt === "code") ta.setRangeText(sel.includes("\n") ? `\n\`\`\`\n${sel}\n\`\`\`\n` : `\`${sel || "code"}\``, start, end, "end");
-      ta.dispatchEvent(new Event("input", { bubbles: true }));
-      ta.focus();
-      return true;
-    }
-    // No block currently focused -> append a new block with that formatting!
-    const parsed = parseMarkdownBlocks(getContent() || "");
-    const templates = {
-      h1: "# ",
-      h2: "## ",
-      h3: "### ",
-      quote: "> ",
-      ul: "- ",
-      ol: "1. ",
-      hr: "---",
-      bold: "**加粗文本**",
-      italic: "*斜体文本*",
-      code: "```\n\n```",
-      wikilink: "[[",
-    };
-    const nextIdx = insertRawAfterBlock(parsed, parsed.blocks.length - 1, templates[fmt] || "");
-    editingIdx = nextIdx;
-    render(hostEl, { caretEnd: true, openAc: fmt === "wikilink" });
-    return true;
+    if (!cmView) return false;
+    if (fmt === "wikilink") { linksCtrl.triggerInsertWikilinkCM(cmView, false); return true; }
+    if (fmt === "h1") { setParagraphPrefix("# "); return true; }
+    if (fmt === "h2") { setParagraphPrefix("## "); return true; }
+    if (fmt === "h3") { setParagraphPrefix("### "); return true; }
+    if (fmt === "quote") { setParagraphPrefix("> "); return true; }
+    if (fmt === "ul") { setParagraphPrefix("- "); return true; }
+    if (fmt === "ol") { setParagraphPrefix("1. "); return true; }
+    if (fmt === "hr") { insertBlockSnippet("---"); return true; }
+    if (fmt === "bold") { wrapSelection("**", "**", "加粗文本"); return true; }
+    if (fmt === "italic") { wrapSelection("*", "*", "斜体文本"); return true; }
+    if (fmt === "code") { wrapSelection("`", "`", "code"); return true; }
+    return false;
   }
 
   function resetEditing() {
-    editingIdx = -1;
-    activeLiveTa = null;
+    lastDocVersionPath = "__reset__";
   }
 
   function getActiveTextarea() {
-    return activeLiveTa && activeLiveTa.isConnected ? activeLiveTa : null;
+    return cmView ? cmView.contentDOM : null;
+  }
+
+  function getSelectionRange() {
+    if (!cmView) return { start: 0, end: 0 };
+    const { from, to } = cmView.state.selection.main;
+    return { start: from, end: to };
+  }
+
+  function dispose() {
+    if (cmView) {
+      cmView.destroy();
+      cmView = null;
+    }
   }
 
   return {
@@ -793,5 +1448,7 @@ export function createArticleLiveEditor(opts) {
     applyFormat,
     resetEditing,
     getActiveTextarea,
+    getSelectionRange,
+    dispose,
   };
 }

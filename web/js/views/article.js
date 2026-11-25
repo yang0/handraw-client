@@ -1159,7 +1159,7 @@ export async function renderArticle(root, ctx, params = {}) {
       drawerTabLinksBtn.textContent = cnt > 0 ? `🔗 双链 (${cnt})` : "🔗 双链";
       linksCtrl.renderPaperLinksBar(paperLinksBar);
       if (state.viewMode === "preview") renderPreviewStage();
-      else if (state.viewMode === "live" && state.editorActive && !liveEditor.getActiveTextarea()) {
+      else if (state.viewMode === "live" && state.editorActive) {
         liveEditor.render(flowBox);
       }
     },
@@ -1422,7 +1422,11 @@ export async function renderArticle(root, ctx, params = {}) {
     let selStart = 0;
     let selEnd = 0;
     const content = state.content || "";
-    if (activeSegTextarea && activeSegTextarea.isConnected) {
+    if (state.viewMode === "live") {
+      const r = liveEditor.getSelectionRange();
+      selStart = r.start;
+      selEnd = r.end;
+    } else if (activeSegTextarea && activeSegTextarea.isConnected) {
       const segs = Array.from(flowBox.querySelectorAll("textarea.ic-art-seg-ta"));
       let baseOff = 0;
       for (const ta of segs) {
@@ -4411,6 +4415,7 @@ export async function renderArticle(root, ctx, params = {}) {
       closeTreeContextMenu();
       closeArticleContextMenu();
       closeSelectionBubble();
+      liveEditor.dispose();
       obsidianCtrl.dispose();
       linksCtrl.dispose();
       unsub();

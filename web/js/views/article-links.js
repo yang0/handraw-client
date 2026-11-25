@@ -151,61 +151,135 @@ function prefersReducedMotion() {
   return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
 }
 
-// ---------- Reusable Obsidian-Style Floating Context Menu (#121) ----------
-let activeCtxMenu = null;
+// ---------- Reusable Obsidian-Style Multi-Level Cascading Context Menu (#121, #124) ----------
+let activeCtxMenus = [];
 let activeCtxCleanup = null;
 
 export function closeArticleContextMenu() {
   if (activeCtxCleanup) { activeCtxCleanup(); activeCtxCleanup = null; }
-  if (activeCtxMenu) { activeCtxMenu.remove(); activeCtxMenu = null; }
+  while (activeCtxMenus.length) {
+    const m = activeCtxMenus.pop();
+    if (m && m.isConnected) m.remove();
+  }
 }
 
 export function openArticleContextMenu(ev, items) {
   ev.preventDefault();
   ev.stopPropagation();
   closeArticleContextMenu();
-  const valid = (items || []).filter(Boolean);
-  if (!valid.length) return;
+  const validRoot = (items || []).filter(Boolean);
+  if (!validRoot.length) return;
 
-  const menu = el("div", { class: "ic-ctx-menu", role: "menu" });
-  valid.forEach((it) => {
-    if (it.sep) {
-      menu.appendChild(el("div", { class: "ic-ctx-sep", role: "separator" }));
-      return;
+  function trimLevels(keepDepth) {
+    while (activeCtxMenus.length > keepDepth) {
+      const m = activeCtxMenus.pop();
+      if (m && m.isConnected) m.remove();
     }
-    if (it.header) {
-      menu.appendChild(el("div", { class: "ic-ctx-header" }, it.header));
-      return;
-    }
-    const btn = el("button", {
-      type: "button",
-      role: "menuitem",
-      class: "ic-ctx-item" + (it.danger ? " is-danger" : ""),
-      disabled: Boolean(it.disabled),
-      onClick: () => {
-        closeArticleContextMenu();
-        it.onClick?.();
+  }
+
+  function buildMenuLevel(itemList, depth, anchorRect, fallbackX, fallbackY) {
+    const valid = (itemList || []).filter(Boolean);
+    if (!valid.length) return null;
+    trimLevels(depth);
+
+    const menu = el("div", {
+      class: "ic-ctx-menu" + (depth > 0 ? " is-sub" : ""),
+      role: "menu",
+      dataset: { depth: String(depth) },
+    });
+
+    let activeSubOwner = null;
+    const clearOwnerHighlight = () => {
+      if (activeSubOwner) {
+        activeSubOwner.classList.remove("is-sub-open");
+        activeSubOwner = null;
+      }
+    };
+
+    valid.forEach((it) => {
+      if (it.sep) {
+        menu.appendChild(el("div", { class: "ic-ctx-sep", role: "separator" }));
+        return;
+      }
+      if (it.header) {
+        menu.appendChild(el("div", { class: "ic-ctx-header" }, it.header));
+        return;
+      }
+      const hasChildren = Array.isArray(it.children) && it.children.filter(Boolean).length > 0;
+      const icoNode = it.swatch
+        ? el("span", { class: "ic-ctx-swatch", style: { background: it.swatch }, "aria-hidden": "true" })
+        : el("span", { class: "ic-ctx-ico", "aria-hidden": "true" }, it.icon || "");
+
+      const btn = el("button", {
+        type: "button",
+        role: "menuitem",
+        "aria-haspopup": hasChildren ? "menu" : undefined,
+        class: "ic-ctx-item" + (it.danger ? " is-danger" : "") + (hasChildren ? " has-sub" : ""),
+        disabled: Boolean(it.disabled),
+        onMouseEnter: () => {
+          if (hasChildren && !it.disabled) {
+            if (activeSubOwner !== btn) {
+              clearOwnerHighlight();
+              activeSubOwner = btn;
+              btn.classList.add("is-sub-open");
+              buildMenuLevel(it.children, depth + 1, btn.getBoundingClientRect(), 0, 0);
+            }
+          } else {
+            clearOwnerHighlight();
+            trimLevels(depth + 1);
+          }
+        },
+        onClick: (clickEv) => {
+          clickEv.stopPropagation();
+          if (hasChildren && !it.disabled) {
+            clearOwnerHighlight();
+            activeSubOwner = btn;
+            btn.classList.add("is-sub-open");
+            buildMenuLevel(it.children, depth + 1, btn.getBoundingClientRect(), 0, 0);
+            return;
+          }
+          closeArticleContextMenu();
+          it.onClick?.();
+        },
       },
-    },
-      el("span", { class: "ic-ctx-ico", "aria-hidden": "true" }, it.icon || ""),
-      el("span", { class: "ic-ctx-label" }, it.label || ""),
-      it.shortcut ? el("span", { class: "ic-ctx-kbd" }, it.shortcut) : null
-    );
-    menu.appendChild(btn);
-  });
+        icoNode,
+        el("span", { class: "ic-ctx-label" }, it.label || ""),
+        it.shortcut ? el("span", { class: "ic-ctx-kbd" }, it.shortcut) : null,
+        hasChildren ? el("span", { class: "ic-ctx-chev", "aria-hidden": "true" }, "›") : null
+      );
+      menu.appendChild(btn);
+    });
 
-  document.body.appendChild(menu);
-  const mw = menu.offsetWidth || 220;
-  const mh = menu.offsetHeight || 240;
-  const x = Math.max(8, Math.min(ev.clientX, window.innerWidth - mw - 10));
-  const y = Math.max(8, Math.min(ev.clientY, window.innerHeight - mh - 10));
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
-  activeCtxMenu = menu;
+    menu.style.visibility = "hidden";
+    document.body.appendChild(menu);
+    const mw = menu.offsetWidth || 216;
+    const mh = menu.offsetHeight || 220;
 
-  const onDown = (e) => { if (!menu.contains(e.target)) closeArticleContextMenu(); };
+    let x = fallbackX;
+    let y = fallbackY;
+    if (anchorRect) {
+      const rightSpace = window.innerWidth - anchorRect.right;
+      x = rightSpace >= mw + 12
+        ? anchorRect.right - 2
+        : Math.max(8, anchorRect.left - mw + 2);
+      y = Math.max(8, Math.min(anchorRect.top - 5, window.innerHeight - mh - 10));
+    } else {
+      x = Math.max(8, Math.min(fallbackX, window.innerWidth - mw - 10));
+      y = Math.max(8, Math.min(fallbackY, window.innerHeight - mh - 10));
+    }
+    menu.style.left = `${Math.round(x)}px`;
+    menu.style.top = `${Math.round(y)}px`;
+    menu.style.visibility = "visible";
+    activeCtxMenus.push(menu);
+    return menu;
+  }
+
+  buildMenuLevel(validRoot, 0, null, ev.clientX, ev.clientY);
+
+  const isInsideAny = (target) => activeCtxMenus.some((m) => m && m.contains(target));
+  const onDown = (e) => { if (!isInsideAny(e.target)) closeArticleContextMenu(); };
   const onKey = (e) => { if (e.key === "Escape") closeArticleContextMenu(); };
-  const onWheel = (e) => { if (!menu.contains(e.target)) closeArticleContextMenu(); };
+  const onWheel = (e) => { if (!isInsideAny(e.target)) closeArticleContextMenu(); };
   const onResize = () => closeArticleContextMenu();
   document.addEventListener("pointerdown", onDown, true);
   document.addEventListener("keydown", onKey, true);
@@ -967,8 +1041,21 @@ export function createArticleLinksController(opts) {
 
   function applyAutocompleteItem(item) {
     if (!acState) return;
-    const { ta, startIdx, endIdx, isEmbed } = acState;
+    const { ta, cmView, startIdx, endIdx, isEmbed } = acState;
     const prefix = isEmbed ? "![[" : "[[";
+    if (cmView) {
+      const docStr = cmView.state.doc.toString();
+      const hasClosing = docStr.slice(endIdx, endIdx + 2) === "]]";
+      const insertText = `${prefix}${item.insertValue}]]`;
+      const replaceEnd = hasClosing ? endIdx + 2 : endIdx;
+      cmView.dispatch({
+        changes: { from: startIdx, to: replaceEnd, insert: insertText },
+        selection: { anchor: startIdx + insertText.length },
+      });
+      cmView.focus();
+      closeAutocomplete();
+      return;
+    }
     const after = ta.value.slice(endIdx);
     const hasClosing = after.startsWith("]]");
     const insertText = `${prefix}${item.insertValue}]]`;
@@ -1017,24 +1104,29 @@ export function createArticleLinksController(opts) {
     });
     acEl.appendChild(list);
     acEl.appendChild(el("div", { class: "ic-link-ac-foot muted" }, "输入 # 可补全标题 · Ctrl/⌘+点击 可跳转"));
-    const coords = getTextareaCaretCoords(acState.ta, acState.endIdx);
+    let coords;
+    if (acState.cmView) {
+      const c = acState.cmView.coordsAtPos(acState.endIdx);
+      const popW = 340, popH = 290;
+      if (c) {
+        coords = {
+          left: Math.max(12, Math.min(c.left, window.innerWidth - popW - 14)),
+          top: c.bottom + popH > window.innerHeight - 16
+            ? Math.max(48, c.top - popH - 6)
+            : Math.max(48, c.bottom + 4),
+        };
+      } else {
+        coords = { left: 120, top: 140 };
+      }
+    } else {
+      coords = getTextareaCaretCoords(acState.ta, acState.endIdx);
+    }
     acEl.style.left = `${coords.left}px`;
     acEl.style.top = `${coords.top}px`;
     if (selectedBtn) selectedBtn.scrollIntoView({ block: "nearest" });
   }
 
-  function updateAutocomplete(ta) {
-    const pos = ta.selectionStart ?? 0;
-    if (ta.selectionEnd !== pos) { closeAutocomplete(); return; }
-    const before = ta.value.slice(0, pos);
-    const m = before.match(/(!)?\[\[([^\[\]\r\n]*)$/);
-    if (!m) { closeAutocomplete(); return; }
-
-    const isEmbed = Boolean(m[1]);
-    const rawQuery = m[2] || "";
-    const startIdx = pos - m[0].length;
-    if (rawQuery.includes("|")) { closeAutocomplete(); return; }
-
+  function buildAutocompleteItems(isEmbed, rawQuery) {
     const items = [];
     const hashIdx = rawQuery.indexOf("#");
     const headingMode = hashIdx >= 0;
@@ -1106,7 +1198,22 @@ export function createArticleLinksController(opts) {
         });
       }
     }
+    return { items, headingMode, hashIdx };
+  }
 
+  function updateAutocomplete(ta) {
+    const pos = ta.selectionStart ?? 0;
+    if (ta.selectionEnd !== pos) { closeAutocomplete(); return; }
+    const before = ta.value.slice(0, pos);
+    const m = before.match(/(!)?\[\[([^\[\]\r\n]*)$/);
+    if (!m) { closeAutocomplete(); return; }
+
+    const isEmbed = Boolean(m[1]);
+    const rawQuery = m[2] || "";
+    const startIdx = pos - m[0].length;
+    if (rawQuery.includes("|")) { closeAutocomplete(); return; }
+
+    const { items, headingMode, hashIdx } = buildAutocompleteItems(isEmbed, rawQuery);
     if (!items.length) { closeAutocomplete(); return; }
     acState = {
       ta,
@@ -1119,6 +1226,77 @@ export function createArticleLinksController(opts) {
       selected: 0,
     };
     renderAutocomplete();
+  }
+
+  function updateAutocompleteFromCM(cmView) {
+    if (!cmView) { closeAutocomplete(); return; }
+    const sel = cmView.state.selection.main;
+    if (!sel.empty) { closeAutocomplete(); return; }
+    const pos = sel.head;
+    const line = cmView.state.doc.lineAt(pos);
+    const before = line.text.slice(0, pos - line.from);
+    const m = before.match(/(!)?\[\[([^\[\]\r\n]*)$/);
+    if (!m) { closeAutocomplete(); return; }
+    const isEmbed = Boolean(m[1]);
+    const rawQuery = m[2] || "";
+    if (rawQuery.includes("|")) { closeAutocomplete(); return; }
+    const startIdx = pos - m[0].length;
+    const { items, headingMode, hashIdx } = buildAutocompleteItems(isEmbed, rawQuery);
+    if (!items.length) { closeAutocomplete(); return; }
+    acState = {
+      cmView,
+      startIdx,
+      endIdx: pos,
+      isEmbed,
+      headingMode,
+      rawQuery: headingMode ? rawQuery.slice(hashIdx + 1).trim() : rawQuery.trim(),
+      items,
+      selected: 0,
+    };
+    renderAutocomplete();
+  }
+
+  function handleCMKeydown(cmView, ev) {
+    if (!acState || acState.cmView !== cmView) return false;
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      acState.selected = (acState.selected + 1) % acState.items.length;
+      renderAutocomplete();
+      return true;
+    }
+    if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      acState.selected = (acState.selected - 1 + acState.items.length) % acState.items.length;
+      renderAutocomplete();
+      return true;
+    }
+    if (ev.key === "Enter" || ev.key === "Tab") {
+      ev.preventDefault();
+      applyAutocompleteItem(acState.items[acState.selected]);
+      return true;
+    }
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      closeAutocomplete();
+      return true;
+    }
+    return false;
+  }
+
+  function triggerInsertWikilinkCM(cmView, isEmbed = false) {
+    if (!cmView) return;
+    const { from, to } = cmView.state.selection.main;
+    const sel = cmView.state.sliceDoc(from, to).trim();
+    const prefix = isEmbed ? "![[" : "[[";
+    if (sel) {
+      const insert = `${prefix}${sel}]]`;
+      cmView.dispatch({ changes: { from, to, insert }, selection: { anchor: from + insert.length } });
+      cmView.focus();
+      return;
+    }
+    cmView.dispatch({ changes: { from, to, insert: prefix }, selection: { anchor: from + prefix.length } });
+    cmView.focus();
+    updateAutocompleteFromCM(cmView);
   }
 
   function triggerInsertWikilink(ta) {
@@ -1928,6 +2106,10 @@ export function createArticleLinksController(opts) {
     buildEmbeddedNoteCard,
     fetchNoteText,
     triggerInsertWikilink,
+    triggerInsertWikilinkCM,
+    updateAutocompleteFromCM,
+    handleCMKeydown,
+    closeAutocomplete,
     attachTextarea,
     openGraphModal,
     navigateToLink,
