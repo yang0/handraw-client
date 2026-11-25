@@ -75,16 +75,29 @@ func TestArticleObsidianAPIAndSecurity(t *testing.T) {
 		t.Fatalf("expected 400 for path escape, got %d", rrEsc.Code)
 	}
 
-	// 5. Desktop FS must return 403 until user grants trustedDesktop
+	// 5. Enabled plugins default to trustedDesktop=true -> desktop FS succeeds out of the box
+	rrAllowDefault := doReq(t, h, srv.Token, "POST", "/api/article/obsidian/desktop/fs", map[string]any{
+		"pluginId": "demo-sync",
+		"req":      map[string]any{"op": "exists", "path": vaultDir},
+	})
+	if rrAllowDefault.Code != 200 {
+		t.Fatalf("expected 200 for default-trusted desktop fs, got %d %s", rrAllowDefault.Code, rrAllowDefault.Body.String())
+	}
+
+	// 6. Explicitly revoking trustedDesktop -> returns 403; re-granting -> succeeds again
+	rrRevoke := doReq(t, h, srv.Token, "PATCH", "/api/article/obsidian/plugins/demo-sync", map[string]any{
+		"trustedDesktop": false,
+	})
+	if rrRevoke.Code != 200 {
+		t.Fatalf("patch revoke trust failed: %d %s", rrRevoke.Code, rrRevoke.Body.String())
+	}
 	rrDeny := doReq(t, h, srv.Token, "POST", "/api/article/obsidian/desktop/fs", map[string]any{
 		"pluginId": "demo-sync",
 		"req":      map[string]any{"op": "exists", "path": vaultDir},
 	})
 	if rrDeny.Code != 403 {
-		t.Fatalf("expected 403 for untrusted desktop fs, got %d %s", rrDeny.Code, rrDeny.Body.String())
+		t.Fatalf("expected 403 after explicitly revoking trustedDesktop, got %d %s", rrDeny.Code, rrDeny.Body.String())
 	}
-
-	// 6. Grant trustedDesktop -> desktop FS succeeds
 	rrTrust := doReq(t, h, srv.Token, "PATCH", "/api/article/obsidian/plugins/demo-sync", map[string]any{
 		"trustedDesktop": true,
 	})

@@ -2313,10 +2313,33 @@ function createDesktopFsModules(pluginId) {
       await rpc("desktop.fs", { pluginId, req: { op: "copyFile", path: String(src), destPath: String(dst) } });
       knownExistingPaths.add(normFsKey(dst));
     },
+    async chmod() {},
+    watch(_p, opts) {
+      const sig = opts?.signal;
+      return {
+        async *[Symbol.asyncIterator]() {
+          if (sig?.aborted) return;
+          await new Promise((resolve) => {
+            if (sig && typeof sig.addEventListener === "function") {
+              sig.addEventListener("abort", () => resolve(), { once: true });
+            }
+          });
+        },
+      };
+    },
   };
 
   const fsMod = {
     promises,
+    chmod(p, mode, cb) { if (typeof cb === "function") setTimeout(() => cb(null), 0); },
+    chmodSync() {},
+    watch() {
+      const w = new NodeEventEmitter();
+      w.close = () => {};
+      w.ref = () => w;
+      w.unref = () => w;
+      return w;
+    },
     existsSync(p) {
       const raw = String(p || "").trim();
       if (!raw) return false;
@@ -2333,6 +2356,29 @@ function createDesktopFsModules(pluginId) {
         return ok;
       }
       return false;
+    },
+    statSync(p, opts) {
+      const raw = String(p || "").trim();
+      const bridge = getCM6Bridge();
+      const res = raw && bridge?.checkFsStatSync ? bridge.checkFsStatSync(pluginId, raw) : { ok: false };
+      if (!res?.ok) {
+        if (opts?.throwIfNoEntry === false) return undefined;
+        const err = new Error(`ENOENT: no such file or directory, stat '${raw}'`);
+        err.code = "ENOENT";
+        throw err;
+      }
+      knownExistingPaths.add(normFsKey(raw));
+      return {
+        size: res.size || 0,
+        mtimeMs: res.mtime || 0,
+        mtime: new Date(res.mtime || 0),
+        isFile: () => Boolean(res.isFile),
+        isDirectory: () => Boolean(res.isDir),
+        isSymbolicLink: () => false,
+      };
+    },
+    lstatSync(p, opts) {
+      return fsMod.statSync(p, opts);
     },
     constants: { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 },
   };

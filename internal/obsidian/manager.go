@@ -373,7 +373,7 @@ func (m *Manager) List() []InstalledPlugin {
 			ID:             mf.ID,
 			Manifest:       mf,
 			Enabled:        st.Enabled[mf.ID],
-			TrustedDesktop: st.TrustedDesktop[mf.ID],
+			TrustedDesktop: isTrustedInState(st, mf.ID),
 			LocalPorts:     st.LocalPorts[mf.ID],
 			HasStyles:      sErr == nil,
 			HasData:        dErr == nil,
@@ -445,7 +445,16 @@ func (m *Manager) SetPluginState(id string, enabled *bool, trustedDesktop *bool,
 	return m.Get(id)
 }
 
-// IsTrustedDesktop returns whether the user has explicitly granted desktop fs/spawn permissions to id.
+// isTrustedInState returns whether plugin id has local desktop fs/exec access.
+// All installed plugins default to trusted unless explicitly revoked (false).
+func isTrustedInState(st globalState, id string) bool {
+	if v, ok := st.TrustedDesktop[id]; ok {
+		return v
+	}
+	return true
+}
+
+// IsTrustedDesktop returns whether enabled plugin id is trusted for desktop fs/spawn access.
 func (m *Manager) IsTrustedDesktop(id string) bool {
 	if err := ValidatePluginID(id); err != nil {
 		return false
@@ -453,7 +462,7 @@ func (m *Manager) IsTrustedDesktop(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := m.loadStateLocked()
-	return st.Enabled[id] && st.TrustedDesktop[id]
+	return st.Enabled[id] && isTrustedInState(st, id)
 }
 
 // AllowedLocalPorts returns the user-approved localhost ports for a plugin (plus standard PicGo default if allowed).
@@ -532,7 +541,7 @@ func (m *Manager) LoadBundle(id string) (PluginBundle, error) {
 
 	m.mu.Lock()
 	st := m.loadStateLocked()
-	trusted := st.TrustedDesktop[id]
+	trusted := isTrustedInState(st, id)
 	ports := append([]int(nil), st.LocalPorts[id]...)
 	m.mu.Unlock()
 

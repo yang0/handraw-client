@@ -215,6 +215,43 @@ export function createArticleObsidianController(opts) {
         }
       };
     })(),
+    // Synchronous cached stat probe for desktop plugins calling fs.statSync() (e.g. obsidian-git / simple-git) (#138)
+    checkFsStatSync: (() => {
+      const cache = new Map(); // key -> { res, ts }
+      return (pluginId, filePath) => {
+        if (disposed || !pluginId || !filePath) return { ok: false, error: "ENOENT" };
+        const key = `${pluginId}\0${String(filePath)}`;
+        const now = Date.now();
+        const hit = cache.get(key);
+        if (hit && now - hit.ts < 3000) return hit.res;
+        try {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", "/api/article/obsidian/desktop/fs", false);
+          xhr.setRequestHeader("Content-Type", "application/json");
+          const tok = getToken();
+          if (tok) xhr.setRequestHeader("X-Handraw-Token", tok);
+          xhr.send(JSON.stringify({ pluginId, req: { op: "stat", path: String(filePath) } }));
+          if (xhr.status >= 200 && xhr.status < 300) {
+            const data = JSON.parse(xhr.responseText || "{}");
+            const res = {
+              ok: true,
+              size: Number(data.size || 0),
+              mtime: Number(data.mtime || 0),
+              isFile: Boolean(data.isFile),
+              isDir: Boolean(data.isDir),
+            };
+            cache.set(key, { res, ts: now });
+            if (cache.size > 200) cache.clear();
+            return res;
+          }
+          const res = { ok: false, error: xhr.responseText || `HTTP ${xhr.status}` };
+          cache.set(key, { res, ts: now });
+          return res;
+        } catch (err) {
+          return { ok: false, error: err?.message || "stat failed" };
+        }
+      };
+    })(),
   };
   window.__HANDRAW_CM6_BRIDGE__ = cm6Bridge;
 
