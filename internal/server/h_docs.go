@@ -21,41 +21,117 @@ type workflowTemplate struct {
 func builtinTemplates() []workflowTemplate {
 	return []workflowTemplate{
 		{
-			ID: "tpl_xhs_6", Name: "小红书 6 图干货套图", Desc: "1 个配方 × 6 个分节主题自动展开生成 6 张 3:4 图文卡",
+			ID:   "tpl_char_scenes",
+			Name: "固定角色多场景连载",
+			Desc: "1 张角色参考图（锁定五官特征）× 4 个连载场景，批量保持 IP 角色一致性",
 			Nodes: []any{
-				map[string]any{"id": "n1", "type": "recipe", "x": 80, "y": 140, "data": map[string]any{"style": "FA-001", "layout": "SC-008", "ratio": "3:4", "label": "小红书 3:4 干货图"}},
-				map[string]any{"id": "n2", "type": "themes", "x": 80, "y": 320, "data": map[string]any{"label": "6 张分节主题", "items": []string{"封面：晨间手冲咖啡指南", "1. 挑选新鲜浅烘豆", "2. 磨豆粗细度对比", "3. 92度水温控制", "4. 三段式注水节奏", "5. 常见萃取翻车避坑"}}},
-				map[string]any{"id": "n3", "type": "generate", "x": 420, "y": 210, "data": map[string]any{"label": "批量生成 6 张", "count": 1}},
-				map[string]any{"id": "n4", "type": "export", "x": 740, "y": 210, "data": map[string]any{"label": "小红书格式导出", "format": "xiaohongshu"}},
+				map[string]any{
+					"id": "ref_char", "type": "reference", "title": "主角参考图", "refMode": "bundle", "x": 36, "y": 36,
+					"refs": []any{},
+					"defaultRole": "角色长相",
+					"defaultNote": "保持主角五官、发型与核心服饰特征一致",
+				},
+				map[string]any{
+					"id": "params", "type": "parameters", "mode": "cartesian", "x": 36, "y": 290,
+					"fieldOrder": []string{"prompt", "style1", "layout", "ratio"},
+					"fields": map[string]any{
+						"prompt": []string{
+							"主角清晨在街角咖啡馆窗边手冲咖啡，阳光洒在木桌上",
+							"主角午后在公园长椅上看书，微风吹起围巾",
+							"主角傍晚骑着复古自行车穿过梧桐树影",
+							"主角夜晚在暖黄台灯下画手账，窗外下着小雨",
+						},
+						"style1": []string{"FA-013"},
+						"layout": []string{""},
+						"ratio":  []string{"3:4"},
+					},
+				},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 492, "y": 170},
 			},
 			Edges: []any{
-				map[string]any{"id": "e1", "from": "n1", "to": "n3"},
-				map[string]any{"id": "e2", "from": "n2", "to": "n3"},
-				map[string]any{"id": "e3", "from": "n3", "to": "n4"},
+				map[string]any{"id": "e1", "from": "ref_char", "to": "output"},
+				map[string]any{"id": "e2", "from": "params", "to": "output"},
 			},
 		},
 		{
-			ID: "tpl_ip_sheet", Name: "IP 角色三视图与表情包", Desc: "锁定角色描述，展开正面/侧面/背面及三款表情动作",
+			ID:   "tpl_multi_ref_fusion",
+			Name: "多图元素融合创作",
+			Desc: "参考图 A（角色长相）+ 参考图 B（构图姿势/服装）自动按图序合并注入，实现多参考图精准融合",
 			Nodes: []any{
-				map[string]any{"id": "n1", "type": "recipe", "x": 80, "y": 140, "data": map[string]any{"style": "FA-013", "layout": "IP-001", "ratio": "3:4", "label": "IP 设定配方"}},
-				map[string]any{"id": "n2", "type": "themes", "x": 80, "y": 320, "data": map[string]any{"label": "角色视角", "items": []string{"戴圆眼镜的橘猫店员 · 正面全身三视图", "戴圆眼镜的橘猫店员 · 侧面与背面细节", "戴圆眼镜的橘猫店员 · 开心/困倦/惊讶表情"}}},
-				map[string]any{"id": "n3", "type": "generate", "x": 420, "y": 210, "data": map[string]any{"label": "生成角色设定集", "count": 1}},
+				map[string]any{
+					"id": "ref_a", "type": "reference", "title": "参考图 A · 角色", "refMode": "bundle", "x": 36, "y": 36,
+					"refs": []any{}, "defaultRole": "角色长相", "defaultNote": "保留人物脸型、神态与发型",
+				},
+				map[string]any{
+					"id": "ref_b", "type": "reference", "title": "参考图 B · 姿势/穿搭", "refMode": "variants", "x": 36, "y": 280,
+					"refs": []any{}, "defaultRole": "构图姿势", "defaultNote": "参考动作姿态与画面机位，不照搬背景",
+				},
+				map[string]any{
+					"id": "params", "type": "parameters", "mode": "cartesian", "x": 36, "y": 520,
+					"fieldOrder": []string{"prompt", "style1", "ratio"},
+					"fields": map[string]any{
+						"prompt": []string{"秋日复古书店门前的日常插画，自然温暖光影"},
+						"style1": []string{"FA-013"},
+						"ratio":  []string{"3:4"},
+					},
+				},
+				map[string]any{"id": "comb", "type": "combine", "mode": "cartesian", "x": 460, "y": 240},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 800, "y": 240},
 			},
 			Edges: []any{
-				map[string]any{"id": "e1", "from": "n1", "to": "n3"},
-				map[string]any{"id": "e2", "from": "n2", "to": "n3"},
+				map[string]any{"id": "e1", "from": "ref_a", "to": "comb"},
+				map[string]any{"id": "e2", "from": "ref_b", "to": "comb"},
+				map[string]any{"id": "e3", "from": "params", "to": "comb"},
+				map[string]any{"id": "e4", "from": "comb", "to": "output"},
 			},
 		},
 		{
-			ID: "tpl_style_matrix", Name: "多画风横评矩阵", Desc: "2 个主题 × 3 种画风笛卡尔积对比不同视觉方案",
+			ID:   "tpl_style_matrix",
+			Name: "多画风横评对比矩阵",
+			Desc: "2 个主题 × 3 种画风笛卡尔积对比不同视觉方案，快速筛选最佳风格",
 			Nodes: []any{
-				map[string]any{"id": "n1", "type": "themes", "x": 80, "y": 120, "data": map[string]any{"label": "主题列表", "items": []string{"雨夜街角亮着暖灯的小书店", "周末公园草地上打盹的柴犬"}}},
-				map[string]any{"id": "n2", "type": "styles", "x": 80, "y": 320, "data": map[string]any{"label": "候选画风", "items": []string{"FA-013", "FB-001", "FE-001"}}},
-				map[string]any{"id": "n3", "type": "generate", "x": 420, "y": 210, "data": map[string]any{"label": "交叉生成 6 张对比", "count": 1}},
+				map[string]any{
+					"id": "params", "type": "parameters", "mode": "cartesian", "x": 36, "y": 48,
+					"fieldOrder": []string{"prompt", "style1", "ratio"},
+					"fields": map[string]any{
+						"prompt": []string{"雨夜街角亮着暖灯的小书店", "周末公园草地上打盹的橘猫"},
+						"style1": []string{"FA-013", "FB-001", "FE-001"},
+						"ratio":  []string{"3:4"},
+					},
+				},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "1k", "x": 492, "y": 130},
 			},
 			Edges: []any{
-				map[string]any{"id": "e1", "from": "n1", "to": "n3"},
-				map[string]any{"id": "e2", "from": "n2", "to": "n3"},
+				map[string]any{"id": "e1", "from": "params", "to": "output"},
+			},
+		},
+		{
+			ID:   "tpl_xhs_6",
+			Name: "小红书 6 图干货套图",
+			Desc: "统一画风与 3:4 图型 × 6 节分镜主题，一键批量生成小红书图文卡",
+			Nodes: []any{
+				map[string]any{
+					"id": "params", "type": "parameters", "mode": "cartesian", "x": 36, "y": 48,
+					"fieldOrder": []string{"prompt", "style1", "layout", "ratio", "mode"},
+					"fields": map[string]any{
+						"prompt": []string{
+							"封面：晨间手冲咖啡指南",
+							"1. 挑选新鲜浅烘豆",
+							"2. 磨豆粗细度对比",
+							"3. 92度水温控制",
+							"4. 三段式注水节奏",
+							"5. 常见萃取翻车避坑",
+						},
+						"style1": []string{"FA-001"},
+						"layout": []string{"SC-008"},
+						"ratio":  []string{"3:4"},
+						"mode":   []string{"graphic-text"},
+					},
+				},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 492, "y": 140},
+			},
+			Edges: []any{
+				map[string]any{"id": "e1", "from": "params", "to": "output"},
 			},
 		},
 	}

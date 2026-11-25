@@ -533,22 +533,179 @@ func (s *Server) quote(w http.ResponseWriter, r *http.Request) (any, error) {
 	}, nil
 }
 
+type generateItemRef struct {
+	Path      string `json:"path,omitempty"`
+	LocalPath string `json:"localPath,omitempty"`
+	Label     string `json:"label,omitempty"`
+	Role      string `json:"role,omitempty"`
+	Note      string `json:"note,omitempty"`
+	Source    string `json:"source,omitempty"`
+	GalleryID string `json:"galleryId,omitempty"`
+	ItemID    string `json:"itemId,omitempty"`
+	Variant   string `json:"variant,omitempty"`
+	AssetID   string `json:"assetId,omitempty"`
+}
+
+type generateItem struct {
+	Theme    string            `json:"theme"`
+	Style    string            `json:"style"`
+	Style2   string            `json:"style2"`
+	Layout   string            `json:"layout"`
+	Color    string            `json:"color"`
+	Tone     string            `json:"tone"`
+	Mood     string            `json:"mood"`
+	Ratio    string            `json:"ratio"`
+	Text     string            `json:"text"`
+	Mode     string            `json:"mode"`
+	Redraw   bool              `json:"redraw"`
+	Extra    string            `json:"extra"`
+	Prompt   string            `json:"prompt"`
+	Refs     []string          `json:"refs,omitempty"`
+	RefSpecs []generateItemRef `json:"refSpecs,omitempty"`
+}
+
+func resolveItemRefsAndDirective(baseRefs []string, baseMeta []RunRefMeta, it generateItem, guidePath string) (refs []string, directive string, metas []RunRefMeta) {
+	seen := map[string]bool{}
+	specByPath := map[string]generateItemRef{}
+	for _, m := range baseMeta {
+		p := normalizeLocalRef(m.LocalPath)
+		if p == "" {
+			continue
+		}
+		key := strings.ToLower(filepath.Clean(p))
+		if _, exists := specByPath[key]; !exists {
+			specByPath[key] = generateItemRef{
+				Path:      p,
+				Label:     m.Label,
+				Role:      m.Role,
+				Note:      m.Note,
+				Source:    m.Source,
+				GalleryID: m.GalleryID,
+				ItemID:    m.ItemID,
+				Variant:   m.Variant,
+				AssetID:   m.AssetID,
+			}
+		}
+	}
+
+	addRef := func(rawPath string, sp *generateItemRef) {
+		if len(refs) >= 6 {
+			return
+		}
+		resolved := normalizeLocalRef(rawPath)
+		if resolved == "" {
+			return
+		}
+		key := strings.ToLower(filepath.Clean(resolved))
+		if sp != nil {
+			prev := specByPath[key]
+			merged := prev
+			merged.Path = resolved
+			if sp.Label != "" {
+				merged.Label = sp.Label
+			}
+			if sp.Role != "" {
+				merged.Role = sp.Role
+			}
+			if sp.Note != "" {
+				merged.Note = sp.Note
+			}
+			if sp.Source != "" {
+				merged.Source = sp.Source
+			}
+			if sp.GalleryID != "" {
+				merged.GalleryID = sp.GalleryID
+			}
+			if sp.ItemID != "" {
+				merged.ItemID = sp.ItemID
+			}
+			if sp.Variant != "" {
+				merged.Variant = sp.Variant
+			}
+			if sp.AssetID != "" {
+				merged.AssetID = sp.AssetID
+			}
+			specByPath[key] = merged
+		}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		refs = append(refs, resolved)
+	}
+
+	for _, r := range baseRefs {
+		addRef(r, nil)
+	}
+	for idx := range it.RefSpecs {
+		sp := it.RefSpecs[idx]
+		p := firstStr(sp.Path, sp.LocalPath)
+		addRef(p, &sp)
+	}
+	for _, r := range it.Refs {
+		addRef(r, nil)
+	}
+	if guidePath != "" {
+		addRef(guidePath, nil)
+	}
+
+	hasAnyRoleOrNote := false
+	for _, p := range refs {
+		sp := specByPath[strings.ToLower(filepath.Clean(p))]
+		if strings.TrimSpace(sp.Role) != "" || strings.TrimSpace(sp.Note) != "" {
+			hasAnyRoleOrNote = true
+		}
+		metas = append(metas, RunRefMeta{
+			Source:    sp.Source,
+			GalleryID: sp.GalleryID,
+			ItemID:    sp.ItemID,
+			Variant:   sp.Variant,
+			AssetID:   sp.AssetID,
+			Label:     sp.Label,
+			Role:      sp.Role,
+			Note:      sp.Note,
+			LocalPath: p,
+		})
+	}
+	if !hasAnyRoleOrNote || len(refs) == 0 {
+		return refs, "", metas
+	}
+	lines := make([]string, 0, len(refs)+1)
+	lines = append(lines, "【参考图使用说明】")
+	for idx, p := range refs {
+		sp := specByPath[strings.ToLower(filepath.Clean(p))]
+		role := strings.TrimSpace(sp.Role)
+		note := strings.TrimSpace(sp.Note)
+		switch {
+		case role != "" && note != "":
+			lines = append(lines, fmt.Sprintf("- 参考图 %d（%s）：%s", idx+1, role, note))
+		case role != "":
+			lines = append(lines, fmt.Sprintf("- 参考图 %d（%s）", idx+1, role))
+		case note != "":
+			lines = append(lines, fmt.Sprintf("- 参考图 %d：%s", idx+1, note))
+		default:
+			lines = append(lines, fmt.Sprintf("- 参考图 %d（综合参考）", idx+1))
+		}
+	}
+	return refs, strings.Join(lines, "\n"), metas
+}
+
 func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	p, err := s.pack()
 	if err != nil {
 		return nil, err
 	}
 	var body struct {
-		Mode             string           `json:"mode"` // quick | single | series | article | canvas | edit | compare
-		Title            string           `json:"title"`
-		ModelRef         string           `json:"modelRef"` // site:<id> | <providerId>:<modelId>
-		Resolution       string           `json:"resolution"`
-		Quality          string           `json:"quality"`
-		Count            int              `json:"count"` // variants for single
-		Confirmed        bool             `json:"confirmed"`
-		GroupID          string           `json:"groupId"`
-		ParentID         string           `json:"parentId"`
-		ForkOf           string           `json:"forkOf"`
+		Mode                  string           `json:"mode"` // quick | single | series | article | canvas | edit | compare
+		Title                 string           `json:"title"`
+		ModelRef              string           `json:"modelRef"` // site:<id> | <providerId>:<modelId>
+		Resolution            string           `json:"resolution"`
+		Quality               string           `json:"quality"`
+		Count                 int              `json:"count"` // variants for single
+		Confirmed             bool             `json:"confirmed"`
+		GroupID               string           `json:"groupId"`
+		ParentID              string           `json:"parentId"`
+		ForkOf                string           `json:"forkOf"`
 		Recipe                json.RawMessage  `json:"recipe"`
 		DirectPrompt          bool             `json:"directPrompt"`
 		PromptCustomized      bool             `json:"promptCustomized"`
@@ -559,22 +716,8 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		Refs                  []string         `json:"refs"`
 		RefMeta               []RunRefMeta     `json:"refMeta"`
 		GalleryRefs           []GalleryRef     `json:"galleryRefs"`
-		Items            []struct {
-			Theme  string `json:"theme"`
-			Style  string `json:"style"`
-			Style2 string `json:"style2"`
-			Layout string `json:"layout"`
-			Color  string `json:"color"`
-			Tone   string `json:"tone"`
-			Mood   string `json:"mood"`
-			Ratio  string `json:"ratio"`
-			Text   string `json:"text"`
-			Mode   string `json:"mode"`
-			Redraw bool   `json:"redraw"`
-			Extra  string `json:"extra"`
-			Prompt string `json:"prompt"`
-		} `json:"items"`
-		Input prompt.Input `json:"input"`
+		Items                 []generateItem   `json:"items"`
+		Input                 prompt.Input     `json:"input"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -601,21 +744,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			cnt = 4
 		}
 		for i := 0; i < cnt; i++ {
-			body.Items = append(body.Items, struct {
-				Theme  string `json:"theme"`
-				Style  string `json:"style"`
-				Style2 string `json:"style2"`
-				Layout string `json:"layout"`
-				Color  string `json:"color"`
-				Tone   string `json:"tone"`
-				Mood   string `json:"mood"`
-				Ratio  string `json:"ratio"`
-				Text   string `json:"text"`
-				Mode   string `json:"mode"`
-				Redraw bool   `json:"redraw"`
-				Extra  string `json:"extra"`
-				Prompt string `json:"prompt"`
-			}{
+			body.Items = append(body.Items, generateItem{
 				Theme: body.Input.Theme, Style: body.Input.Style, Style2: body.Input.Style2,
 				Layout: body.Input.Layout, Color: body.Input.Color, Tone: body.Input.Tone,
 				Mood: body.Input.Mood, Ratio: body.Input.Ratio, Text: body.Input.Text,
@@ -637,17 +766,28 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		}
 	}
 
-	// Build prompts for each item.
+	// Build prompts & per-item reference lists/directives for each item (#155).
 	_, rawModel, _ := strings.Cut(body.ModelRef, ":")
 	var built []prompt.Result
 	var itemPrompts []string
 	var itemRatios []string
 	var itemThemes []string
+	var itemRefsList [][]string
+	var itemRefDirectives []string
+	var collectedItemRefMetas []RunRefMeta
 	for _, it := range body.Items {
+		iRefs, iRefDir, iMetas := resolveItemRefsAndDirective(body.Refs, body.RefMeta, it, "")
+		itemRefsList = append(itemRefsList, iRefs)
+		itemRefDirectives = append(itemRefDirectives, iRefDir)
+		collectedItemRefMetas = append(collectedItemRefMetas, iMetas...)
+
 		if body.DirectPrompt {
 			rawPrompt := firstStr(strings.TrimSpace(it.Prompt), strings.TrimSpace(body.CustomPrompt), strings.TrimSpace(it.Theme), strings.TrimSpace(body.Input.Theme))
 			if rawPrompt == "" {
 				return nil, bad("请输入要直出的完整提示词")
+			}
+			if iRefDir != "" {
+				rawPrompt += "\n\n" + iRefDir
 			}
 			pr := prompt.Result{Primary: rawPrompt, Zh: rawPrompt}
 			built = append(built, pr)
@@ -682,6 +822,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		}
 		if len(galCtx.PromptCues) > 0 {
 			finalPrompt += "\n" + strings.Join(galCtx.PromptCues, "\n")
+		}
+		if iRefDir != "" {
+			finalPrompt += "\n\n" + iRefDir
 		}
 		globalEditExtra := strings.TrimSpace(firstStr(it.Extra, body.Input.Extra))
 		if len(body.Annotations) > 0 {
@@ -790,7 +933,13 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	var persistedRecipe json.RawMessage
 	var runMeta json.RawMessage
 	defaultRunTitle := "手绘风创作"
-	refMetaList := s.buildRunRefMeta(body.RefMeta, body.GalleryRefs, body.Refs)
+	mergedExplicitMeta := append([]RunRefMeta{}, body.RefMeta...)
+	mergedExplicitMeta = append(mergedExplicitMeta, collectedItemRefMetas...)
+	mergedRawPaths := append([]string{}, body.Refs...)
+	for _, rList := range itemRefsList {
+		mergedRawPaths = append(mergedRawPaths, rList...)
+	}
+	refMetaList := s.buildRunRefMeta(mergedExplicitMeta, body.GalleryRefs, mergedRawPaths)
 	if body.DirectPrompt {
 		persistedRecipe = json.RawMessage("{}")
 		metaObj := map[string]any{
@@ -857,18 +1006,12 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 
 	imgs := make([]store.Image, 0, len(body.Items))
 	canRef := providerSupportsRef(body.ModelRef)
-	baseRefs := make([]string, 0, len(body.Refs)+1)
-	for _, ref := range body.Refs {
-		if resolved := normalizeLocalRef(ref); resolved != "" {
-			baseRefs = append(baseRefs, resolved)
-		}
-	}
-	if guidePath != "" {
-		baseRefs = append(baseRefs, guidePath)
-	}
 	for i, it := range body.Items {
-		refs := append([]string{}, baseRefs...)
-		if !body.DirectPrompt && !isSite && canRef && built[i].UseReference && built[i].ReferenceImage != "" {
+		refs := append([]string{}, itemRefsList[i]...)
+		if guidePath != "" && len(refs) < 6 {
+			refs = append(refs, guidePath)
+		}
+		if !body.DirectPrompt && !isSite && canRef && built[i].UseReference && built[i].ReferenceImage != "" && len(refs) < 6 {
 			if resolved := jobs.ResolveRef(built[i].ReferenceImage); resolved != "" {
 				refs = append(refs, resolved)
 			}
@@ -942,7 +1085,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 					"creationSource": siteCreationSource,
 					"autoPublish":    false,
 				}
-				if body.Mode == "edit" || body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" {
+				if body.Mode == "edit" || body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" || itemRefDirectives[i] != "" {
 					sb["promptFromSkill"] = true
 				}
 			}
@@ -1489,8 +1632,21 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 	if err != nil {
 		return nil, err
 	}
+	canvasPromptSchema := `根据用户需求「%s」生成手绘风节点画布 v2 工作流 JSON（严格只输出 JSON）：
+{
+  "nodes": [
+    {"id":"ref1","type":"reference","title":"角色参考图","refMode":"bundle","x":36,"y":36,"refs":[{"path":"","role":"角色长相","note":"保持人物五官、发型和服装主色"}]},
+    {"id":"params","type":"parameters","mode":"cartesian","x":36,"y":280,"fieldOrder":["prompt","style1","layout","ratio"],"fields":{"prompt":["场景1","场景2"],"style1":["FA-013"],"layout":[""],"ratio":["3:4"]}},
+    {"id":"output","type":"output","mode":"cartesian","repeat":1,"resolution":"2k","x":492,"y":160}
+  ],
+  "edges": [
+    {"id":"e1","from":"ref1","to":"output"},
+    {"id":"e2","from":"params","to":"output"}
+  ]
+}
+节点类型支持：parameters(多参数卡)、reference(参考图节点，仅当用户提到参考图/角色一致性/换装/垫图时添加)、parameter(单项参数 prompt|style1|layout|ratio|colors|tones|moods|mode)、combine(参数组合)、output(批量出图)。`
 	buildWithHarness := func() (map[string]any, error) {
-		ask := fmt.Sprintf("根据用户需求「%s」生成节点画布工作流 JSON：{\"nodes\":[{\"id\":\"n1\",\"type\":\"themes|recipe|styles|generate|export\",\"x\":80,\"y\":120,\"data\":{\"label\":\"\",\"items\":[]}}],\"edges\":[{\"id\":\"e1\",\"from\":\"n1\",\"to\":\"n2\"}]}", body.Prompt)
+		ask := fmt.Sprintf(canvasPromptSchema, body.Prompt)
 		res, err := s.callHarnessText(r.Context(), route, []providers.ChatMessage{{Role: "user", Content: ask}}, true)
 		if err != nil {
 			return nil, err
@@ -1509,7 +1665,7 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 		if err != nil {
 			var ae *site.APIError
 			if errors.As(err, &ae) && (ae.Status == 404 || ae.Status == 403) {
-				ask := fmt.Sprintf("根据用户需求「%s」生成节点画布工作流 JSON：{\"nodes\":[{\"id\":\"n1\",\"type\":\"themes|recipe|styles|generate|export\",\"x\":80,\"y\":120,\"data\":{\"label\":\"\",\"items\":[]}}],\"edges\":[{\"id\":\"e1\",\"from\":\"n1\",\"to\":\"n2\"}]}", body.Prompt)
+				ask := fmt.Sprintf(canvasPromptSchema, body.Prompt)
 				aiRes, aiErr := s.Site.AIChat(r.Context(), site.AIChatRequest{
 					Capability:   "text",
 					Messages:     []providers.ChatMessage{{Role: "user", Content: ask}},
@@ -1531,7 +1687,7 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 		return map[string]any{"raw": raw, "source": "site"}, nil
 	}
 	buildWithProvider := func(tp settings.Provider, model string) (map[string]any, error) {
-		ask := fmt.Sprintf("根据用户需求「%s」生成节点画布工作流 JSON：{\"nodes\":[{\"id\":\"n1\",\"type\":\"themes|recipe|styles|generate|export\",\"x\":80,\"y\":120,\"data\":{\"label\":\"\",\"items\":[]}}],\"edges\":[{\"id\":\"e1\",\"from\":\"n1\",\"to\":\"n2\"}]}", body.Prompt)
+		ask := fmt.Sprintf(canvasPromptSchema, body.Prompt)
 		reply, err := providers.Chat(r.Context(), tp, model, []providers.ChatMessage{{Role: "user", Content: ask}}, true)
 		if err != nil {
 			return nil, err

@@ -34,6 +34,7 @@ type RunRefMeta struct {
 	SHA256    string `json:"sha256,omitempty"`
 	Label     string `json:"label,omitempty"`
 	Role      string `json:"role,omitempty"`
+	Note      string `json:"note,omitempty"`
 	LocalPath string `json:"localPath,omitempty"`
 }
 
