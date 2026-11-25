@@ -2,6 +2,39 @@
 // Runs inside /obsidian-host.html (opaque sandbox iframe, no access to parent token/DOM).
 // Communicates with the Handraw Article Workbench strictly via window.parent.postMessage.
 
+// Provide isolated in-memory localStorage/sessionStorage so plugins never hit SecurityError
+// inside an opaque sandboxed iframe (lacking allow-same-origin).
+function createMemoryStorage() {
+  const store = new Map();
+  return new Proxy({
+    get length() { return store.size; },
+    key(i) { return Array.from(store.keys())[i] ?? null; },
+    getItem(k) { const s = String(k); return store.has(s) ? store.get(s) : null; },
+    setItem(k, v) { store.set(String(k), String(v)); },
+    removeItem(k) { store.delete(String(k)); },
+    clear() { store.clear(); },
+  }, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      const s = String(prop);
+      return store.has(s) ? store.get(s) : undefined;
+    },
+    set(target, prop, val) {
+      if (prop in target) return false;
+      store.set(String(prop), String(val));
+      return true;
+    },
+    deleteProperty(target, prop) {
+      store.delete(String(prop));
+      return true;
+    },
+  });
+}
+const memLocalStorage = createMemoryStorage();
+const memSessionStorage = createMemoryStorage();
+try { Object.defineProperty(window, "localStorage", { value: memLocalStorage, configurable: true }); } catch {}
+try { Object.defineProperty(window, "sessionStorage", { value: memSessionStorage, configurable: true }); } catch {}
+
 const PARENT = window.parent;
 let nextRpcId = 1;
 const pendingRpcs = new Map();
@@ -480,6 +513,16 @@ function addIcon(iconId, svgContent) {
   CUSTOM_ICONS.set(String(iconId), String(svgContent || ""));
 }
 
+function getIcon(iconId) {
+  const wrap = document.createElement("div");
+  setIcon(wrap, iconId);
+  return wrap.firstElementChild || null;
+}
+
+function getIconIds() {
+  return [...Object.keys(BUILTIN_ICONS), ...Array.from(CUSTOM_ICONS.keys())];
+}
+
 function setIcon(parent, iconId) {
   if (!parent) return;
   parent.textContent = "";
@@ -622,6 +665,37 @@ class MarkdownRenderChild extends Component {
   }
 }
 
+class PopoverSuggest {
+  constructor(app, scope) {
+    this.app = app || appInstance;
+    this.scope = scope || new Scope();
+  }
+  open() {}
+  close() {}
+  renderSuggestion() {}
+  selectSuggestion() {}
+}
+
+class HoverPopover extends Component {
+  constructor(parent, targetEl) {
+    super();
+    this.hoverEl = document.createElement("div");
+    this.targetEl = targetEl;
+    this.state = 0;
+  }
+}
+
+class Scope {
+  constructor(parent) { this.parent = parent || null; this._keys = []; }
+  register(modifiers, key, func) { const h = { modifiers, key, func }; this._keys.push(h); return h; }
+  unregister(h) { this._keys = this._keys.filter((x) => x !== h); }
+}
+
+const Keymap = {
+  isModifier: () => false,
+  isModEvent: (ev) => Boolean(ev && (ev.ctrlKey || ev.metaKey)),
+};
+
 class AbstractInputSuggest {
   constructor(app, inputEl) {
     this.app = app || appInstance;
@@ -745,12 +819,15 @@ class Vault extends Events {
   constructor() {
     super();
     this.configDir = ".obsidian";
+    this.config = {};
     this.adapter = new FileSystemAdapter(this);
     this._name = "articles";
     this._byPath = new Map();
     this._root = new TFolder(this, "/", "");
     this._textCache = new Map();
   }
+  getConfig(key) { return this.config[key]; }
+  setConfig(key, val) { this.config[key] = val; }
   getName() { return this._name; }
   getRoot() { return this._root; }
   _syncFromList(payload) {
@@ -1144,6 +1221,8 @@ class Workspace extends Events {
   onLayoutReady(cb) {
     if (typeof cb === "function") setTimeout(cb, 0);
   }
+  updateOptions() {}
+  requestSaveLayout() {}
   getActiveFile() {
     if (!activeDoc.path) return null;
     const existing = this._app.vault.getFileByPath(activeDoc.path);
@@ -1481,6 +1560,21 @@ class TextComponent extends BaseComponent {
   onChange(cb) { this._cb = cb; return this; }
 }
 
+class MomentFormatComponent extends TextComponent {
+  setDefaultFormat(f) { this._defaultFormat = f; return this; }
+  setSampleEl(el) { this._sampleEl = el; return this; }
+  updateSample() { return this; }
+}
+
+class ProgressBarComponent extends BaseComponent {
+  constructor(containerEl) {
+    super();
+    this.progressEl = containerEl.createEl("progress");
+  }
+  setValue(v) { this.progressEl.value = Number(v || 0); return this; }
+  getValue() { return Number(this.progressEl.value || 0); }
+}
+
 class SearchComponent extends TextComponent {
   constructor(containerEl) {
     super(containerEl);
@@ -1721,6 +1815,7 @@ class Plugin extends Component {
     // Graceful no-op in segmented textarea mode (Phase 1)
   }
   registerObsidianProtocolHandler() {}
+  registerHoverLinkSource() {}
   async loadData() {
     const res = await rpc("plugin.readData", { pluginId: this.manifest.id });
     return res.data ?? null;
@@ -2110,17 +2205,24 @@ function createRequireForPlugin(pluginId, obsidianExports) {
     },
   };
 
-  // Harmless CM6 stubs so plugins with optional CM6 imports load cleanly
-  const cmStub = new Proxy({}, {
-    get(_, prop) {
-      if (prop === "__esModule") return true;
-      if (prop === "StateField" || prop === "StateEffect") return { define: () => ({ of: () => ({}) }) };
-      if (prop === "ViewPlugin") return { fromClass: () => ({}), define: () => ({}) };
-      if (prop === "Decoration") return { mark: () => ({ range: () => ({}) }), widget: () => ({ range: () => ({}) }), none: {} };
-      if (prop === "WidgetType") return class WidgetType {};
-      return () => ({});
-    },
-  });
+  // Recursive, constructible, callable stub for optional @codemirror/* & @lezer/* modules
+  // so `class X extends cm.WidgetType {}` and `lezer.tags.modifier` never throw.
+  function createDeepStub() {
+    function StubClass() {}
+    return new Proxy(StubClass, {
+      get(target, prop) {
+        if (prop === "__esModule") return true;
+        if (prop === "prototype") return target.prototype;
+        if (prop === "then") return undefined;
+        if (prop === Symbol.toPrimitive) return () => "";
+        if (prop === Symbol.iterator) return function* () {};
+        return createDeepStub();
+      },
+      apply() { return createDeepStub(); },
+      construct() { return createDeepStub(); },
+    });
+  }
+  const cmStub = createDeepStub();
 
   window.process = processShim;
 
@@ -2143,9 +2245,9 @@ function createRequireForPlugin(pluginId, obsidianExports) {
     if (norm === "stream") return streamMod;
     if (norm === "assert") return assertFn;
     if (norm === "querystring") return { parse: (s) => Object.fromEntries(new URLSearchParams(s)), stringify: (o) => new URLSearchParams(o).toString() };
-    if (norm.startsWith("@codemirror/") || norm === "codemirror") return cmStub;
+    if (norm.startsWith("@codemirror/") || norm === "codemirror" || norm.startsWith("@lezer/")) return cmStub;
     console.warn(`[obsidian-shim] Unsupported require("${spec}") requested by ${pluginId}`);
-    return {};
+    return createDeepStub();
   };
 }
 
@@ -2197,6 +2299,23 @@ class App {
       defaultKeys: {},
       getHotkeys: () => [],
     };
+    this.keymap = {
+      pushScope: () => {},
+      popScope: () => {},
+    };
+    this.isVimEnabled = () => false;
+    this.loadLocalStorage = (key) => {
+      try {
+        const raw = memLocalStorage.getItem(String(key));
+        return raw === null ? null : JSON.parse(raw);
+      } catch {
+        return memLocalStorage.getItem(String(key));
+      }
+    };
+    this.saveLocalStorage = (key, val) => {
+      if (val === null || val === undefined) memLocalStorage.removeItem(String(key));
+      else memLocalStorage.setItem(String(key), typeof val === "string" ? val : JSON.stringify(val));
+    };
     this.plugins = {
       plugins: {},
       enabledPlugins: new Set(),
@@ -2244,9 +2363,19 @@ function buildObsidianExports(pluginId) {
     MarkdownRenderChild,
     AbstractInputSuggest,
     EditorSuggest,
+    PopoverSuggest,
+    HoverPopover,
+    Scope,
+    Keymap,
     EditableFileView: FileView,
     TextFileView: FileView,
+    MarkdownPreviewView: ItemView,
+    BaseComponent,
     ValueComponent: BaseComponent,
+    AbstractTextComponent: TextComponent,
+    SecretComponent: TextComponent,
+    MomentFormatComponent,
+    ProgressBarComponent,
     MetadataCache,
     Workspace,
     WorkspaceLeaf,
@@ -2298,7 +2427,15 @@ function buildObsidianExports(pluginId) {
     displayTooltip,
     getLanguage,
     setIcon,
+    getIcon,
+    getIconIds,
     addIcon,
+    loadMathJax: async () => {},
+    finishRenderMath: async () => {},
+    renderMath: (src) => { const s = document.createElement("span"); s.textContent = String(src || ""); return s; },
+    loadPrism: async () => ({}),
+    loadMermaid: async () => ({}),
+    loadPdfJs: async () => ({}),
     moment: createMoment,
   };
 }
@@ -2401,9 +2538,11 @@ async function loadPluginBundle(bundle) {
       "global",
       "process",
       "Buffer",
+      "localStorage",
+      "sessionStorage",
       `${bundle.mainJs}\n//# sourceURL=obsidian-plugin-${id}.js`
     );
-    factory(reqFn, moduleObj, moduleObj.exports, window, window.process, BufferPolyfill);
+    factory(reqFn, moduleObj, moduleObj.exports, window, window.process, BufferPolyfill, memLocalStorage, memSessionStorage);
 
     const exported = moduleObj.exports;
     const PluginClass = exported?.default || exported;
