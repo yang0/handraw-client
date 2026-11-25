@@ -87,10 +87,10 @@ export async function renderArticle(root, ctx, params = {}) {
   });
   root = session.root;
   const state = session.state;
-  if (!state.viewMode || state.viewMode === "editor") state.viewMode = "live";
+  if (!state.viewMode || state.viewMode === "editor" || state.viewMode === "source") state.viewMode = "live";
   if (!Array.isArray(state.openTabs)) state.openTabs = [];
   if (state.activeFile && !state.openTabs.includes(state.activeFile)) state.openTabs.push(state.activeFile);
-  let lastEditorViewMode = state.viewMode === "source" ? "source" : "live";
+  let lastEditorViewMode = "live";
   let graphMounted = false;
   let edgelessMountedKey = "";
   let boardMounted = false;
@@ -335,19 +335,6 @@ export async function renderArticle(root, ctx, params = {}) {
       session.persist();
     },
   }, "🎨 白板");
-  const sourceSwitchBtn = el("button", {
-    type: "button",
-    class: "ic-article-seg-btn",
-    title: "纯 Markdown 源码分段编辑",
-    onClick: () => {
-      state.viewMode = "source";
-      lastEditorViewMode = "source";
-      state.graphFullscreen = false;
-      renderFlow();
-      renderStageMode();
-      session.persist();
-    },
-  }, "源码");
   const previewSwitchBtn = el("button", {
     type: "button",
     class: "ic-article-seg-btn",
@@ -426,7 +413,6 @@ export async function renderArticle(root, ctx, params = {}) {
       el("div", { class: "ic-article-segmented-switch", role: "group", "aria-label": "视图模式切换" },
         liveSwitchBtn,
         edgelessSwitchBtn,
-        sourceSwitchBtn,
         previewSwitchBtn,
         graphSwitchBtn
       ),
@@ -1264,6 +1250,7 @@ export async function renderArticle(root, ctx, params = {}) {
     },
     onExtractSelectionToNote: (selText) => extractSelectionToNote(selText),
     onOpenNoteNewTab: (relPath) => openVaultFile(relPath, { newTab: true }),
+    tocHostEl: centerCol,
   });
 
   function openBoardView(dir = "") {
@@ -3897,213 +3884,7 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function renderFlow() {
-    if (state.viewMode === "live") {
-      liveEditor.render(flowBox);
-      return;
-    }
-    clear(flowBox);
-    const coverSlot = state.slots.find((s) => s.role === "cover");
-    const inlineSlots = state.slots.filter((s) => s.role !== "cover");
-
-    // 1. Top Cover slot (or insert cover gap)
-    if (coverSlot) {
-      flowBox.appendChild(renderSlotCard(coverSlot, 0, "固定在文章开头"));
-    } else {
-      flowBox.appendChild(el("div", { class: "ic-art-gap" },
-        el("button", { type: "button", class: "ic-art-gap-btn", onClick: () => insertSlotAt("", "cover") }, "＋ 添加文章封面")
-      ));
-    }
-
-    // 2. Interleave raw markdown lines cleanly around matched inline anchors
-    const rawLines = (state.content || "").split(/\r?\n/);
-    const cuts = [];
-    const orphans = [];
-    inlineSlots.forEach((sl) => {
-      const idx = sl.anchor ? rawLines.findIndex((line) => line.trim() && line.includes(sl.anchor)) : -1;
-      if (idx >= 0) cuts.push({ lineIdx: idx, slot: sl });
-      else orphans.push(sl);
-    });
-    cuts.sort((a, b) => a.lineIdx - b.lineIdx);
-
-    // Group cuts by lineIdx
-    const lineGroups = new Map();
-    cuts.forEach((c) => {
-      if (!lineGroups.has(c.lineIdx)) lineGroups.set(c.lineIdx, []);
-      lineGroups.get(c.lineIdx).push(c.slot);
-    });
-    const sortedCutLines = Array.from(lineGroups.keys()).sort((a, b) => a - b);
-
-    const segTextareas = [];
-    const syncContentFromSegments = () => {
-      state.content = segTextareas.map((ta) => ta.value).join("\n");
-      state.dirty = true;
-      charCounter.textContent = `正文字数 ${state.content.length}`;
-      syncTopbarBreadcrumb();
-      obsidianCtrl.syncDoc(false);
-      session.persist();
-    };
-
-    const appendSegmentTa = (textValue, placeholder, minRows) => {
-      const segIdx = segTextareas.length;
-      const linesCount = Math.max(minRows, Math.min(24, textValue.split("\n").length + 1));
-      const ta = el("textarea", {
-        class: "ic-art-seg-ta",
-        rows: String(linesCount),
-        placeholder: placeholder || "在此撰写或粘贴文章正文（支持 Markdown）…",
-      });
-      ta.value = textValue;
-      ta.addEventListener("focus", () => { activeSegTextarea = ta; });
-      ta.addEventListener("input", () => {
-        closeSelectionBubble();
-        syncContentFromSegments();
-      });
-      ta.addEventListener("mouseup", (e) => {
-        setTimeout(() => {
-          if (ta.selectionEnd - ta.selectionStart >= 2) {
-            showSelectionBubble(ta, segIdx, e.clientX, e.clientY);
-          } else {
-            closeSelectionBubble();
-          }
-        }, 0);
-      });
-      ta.addEventListener("keyup", (e) => {
-        if (e.shiftKey || e.key === "Shift") {
-          if (ta.selectionEnd - ta.selectionStart >= 2) {
-            showSelectionBubble(ta, segIdx, 0, 0);
-          } else {
-            closeSelectionBubble();
-          }
-        }
-      });
-      ta.addEventListener("contextmenu", (ev) => {
-        const s = ta.selectionStart ?? 0;
-        const e = ta.selectionEnd ?? 0;
-        const sel = ta.value.slice(s, e).trim();
-        const items = [];
-        if (sel.length >= 2) {
-          items.push(
-            { header: `选中文本 (${sel.length} 字)` },
-            {
-              icon: "✨",
-              label: "让 AI 改写选中片段",
-              onClick: () => {
-                state.rightDrawerTab = "ai";
-                pinSelectionToCopilot({ text: sel, start: s, end: e, segIdx }, { openDrawer: true, focusInput: true, mode: "edit" });
-              },
-            },
-            {
-              icon: "💬",
-              label: "向 AI 提问 / 诊断这段",
-              onClick: () => {
-                state.rightDrawerTab = "ai";
-                pinSelectionToCopilot({ text: sel, start: s, end: e, segIdx }, { openDrawer: true, focusInput: true, mode: "advise" });
-              },
-            },
-            {
-              icon: "🔗",
-              label: `转为双链 [[${sel.slice(0, 14)}${sel.length > 14 ? "…" : ""}]]`,
-              onClick: () => {
-                ta.setRangeText(`[[${sel}]]`, s, e, "end");
-                ta.dispatchEvent(new Event("input", { bubbles: true }));
-              },
-            },
-            {
-              icon: "📄",
-              label: "提取为新笔记并替换为双链…",
-              onClick: async () => {
-                const base = await extractSelectionToNote(sel);
-                if (base) {
-                  ta.setRangeText(`[[${base}]]`, s, e, "end");
-                  ta.dispatchEvent(new Event("input", { bubbles: true }));
-                }
-              },
-            },
-            { sep: true }
-          );
-        } else {
-          items.push({ header: "Markdown 源码操作" });
-        }
-        items.push(
-          { icon: "🔗", label: "插入双链 [[笔记]]", onClick: () => linksCtrl.triggerInsertWikilink(ta) },
-          { icon: "🎨", label: "在此插入 AI 配图位", onClick: () => insertSlotAt(sel || "") },
-          {
-            icon: "⊞",
-            label: "插入 Markdown 表格",
-            onClick: () => {
-              ta.setRangeText("\n| 列一 | 列二 | 列三 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |\n", s, e, "end");
-              ta.dispatchEvent(new Event("input", { bubbles: true }));
-            },
-          },
-          {
-            icon: "💡",
-            label: "插入提示框 (Callout)",
-            onClick: () => {
-              ta.setRangeText("\n> [!TIP] 提示\n> 在此输入提示内容\n", s, e, "end");
-              ta.dispatchEvent(new Event("input", { bubbles: true }));
-            },
-          },
-          { sep: true },
-          {
-            icon: "👁",
-            label: "切回所见即所得实时预览",
-            onClick: () => {
-              state.viewMode = "live";
-              lastEditorViewMode = "live";
-              liveEditor.resetEditing();
-              renderFlow();
-              renderStageMode();
-              session.persist();
-            },
-          }
-        );
-        openArticleContextMenu(ev, items);
-      });
-      segTextareas.push(ta);
-      linksCtrl.attachTextarea(ta);
-      flowBox.appendChild(ta);
-    };
-
-    if (!sortedCutLines.length) {
-      appendSegmentTa(
-        state.content || "",
-        "# 文章主标题\n\n导语与背景介绍…\n\n## 第一节：核心观点\n正文段落内容…\n\n写好后点击底部「✨ AI 规划配图」，封面与插图卡会自动插入到对应段落之后。",
-        14
-      );
-    } else {
-      let cursor = 0;
-      let inlineNo = 0;
-      sortedCutLines.forEach((cutIdx) => {
-        const chunk = rawLines.slice(cursor, cutIdx + 1).join("\n");
-        appendSegmentTa(chunk, "继续编写本段内容…", 3);
-        const matchedLine = (rawLines[cutIdx] || "").trim().slice(0, 26);
-        lineGroups.get(cutIdx).forEach((sl) => {
-          inlineNo += 1;
-          flowBox.appendChild(renderSlotCard(sl, inlineNo, `§ 位于「${matchedLine}」之后`));
-        });
-        cursor = cutIdx + 1;
-      });
-      const tail = rawLines.slice(cursor).join("\n");
-      appendSegmentTa(tail, "继续编写后续段落…", 5);
-    }
-
-    // Orphan slots (not yet matched to a paragraph line)
-    orphans.forEach((sl, oIdx) => {
-      const num = cuts.length + oIdx + 1;
-      flowBox.appendChild(renderSlotCard(sl, num, sl.anchor ? `原位置「${sl.anchor.slice(0, 20)}」未匹配` : "尚未绑定段落", true));
-    });
-
-    // End insertion gap
-    flowBox.appendChild(el("div", { class: "ic-art-gap" },
-      el("button", {
-        type: "button",
-        class: "ic-art-gap-btn",
-        onClick: () => {
-          const blocks = paragraphBlocks();
-          const lastAnchor = blocks.length ? blocks[blocks.length - 1].trimmed : "";
-          insertSlotAt(lastAnchor, "inline");
-        },
-      }, "＋ 在文末添加插图")
-    ));
+    liveEditor.render(flowBox);
   }
 
   function renderPreviewStage() {
@@ -4144,6 +3925,7 @@ export async function renderArticle(root, ctx, params = {}) {
       drawerResizer.classList.add("hidden");
       copilotBackdrop.classList.add("hidden");
       obsidianCtrl.updateHostVisibility(false);
+      liveEditor.setTocVisible(false);
       closeSelectionBubble();
       renderWelcome();
       return;
@@ -4151,17 +3933,16 @@ export async function renderArticle(root, ctx, params = {}) {
 
     syncTopbarBreadcrumb();
     const isLive = state.viewMode === "live";
-    const isSource = state.viewMode === "source";
-    const isEditor = isLive || isSource;
+    const isEditor = isLive;
     const isReviewing = isEditor && Boolean(activeDiffReview);
     const drawerOpen = Boolean(state.aiDrawerOpen) && !isFocusFs;
     const showingObs = drawerOpen && state.rightDrawerTab === "obsidian";
 
     liveSwitchBtn.classList.toggle("is-active", isLive);
     edgelessSwitchBtn.classList.toggle("is-active", isEdgeless);
-    sourceSwitchBtn.classList.toggle("is-active", isSource);
     previewSwitchBtn.classList.toggle("is-active", isPreview);
     graphSwitchBtn.classList.toggle("is-active", isGraph);
+    liveEditor.setTocVisible(isLive && !isReviewing);
 
     wideModeBtn.classList.toggle("hidden", isSpatialStage);
     wideModeBtn.classList.toggle("is-active", Boolean(state.wideMode));

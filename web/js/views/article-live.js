@@ -871,6 +871,7 @@ export function createArticleLiveEditor(opts) {
     onAskAiSelection,
     onExtractSelectionToNote,
     onOpenNoteNewTab,
+    tocHostEl,
   } = opts;
 
   let cmView = null;
@@ -879,6 +880,7 @@ export function createArticleLiveEditor(opts) {
   let orphanSlotsBox = null;
   let backlinksBox = null;
   let tocRailEl = null;
+  let tocVisible = true;
   let rootHostEl = null;
   let lastDocVersionPath = "";
   let suppressDocChange = false;
@@ -1543,8 +1545,8 @@ export function createArticleLiveEditor(opts) {
         headings.push({ level: m[1].length, text: m[2].replace(/[*`[\]]/g, "").trim(), lineNo: ln, pos: doc.line(ln).from });
       }
     }
-    tocRailEl.classList.toggle("hidden", headings.length < 2);
-    if (headings.length < 2) return;
+    tocRailEl.classList.toggle("hidden", !tocVisible || headings.length < 2);
+    if (!tocVisible || headings.length < 2) return;
 
     const activeLineNo = doc.lineAt(cmView.state.selection.main.head).number;
     let activeIdx = 0;
@@ -1765,8 +1767,10 @@ export function createArticleLiveEditor(opts) {
     cmMountBox = el("div", { class: "cm-lp-host" });
     orphanSlotsBox = el("div", { class: "cm-lp-orphans" });
     backlinksBox = el("div", { class: "cm-lp-backlinks" });
+    if (tocRailEl && tocRailEl.isConnected) tocRailEl.remove();
     tocRailEl = el("div", { class: "ic-live-toc-rail hidden" });
-    container.append(coverSlotBox, cmMountBox, orphanSlotsBox, backlinksBox, tocRailEl);
+    container.append(coverSlotBox, cmMountBox, orphanSlotsBox, backlinksBox);
+    (tocHostEl || container).appendChild(tocRailEl);
 
     lastDocVersionPath = curPath;
     cmView = new EditorView({
@@ -1807,10 +1811,19 @@ export function createArticleLiveEditor(opts) {
     return { start: from, end: to };
   }
 
+  function setTocVisible(flag) {
+    tocVisible = Boolean(flag);
+    if (tocRailEl) {
+      if (!tocVisible) tocRailEl.classList.add("hidden");
+      else renderTocRail();
+    }
+  }
+
   function dispose() {
     closeSlashMenu();
     closeSelectionBar();
     if (tocTimer) { clearTimeout(tocTimer); tocTimer = null; }
+    if (tocRailEl) { tocRailEl.remove(); tocRailEl = null; }
     if (cmView) {
       cmView.destroy();
       cmView = null;
@@ -1823,6 +1836,7 @@ export function createArticleLiveEditor(opts) {
     resetEditing,
     getActiveTextarea,
     getSelectionRange,
+    setTocVisible,
     dispose,
   };
 }

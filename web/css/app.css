@@ -7838,12 +7838,15 @@ details.ic-links-sec:not([open]) .ic-links-chev {
 }
 .ic-cm-selbar-dot:hover { transform: scale(1.18); }
 
-/* Phase 1: Minimalist Floating Outline TOC Rail */
+/* Phase 1: Minimalist Floating Outline TOC Rail — anchored inside .ic-wechat-center-col so it NEVER overlaps the right AI drawer (#129) */
+.ic-wechat-center-col {
+  position: relative;
+}
 .ic-live-toc-rail {
-  position: fixed;
-  right: 18px;
-  top: 150px;
-  z-index: 40;
+  position: absolute;
+  right: 16px;
+  top: 56px;
+  z-index: 25;
   display: flex;
   align-items: flex-start;
   justify-content: flex-end;
