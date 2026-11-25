@@ -185,7 +185,9 @@ func (u *Updater) ApplyResources(ctx context.Context, dir string, p *Plan, progr
 // InstallBundled copies a bundled pack into dir when dir has none (first run).
 func InstallBundled(src, dir string) error {
 	if _, err := os.Stat(filepath.Join(dir, "manifest.json")); err == nil {
-		return nil
+		if _, err2 := os.Stat(filepath.Join(dir, "references", "styles.json")); err2 == nil {
+			return nil
+		}
 	}
 	if _, err := os.Stat(filepath.Join(src, "manifest.json")); err != nil {
 		return errors.New("no bundled pack")

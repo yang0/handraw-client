@@ -97,15 +97,17 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 	}
 
 	userPackDir := appdir.Resources()
-	bundledDir := findBundledPack()
+	bundledDir := findBundledPack(userPackDir)
 	if bundledDir != "" {
 		_ = updater.InstallBundled(bundledDir, userPackDir)
 	}
-	if packDir, err := resources.Locate(
+	locateCandidates := []string{
 		os.Getenv("HANDRAW_PACK_DIR"),
 		userPackDir,
 		bundledDir,
-	); err == nil {
+	}
+	locateCandidates = append(locateCandidates, findDevSkillCheckouts()...)
+	if packDir, err := resources.Locate(locateCandidates...); err == nil {
 		if pack, lErr := resources.Load(packDir); lErr == nil {
 			resources.SetCurrent(pack)
 		} else {
@@ -155,7 +157,7 @@ func newServer(db *store.DB, sc *site.Client, upd *updater.Updater, packDir, bun
 	return srv
 }
 
-func findBundledPack() string {
+func findBundledPack(userPackDir string) string {
 	candidates := []string{}
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
@@ -173,10 +175,29 @@ func findBundledPack() string {
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates, filepath.Join(home, ".handraw-style", "client-resources"))
 	}
+	// When Windows data dir moved off C: (#125), seed from any previously downloaded
+	// %APPDATA%\handraw-client\resources pack so styles/layouts/colors/tones appear immediately.
+	if appdata := strings.TrimSpace(os.Getenv("APPDATA")); appdata != "" {
+		legacyRes := filepath.Join(appdata, appdir.AppName, "resources")
+		if !strings.EqualFold(filepath.Clean(legacyRes), filepath.Clean(userPackDir)) {
+			candidates = append(candidates, legacyRes)
+		}
+	}
 	for _, c := range candidates {
 		if st, err := os.Stat(filepath.Join(c, "references", "styles.json")); err == nil && !st.IsDir() {
 			return c
 		}
 	}
 	return ""
+}
+
+func findDevSkillCheckouts() []string {
+	var out []string
+	if cwd, err := os.Getwd(); err == nil {
+		out = append(out, filepath.Join(cwd, "..", "handraw-style"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		out = append(out, filepath.Join(filepath.Dir(exe), "..", "handraw-style"))
+	}
+	return out
 }
