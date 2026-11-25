@@ -105,6 +105,37 @@ const isTableSepLine = (ln) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*
 
 // ---------- CodeMirror 6 Custom Live Preview Widgets ----------
 
+// Keep CM6's internal heightMap synchronized whenever an async block widget
+// (video metadata, images, tables, frontmatter details, embedded notes) changes height (#142).
+function observeBlockWidgetResize(dom, view) {
+  if (!dom || !view) return;
+  const trigger = () => {
+    if (!dom.isConnected) return;
+    try { view.requestMeasure(); } catch {}
+  };
+  let ro = null;
+  if (typeof ResizeObserver === "function") {
+    ro = new ResizeObserver(trigger);
+    ro.observe(dom);
+  }
+  dom.addEventListener("load", trigger, true);
+  dom.addEventListener("loadedmetadata", trigger, true);
+  dom.addEventListener("toggle", trigger, true);
+  dom.__cmResizeCleanup = () => {
+    if (ro) { ro.disconnect(); ro = null; }
+    dom.removeEventListener("load", trigger, true);
+    dom.removeEventListener("loadedmetadata", trigger, true);
+    dom.removeEventListener("toggle", trigger, true);
+  };
+}
+
+function unobserveBlockWidgetResize(dom) {
+  if (dom && typeof dom.__cmResizeCleanup === "function") {
+    dom.__cmResizeCleanup();
+    dom.__cmResizeCleanup = null;
+  }
+}
+
 class FrontmatterWidget extends WidgetType {
   constructor(raw, from, to, linksCtrl) {
     super();
@@ -151,7 +182,12 @@ class FrontmatterWidget extends WidgetType {
       ),
       grid
     );
-    return el("div", { class: "cm-lp-block-widget cm-lp-frontmatter-widget" }, det);
+    const wrap = el("div", { class: "cm-lp-block-widget cm-lp-frontmatter-widget" }, det);
+    observeBlockWidgetResize(wrap, view);
+    return wrap;
+  }
+  destroy(dom) {
+    unobserveBlockWidgetResize(dom);
   }
   ignoreEvent() {
     return true;
@@ -208,7 +244,11 @@ class TableWidget extends WidgetType {
       view.dispatch({ selection: { anchor: line.from + 2 }, scrollIntoView: true });
       view.focus();
     });
+    observeBlockWidgetResize(wrap, view);
     return wrap;
+  }
+  destroy(dom) {
+    unobserveBlockWidgetResize(dom);
   }
   ignoreEvent(ev) {
     return ev.type !== "contextmenu";
@@ -408,10 +448,14 @@ class EmbedWidget extends WidgetType {
   eq(other) {
     return other.rawLine === this.rawLine && other.sourcePath === this.sourcePath;
   }
-  toDOM() {
+  toDOM(view) {
     const box = el("div", { class: "cm-lp-embed-widget" });
     this.linksCtrl.renderPreviewBlock(box, this.rawLine.trim(), this.sourcePath);
+    observeBlockWidgetResize(box, view);
     return box;
+  }
+  destroy(dom) {
+    unobserveBlockWidgetResize(dom);
   }
   ignoreEvent(ev) {
     return ev.type !== "contextmenu";
@@ -430,8 +474,13 @@ class SlotCardWidget extends WidgetType {
   eq(other) {
     return other.sig === this.sig;
   }
-  toDOM() {
-    return el("div", { class: "cm-lp-slot-widget" }, this.renderSlotCard(this.slot, this.inlineNo, this.desc));
+  toDOM(view) {
+    const box = el("div", { class: "cm-lp-slot-widget" }, this.renderSlotCard(this.slot, this.inlineNo, this.desc));
+    observeBlockWidgetResize(box, view);
+    return box;
+  }
+  destroy(dom) {
+    unobserveBlockWidgetResize(dom);
   }
   ignoreEvent() {
     return true;
@@ -948,6 +997,7 @@ export function createArticleLiveEditor(opts) {
 
   let cmView = null;
   let cmMountBox = null;
+  let cmHostResizeObs = null;
   let coverSlotBox = null;
   let orphanSlotsBox = null;
   let backlinksBox = null;
@@ -1841,6 +1891,10 @@ export function createArticleLiveEditor(opts) {
     }
 
     // Fresh mount inside container
+    if (cmHostResizeObs) {
+      cmHostResizeObs.disconnect();
+      cmHostResizeObs = null;
+    }
     if (cmView) {
       cmView.destroy();
       cmView = null;
@@ -1860,6 +1914,14 @@ export function createArticleLiveEditor(opts) {
       state: createCMState(rawContent),
       parent: cmMountBox,
     });
+    if (typeof ResizeObserver === "function") {
+      cmHostResizeObs = new ResizeObserver(() => {
+        if (cmView && cmMountBox?.isConnected) {
+          try { cmView.requestMeasure(); } catch {}
+        }
+      });
+      cmHostResizeObs.observe(cmMountBox);
+    }
     renderAuxiliaryRegions();
     renderTocRail();
   }
@@ -1973,6 +2035,7 @@ export function createArticleLiveEditor(opts) {
     closeSlashMenu();
     closeSelectionBar();
     if (tocTimer) { clearTimeout(tocTimer); tocTimer = null; }
+    if (cmHostResizeObs) { cmHostResizeObs.disconnect(); cmHostResizeObs = null; }
     if (tocRailEl) { tocRailEl.remove(); tocRailEl = null; }
     if (cmView) {
       cmView.destroy();
