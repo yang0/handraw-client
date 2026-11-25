@@ -229,3 +229,107 @@ func TestArticleEditAdviseSelectionAndHistory(t *testing.T) {
 		t.Fatalf("unexpected selection response: %+v", selRes)
 	}
 }
+
+func TestArticleEditSelectionScopeIsolationAndEchoGuard(t *testing.T) {
+	var mu sync.Mutex
+	var capturedMsgs []map[string]any
+	mockText := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		capturedMsgs = req.Messages
+		mu.Unlock()
+
+		// Deliberately echo immediate before/after lines around the rewritten snippet to test echo stripping.
+		replyObj := map[string]string{
+			"replacement": "紧邻前文段落，用来测试局部衔接窗口是否只传附近内容。\n\n把这段话改写得更克制、更有节奏感。\n\n紧邻后文段落，同样仅用于局部衔接而不应被全文替换。",
+			"summary":     "只改写了选中的核心一句",
+		}
+		b, _ := json.Marshal(replyObj)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": string(b)}}},
+		})
+	}))
+	defer mockText.Close()
+
+	srv, _ := setupTestServer(t, "")
+	h := srv.Handler()
+	rrProv := doReq(t, h, srv.Token, "POST", "/api/providers", map[string]any{
+		"id": "mocktxt3", "name": "MockText3", "kind": "openai", "purpose": "text",
+		"baseUrl": mockText.URL + "/v1", "apiKey": "sk-mock3", "enabled": true,
+		"models": []map[string]any{{"id": "writer-iso", "label": "Writer Iso"}},
+	})
+	if rrProv.Code != 200 {
+		t.Fatalf("add provider: %d %s", rrProv.Code, rrProv.Body.String())
+	}
+
+	distantIntro := "DISTANT_INTRO_MARKER_NEVER_SEND " + strings.Repeat("这是一段远离选中区域的开头铺垫内容。", 30)
+	nearBefore := "紧邻前文段落，用来测试局部衔接窗口是否只传附近内容。"
+	targetSel := "原句略显啰嗦，需要单独润色这一句。"
+	nearAfter := "紧邻后文段落，同样仅用于局部衔接而不应被全文替换。"
+	distantOutro := strings.Repeat("这是一段远离选中区域的结尾总结内容。", 30) + " DISTANT_OUTRO_MARKER_NEVER_SEND"
+	fullDoc := strings.Join([]string{distantIntro, nearBefore, targetSel, nearAfter, distantOutro}, "\n\n")
+
+	rr := doReq(t, h, srv.Token, "POST", "/api/article/edit", map[string]any{
+		"mode":        "edit",
+		"title":       "长文局部改写测试",
+		"content":     fullDoc,
+		"selection":   targetSel,
+		"instruction": "去掉冗余，保留原意",
+		"sessionKey":  "article-full-doc-session",
+		"history": []map[string]any{
+			{"role": "user", "content": "请把整篇文章重新写一遍"},
+			{"role": "assistant", "content": "好的，我将输出改写后的全文。"},
+		},
+		"textModelRef": "mocktxt3:writer-iso",
+	})
+	if rr.Code != 200 {
+		t.Fatalf("selection edit failed: %d %s", rr.Code, rr.Body.String())
+	}
+
+	mu.Lock()
+	msgs := capturedMsgs
+	mu.Unlock()
+	if len(msgs) != 2 {
+		t.Fatalf("selection rewrite must isolate history (expected system+user=2 msgs), got %d", len(msgs))
+	}
+	userPrompt, _ := msgs[1]["content"].(string)
+	if strings.Contains(userPrompt, "DISTANT_INTRO_MARKER_NEVER_SEND") || strings.Contains(userPrompt, "DISTANT_OUTRO_MARKER_NEVER_SEND") {
+		t.Fatalf("selection rewrite leaked distant full-article paragraphs into prompt: %s", userPrompt)
+	}
+	if !strings.Contains(userPrompt, targetSel) || !strings.Contains(userPrompt, nearBefore) || !strings.Contains(userPrompt, nearAfter) {
+		t.Fatalf("selection rewrite prompt missing target selection or local context window: %s", userPrompt)
+	}
+
+	var res struct {
+		Mode        string `json:"mode"`
+		Replacement string `json:"replacement"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &res)
+	if res.Mode != "selection" {
+		t.Fatalf("expected mode=selection, got %+v", res)
+	}
+	if res.Replacement != "把这段话改写得更克制、更有节奏感。" {
+		t.Fatalf("expected echoed before/after context stripped, got %q", res.Replacement)
+	}
+
+	// Verify duplicate selection disambiguation with JS UTF-16 offsets (including surrogate-pair emoji).
+	dupDoc := "段落一标记。\n\n重复句。\n\n🚀段落二标记。\n\n重复句。\n\n段落三标记。"
+	// Compute UTF-16 start/end of the second "重复句。"
+	secondByteIdx := strings.LastIndex(dupDoc, "重复句。")
+	u16Start := 0
+	for _, r := range dupDoc[:secondByteIdx] {
+		if r > 0xFFFF {
+			u16Start += 2
+		} else {
+			u16Start++
+		}
+	}
+	u16End := u16Start + len([]rune("重复句。"))
+	before, after := extractSelectionContextWindow(dupDoc, "重复句。", u16Start, u16End, 10)
+	if !strings.Contains(before, "段落二标记") || !strings.Contains(after, "段落三标记") {
+		t.Fatalf("expected UTF-16 offset to resolve second duplicate occurrence, got before=%q after=%q", before, after)
+	}
+}

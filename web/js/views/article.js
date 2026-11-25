@@ -392,9 +392,14 @@ export async function renderArticle(root, ctx, params = {}) {
     "aria-label": "打开或收起右侧 AI 写作助手",
     "aria-pressed": "false",
     onClick: () => {
+      if (!pinnedSelection) {
+        const liveSel = captureCurrentEditorSelection();
+        if (liveSel?.text) pinnedSelection = liveSel;
+      }
       if (state.aiDrawerOpen && state.rightDrawerTab !== "ai") {
         state.rightDrawerTab = "ai";
         renderStageMode();
+        renderCopilotPanel();
         session.persist();
       } else {
         state.rightDrawerTab = "ai";
@@ -793,6 +798,39 @@ export async function renderArticle(root, ctx, params = {}) {
     toast("已撤销上次 AI 改稿");
   }
 
+  function captureCurrentEditorSelection() {
+    if (state.viewMode === "live" && typeof liveEditor?.getSelectionInfo === "function") {
+      const info = liveEditor.getSelectionInfo();
+      if (info?.text) return { text: info.text, rawText: info.rawText, from: info.from, to: info.to, segIdx: -1 };
+    }
+    if (activeSegTextarea && activeSegTextarea.isConnected) {
+      const start = activeSegTextarea.selectionStart ?? 0;
+      const end = activeSegTextarea.selectionEnd ?? 0;
+      if (end - start >= 2) {
+        const rawText = activeSegTextarea.value.slice(start, end);
+        const text = rawText.trim();
+        if (text.length >= 2) {
+          const segs = Array.from(flowBox.querySelectorAll("textarea.ic-art-seg-ta"));
+          let baseOff = 0;
+          let found = false;
+          for (const ta of segs) {
+            if (ta === activeSegTextarea) { found = true; break; }
+            baseOff += ta.value.length + 1;
+          }
+          return {
+            text,
+            rawText,
+            from: found ? baseOff + start : -1,
+            to: found ? baseOff + end : -1,
+            start,
+            end,
+          };
+        }
+      }
+    }
+    return null;
+  }
+
   function openInlineDiffReview(msg) {
     if (!msg || !msg.revision) return;
     const rev = msg.revision;
@@ -811,7 +849,14 @@ export async function renderArticle(root, ctx, params = {}) {
     renderStageMode();
     renderInlineDiffReview();
     renderCopilotPanel();
-    scrollArea.scrollTop = 0;
+    if (rev.kind === "selection") {
+      requestAnimationFrame(() => {
+        const firstHunk = diffReviewBox.querySelector(".ic-diff-hunk");
+        if (firstHunk) firstHunk.scrollIntoView({ block: "center", behavior: "instant" });
+      });
+    } else {
+      scrollArea.scrollTop = 0;
+    }
   }
 
   function exitInlineDiffReview() {
@@ -1255,9 +1300,19 @@ export async function renderArticle(root, ctx, params = {}) {
     getSlots: () => state.slots || [],
     renderSlotCard: (sl, no, desc, orphan) => renderSlotCard(sl, no, desc, orphan),
     insertSlotAt: (anchor, role) => insertSlotAt(anchor, role),
-    onAskAiSelection: (selText, mode) => {
+    onAskAiSelection: (selArg, mode) => {
       state.rightDrawerTab = "ai";
-      pinSelectionToCopilot({ text: selText, start: 0, end: selText.length, segIdx: 0 }, {
+      const selObj = typeof selArg === "string"
+        ? { text: selArg.trim(), rawText: selArg, from: -1, to: -1, segIdx: -1 }
+        : {
+            text: String(selArg?.text || "").trim(),
+            rawText: String(selArg?.rawText ?? selArg?.text ?? ""),
+            from: typeof selArg?.from === "number" ? selArg.from : -1,
+            to: typeof selArg?.to === "number" ? selArg.to : -1,
+            segIdx: -1,
+          };
+      if (!selObj.text) return;
+      pinSelectionToCopilot(selObj, {
         openDrawer: true,
         focusInput: true,
         mode: mode || "edit",
@@ -1896,16 +1951,24 @@ export async function renderArticle(root, ctx, params = {}) {
     { label: "精简 20% 篇幅", mode: "edit", prompt: "删去重复啰嗦的过渡句，压缩约 20% 篇幅，提升信息密度与阅读节奏，保留所有配图链接。" },
   ];
 
+  const SELECTION_PRESETS = [
+    { label: "精简这段", mode: "edit", prompt: "只精简压缩这段选中文字，去掉冗余修饰，保留核心意思和节奏感。" },
+    { label: "扩写润色", mode: "edit", prompt: "只扩写润色这段选中文字，补充具体画面细节或更有说服力的表达。" },
+    { label: "去 AI 味", mode: "edit", prompt: "只去掉这段选中文字的 AI 味和书面腔，改得更像真人自然口吻。" },
+    { label: "更有画面感", mode: "edit", prompt: "只重写这段选中文字，把抽象表述换成具象画面与动作细节。" },
+  ];
+
   function renderCopilotPanel() {
     renderAiSkillsBar();
     const isAdvise = state.aiMode === "advise";
+    const hasPinnedSel = Boolean(pinnedSelection?.text);
     aiModeEditBtn.classList.toggle("is-active", !isAdvise);
     aiModeAdviseBtn.classList.toggle("is-active", isAdvise);
-    aiInput.placeholder = pinnedSelection
-      ? (isAdvise ? "围绕选中片段提问或诊断…（Ctrl+Enter）" : "告诉 AI 如何改写这段选中内容…（Ctrl+Enter）")
+    aiInput.placeholder = hasPinnedSel
+      ? (isAdvise ? "围绕选中片段提问或诊断…（Ctrl+Enter）" : "告诉 AI 如何改写这段选中片段（仅改此处）…（Ctrl+Enter）")
       : (isAdvise ? "让 AI 诊断文章、起标题、查风险或给建议…（Ctrl+Enter）" : "告诉 AI 如何修改这篇文章，或先选好 Skill…（Ctrl+Enter）");
     aiRunBtn.disabled = aiEditing;
-    aiRunBtn.textContent = aiEditing ? "处理中…" : (isAdvise ? "提问" : "改稿 ✨");
+    aiRunBtn.textContent = aiEditing ? "处理中…" : (isAdvise ? "提问" : (hasPinnedSel ? "改写选中片段 ✨" : "全文改稿 ✨"));
     aiUndoTopBtn.classList.toggle("hidden", !lastAiUndo);
     aiDrawerToggleBtn.classList.toggle("is-active", Boolean(state.aiDrawerOpen));
     aiDrawerToggleBtn.setAttribute("aria-pressed", String(Boolean(state.aiDrawerOpen)));
@@ -1913,26 +1976,39 @@ export async function renderArticle(root, ctx, params = {}) {
     const chat = Array.isArray(state.aiChat) ? state.aiChat : [];
     aiClearChatBtn.disabled = chat.length === 0 && !aiEditing;
 
-    // Pinned selection context chip
+    // Pinned selection context chip + 1-click local rewrite actions (#145)
     clear(copilotSelectionChip);
-    if (pinnedSelection?.text) {
+    if (hasPinnedSel) {
       copilotSelectionChip.classList.remove("hidden");
       const preview = pinnedSelection.text.replace(/\s+/g, " ");
+      const quickBar = !isAdvise
+        ? el("div", { class: "row", style: { gap: "4px", flexWrap: "wrap", width: "100%", marginTop: "4px" } },
+            ...SELECTION_PRESETS.map((p) => el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              style: { fontSize: "11px", padding: "2px 7px", height: "auto", lineHeight: "1.4" },
+              disabled: aiEditing,
+              onClick: () => runAiArticleEdit({ instructionOverride: p.prompt, modeOverride: "edit", selectionOverride: pinnedSelection }),
+            }, p.label))
+          )
+        : null;
+      copilotSelectionChip.style.flexWrap = "wrap";
       copilotSelectionChip.append(
         el("span", { class: "ic-cop-sel-chip-ico", "aria-hidden": "true" }, "📌"),
         el("span", { class: "ic-cop-sel-chip-text", title: pinnedSelection.text },
-          `选中片段 (${pinnedSelection.text.length} 字)：${preview.slice(0, 32)}${preview.length > 32 ? "…" : ""}`
+          `仅改选中片段 (${pinnedSelection.text.length} 字)：${preview.slice(0, 28)}${preview.length > 28 ? "…" : ""}`
         ),
         el("button", {
           type: "button",
           class: "ic-art-skill-chip-x",
-          title: "取消引用选中片段",
+          title: "取消选中，切回全文改稿",
           "aria-label": "取消引用选中片段",
           onClick: () => {
             pinnedSelection = null;
             renderCopilotPanel();
           },
-        }, "×")
+        }, "×"),
+        quickBar
       );
     } else {
       copilotSelectionChip.classList.add("hidden");
@@ -1940,19 +2016,26 @@ export async function renderArticle(root, ctx, params = {}) {
 
     clear(copilotFeed);
     if (!chat.length && !aiEditing) {
+      const presetsToShow = hasPinnedSel ? SELECTION_PRESETS : COPILOT_PRESETS;
       copilotFeed.appendChild(el("div", { class: "ic-cop-empty" },
-        el("div", { class: "ic-cop-empty-title" }, "边写边聊，所见即所得改稿"),
-        el("p", { class: "muted ic-cop-empty-desc" }, "支持调用已安装的写作 / 排雷 Skill；在左侧正文划选任意段落，还能只改局部不伤全文。"),
+        el("div", { class: "ic-cop-empty-title" }, hasPinnedSel ? "已锁定选中片段 · 局部精准改写" : "边写边聊，所见即所得改稿"),
+        el("p", { class: "muted ic-cop-empty-desc" }, hasPinnedSel
+          ? "本次改写只会替换你选中的这一小段，不会改动文章其他段落；点下方快捷指令或在输入框补充要求即可。"
+          : "支持调用已安装的写作 / 排雷 Skill；在左侧正文划选任意段落，还能只改局部不伤全文。"),
         el("div", { class: "ic-cop-presets" },
-          ...COPILOT_PRESETS.map((p) => el("button", {
+          ...presetsToShow.map((p) => el("button", {
             type: "button",
             class: "ic-cop-preset-btn",
             onClick: () => {
               state.aiMode = p.mode;
-              runAiArticleEdit({ instructionOverride: p.prompt, modeOverride: p.mode });
+              runAiArticleEdit({
+                instructionOverride: p.prompt,
+                modeOverride: p.mode,
+                selectionOverride: hasPinnedSel ? pinnedSelection : undefined,
+              });
             },
           },
-            el("span", { class: "ic-cop-preset-tag" }, p.mode === "advise" ? "建议" : "改稿"),
+            el("span", { class: "ic-cop-preset-tag" }, hasPinnedSel ? "局部" : (p.mode === "advise" ? "建议" : "改稿")),
             el("span", null, p.label)
           ))
         )
@@ -2102,12 +2185,36 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function replaceSelectionInContent(fullContent, selObj, replacement) {
-    const src = String(fullContent || "");
-    const target = selObj?.text || "";
-    if (!target) return src;
+    const src = String(fullContent || "").replace(/\r\n/g, "\n");
+    const rep = String(replacement ?? "").replace(/\r\n/g, "\n");
+    const target = String(selObj?.text || "").replace(/\r\n/g, "\n");
+    const rawTarget = String(selObj?.rawText ?? "").replace(/\r\n/g, "\n");
+    if (!target && !rawTarget) return src;
+
+    // 1. Prefer exact [from, to] offset slice from CodeMirror / textarea when still aligned (#145).
+    const from = typeof selObj?.from === "number" ? selObj.from : -1;
+    const to = typeof selObj?.to === "number" ? selObj.to : -1;
+    if (from >= 0 && to > from && to <= src.length) {
+      const slice = src.slice(from, to);
+      if ((rawTarget && slice === rawTarget) || slice.trim() === target) {
+        const leadWS = slice.match(/^\s*/)?.[0] || "";
+        const trailWS = slice.match(/\s*$/)?.[0] || "";
+        return src.slice(0, from) + leadWS + rep.trim() + trailWS + src.slice(to);
+      }
+    }
+
+    // 2. Fallback to exact substring match.
+    if (rawTarget) {
+      const rIdx = src.indexOf(rawTarget);
+      if (rIdx >= 0) {
+        const leadWS = rawTarget.match(/^\s*/)?.[0] || "";
+        const trailWS = rawTarget.match(/\s*$/)?.[0] || "";
+        return src.slice(0, rIdx) + leadWS + rep.trim() + trailWS + src.slice(rIdx + rawTarget.length);
+      }
+    }
     const idx = src.indexOf(target);
     if (idx >= 0) {
-      return src.slice(0, idx) + replacement + src.slice(idx + target.length);
+      return src.slice(0, idx) + rep + src.slice(idx + target.length);
     }
     return src;
   }
@@ -2126,7 +2233,7 @@ export async function renderArticle(root, ctx, params = {}) {
     }
 
     const mode = modeOverride || state.aiMode || "edit";
-    const selObj = selectionOverride || pinnedSelection;
+    const selObj = selectionOverride || pinnedSelection || captureCurrentEditorSelection();
     const selText = selObj?.text || "";
     const skillIds = Array.isArray(state.aiSkillIds) ? state.aiSkillIds : [];
     const byId = new Map(installedSkills.map((sk) => [sk.id, sk]));
@@ -2172,6 +2279,8 @@ export async function renderArticle(root, ctx, params = {}) {
         instruction,
         mode,
         selection: selText,
+        selectionStart: typeof selObj?.from === "number" ? selObj.from : -1,
+        selectionEnd: typeof selObj?.to === "number" ? selObj.to : -1,
         history,
         skillIds,
         textModelRef: activeRef,

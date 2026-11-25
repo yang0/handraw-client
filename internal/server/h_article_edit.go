@@ -15,15 +15,17 @@ type articleEditHistoryTurn struct {
 }
 
 type articleEditRequest struct {
-	Title        string                   `json:"title"`
-	Content      string                   `json:"content"`
-	Instruction  string                   `json:"instruction"`
-	Mode         string                   `json:"mode"`      // "edit" (default) | "advise"
-	Selection    string                   `json:"selection"` // optional selected passage for surgical local rewrite
-	History      []articleEditHistoryTurn `json:"history"`   // optional recent multi-turn context
-	SkillIDs     []string                 `json:"skillIds"`
-	TextModelRef string                   `json:"textModelRef"`
-	SessionKey   string                   `json:"sessionKey"`
+	Title          string                   `json:"title"`
+	Content        string                   `json:"content"`
+	Instruction    string                   `json:"instruction"`
+	Mode           string                   `json:"mode"`           // "edit" (default) | "advise"
+	Selection      string                   `json:"selection"`      // optional selected passage for surgical local rewrite
+	SelectionStart int                      `json:"selectionStart"` // optional UTF-16/rune start offset of selection in content
+	SelectionEnd   int                      `json:"selectionEnd"`   // optional UTF-16/rune end offset of selection in content
+	History        []articleEditHistoryTurn `json:"history"`        // optional recent multi-turn context
+	SkillIDs       []string                 `json:"skillIds"`
+	TextModelRef   string                   `json:"textModelRef"`
+	SessionKey     string                   `json:"sessionKey"`
 }
 
 func attachChatMeta(out map[string]any, chatRes map[string]any) map[string]any {
@@ -166,34 +168,43 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 		}, chatRes), nil
 	}
 
-	// 2. Surgical selection rewrite mode: modify ONLY the highlighted passage.
+	// 2. Surgical selection rewrite mode: modify ONLY the highlighted passage (#145).
+	// Never dump the entire article or reuse warm full-article harness sessions/history,
+	// otherwise models & writing skills frequently return the rewritten full article.
 	if selection != "" {
-		sysPrompt := strings.TrimSpace(`你是精准的中文文章局部润色编辑。用户只选中了文章中的一小段文字要求改写。
+		sysPrompt := strings.TrimSpace(`你是精准的中文文章局部润色编辑。用户只选中了文章中的一小段文字要求局部改写。
 
-核心要求：
-1. 只改写【选中待改片段】，保持与上下文语气、人称与事实一致，严禁复述文章其他段落。
-2. 保留片段内必要的 Markdown 格式或配图链接（如有）。
-3. 请严格只输出一个 JSON 对象，不要包含额外解释，字段如下：
+铁律（必须严格遵守，优先级高于一切 Skill 与惯例）：
+1. 只改写【选中待改片段】本身，绝对禁止输出文章标题、前文、后文、其他段落或整篇文章！
+2. 即使已启用的写作 Skill 提到「输出完整正文」或「全文润色」，本次任务也仅将该 Skill 的文风/规则作用于【选中待改片段】，replacement 字段必须只包含改写后的这一小段文字。
+3. 保持与前后文语气、人称、事实一致，保留片段内原有的 Markdown 格式或配图链接（如有）。
+4. 严格只输出一个 JSON 对象，不要包含额外解释，字段如下：
 {
-  "replacement": "改写后的局部片段文本",
+  "replacement": "仅包含改写后的局部片段文本（严禁夹带前文、后文或全文）",
   "summary": "1 句话简洁概括本次局部修改点"
 }`)
+		beforeCtx, afterCtx := extractSelectionContextWindow(content, selection, req.SelectionStart, req.SelectionEnd, 220)
 		var userMsg strings.Builder
 		userMsg.WriteString("【修改要求】\n")
 		userMsg.WriteString(cleanedInstruction)
-		userMsg.WriteString("\n\n【选中待改片段】\n")
-		userMsg.WriteString(selection)
-		userMsg.WriteString("\n\n【文章上下文参考】\n标题：")
-		userMsg.WriteString(firstStr(title, "（未设置标题）"))
-		userMsg.WriteString("\n")
-		ctxContent := content
-		if r := []rune(ctxContent); len(r) > 4000 {
-			ctxContent = string(r[:4000]) + "\n……"
+		if title != "" {
+			userMsg.WriteString("\n\n【文章标题（仅参考语境，禁止输出）】\n")
+			userMsg.WriteString(title)
 		}
-		userMsg.WriteString(ctxContent)
+		if beforeCtx != "" {
+			userMsg.WriteString("\n\n【前文摘录（仅用于衔接，严禁输出到 replacement）】\n")
+			userMsg.WriteString(beforeCtx)
+		}
+		userMsg.WriteString("\n\n【选中待改片段】\n（只改写并输出这一段，严禁带入标题或前后文）\n")
+		userMsg.WriteString(selection)
+		if afterCtx != "" {
+			userMsg.WriteString("\n\n【后文摘录（仅用于衔接，严禁输出到 replacement）】\n")
+			userMsg.WriteString(afterCtx)
+		}
 
-		msgs := appendArticleHistory(nil, req.History)
-		msgs = append(msgs, providers.ChatMessage{Role: "user", Content: userMsg.String()})
+		// Intentionally do NOT attach full-article History or warm SessionKey so the model
+		// cannot drift back into full-article rewrite mode.
+		msgs := []providers.ChatMessage{{Role: "user", Content: userMsg.String()}}
 
 		chatRes, err := s.executeHostChatWithJSONFallback(r.Context(), hostChatRequest{
 			ModelRef:   strings.TrimSpace(req.TextModelRef),
@@ -203,13 +214,13 @@ func (s *Server) articleEdit(w http.ResponseWriter, r *http.Request) (any, error
 			SkillIDs:   activeIDs,
 			Messages:   msgs,
 			JSONMode:   true,
-			SessionKey: strings.TrimSpace(req.SessionKey),
+			SessionKey: "",
 		})
 		if err != nil {
 			return nil, err
 		}
 		rawReply, _ := chatRes["text"].(string)
-		replacement, summary := parseArticleSelectionOutput(rawReply)
+		replacement, summary := parseArticleSelectionOutput(rawReply, selection, beforeCtx, afterCtx)
 		if strings.TrimSpace(replacement) == "" {
 			return nil, bad("AI 返回的局部改写结果为空，请重试或换个文本模型")
 		}
@@ -333,7 +344,119 @@ func stripJSONCandidate(raw string) string {
 	return candidate
 }
 
-func parseArticleSelectionOutput(raw string) (replacement, summary string) {
+// extractSelectionContextWindow returns up to radius runes immediately before and
+// after the selected passage in content so the model has local flow context without
+// ever receiving the full article (#145).
+func extractSelectionContextWindow(content, selection string, startHint, endHint, radius int) (before, after string) {
+	if content == "" || selection == "" || radius <= 0 {
+		return "", ""
+	}
+	runes := []rune(content)
+	selRunes := []rune(selection)
+	sIdx, eIdx := -1, -1
+
+	// Prefer caller-provided rune or JS UTF-16 code-unit offsets when they align with selection.
+	if startHint >= 0 && endHint > startHint {
+		if endHint <= len(runes) && strings.TrimSpace(string(runes[startHint:endHint])) == selection {
+			sIdx, eIdx = startHint, endHint
+		} else if rs, re, ok := utf16RangeToRuneRange(runes, startHint, endHint); ok && strings.TrimSpace(string(runes[rs:re])) == selection {
+			sIdx, eIdx = rs, re
+		}
+	}
+	if sIdx < 0 {
+		if byteIdx := strings.Index(content, selection); byteIdx >= 0 {
+			sIdx = len([]rune(content[:byteIdx]))
+			eIdx = sIdx + len(selRunes)
+		}
+	}
+	if sIdx < 0 {
+		return "", ""
+	}
+	bStart := sIdx - radius
+	if bStart < 0 {
+		bStart = 0
+	}
+	aEnd := eIdx + radius
+	if aEnd > len(runes) {
+		aEnd = len(runes)
+	}
+	before = strings.TrimSpace(string(runes[bStart:sIdx]))
+	after = strings.TrimSpace(string(runes[eIdx:aEnd]))
+	return before, after
+}
+
+func utf16RangeToRuneRange(runes []rune, startU16, endU16 int) (int, int, bool) {
+	if startU16 < 0 || endU16 <= startU16 {
+		return -1, -1, false
+	}
+	u16 := 0
+	rs, re := -1, -1
+	for i, r := range runes {
+		if u16 == startU16 {
+			rs = i
+		}
+		if r > 0xFFFF {
+			u16 += 2
+		} else {
+			u16++
+		}
+		if u16 == endU16 {
+			re = i + 1
+			break
+		}
+	}
+	if rs >= 0 && re > rs {
+		return rs, re, true
+	}
+	return -1, -1, false
+}
+
+// stripEchoedSelectionContext trims unchanged surrounding context if a model
+// accidentally echoed the beforeCtx/afterCtx excerpt around its rewritten passage.
+func stripEchoedSelectionContext(rep, beforeCtx, afterCtx string) string {
+	out := strings.TrimSpace(strings.ReplaceAll(rep, "\r\n", "\n"))
+	if out == "" {
+		return out
+	}
+	if b := strings.TrimSpace(beforeCtx); len([]rune(b)) >= 12 {
+		if strings.HasPrefix(out, b) {
+			trimmed := strings.TrimSpace(strings.TrimPrefix(out, b))
+			if trimmed != "" {
+				out = trimmed
+			}
+		} else {
+			// Also handle echoing the last paragraph of beforeCtx.
+			parts := strings.Split(b, "\n")
+			lastLine := strings.TrimSpace(parts[len(parts)-1])
+			if len([]rune(lastLine)) >= 12 && strings.HasPrefix(out, lastLine+"\n") {
+				trimmed := strings.TrimSpace(strings.TrimPrefix(out, lastLine))
+				if trimmed != "" {
+					out = trimmed
+				}
+			}
+		}
+	}
+	if a := strings.TrimSpace(afterCtx); len([]rune(a)) >= 12 {
+		if strings.HasSuffix(out, a) {
+			trimmed := strings.TrimSpace(strings.TrimSuffix(out, a))
+			if trimmed != "" {
+				out = trimmed
+			}
+		} else {
+			parts := strings.Split(a, "\n")
+			firstLine := strings.TrimSpace(parts[0])
+			if len([]rune(firstLine)) >= 12 && strings.HasSuffix(out, "\n"+firstLine) {
+				trimmed := strings.TrimSpace(strings.TrimSuffix(out, firstLine))
+				if trimmed != "" {
+					out = trimmed
+				}
+			}
+		}
+	}
+	return out
+}
+
+func parseArticleSelectionOutput(raw, selection, beforeCtx, afterCtx string) (replacement, summary string) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "", ""
@@ -346,16 +469,16 @@ func parseArticleSelectionOutput(raw string) (replacement, summary string) {
 		Summary     string `json:"summary"`
 	}
 	if json.Unmarshal([]byte(candidate), &parsed) == nil {
-		rep := firstStr(parsed.Replacement, parsed.Content, parsed.Text)
+		rep := firstStr(parsed.Replacement, parsed.Text, parsed.Content)
 		if strings.TrimSpace(rep) != "" {
 			sum := strings.TrimSpace(parsed.Summary)
 			if sum == "" {
 				sum = "已完成局部片段改写"
 			}
-			return strings.ReplaceAll(rep, "\r\n", "\n"), sum
+			return stripEchoedSelectionContext(rep, beforeCtx, afterCtx), sum
 		}
 	}
-	return strings.ReplaceAll(trimmed, "\r\n", "\n"), "已完成局部片段改写"
+	return stripEchoedSelectionContext(trimmed, beforeCtx, afterCtx), "已完成局部片段改写"
 }
 
 type articleEditSmartResult struct {

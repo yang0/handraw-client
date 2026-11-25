@@ -1151,7 +1151,11 @@ export function createArticleLiveEditor(opts) {
     const hasSel = to > from;
     const selText = hasSel ? cmView.state.sliceDoc(from, to) : "";
     const activeLine = cmView.state.doc.lineAt(to);
-    const aiTargetText = selText.trim() || activeLine.text.trim();
+    const aiFrom = hasSel && selText.trim() ? from : activeLine.from;
+    const aiTo = hasSel && selText.trim() ? to : activeLine.to;
+    const aiRawText = cmView.state.sliceDoc(aiFrom, aiTo);
+    const aiTargetText = aiRawText.trim();
+    const aiSelPayload = { text: aiTargetText, rawText: aiRawText, from: aiFrom, to: aiTo };
 
     // Check if right-clicked directly on a wikilink widget
     const wikiEl = ev.target?.closest?.(".cm-lp-wikilink");
@@ -1315,13 +1319,13 @@ export function createArticleLiveEditor(opts) {
             icon: "✨",
             label: hasSel ? "改写选中片段" : "改写当前段落",
             disabled: !aiTargetText,
-            onClick: () => onAskAiSelection?.(aiTargetText, "edit"),
+            onClick: () => onAskAiSelection?.(aiSelPayload, "edit"),
           },
           {
             icon: "💬",
             label: hasSel ? "诊断 / 提问这段" : "诊断当前段落",
             disabled: !aiTargetText,
-            onClick: () => onAskAiSelection?.(aiTargetText, "advise"),
+            onClick: () => onAskAiSelection?.(aiSelPayload, "advise"),
           },
           { sep: true },
           {
@@ -1579,8 +1583,10 @@ export function createArticleLiveEditor(opts) {
     if (!cmView || !cmView.hasFocus) { closeSelectionBar(); return; }
     const { from, to } = cmView.state.selection.main;
     if (to - from < 2) { closeSelectionBar(); return; }
-    const selText = cmView.state.sliceDoc(from, to).trim();
+    const rawSelText = cmView.state.sliceDoc(from, to);
+    const selText = rawSelText.trim();
     if (selText.length < 2) { closeSelectionBar(); return; }
+    const selPayload = { text: selText, rawText: rawSelText, from, to };
     if (document.querySelector(".ic-ctx-menu")) { closeSelectionBar(); return; }
 
     const startCoords = cmView.coordsAtPos(from);
@@ -1615,8 +1621,8 @@ export function createArticleLiveEditor(opts) {
       mkBtn("[[", "转为内部双链", () => { linksCtrl.triggerInsertWikilinkCM(cmView, false); closeSelectionBar(); }),
       mkBtn("🔗", "添加外部链接 (Ctrl+K)", () => { closeSelectionBar(); openExternalLinkModal(); }),
       el("span", { class: "ic-cm-selbar-sep" }),
-      mkBtn("✨ AI 改写", "用 AI 局部改写选中片段", () => { closeSelectionBar(); onAskAiSelection?.(selText, "edit"); }, "is-accent"),
-      mkBtn("💬 问 AI", "围绕选中片段提问或诊断", () => { closeSelectionBar(); onAskAiSelection?.(selText, "advise"); }),
+      mkBtn("✨ AI 改写", "用 AI 局部改写选中片段", () => { closeSelectionBar(); onAskAiSelection?.(selPayload, "edit"); }, "is-accent"),
+      mkBtn("💬 问 AI", "围绕选中片段提问或诊断", () => { closeSelectionBar(); onAskAiSelection?.(selPayload, "advise"); }),
       mkBtn("📄 提取笔记", "提取为新笔记并替换为双链", async () => {
         closeSelectionBar();
         const title = await onExtractSelectionToNote?.(selText);
@@ -1956,6 +1962,16 @@ export function createArticleLiveEditor(opts) {
     return { start: from, end: to };
   }
 
+  function getSelectionInfo() {
+    if (!cmView) return null;
+    const { from, to } = cmView.state.selection.main;
+    if (to - from < 2) return null;
+    const rawText = cmView.state.sliceDoc(from, to);
+    const text = rawText.trim();
+    if (text.length < 2) return null;
+    return { text, rawText, from, to };
+  }
+
   function setTocVisible(flag) {
     tocVisible = Boolean(flag);
     if (tocRailEl) {
@@ -2049,6 +2065,7 @@ export function createArticleLiveEditor(opts) {
     resetEditing,
     getActiveTextarea,
     getSelectionRange,
+    getSelectionInfo,
     setTocVisible,
     setPluginExtensions,
     getEditorView,
