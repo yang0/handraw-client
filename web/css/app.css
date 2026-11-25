@@ -8654,8 +8654,19 @@ details.ic-links-sec:not([open]) .ic-links-chev {
 }
 
 /* ==========================================================================
-   Issue #127: Unified Extension & Plugin Hub (4 Markets + Workflow Bundles)
+   Issue #127 / #132: Extension & Plugin Hub (Minimal 4-Tab Bar + Right Mirror)
    ========================================================================== */
+.pm-hub-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.pm-hub-bar .tabs {
+  margin: 0;
+}
 .pm-mirror-switch,
 .pm-seg-group {
   display: inline-flex;

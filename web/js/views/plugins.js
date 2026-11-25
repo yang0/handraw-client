@@ -2,22 +2,22 @@ import { api, clear, closeModal, el, openURL, showModal, toast } from "../api.js
 import { fallbackPluginIcon } from "../plugin-icons.js";
 import {
   mirrorTag,
+  openExtensionSubmitModal,
   pricingBadge,
-  renderExtraInstalledSections,
-  renderFeaturedTab,
   renderGalleriesMarketTab,
   renderObsidianMarketTab,
   renderSkillsHubTab,
 } from "./plugins-channels.js";
 
+const VALID_TABS = new Set(["plugins", "galleries", "skills", "obsidian"]);
+
 const state = {
-  tab: "featured", // featured | plugins | galleries | skills | obsidian | installed
-  installedFilter: "all", // all | plugins | galleries | skills | obsidian | builtin
+  tab: "plugins", // plugins | galleries | skills | obsidian
+  pluginSubMode: "market", // market | installed | builtin (scoped inside plugins tab)
   mirror: "gitee", // gitee | github
   mirrorLoaded: false,
   marketCategory: "",
   marketQuery: "",
-  skillQuery: "",
   onlyNotInstalled: false,
   checkingUpdates: false,
   updatingAll: false,
@@ -81,14 +81,24 @@ export async function renderPlugins(root, ctx, params = {}) {
   const hashQ = (location.hash.includes("?") ? new URLSearchParams(location.hash.split("?")[1]).get("tab") : "") || "";
   const reqTab = params.tab || hashQ;
   if (reqTab) {
-    // Support legacy tab aliases cleanly
-    state.tab = reqTab === "market" ? "plugins" : (reqTab === "builtin" ? "installed" : reqTab);
-    if (reqTab === "builtin") state.installedFilter = "builtin";
+    if (VALID_TABS.has(reqTab)) {
+      state.tab = reqTab;
+    } else if (reqTab === "installed") {
+      state.tab = "plugins";
+      state.pluginSubMode = "installed";
+    } else if (reqTab === "builtin") {
+      state.tab = "plugins";
+      state.pluginSubMode = "builtin";
+    } else {
+      state.tab = "plugins";
+      state.pluginSubMode = "market";
+    }
   }
-  const [plugRes, skillsRes, galRes, obsRes, setRes] = await Promise.all([
+  if (!VALID_TABS.has(state.tab)) state.tab = "plugins";
+
+  const [plugRes, skillsRes, obsRes, setRes] = await Promise.all([
     api("GET", "/api/plugins").catch(() => ({ builtin: [], community: [], dshStatus: {} })),
     api("GET", "/api/skills").catch(() => ({ items: [] })),
-    api("GET", "/api/galleries/market").catch(() => ({ packs: [] })),
     api("GET", "/api/article/obsidian/plugins").catch(() => ({ plugins: [] })),
     state.mirrorLoaded ? Promise.resolve(null) : api("GET", "/api/settings").catch(() => null),
   ]);
@@ -108,7 +118,6 @@ export async function renderPlugins(root, ctx, params = {}) {
   const builtins = plugRes.builtin || [];
   const community = plugRes.community || [];
   const skillsList = skillsRes.items || [];
-  const installedGalleries = (galRes.packs || []).filter((p) => p.installed);
   const obsidianPlugins = obsRes.plugins || [];
   const dshStatus = plugRes.dshStatus || {};
   const dshRuntimeMap = new Map((dshStatus.plugins || []).map((p) => [p.id, p]));
@@ -116,14 +125,6 @@ export async function renderPlugins(root, ctx, params = {}) {
 
   const checkMap = new Map(((state.lastCheck?.plugins) || []).map((x) => [x.id, x]));
   const outdatedCount = community.filter((c) => checkMap.get(c.id)?.status === "update").length;
-  const totalInstalled = community.length + installedGalleries.length + skillsList.length + obsidianPlugins.length;
-
-  const dshNodeBadge = dshStatus.nodeVersion
-    ? el("span", { class: "badge" + (dshStatus.running ? " badge-ok" : "") },
-      dshStatus.running
-        ? `DSH 运行中 · Node ${dshStatus.nodeVersion}`
-        : `DSH 就绪 · Node ${dshStatus.nodeVersion}`)
-    : el("span", { class: "badge badge-warn" }, "未检测到 Node.js（启用 DSH 插件需要 Node >= 20）");
 
   const switchGlobalMirror = async (nextMirror) => {
     if (state.mirror === nextMirror) return;
@@ -131,13 +132,12 @@ export async function renderPlugins(root, ctx, params = {}) {
     state.mirrorLoaded = true;
     try {
       await api("PATCH", "/api/settings", { preferredMarketMirror: nextMirror });
-      toast(nextMirror === "gitee" ? "已切换为 Gitee 国内镜像（四市场通用）" : "已切换为 GitHub 官方原仓（四市场通用）");
+      toast(nextMirror === "gitee" ? "已切换为 Gitee 国内镜像" : "已切换为 GitHub 官方原仓");
     } catch {}
     renderPlugins(root, ctx);
   };
 
-  const mirrorSwitch = el("div", { class: "pm-mirror-switch", role: "group", "aria-label": "全局市场镜像" },
-    el("span", { class: "muted", style: { fontSize: "11.5px", padding: "0 4px" } }, "镜像"),
+  const mirrorSwitch = el("div", { class: "pm-mirror-switch", role: "group", "aria-label": "市场镜像" },
     el("button", {
       type: "button",
       class: "pm-seg-btn" + (state.mirror === "gitee" ? " is-active" : ""),
@@ -151,15 +151,13 @@ export async function renderPlugins(root, ctx, params = {}) {
   );
 
   const tabs = [
-    ["featured", "精选推荐", 0],
-    ["plugins", "功能插件", 0],
-    ["galleries", "扩展图库", 0],
-    ["skills", "Skills 技能", 0],
+    ["plugins", "工作台插件", outdatedCount],
+    ["galleries", "图库插件", 0],
+    ["skills", "Skills", 0],
     ["obsidian", "写作插件", 0],
-    ["installed", `已安装 (${totalInstalled})`, outdatedCount],
   ];
 
-  const tabBar = el("div", { class: "tabs", role: "tablist", "aria-label": "扩展与插件频道" });
+  const tabBar = el("div", { class: "tabs", role: "tablist", "aria-label": "插件栏目" });
   tabs.forEach(([k, label, dotCount]) => {
     tabBar.appendChild(el("button", {
       type: "button",
@@ -174,17 +172,8 @@ export async function renderPlugins(root, ctx, params = {}) {
     ));
   });
 
-  root.appendChild(el("div", { class: "page-head" },
-    el("div", { class: "col", style: { gap: "4px" } },
-      el("div", { class: "row", style: { gap: "10px", flexWrap: "wrap", alignItems: "center" } },
-        el("h1", { class: "page-title" }, "扩展与插件中心"),
-        mirrorSwitch,
-        dshNodeBadge
-      ),
-      el("span", { class: "muted" }, "统一管理功能插件（DSH/Handraw）、扩展图库、AI Skills 与 Obsidian 写作插件，支持国内镜像秒装与社区 PR 收录")
-    ),
-    tabBar
-  ));
+  // Minimal single-row header: 4 category tabs on left, mirror switch on far right (no big H1/copy).
+  root.appendChild(el("div", { class: "pm-hub-bar" }, tabBar, mirrorSwitch));
 
   const stage = el("div", { class: "col", style: { gap: "12px" } });
   root.appendChild(stage);
@@ -224,7 +213,7 @@ export async function renderPlugins(root, ctx, params = {}) {
       "aria-expanded": "false",
       "aria-controls": panelId,
       onClick: () => load(),
-    }, buttonLabel || "扫描本机 DSH 插件");
+    }, buttonLabel || "扫描本机 DSH");
 
     const load = async () => {
       discoverBox.hidden = false;
@@ -243,7 +232,7 @@ export async function renderPlugins(root, ctx, params = {}) {
         const items = res.items || [];
         discoverBox.appendChild(el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
           el("span", { class: "muted", role: "status" }, items.length
-            ? `已在 ~/.dsh/profiles/desktop 发现 ${items.length} 个本机 DSH 插件`
+            ? `已发现 ${items.length} 个本机 DSH 插件`
             : "未在本机 ~/.dsh/profiles/desktop 中发现可导入的 DSH 插件。"),
           el("button", { type: "button", class: "btn btn-sm", onClick: () => hide(true) }, "收起")
         ));
@@ -307,28 +296,22 @@ export async function renderPlugins(root, ctx, params = {}) {
     makeSkeletonGrid,
   };
 
-  if (state.tab === "featured") {
-    renderFeaturedTab(stage, ctx, hubHelpers);
-  } else if (state.tab === "plugins" || state.tab === "market") {
-    renderMarketTab(stage, root, ctx, buildDshDiscover);
+  if (state.tab === "plugins") {
+    renderWorkbenchPluginsTab(stage, root, ctx, {
+      community,
+      builtins,
+      dshRuntimeMap,
+      permsMap,
+      dshStatus,
+      outdatedCount,
+      buildDshDiscover,
+    });
   } else if (state.tab === "galleries") {
     renderGalleriesMarketTab(stage, ctx, hubHelpers);
   } else if (state.tab === "skills") {
     renderSkillsHubTab(stage, root, ctx, skillsList, hubHelpers);
   } else if (state.tab === "obsidian") {
-    renderObsidianMarketTab(stage, ctx, hubHelpers);
-  } else {
-    renderUnifiedInstalledTab(stage, root, ctx, {
-      community,
-      installedGalleries,
-      skillsList,
-      obsidianPlugins,
-      builtins,
-      dshRuntimeMap,
-      permsMap,
-      dshStatus,
-      buildDshDiscover,
-    });
+    renderObsidianMarketTab(stage, ctx, obsidianPlugins, hubHelpers);
   }
 }
 
@@ -355,7 +338,67 @@ function makeSkeletonGrid(count = 6) {
   return grid;
 }
 
-function renderMarketTab(stage, root, ctx, buildDshDiscover) {
+function renderWorkbenchPluginsTab(stage, root, ctx, bundle) {
+  const { community, builtins, dshRuntimeMap, permsMap, dshStatus, outdatedCount, buildDshDiscover } = bundle;
+  const enabledBuiltins = builtins.filter((b) => b.enabled).length;
+
+  const subToggle = el("div", { class: "pm-seg-group", role: "tablist", "aria-label": "工作台插件视图" },
+    el("button", {
+      type: "button",
+      class: "pm-seg-btn" + (state.pluginSubMode === "market" ? " is-active" : ""),
+      onClick: () => { state.pluginSubMode = "market"; renderPlugins(root, ctx); },
+    }, "市场"),
+    el("button", {
+      type: "button",
+      class: "pm-seg-btn" + (state.pluginSubMode === "installed" ? " is-active" : ""),
+      onClick: () => { state.pluginSubMode = "installed"; renderPlugins(root, ctx); },
+    }, outdatedCount > 0 ? `已安装 (${community.length}) · ${outdatedCount} 更新` : `已安装 (${community.length})`),
+    el("button", {
+      type: "button",
+      class: "pm-seg-btn" + (state.pluginSubMode === "builtin" ? " is-active" : ""),
+      onClick: () => { state.pluginSubMode = "builtin"; renderPlugins(root, ctx); },
+    }, `内置模块 (${enabledBuiltins}/${builtins.length})`)
+  );
+
+  if (state.pluginSubMode === "market") {
+    renderMarketTab(stage, root, ctx, buildDshDiscover, subToggle);
+    return;
+  }
+
+  // Installed or Builtin subview within Workbench Plugins
+  const dshDiscover = buildDshDiscover({
+    idPrefix: "installed",
+    buttonLabel: "扫描本机 DSH",
+    onImported: () => {
+      state.lastCheck = null;
+      ctx?.refreshNav?.();
+      renderPlugins(root, ctx);
+    },
+  });
+
+  stage.appendChild(el("div", { class: "card col", style: { gap: "10px" } },
+    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px", alignItems: "center" } },
+      subToggle,
+      el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: () => openExtensionSubmitModal(ctx, { channel: "plugin" }),
+        }, "＋ 申请收录"),
+        state.pluginSubMode === "installed" ? dshDiscover.button : null
+      )
+    ),
+    state.pluginSubMode === "installed" ? dshDiscover.box : null
+  ));
+
+  if (state.pluginSubMode === "builtin") {
+    renderBuiltinTab(stage, ctx, builtins);
+  } else {
+    renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap, dshStatus);
+  }
+}
+
+function renderMarketTab(stage, root, ctx, buildDshDiscover, subToggle) {
   const sourcesRow = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } });
   const filterRow = el("div", { class: "pm-filter-bar" });
   const gridHost = el("div", { class: "col", style: { gap: "10px" } });
@@ -503,13 +546,9 @@ function renderMarketTab(stage, root, ctx, buildDshDiscover) {
 
   const openAddMarketDialog = () => {
     const urlIn = el("input", { class: "input", placeholder: "https://.../index.json（DSH Format 1 标准）", style: { width: "100%" } });
-    const nameIn = el("input", { class: "input", placeholder: "显示名称（可留空，自动读取索引标题）", style: { width: "100%" } });
-    const body = el("div", { class: "col", style: { gap: "8px" } },
-      el("span", { class: "muted" }, "输入任意兼容 DeepSeek Harness Format 1 的插件市场 index.json 网址："),
-      urlIn,
-      nameIn
-    );
-    showModal("添加插件市场源", body, [
+    const nameIn = el("input", { class: "input", placeholder: "显示名称（可选）", style: { width: "100%" } });
+    const body = el("div", { class: "col", style: { gap: "8px" } }, urlIn, nameIn);
+    showModal("添加工作台插件市场源", body, [
       el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
       el("button", {
         type: "button",
@@ -527,13 +566,12 @@ function renderMarketTab(stage, root, ctx, buildDshDiscover) {
     ]);
   };
 
-  // Keep search input element persistent across paint() so typing/IME never loses focus (Magpie #1055).
   const searchBox = el("input", {
     class: "input pm-search-input",
     type: "search",
     value: state.marketQuery,
-    placeholder: "搜索市场插件…",
-    "aria-label": "搜索市场插件",
+    placeholder: "搜索工作台插件…",
+    "aria-label": "搜索工作台插件",
   });
   searchBox.addEventListener("input", () => {
     state.marketQuery = searchBox.value;
@@ -579,7 +617,7 @@ function renderMarketTab(stage, root, ctx, buildDshDiscover) {
     const cats = marketData.categories || {};
     const labelsMap = marketData.labels || {};
 
-    const catBar = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } });
+    const catBar = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px", alignItems: "center" } }, subToggle);
     const addCat = (key, label) => {
       catBar.appendChild(el("button", {
         type: "button",
@@ -613,7 +651,7 @@ function renderMarketTab(stage, root, ctx, buildDshDiscover) {
     });
 
     if (!list.length) {
-      gridHost.appendChild(el("div", { class: "card muted", style: { textAlign: "center", padding: "28px 16px" } }, "当前筛选下暂无匹配的插件。"));
+      gridHost.appendChild(el("div", { class: "card muted", style: { textAlign: "center", padding: "28px 16px" } }, "暂无匹配的插件。"));
       return;
     }
 
@@ -648,8 +686,8 @@ function renderMarketTab(stage, root, ctx, buildDshDiscover) {
         actBtn = el("button", {
           type: "button",
           class: "pm-act done",
-          title: "前往已安装页面启用",
-          onClick: (ev) => { ev.stopPropagation(); state.tab = "installed"; renderPlugins(root, ctx); },
+          title: "查看已安装管理",
+          onClick: (ev) => { ev.stopPropagation(); state.pluginSubMode = "installed"; renderPlugins(root, ctx); },
         }, "已安装");
       } else {
         actBtn = el("button", {
@@ -663,9 +701,9 @@ function renderMarketTab(stage, root, ctx, buildDshDiscover) {
       const isVerified = (p.labels || []).includes("handraw-verified");
       const byline = el("div", { class: "pm-card-by" },
         isOfficial
-          ? el("span", { class: "pm-verified-tag", title: "手绘风官方维护" }, "✓ 官方维护")
+          ? el("span", { class: "pm-verified-tag", title: "官方维护" }, "✓ 官方维护")
           : (isVerified
-            ? el("span", { class: "pm-verified-tag", title: "手绘风实测兼容" }, "✓ 实测兼容")
+            ? el("span", { class: "pm-verified-tag", title: "实测兼容" }, "✓ 实测兼容")
             : null),
         p.author ? el("span", { class: "pm-author-text" }, p.author) : el("span", { class: "pm-author-text mono" }, p.name)
       );
@@ -730,7 +768,7 @@ function renderMarketTab(stage, root, ctx, buildDshDiscover) {
 
   const dshDiscover = buildDshDiscover({
     idPrefix: "market",
-    buttonLabel: "扫描本机 DSH 插件",
+    buttonLabel: "扫描本机 DSH",
     onImported: async () => {
       state.lastCheck = null;
       ctx?.refreshNav?.();
@@ -741,16 +779,12 @@ function renderMarketTab(stage, root, ctx, buildDshDiscover) {
 
   stage.appendChild(el("div", { class: "card col", style: { gap: "10px" } },
     el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px", alignItems: "center" } },
-      el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
-        el("strong", null, "功能插件市场源"),
-        sourcesRow,
-        el("a", { href: "https://gitee.com/yang02010/handraw-plugins", class: "muted", style: { fontSize: "11.5px" }, onClick: (e) => { e.preventDefault(); openURL("https://gitee.com/yang02010/handraw-plugins"); } }, "Gitee 镜像 ↗"),
-        el("a", { href: "https://github.com/yang0/handraw-plugins/blob/main/CONTRIBUTING.md", class: "muted", style: { fontSize: "11.5px" }, onClick: (e) => { e.preventDefault(); openURL("https://github.com/yang0/handraw-plugins/blob/main/CONTRIBUTING.md"); } }, "提交插件 PR ↗")
-      ),
+      sourcesRow,
       el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openExtensionSubmitModal(ctx, { channel: "plugin" }) }, "＋ 申请收录"),
         dshDiscover.button,
-        el("button", { type: "button", class: "btn btn-sm", onClick: openAddMarketDialog }, "+ 添加市场源"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => loadMarket(true) }, "↻ 刷新市场")
+        el("button", { type: "button", class: "btn btn-sm", onClick: openAddMarketDialog }, "+ 添加源"),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => loadMarket(true) }, "↻ 刷新")
       )
     ),
     filterRow,
@@ -760,58 +794,7 @@ function renderMarketTab(stage, root, ctx, buildDshDiscover) {
   loadMarket(false);
 }
 
-function renderUnifiedInstalledTab(stage, root, ctx, bundle) {
-  const {
-    community,
-    installedGalleries,
-    skillsList,
-    obsidianPlugins,
-    builtins,
-    dshRuntimeMap,
-    permsMap,
-    dshStatus,
-    buildDshDiscover,
-  } = bundle;
-
-  const totalAll = community.length + installedGalleries.length + skillsList.length + obsidianPlugins.length;
-  const enabledBuiltins = builtins.filter((b) => b.enabled).length;
-
-  const filters = [
-    ["all", `全部扩展 (${totalAll})`],
-    ["plugins", `功能插件 (${community.length})`],
-    ["galleries", `扩展图库 (${installedGalleries.length})`],
-    ["skills", `Skills (${skillsList.length})`],
-    ["obsidian", `写作插件 (${obsidianPlugins.length})`],
-    ["builtin", `内置模块 (${enabledBuiltins}/${builtins.length})`],
-  ];
-
-  const filterBar = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } },
-    ...filters.map(([k, label]) => el("button", {
-      type: "button",
-      class: "btn btn-sm" + (state.installedFilter === k ? " btn-primary" : ""),
-      onClick: () => { state.installedFilter = k; renderPlugins(root, ctx); },
-    }, label))
-  );
-  stage.appendChild(el("div", { class: "card row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px", padding: "10px 14px" } },
-    filterBar
-  ));
-
-  const ft = state.installedFilter;
-  if (ft === "all" || ft === "plugins") {
-    renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap, dshStatus, buildDshDiscover, ft === "plugins" || totalAll === 0);
-  }
-  renderExtraInstalledSections(stage, ctx, {
-    galleries: installedGalleries,
-    skills: skillsList,
-    obsidianPlugins,
-    builtins,
-    filterType: ft,
-    refreshHub: () => renderPlugins(root, ctx),
-    renderBuiltinList: (target) => renderBuiltinTab(target, ctx, builtins),
-  });
-}
-
-function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap, dshStatus, buildDshDiscover, showEmptyCard = true) {
+function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap, dshStatus) {
   const checkMap = new Map(((state.lastCheck?.plugins) || []).map((x) => [x.id, x]));
   const outdated = community.filter((c) => checkMap.get(c.id)?.status === "update");
 
@@ -885,7 +868,6 @@ function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap
     }
   };
 
-  // Magpie-style Updates Banner at top of Installed tab when updates are waiting
   if (outdated.length > 0) {
     const names = outdated.map((c) => c.name || c.id).join("、");
     stage.appendChild(el("div", { class: "pm-updates-banner", role: "status" },
@@ -907,7 +889,7 @@ function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap
     ));
   }
 
-  // Manual install / local DSH discovery card
+  // Manual install bar
   const srcIn = el("input", {
     id: "plugin-install-src",
     class: "input",
@@ -918,56 +900,38 @@ function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap
     placeholder: "输入本地目录、Git 仓库（GitHub/Gitee）、npm:包名 或 .tar.gz / .zip 地址…",
   });
 
-  const dshDiscover = buildDshDiscover({
-    idPrefix: "installed",
-    buttonLabel: "扫描本机 DSH 插件",
-    onImported: () => {
-      state.lastCheck = null;
-      ctx?.refreshNav?.();
-      renderPlugins(root, ctx);
-    },
-  });
-
-  stage.appendChild(el("div", { class: "card col", style: { gap: "10px" } },
-    el("strong", null, "手动安装或导入本地插件"),
-    el("div", { class: "row", style: { flexWrap: "wrap" } },
-      srcIn,
-      el("button", {
-        type: "button",
-        class: "btn btn-sm",
-        onClick: async () => {
-          try {
-            const r = await api("POST", "/api/host/pick-directory", {});
-            if (r?.path) srcIn.value = r.path;
-          } catch (e) { toast(e.message); }
-        },
-      }, "选择目录"),
-      el("button", {
-        type: "button",
-        class: "btn btn-sm btn-primary",
-        onClick: async () => {
-          if (!srcIn.value.trim()) return toast("请输入插件来源路径或网址");
-          try {
-            await api("POST", "/api/plugins/install", { source: srcIn.value.trim() });
-            state.lastCheck = null;
-            toast("插件已安装（请在下方开关中启用）");
-            renderPlugins(root, ctx);
-          } catch (e) { toast(e.message); }
-        },
-      }, "安装插件"),
-      dshDiscover.button
-    ),
-    dshDiscover.box
+  stage.appendChild(el("div", { class: "card row", style: { flexWrap: "wrap", gap: "8px" } },
+    srcIn,
+    el("button", {
+      type: "button",
+      class: "btn btn-sm",
+      onClick: async () => {
+        try {
+          const r = await api("POST", "/api/host/pick-directory", {});
+          if (r?.path) srcIn.value = r.path;
+        } catch (e) { toast(e.message); }
+      },
+    }, "选择目录"),
+    el("button", {
+      type: "button",
+      class: "btn btn-sm btn-primary",
+      onClick: async () => {
+        if (!srcIn.value.trim()) return toast("请输入插件来源路径或网址");
+        try {
+          await api("POST", "/api/plugins/install", { source: srcIn.value.trim() });
+          state.lastCheck = null;
+          toast("插件已安装（请在下方开关中启用）");
+          renderPlugins(root, ctx);
+        } catch (e) { toast(e.message); }
+      },
+    }, "手动安装")
   ));
 
   if (!community.length) {
-    if (showEmptyCard) {
-      stage.appendChild(el("div", { class: "card col", style: { gap: "8px", alignItems: "flex-start" } },
-        el("strong", null, "尚未安装外部或 DSH 插件"),
-        el("span", { class: "muted" }, "你可以前往「功能插件」一键安装，或点击上方「扫描本机 DSH 插件」直接导入已装好的 DSH 插件。"),
-        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => { state.tab = "plugins"; renderPlugins(root, ctx); } }, "去逛功能插件")
-      ));
-    }
+    stage.appendChild(el("div", { class: "card col", style: { gap: "8px", alignItems: "center", padding: "28px 16px" } },
+      el("span", { class: "muted" }, "暂无已安装的工作台插件"),
+      el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => { state.pluginSubMode = "market"; renderPlugins(root, ctx); } }, "浏览市场")
+    ));
     return;
   }
 
@@ -1001,40 +965,24 @@ function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap
     });
 
     const badges = [];
-    if (c.version) {
-      badges.push(el("span", { class: "pm-ver mono" }, `v${c.version}`));
-    }
-    if (commitShort) {
-      badges.push(el("span", { class: "pm-ver mono", title: `已安装提交 ${instMeta.commit}` }, commitShort));
-    }
+    if (c.version) badges.push(el("span", { class: "pm-ver mono" }, `v${c.version}`));
+    if (commitShort) badges.push(el("span", { class: "pm-ver mono", title: `已安装提交 ${instMeta.commit}` }, commitShort));
 
-    // Magpie-style update status chip
     if (hasUpdate) {
-      const label = ck.reason === "new_commits"
-        ? "有新提交"
-        : (ck.latestVersion ? `v${ck.latestVersion} 可更新` : "有更新");
-      const tip = ck.reason === "new_commits"
-        ? `当前 ${commitShort || c.version} → 远端 ${ck.remoteCommit || "最新"}`
-        : `当前 v${c.version || "?"} → 最新 v${ck.latestVersion || "?"}`;
-      badges.push(el("span", { class: "pm-chip up", title: tip }, label));
+      const label = ck.reason === "new_commits" ? "有新提交" : (ck.latestVersion ? `v${ck.latestVersion} 可更新` : "有更新");
+      badges.push(el("span", { class: "pm-chip up" }, label));
     } else if (ck?.status === "unknown") {
-      badges.push(el("span", { class: "pm-chip warn", title: ck.error || "该安装来源暂不支持自动检查" },
-        el("span", { class: "dot" }),
-        el("span", null, ck.error ? "检查失败" : "无法检查")
-      ));
+      badges.push(el("span", { class: "pm-chip warn", title: ck.error || "暂不支持自动检查" }, "无法检查"));
     } else if (ck?.status === "local" || instMeta?.type === "local") {
-      badges.push(el("span", { class: "pm-chip soft", title: "本地目录链接，直接修改本地文件即可" }, "本地目录"));
+      badges.push(el("span", { class: "pm-chip soft" }, "本地目录"));
     } else if (isRecentlyUpdated(instMeta)) {
-      const tip = instMeta.updatedFrom && instMeta.updatedTo
-        ? `已从 ${instMeta.updatedFrom} 更新至 ${instMeta.updatedTo}`
-        : "最近已更新";
-      badges.push(el("span", { class: "pm-chip soft", title: tip }, "已更新"));
+      badges.push(el("span", { class: "pm-chip soft" }, "已更新"));
     } else if (ck?.status === "current") {
-      badges.push(el("span", { class: "pm-chip soft", title: state.lastCheck?.at ? `上次检查 ${formatCheckTime(state.lastCheck.at)}` : "" }, "已是最新"));
+      badges.push(el("span", { class: "pm-chip soft" }, "已是最新"));
     }
 
     if (isDSH) {
-      badges.push(el("span", { class: "badge badge-accent", title: "本地 Node 进程运行（L2 本机权限）" }, "DSH · L2"));
+      badges.push(el("span", { class: "badge badge-accent" }, "DSH · L2"));
       const cmp = c.dsh?.compat || "full";
       const cmpClass = cmp === "full" ? "badge badge-ok" : (cmp === "partial" ? "badge badge-warn" : "badge badge-err");
       const cmpLabel = cmp === "full" ? "完全兼容" : (cmp === "partial" ? "部分兼容" : "需完整 DSH");
@@ -1075,11 +1023,26 @@ function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap
           el("span", { class: "muted", style: { fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: subText }, subText)
         )
       ),
-      el("div", { class: "row", style: { gap: "8px", flexShrink: 0 } },
+      el("div", { class: "row", style: { gap: "6px", flexShrink: 0 } },
         updateBtn,
         isDSH && c.enabled && c.dsh?.clientEntry
           ? el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go(`dsh:${c.id}`) }, "打开")
           : null,
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => openExtensionSubmitModal(ctx, {
+            channel: "plugin",
+            prefill: {
+              name: c.name || c.id,
+              slug: c.id,
+              repoUrl: /^https?:\/\/|^npm:/i.test(c.source || "") ? c.source : "",
+              description: c.description || c.desc || "",
+              authorName: c.author || "",
+              version: c.version || "",
+            },
+          }),
+        }, "申请收录"),
         el("label", { for: chkId, class: "row", style: { cursor: "pointer", fontSize: "12.5px" } }, chk, "启用"),
         el("button", {
           type: "button",
@@ -1098,11 +1061,10 @@ function renderInstalledTab(stage, root, ctx, community, dshRuntimeMap, permsMap
   });
   stage.appendChild(listCard);
 
-  // Magpie-style Installed Footer with Check for Updates button & last-checked timestamp
   const canCheckAny = community.some((c) => c.install?.type !== "local");
   const footLeft = el("span", { class: "muted", style: { fontSize: "12px" } },
     [
-      dshStatus?.nodeVersion ? `DSH 运行时 Node ${dshStatus.nodeVersion}` : "",
+      dshStatus?.nodeVersion ? `DSH 运行时 Node ${dshStatus.nodeVersion}` : "未检测到 Node.js（DSH 插件需 Node >= 20）",
       state.lastCheck?.at ? `上次检查更新：${formatCheckTime(state.lastCheck.at)}` : "",
     ].filter(Boolean).join(" · ")
   );
@@ -1166,228 +1128,4 @@ function renderBuiltinTab(stage, ctx, builtins) {
     });
     stage.appendChild(row);
   });
-}
-
-function renderSkillsTab(stage, root, ctx, initialSkills) {
-  let skillsList = Array.isArray(initialSkills) ? initialSkills : [];
-  const gridHost = el("div", { class: "col", style: { gap: "10px" } });
-
-  const searchIn = el("input", {
-    type: "search",
-    class: "input pm-search-input",
-    value: state.skillQuery,
-    placeholder: "搜索已安装 Skill…",
-    "aria-label": "搜索已安装 Skill",
-  });
-  searchIn.addEventListener("input", () => {
-    state.skillQuery = searchIn.value;
-    paint();
-  });
-
-  const openManualInstallSkillModal = () => {
-    const srcIn = el("input", {
-      class: "input",
-      placeholder: "本地文件夹路径、SKILL.md 文件路径或 GitHub 链接…",
-    });
-    showModal("手动安装 Skill", el("div", { class: "col", style: { gap: "8px" } },
-      el("span", { class: "muted", style: { fontSize: "12.5px" } }, "输入包含 SKILL.md 的本地目录、文件路径或远端链接："),
-      el("div", { class: "row", style: { gap: "6px" } },
-        srcIn,
-        el("button", {
-          type: "button",
-          class: "btn btn-sm",
-          onClick: async () => {
-            try {
-              const r = await api("POST", "/api/host/pick-directory", {});
-              if (r?.path) srcIn.value = r.path;
-            } catch (e) { toast(e.message); }
-          },
-        }, "选择目录")
-      )
-    ), [
-      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
-      el("button", {
-        type: "button",
-        class: "btn btn-primary",
-        onClick: async () => {
-          if (!srcIn.value.trim()) return toast("请输入 Skill 路径或链接");
-          try {
-            const res = await api("POST", "/api/skills/install", { source: srcIn.value.trim() });
-            closeModal();
-            toast(`已安装 Skill「${res.skill?.name || res.skill?.id}」`);
-            renderPlugins(root, ctx);
-          } catch (e) { toast(e.message); }
-        },
-      }, "安装"),
-    ]);
-    srcIn.focus();
-  };
-
-  const openSkillDetailModal = (sk) => {
-    const editor = el("textarea", {
-      class: "textarea mono",
-      rows: "14",
-      style: { fontSize: "12px", lineHeight: "1.55" },
-    });
-    editor.value = sk.content || "";
-    showModal(`Skill 详情 · ${sk.name || sk.id}`, el("div", { class: "col", style: { gap: "10px" } },
-      el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
-        el("span", { class: "badge badge-accent" }, `/${sk.id}`),
-        el("span", { class: "badge" }, formatSkillSourceLabel(sk)),
-        sk.version ? el("span", { class: "badge" }, `v${sk.version}`) : null
-      ),
-      el("span", { class: "muted", style: { fontSize: "12px" } }, "可在「聊天」、「文章 AI 改稿」及兼容插件中通过 Skill 选择器或 /" + sk.id + " 直接调用。"),
-      editor
-    ), [
-      el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
-      el("button", {
-        type: "button",
-        class: "btn btn-primary",
-        onClick: async () => {
-          try {
-            await api("PATCH", `/api/skills/${encodeURIComponent(sk.id)}`, { content: editor.value });
-            closeModal();
-            toast("已保存 Skill 内容");
-            renderPlugins(root, ctx);
-          } catch (e) { toast(e.message); }
-        },
-      }, "保存修改"),
-    ]);
-  };
-
-  const paint = () => {
-    clear(gridHost);
-    const q = state.skillQuery.trim().toLowerCase();
-    const list = skillsList.filter((sk) =>
-      !q || `${sk.name} ${sk.id} ${sk.description || ""} ${sk.source || ""}`.toLowerCase().includes(q)
-    );
-    if (!list.length) {
-      gridHost.appendChild(el("div", { class: "card col", style: { alignItems: "center", gap: "10px", padding: "28px 16px", textAlign: "center" } },
-        el("strong", null, skillsList.length === 0 ? "尚未导入任何 Skill" : "没有匹配的 Skill"),
-        el("span", { class: "muted" }, "点击「从本机 AI 客户端导入」，可自动扫描 Claude Code / Codex / Antigravity / Cursor / DSH 中的 Skill 并勾选导入。"),
-        el("button", {
-          type: "button",
-          class: "btn btn-primary btn-sm",
-          onClick: () => openHarnessSkillImportModal({ onImported: () => renderPlugins(root, ctx) }),
-        }, "📥 从本机 AI 客户端导入")
-      ));
-      return;
-    }
-
-    const grid = el("div", { class: "pm-grid" });
-    list.forEach((sk) => {
-      const srcLabel = formatSkillSourceLabel(sk);
-      const chkId = `skill-en-${sk.id}`;
-      const chk = el("input", { id: chkId, type: "checkbox", checked: sk.enabled !== false });
-      chk.addEventListener("change", async () => {
-        try {
-          await api("PATCH", `/api/skills/${encodeURIComponent(sk.id)}`, { enabled: chk.checked });
-          toast(chk.checked ? `已启用 Skill「${sk.name}」` : `已停用 Skill「${sk.name}」`);
-          sk.enabled = chk.checked;
-        } catch (e) {
-          chk.checked = !chk.checked;
-          toast(e.message);
-        }
-      });
-
-      const card = el("article", {
-        class: "pm-card",
-        onClick: (ev) => {
-          if (ev.target.closest("button, label, input")) return;
-          openSkillDetailModal(sk);
-        },
-      },
-        el("div", { class: "pm-card-top" },
-          el("div", { class: "pm-logo", style: { fontSize: "18px" } }, "⚡"),
-          el("div", { class: "pm-card-who" },
-            el("div", { class: "pm-card-name" }, el("strong", null, sk.name || sk.id)),
-            el("div", { class: "pm-card-by" },
-              el("span", { class: "mono" }, `/${sk.id}`),
-              srcLabel ? el("span", { class: "pm-chip soft" }, srcLabel) : null
-            )
-          ),
-          el("label", { for: chkId, class: "pm-toggle-inline", title: "启用或停用该 Skill" }, chk, "启用")
-        ),
-        el("p", { class: "pm-card-desc", title: sk.description || "" }, sk.description || "暂无简介"),
-        el("div", { class: "pm-card-meta", style: { justifyContent: "space-between" } },
-          el("div", { class: "row", style: { gap: "6px" } },
-            sk.version ? el("span", { class: "pm-ver mono" }, `v${sk.version}`) : null,
-            sk.updateAvailable ? el("span", { class: "pm-chip up" }, `v${sk.latestVersion} 可更新`) : null
-          ),
-          el("div", { class: "row", style: { gap: "6px" } },
-            sk.updatable
-              ? el("button", {
-                  type: "button",
-                  class: "btn btn-sm",
-                  onClick: async (ev) => {
-                    ev.stopPropagation();
-                    try {
-                      const r = await api("POST", `/api/skills/${encodeURIComponent(sk.id)}/update`);
-                      toast(r.updated ? `已更新「${sk.name}」到 v${r.version}` : "已是最新版本");
-                      renderPlugins(root, ctx);
-                    } catch (e) { toast(e.message); }
-                  },
-                }, sk.updateAvailable ? "更新" : "同步")
-              : null,
-            el("button", {
-              type: "button",
-              class: "btn btn-sm",
-              onClick: (ev) => { ev.stopPropagation(); openSkillDetailModal(sk); },
-            }, "查看"),
-            !sk.builtin
-              ? el("button", {
-                  type: "button",
-                  class: "btn btn-sm btn-danger",
-                  onClick: async (ev) => {
-                    ev.stopPropagation();
-                    try {
-                      await api("DELETE", `/api/skills/${encodeURIComponent(sk.id)}`);
-                      toast(`已删除 Skill「${sk.name}」`);
-                      renderPlugins(root, ctx);
-                    } catch (e) { toast(e.message); }
-                  },
-                }, "删除")
-              : null
-          )
-        )
-      );
-      grid.appendChild(card);
-    });
-    gridHost.appendChild(grid);
-  };
-
-  stage.appendChild(el("div", { class: "card col", style: { gap: "10px" } },
-    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
-      el("div", { class: "col", style: { gap: "2px" } },
-        el("strong", null, "共享 Skills 技能库"),
-        el("span", { class: "muted", style: { fontSize: "12px" } }, "导入或安装的 Skill 可在「聊天」、「文章 AI 改稿」以及兼容插件中统一调用")
-      ),
-      el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
-        el("button", {
-          type: "button",
-          class: "btn btn-sm btn-primary",
-          onClick: () => openHarnessSkillImportModal({ onImported: () => renderPlugins(root, ctx) }),
-        }, "📥 从本机 AI 客户端导入"),
-        el("button", { type: "button", class: "btn btn-sm", onClick: openManualInstallSkillModal }, "＋ 手动安装"),
-        el("button", {
-          type: "button",
-          class: "btn btn-sm",
-          onClick: async () => {
-            try {
-              const r = await api("POST", "/api/skills/check-updates");
-              const ups = (r.items || []).filter((x) => x.updateAvailable).length;
-              toast(ups > 0 ? `发现 ${ups} 个 Skill 有更新` : "所有可更新 Skill 均已是最新");
-              renderPlugins(root, ctx);
-            } catch (e) { toast(e.message); }
-          },
-        }, "↻ 检查更新")
-      )
-    ),
-    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
-      el("span", { class: "muted", style: { fontSize: "12px" } }, `共 ${skillsList.length} 个已安装 Skill`),
-      searchIn
-    )
-  ));
-  stage.appendChild(gridHost);
-  paint();
 }

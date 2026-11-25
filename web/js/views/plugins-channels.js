@@ -34,7 +34,18 @@ function formatDownloads(n) {
   return `${num.toLocaleString()} 下载`;
 }
 
-function renderSourceChips(sources, busy, onRemove) {
+function formatDateShort(raw) {
+  if (!raw) return "";
+  try {
+    const d = new Date(raw);
+    if (Number.isNaN(d.getTime())) return String(raw);
+    return d.toLocaleDateString();
+  } catch {
+    return "";
+  }
+}
+
+export function renderSourceChips(sources, busy, onRemove) {
   const wrap = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } });
   (sources || []).forEach((s) => {
     const mTag = mirrorTag(s.activeMirror);
@@ -62,283 +73,302 @@ function renderSourceChips(sources, busy, onRemove) {
 }
 
 // =========================================================================
-// 1. Featured Tab (Workflow Starter Bundles + 4-Channel Quick Preview)
+// Shared: Extension Market Inclusion Submission Modal (integrated with handraw-web #523)
 // =========================================================================
 
-const WORKFLOW_BUNDLES = [
-  {
-    id: "wechat-writer-pack",
-    icon: "✍️",
-    title: "公众号图文创作套装",
-    subtitle: "文章润色 + 自动配图规划 + 公众号实时预览 + Markdown 规范排版",
-    items: [
-      { channel: "skill", id: "wechat-article-polish", label: "公众号文章润色", typeLabel: "Skill" },
-      { channel: "skill", id: "article-illustration-planner", label: "长文自动配图规划", typeLabel: "Skill" },
-      { channel: "obsidian", id: "mp-preview", label: "MP Preview 公众号预览", typeLabel: "写作插件" },
-      { channel: "obsidian", id: "obsidian-linter", label: "Linter 文档排版规范", typeLabel: "写作插件" },
-    ],
-  },
-  {
-    id: "illustration-pose-pack",
-    icon: "🎨",
-    title: "角色与姿势插画套装",
-    subtitle: "5 视角人体姿态图鉴 + 服饰图鉴 + 角色设定表 + 多页绘本分镜",
-    items: [
-      { channel: "gallery", id: "ruic-poses", label: "姿态图鉴（5视角）", typeLabel: "扩展图库" },
-      { channel: "gallery", id: "ruic-costumes", label: "衣装图鉴（1,407套）", typeLabel: "扩展图库" },
-      { channel: "skill", id: "character-sheet-bible", label: "角色设定与三视图", typeLabel: "Skill" },
-      { channel: "skill", id: "picturebook-storyboard", label: "多页绘本分镜脚本", typeLabel: "Skill" },
-    ],
-  },
-  {
-    id: "ai-pkm-pack",
-    icon: "⚡",
-    title: "AI 写作与知识库套装",
-    subtitle: "去 AI 味审稿 + 长文深度拆解 + 双链笔记整理 + 最近文档导航",
-    items: [
-      { channel: "skill", id: "de-ai-tone", label: "去 AI 味清理", typeLabel: "Skill" },
-      { channel: "skill", id: "deep-article-summary", label: "长文深度拆解", typeLabel: "Skill" },
-      { channel: "skill", id: "knowledge-note-linker", label: "Obsidian 双链整理", typeLabel: "Skill" },
-      { channel: "obsidian", id: "recent-files-obsidian", label: "Recent Files 导航", typeLabel: "写作插件" },
-    ],
-  },
+const CHANNEL_OPTIONS = [
+  { value: "plugin", label: "工作台插件", repoPlaceholder: "https://github.com/owner/repo 或 npm:@scope/pkg" },
+  { value: "gallery", label: "图库插件", repoPlaceholder: "https://github.com/owner/gallery-repo 或 index.json / .zip 地址" },
+  { value: "skill", label: "Skills", repoPlaceholder: "https://github.com/owner/skill-repo 或 SKILL.md 仓库地址" },
+  { value: "obsidian", label: "写作插件", repoPlaceholder: "GitHub 仓库（owner/repo 或 https://github.com/owner/repo）" },
 ];
 
-export function renderFeaturedTab(stage, ctx, helpers) {
-  const { getMirror, switchTab, refreshHub, makeSkeletonGrid } = helpers;
-  let bundleBusyId = "";
-  let data = null;
+const SUBMISSION_STATUS_MAP = {
+  pending: { label: "待审核", cls: "badge badge-warn" },
+  approved: { label: "已通过", cls: "badge badge-ok" },
+  rejected: { label: "已拒绝", cls: "badge badge-err" },
+};
 
-  const host = el("div", { class: "col", style: { gap: "16px" } });
-  stage.appendChild(host);
+export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = null } = {}) {
+  let mode = "form"; // "form" | "mine"
+  let submitting = false;
+  let mineData = null;
+  let mineLoading = false;
 
-  const loadAll = async (refresh = false) => {
-    data = null;
-    paint();
-    const m = getMirror();
-    const qs = `?mirror=${encodeURIComponent(m)}${refresh ? "&refresh=1" : ""}`;
-    const [plugMkt, galMkt, skMkt, obsMkt] = await Promise.all([
-      api("GET", `/api/plugins/market${qs}`).catch(() => ({ plugins: [], sources: [] })),
-      api("GET", `/api/galleries/market${qs}`).catch(() => ({ packs: [], sources: [] })),
-      api("GET", `/api/skills/market${qs}`).catch(() => ({ skills: [], sources: [] })),
-      api("GET", `/api/article/obsidian/market${qs}&limit=30`).catch(() => ({ items: [], sources: [] })),
-    ]);
-    if (!stage.isConnected) return;
-    data = { plugMkt, galMkt, skMkt, obsMkt };
-    paint();
-  };
+  const chSel = el("select", { class: "select" },
+    ...CHANNEL_OPTIONS.map((c) => el("option", { value: c.value, selected: c.value === channel }, c.label))
+  );
+  const currentMeta = () => CHANNEL_OPTIONS.find((c) => c.value === chSel.value) || CHANNEL_OPTIONS[0];
 
-  const isBundleItemInstalled = (it) => {
-    if (!data) return false;
-    if (it.channel === "gallery") return Boolean((data.galMkt.packs || []).find((p) => p.id === it.id && p.installed));
-    if (it.channel === "skill") return Boolean((data.skMkt.skills || []).find((s) => s.id === it.id && s.installed));
-    if (it.channel === "obsidian") return Boolean((data.obsMkt.items || []).find((o) => o.id === it.id && o.installed));
-    if (it.channel === "plugin") return Boolean((data.plugMkt.plugins || []).find((p) => p.name === it.id && p.installed));
-    return false;
-  };
+  const nameIn = el("input", {
+    class: "input",
+    type: "text",
+    value: prefill?.name || "",
+    placeholder: "插件显示名称（必填）",
+  });
+  const repoIn = el("input", {
+    class: "input mono",
+    type: "text",
+    value: prefill?.repoUrl || "",
+    placeholder: currentMeta().repoPlaceholder,
+  });
+  chSel.addEventListener("change", () => {
+    repoIn.placeholder = currentMeta().repoPlaceholder;
+  });
 
-  const installBundle = async (bundle) => {
-    if (bundleBusyId) return;
-    const missing = bundle.items.filter((it) => !isBundleItemInstalled(it));
-    if (!missing.length) return;
-    bundleBusyId = bundle.id;
-    paint();
-    const m = getMirror();
-    let okCount = 0;
-    const errs = [];
-    for (const it of missing) {
-      try {
-        if (it.channel === "gallery") {
-          await api("POST", "/api/galleries/market/install", { id: it.id, mirror: m });
-        } else if (it.channel === "skill") {
-          await api("POST", "/api/skills/market/install", { id: it.id, mirror: m });
-        } else if (it.channel === "obsidian") {
-          const found = (data.obsMkt.items || []).find((o) => o.id === it.id);
-          await api("POST", "/api/article/obsidian/install", {
-            sourceType: "market",
-            id: it.id,
-            repo: found?.repo || "",
-            downloadMirrors: found?.downloadMirrors || undefined,
-            files: found?.files || undefined,
-            mirror: m,
-            enable: true,
-          });
-        }
-        okCount++;
-      } catch (e) {
-        errs.push(`${it.label}: ${e?.message || "安装失败"}`);
-      }
+  const descIn = el("textarea", {
+    class: "textarea",
+    rows: "3",
+    placeholder: "简要说明插件用途、核心功能与使用方式（必填）",
+  });
+  descIn.value = prefill?.description || "";
+
+  const authorIn = el("input", {
+    class: "input",
+    type: "text",
+    value: prefill?.authorName || "",
+    placeholder: "作者名称（可选，默认当前账号）",
+  });
+  const verIn = el("input", {
+    class: "input mono",
+    type: "text",
+    value: prefill?.version || "",
+    placeholder: "版本号，如 1.0.0（可选）",
+  });
+  const homeIn = el("input", {
+    class: "input",
+    type: "url",
+    value: prefill?.homepageUrl || "",
+    placeholder: "主页或文档链接 https://...（可选）",
+  });
+  const contactIn = el("input", {
+    class: "input",
+    type: "text",
+    value: "",
+    placeholder: "联系方式：邮箱 / 微信 / GitHub（可选）",
+  });
+  const tagsIn = el("input", {
+    class: "input",
+    type: "text",
+    value: Array.isArray(prefill?.tags) ? prefill.tags.join(", ") : "",
+    placeholder: "标签，逗号分隔（可选）",
+  });
+  const notesIn = el("textarea", {
+    class: "textarea",
+    rows: "2",
+    placeholder: "补充说明：兼容范围、安装注意事项、Gitee 镜像等（可选）",
+  });
+
+  const errBox = el("div", { class: "muted", style: { color: "var(--err, #c62828)", fontSize: "12.5px", display: "none" } });
+  const bodyHost = el("div", { class: "col", style: { gap: "10px" } });
+  const tabHost = el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px" } });
+  const submitBtn = el("button", { type: "button", class: "btn btn-primary" }, "提交收录申请");
+
+  const loadMine = async () => {
+    mineLoading = true;
+    paintBody();
+    try {
+      mineData = await api("GET", "/api/extensions/submissions/mine?limit=50");
+    } catch (e) {
+      mineData = { loggedIn: false, items: [], error: e.message };
+    } finally {
+      mineLoading = false;
+      if (bodyHost.isConnected) paintBody();
     }
-    bundleBusyId = "";
-    if (errs.length) toast(`套装已安装 ${okCount}/${missing.length} 项（失败：${errs[0]}）`);
-    else toast(`「${bundle.title}」已一键补齐 ${okCount} 项扩展`);
-    ctx.refreshNav?.();
-    await loadAll(false);
-    refreshHub?.();
   };
 
-  const paint = () => {
-    clear(host);
-    if (!data) {
-      host.appendChild(makeSkeletonGrid(6));
+  const paintTabs = () => {
+    clear(tabHost);
+    tabHost.appendChild(el("div", { class: "pm-seg-group", role: "tablist" },
+      el("button", {
+        type: "button",
+        class: "pm-seg-btn" + (mode === "form" ? " is-active" : ""),
+        onClick: () => { mode = "form"; paintTabs(); paintBody(); },
+      }, "提交申请"),
+      el("button", {
+        type: "button",
+        class: "pm-seg-btn" + (mode === "mine" ? " is-active" : ""),
+        onClick: () => {
+          mode = "mine";
+          paintTabs();
+          if (!mineData) loadMine();
+          else paintBody();
+        },
+      }, `我的申请${mineData?.items?.length ? ` (${mineData.items.length})` : ""}`)
+    ));
+    if (mode === "mine") {
+      tabHost.appendChild(el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: loadMine,
+      }, "↻ 刷新"));
+    }
+    submitBtn.style.display = mode === "form" ? "" : "none";
+  };
+
+  const paintBody = () => {
+    clear(bodyHost);
+    if (mode === "form") {
+      bodyHost.append(
+        el("div", { class: "split" },
+          el("div", { class: "field" }, el("label", null, "所属栏目"), chSel),
+          el("div", { class: "field" }, el("label", null, "插件名称 *"), nameIn)
+        ),
+        el("div", { class: "field" }, el("label", null, "仓库 / 下载地址 *"), repoIn),
+        el("div", { class: "field" }, el("label", null, "插件简介 *"), descIn),
+        el("div", { class: "split" },
+          el("div", { class: "field" }, el("label", null, "作者名称"), authorIn),
+          el("div", { class: "field" }, el("label", null, "版本号"), verIn)
+        ),
+        el("div", { class: "split" },
+          el("div", { class: "field" }, el("label", null, "主页 / 文档链接"), homeIn),
+          el("div", { class: "field" }, el("label", null, "联系方式"), contactIn)
+        ),
+        el("div", { class: "field" }, el("label", null, "标签"), tagsIn),
+        el("div", { class: "field" }, el("label", null, "补充说明"), notesIn),
+        errBox
+      );
       return;
     }
 
-    // Section 1: One-Click Workflow Bundles
-    const bundleGrid = el("div", { class: "pm-bundle-grid" });
-    WORKFLOW_BUNDLES.forEach((b) => {
-      const doneCount = b.items.filter(isBundleItemInstalled).length;
-      const allDone = doneCount === b.items.length;
-      const isBusy = bundleBusyId === b.id;
-
-      const pills = el("div", { class: "pm-bundle-items" },
-        ...b.items.map((it) => {
-          const installed = isBundleItemInstalled(it);
-          return el("span", { class: "pm-bundle-pill" + (installed ? " is-done" : "") },
-            el("span", null, installed ? "✓ " : "○ "),
-            el("span", null, it.label),
-            el("span", { class: "muted", style: { fontSize: "10.5px" } }, `· ${it.typeLabel}`)
-          );
-        })
-      );
-
-      bundleGrid.appendChild(el("div", { class: "card pm-bundle-card" },
-        el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "flex-start", gap: "10px" } },
-          el("div", { class: "row", style: { gap: "10px", alignItems: "center", minWidth: 0 } },
-            el("div", { class: "pm-logo", style: { fontSize: "20px" } }, b.icon),
-            el("div", { class: "col", style: { gap: "2px", minWidth: 0 } },
-              el("strong", { style: { fontSize: "14.5px" } }, b.title),
-              el("span", { class: "muted", style: { fontSize: "12px" } }, b.subtitle)
-            )
+    if (mineLoading) {
+      bodyHost.appendChild(el("div", { class: "muted", style: { padding: "18px 0", textAlign: "center" } }, "正在加载申请记录…"));
+      return;
+    }
+    if (mineData && mineData.loggedIn === false) {
+      bodyHost.appendChild(el("div", { class: "card col", style: { gap: "8px", alignItems: "center", padding: "20px" } },
+        el("span", { class: "muted" }, "登录后可查看你的插件收录申请与审核进度。"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: () => { closeModal(); ctx.go("settings"); },
+        }, "前往登录")
+      ));
+      return;
+    }
+    const items = Array.isArray(mineData?.items) ? mineData.items : [];
+    if (!items.length) {
+      bodyHost.appendChild(el("div", { class: "card muted", style: { padding: "20px", textAlign: "center" } }, "你还没有提交过插件收录申请。"));
+      return;
+    }
+    const listWrap = el("div", { class: "col", style: { gap: "8px", maxHeight: "360px", overflowY: "auto" } });
+    items.forEach((it) => {
+      const sb = SUBMISSION_STATUS_MAP[it.status] || { label: it.status || "待审核", cls: "badge" };
+      listWrap.appendChild(el("div", { class: "card col", style: { gap: "4px", padding: "10px 12px" } },
+        el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "6px", flexWrap: "wrap" } },
+          el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
+            el("strong", null, it.name),
+            el("span", { class: "badge" }, it.channelLabel || it.channel),
+            el("span", { class: sb.cls }, sb.label)
           ),
-          el("button", {
-            type: "button",
-            class: allDone ? "pm-act done" : "pm-act get",
-            disabled: allDone || Boolean(bundleBusyId),
-            onClick: () => installBundle(b),
-          }, isBusy ? "安装中…" : (allDone ? "✓ 已就绪" : `一键补齐 (${b.items.length - doneCount})`))
+          el("span", { class: "muted", style: { fontSize: "11.5px" } }, formatDateShort(it.createdAt))
         ),
-        pills
+        el("div", { class: "mono muted", style: { fontSize: "11.5px", wordBreak: "break-all" } }, it.repoUrl),
+        it.adminNote
+          ? el("div", { class: "muted", style: { fontSize: "12px", borderTop: "1px dashed var(--line)", paddingTop: "4px", marginTop: "2px" } }, `审核备注：${it.adminNote}`)
+          : null
       ));
     });
-
-    host.appendChild(el("section", { class: "col", style: { gap: "10px" } },
-      el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" } },
-        el("div", { class: "col", style: { gap: "2px" } },
-          el("strong", { style: { fontSize: "15px" } }, "场景一键套装"),
-          el("span", { class: "muted", style: { fontSize: "12px" } }, "跨图库、Skills 与写作插件的开箱即用组合，自动跳过已安装项")
-        ),
-        el("button", { type: "button", class: "btn btn-sm", onClick: () => loadAll(true) }, "↻ 刷新四大市场")
-      ),
-      bundleGrid
-    ));
-
-    // Section 2: 4 Channel Spotlight Summaries
-    const makeSpotlight = (title, desc, count, tabKey, cards) => {
-      return el("section", { class: "col", style: { gap: "8px" } },
-        el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px" } },
-          el("div", { class: "row", style: { gap: "8px", alignItems: "baseline", flexWrap: "wrap" } },
-            el("strong", { style: { fontSize: "14.5px" } }, title),
-            el("span", { class: "badge" }, `${count} 项`),
-            el("span", { class: "muted", style: { fontSize: "12px" } }, desc)
-          ),
-          el("button", { type: "button", class: "btn btn-sm", onClick: () => switchTab(tabKey) }, "查看全部 →")
-        ),
-        el("div", { class: "pm-grid" }, ...cards)
-      );
-    };
-
-    const galCards = (data.galMkt.packs || []).slice(0, 3).map((p) =>
-      el("article", { class: "pm-card", onClick: () => switchTab("galleries") },
-        el("div", { class: "pm-card-top" },
-          el("div", { class: "pm-logo", style: { fontSize: "18px" } }, p.multiVariant ? "🧍" : "🖼️"),
-          el("div", { class: "pm-card-who" },
-            el("div", { class: "pm-card-name" }, el("strong", null, p.name)),
-            el("div", { class: "pm-card-by" }, el("span", null, p.badge || "标准图库"), el("span", { class: "pm-author-text" }, p.author || ""))
-          ),
-          el("span", { class: "pm-act " + (p.installed ? "done" : "get") }, p.installed ? "已安装" : "去安装")
-        ),
-        el("p", { class: "pm-card-desc" }, p.description || p.id),
-        el("div", { class: "pm-card-meta" }, el("span", { class: "pm-chip soft" }, "扩展图库"), p.multiVariant ? el("span", { class: "pm-chip" }, "多视角") : null)
-      )
-    );
-
-    const skCards = (data.skMkt.skills || []).slice(0, 3).map((s) =>
-      el("article", { class: "pm-card", onClick: () => switchTab("skills") },
-        el("div", { class: "pm-card-top" },
-          el("div", { class: "pm-logo", style: { fontSize: "18px" } }, "⚡"),
-          el("div", { class: "pm-card-who" },
-            el("div", { class: "pm-card-name" }, el("strong", null, s.name)),
-            el("div", { class: "pm-card-by" }, el("span", { class: "mono" }, `/${s.id}`), s.badge ? el("span", { class: "pm-chip soft" }, s.badge) : null)
-          ),
-          el("span", { class: "pm-act " + (s.installed ? "done" : "get") }, s.installed ? "已安装" : "去安装")
-        ),
-        el("p", { class: "pm-card-desc" }, s.description || s.id),
-        el("div", { class: "pm-card-meta" }, el("span", { class: "pm-chip soft" }, "AI Skill"), pricingBadge(s.pricing))
-      )
-    );
-
-    const obsCards = (data.obsMkt.items || []).slice(0, 3).map((o) =>
-      el("article", { class: "pm-card", onClick: () => switchTab("obsidian") },
-        el("div", { class: "pm-card-top" },
-          el("div", { class: "pm-logo", style: { fontSize: "18px" } }, "📝"),
-          el("div", { class: "pm-card-who" },
-            el("div", { class: "pm-card-name" }, el("strong", null, o.name)),
-            el("div", { class: "pm-card-by" }, el("span", null, o.featuredTag || "写作插件"), el("span", { class: "pm-author-text" }, o.author || ""))
-          ),
-          el("span", { class: "pm-act " + (o.installed ? "done" : "get") }, o.installed ? "已安装" : "去安装")
-        ),
-        el("p", { class: "pm-card-desc" }, o.description || o.repo),
-        el("div", { class: "pm-card-meta" },
-          el("span", { class: "pm-chip soft" }, o.compatLevel === "partial" ? "🟡 部分兼容" : "🟢 实测兼容"),
-          o.mirroredFast ? el("span", { class: "pm-chip up" }, "⚡ 国内加速") : null
-        )
-      )
-    );
-
-    const plugCards = (data.plugMkt.plugins || []).slice(0, 3).map((p) =>
-      el("article", { class: "pm-card", onClick: () => switchTab("plugins") },
-        el("div", { class: "pm-card-top" },
-          el("div", { class: "pm-logo", style: { fontSize: "18px" } }, "🧩"),
-          el("div", { class: "pm-card-who" },
-            el("div", { class: "pm-card-name" }, el("strong", null, p.title || p.name)),
-            el("div", { class: "pm-card-by" }, el("span", { class: "pm-verified-tag" }, "✓ 官方/兼容"), el("span", { class: "pm-author-text" }, p.author || ""))
-          ),
-          el("span", { class: "pm-act " + (p.installed ? "done" : "get") }, p.installed ? "已安装" : "去安装")
-        ),
-        el("p", { class: "pm-card-desc" }, p.description || p.name),
-        el("div", { class: "pm-card-meta" }, el("span", { class: "pm-ver mono" }, `v${p.latestVersion}`), pricingBadge(p.pricing))
-      )
-    );
-
-    if (plugCards.length) host.appendChild(makeSpotlight("功能插件（Handraw / DSH）", "独立工作台、模型号池与全能工作流应用", (data.plugMkt.plugins || []).length, "plugins", plugCards));
-    if (galCards.length) host.appendChild(makeSpotlight("扩展图库（标准 Format 1）", "姿势、服饰、人像等本机按需缓存视觉参考库", (data.galMkt.packs || []).length, "galleries", galCards));
-    if (skCards.length) host.appendChild(makeSpotlight("AI Skills 技能市场", "即装即用的写作、配图分镜与知识整理提示词技能", (data.skMkt.skills || []).length, "skills", skCards));
-    if (obsCards.length) host.appendChild(makeSpotlight("写作插件（Obsidian 兼容）", "公众号排版、图床与 Markdown 写作增强", (data.obsMkt.items || []).length, "obsidian", obsCards));
+    bodyHost.appendChild(listWrap);
   };
 
-  loadAll(false);
+  submitBtn.addEventListener("click", async () => {
+    if (submitting) return;
+    errBox.style.display = "none";
+    errBox.textContent = "";
+    const name = nameIn.value.trim();
+    const repoUrl = repoIn.value.trim();
+    const description = descIn.value.trim();
+    if (name.length < 2) {
+      errBox.textContent = "请填写插件名称（至少 2 个字符）";
+      errBox.style.display = "block";
+      return;
+    }
+    if (!repoUrl) {
+      errBox.textContent = "请填写仓库或下载地址";
+      errBox.style.display = "block";
+      return;
+    }
+    if (description.length < 4) {
+      errBox.textContent = "请填写简短插件简介（至少 4 个字符）";
+      errBox.style.display = "block";
+      return;
+    }
+    submitting = true;
+    submitBtn.disabled = true;
+    submitBtn.textContent = "提交中…";
+    try {
+      const tags = tagsIn.value
+        .split(/[,，\s]+/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+      await api("POST", "/api/extensions/submissions", {
+        channel: chSel.value,
+        name,
+        slug: prefill?.slug || "",
+        repoUrl,
+        homepageUrl: homeIn.value.trim(),
+        description,
+        authorName: authorIn.value.trim(),
+        version: verIn.value.trim(),
+        tags,
+        contact: contactIn.value.trim(),
+        notes: notesIn.value.trim(),
+      });
+      toast("收录申请已提交，管理员审核后将收录至官方市场");
+      mode = "mine";
+      mineData = null;
+      paintTabs();
+      await loadMine();
+    } catch (e) {
+      const msg = e?.message || "提交失败";
+      errBox.textContent = msg;
+      errBox.style.display = "block";
+      if (e?.status === 401 || msg.includes("登录")) {
+        errBox.append(" ", el("a", {
+          href: "#settings",
+          onClick: (ev) => { ev.preventDefault(); closeModal(); ctx.go("settings"); },
+        }, "去登录 →"));
+      }
+    } finally {
+      submitting = false;
+      if (submitBtn.isConnected) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "提交收录申请";
+      }
+    }
+  });
+
+  paintTabs();
+  paintBody();
+
+  showModal("申请收录到官方市场", el("div", { class: "col", style: { gap: "12px" } }, tabHost, bodyHost), [
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
+    submitBtn,
+  ]);
 }
 
 // =========================================================================
-// 2. Galleries Market Channel (Full-page Grid backed by /api/galleries/market)
+// 1. Galleries Channel (图库插件：页内独立管理 市场 / 已安装)
 // =========================================================================
 
 export function renderGalleriesMarketTab(stage, ctx, helpers) {
   const { getMirror, makeSkeletonGrid, refreshHub } = helpers;
+  let subMode = "market"; // "market" | "installed"
   let data = null;
   let activeCat = "";
   let query = "";
-  let panelMode = ""; // "" | "add-source" | "direct-url"
   let busyId = "";
+  let panelMode = ""; // "" | "add-source" | "direct-url"
 
   const topHost = el("div", { class: "col", style: { gap: "10px" } });
   const gridHost = el("div", { class: "col", style: { gap: "10px" } });
+
   const searchIn = el("input", {
     type: "search",
     class: "input pm-search-input",
-    placeholder: "搜索扩展图库…",
-    "aria-label": "搜索扩展图库",
+    placeholder: "搜索图库插件…",
+    "aria-label": "搜索图库插件",
   });
   searchIn.addEventListener("input", () => { query = searchIn.value; paint(); });
 
@@ -365,6 +395,7 @@ export function renderGalleriesMarketTab(stage, ctx, helpers) {
     }
 
     const packs = data.packs || [];
+    const installedPacks = packs.filter((p) => p.installed);
     const cats = data.categories || [];
     const srcChips = renderSourceChips(data.sources, busyId, async (s) => {
       busyId = "__rm__";
@@ -376,32 +407,34 @@ export function renderGalleriesMarketTab(stage, ctx, helpers) {
       finally { busyId = ""; if (stage.isConnected) paint(); }
     });
 
-    const catBar = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } },
-      el("button", { type: "button", class: "btn btn-sm" + (activeCat === "" ? " btn-primary" : ""), onClick: () => { activeCat = ""; paint(); } }, `全部 (${packs.length})`),
-      el("button", { type: "button", class: "btn btn-sm" + (activeCat === "__installed__" ? " btn-primary" : ""), onClick: () => { activeCat = "__installed__"; paint(); } }, `已安装 (${packs.filter((p) => p.installed).length})`),
-      ...cats.map((c) => el("button", {
-        type: "button",
-        class: "btn btn-sm" + (activeCat === c.id ? " btn-primary" : ""),
-        onClick: () => { activeCat = c.id; paint(); },
-      }, `${c.name} (${c.count})`))
+    const subToggle = el("div", { class: "pm-seg-group", role: "tablist" },
+      el("button", { type: "button", class: "pm-seg-btn" + (subMode === "market" ? " is-active" : ""), onClick: () => { subMode = "market"; paint(); } }, `市场 (${packs.length})`),
+      el("button", { type: "button", class: "pm-seg-btn" + (subMode === "installed" ? " is-active" : ""), onClick: () => { subMode = "installed"; paint(); } }, `已安装 (${installedPacks.length})`)
     );
+
+    const catBar = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px", alignItems: "center" } }, subToggle);
+    if (subMode === "market") {
+      catBar.appendChild(el("button", { type: "button", class: "btn btn-sm" + (activeCat === "" ? " btn-primary" : ""), onClick: () => { activeCat = ""; paint(); } }, "全部分类"));
+      cats.forEach((c) => {
+        catBar.appendChild(el("button", {
+          type: "button",
+          class: "btn btn-sm" + (activeCat === c.id ? " btn-primary" : ""),
+          onClick: () => { activeCat = c.id; paint(); },
+        }, `${c.name} (${c.count})`));
+      });
+    }
 
     topHost.appendChild(el("div", { class: "card col", style: { gap: "10px" } },
       el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px", alignItems: "center" } },
-        el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
-          el("strong", null, "图库市场源"),
-          srcChips,
-          el("a", { href: "https://gitee.com/yang02010/handraw-galleries", class: "muted", style: { fontSize: "11.5px" }, onClick: (e) => { e.preventDefault(); openURL("https://gitee.com/yang02010/handraw-galleries"); } }, "Gitee 镜像 ↗"),
-          el("a", { href: "https://github.com/yang0/handraw-galleries/blob/main/CONTRIBUTING.md", class: "muted", style: { fontSize: "11.5px" }, onClick: (e) => { e.preventDefault(); openURL("https://github.com/yang0/handraw-galleries/blob/main/CONTRIBUTING.md"); } }, "提交图库 PR ↗")
-        ),
+        srcChips,
         el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
-          el("button", { type: "button", class: "btn btn-sm" + (panelMode === "add-source" ? " btn-primary" : ""), onClick: () => { panelMode = panelMode === "add-source" ? "" : "add-source"; paint(); } }, "+ 添加图库源"),
+          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openExtensionSubmitModal(ctx, { channel: "gallery" }) }, "＋ 申请收录"),
+          el("button", { type: "button", class: "btn btn-sm" + (panelMode === "add-source" ? " btn-primary" : ""), onClick: () => { panelMode = panelMode === "add-source" ? "" : "add-source"; paint(); } }, "+ 添加源"),
           el("button", { type: "button", class: "btn btn-sm" + (panelMode === "direct-url" ? " btn-primary" : ""), onClick: () => { panelMode = panelMode === "direct-url" ? "" : "direct-url"; paint(); } }, "🔗 链接直装"),
-          el("button", { type: "button", class: "btn btn-sm", onClick: () => load(true) }, "↻ 刷新市场")
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => load(true) }, "↻ 刷新")
         )
       ),
-      el("div", { class: "pm-filter-bar" }, catBar, searchIn),
-      el("span", { class: "muted", style: { fontSize: "11.5px" } }, "🔒 全部扩展图库采用 Format 1 标准接口，按需选装且索引与图片仅缓存在本机，不会同步至云端。")
+      el("div", { class: "pm-filter-bar" }, catBar, searchIn)
     ));
 
     if (panelMode === "add-source") {
@@ -443,15 +476,84 @@ export function renderGalleriesMarketTab(stage, ctx, helpers) {
     }
 
     const q = query.trim().toLowerCase();
+
+    if (subMode === "installed") {
+      const list = installedPacks.filter((p) =>
+        !q || `${p.id} ${p.name} ${p.nameEn || ""} ${p.description || ""} ${p.author || ""}`.toLowerCase().includes(q)
+      );
+      if (!list.length) {
+        gridHost.appendChild(el("div", { class: "card col", style: { alignItems: "center", gap: "10px", padding: "28px 16px" } },
+          el("span", { class: "muted" }, "暂无已安装的图库插件"),
+          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => { subMode = "market"; paint(); } }, "浏览图库市场")
+        ));
+        return;
+      }
+      const listEl = el("div", { class: "pm-installed-list" });
+      list.forEach((p) => {
+        const isBusy = busyId === p.id;
+        listEl.appendChild(el("div", { class: "pm-inst-row" },
+          el("div", { class: "row", style: { gap: "11px", minWidth: 0, flex: "1", alignItems: "center" } },
+            el("div", { class: "pm-logo", style: { fontSize: "18px" } }, p.multiVariant ? "🧍" : "🖼️"),
+            el("div", { class: "col", style: { gap: "3px", minWidth: 0, flex: "1" } },
+              el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+                el("strong", { style: { fontSize: "13.5px" } }, p.name),
+                p.installedVersion || p.version ? el("span", { class: "pm-ver mono" }, `v${p.installedVersion || p.version}`) : null,
+                el("span", { class: "pm-chip soft" }, `${p.itemCount || 0} 条 · ${formatBytes(p.cachedBytes)}`)
+              ),
+              el("span", { class: "muted", style: { fontSize: "12px" } }, p.description || p.id)
+            )
+          ),
+          el("div", { class: "row", style: { gap: "6px", flexShrink: 0 } },
+            el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("atlas", { tab: p.id }) }, "去画廊"),
+            !p.customInstall
+              ? el("button", {
+                  type: "button", class: "btn btn-sm", disabled: Boolean(busyId),
+                  onClick: async () => {
+                    busyId = p.id; paint();
+                    try {
+                      data = await api("POST", "/api/galleries/market/install", { id: p.id, mirror: getMirror() });
+                      toast(`已更新「${p.name}」`);
+                    } catch (e) { toast(e.message || "更新失败"); }
+                    finally { busyId = ""; if (stage.isConnected) paint(); }
+                  },
+                }, isBusy ? "更新中…" : "更新")
+              : null,
+            p.customInstall
+              ? el("button", {
+                  type: "button", class: "btn btn-sm",
+                  onClick: () => openExtensionSubmitModal(ctx, {
+                    channel: "gallery",
+                    prefill: { name: p.name, slug: p.id, repoUrl: p.sourceUrl || p.homepage || "", description: p.description || "", authorName: p.author || "", version: p.version || "" },
+                  }),
+                }, "申请收录")
+              : null,
+            el("button", {
+              type: "button", class: "btn btn-sm btn-danger", disabled: Boolean(busyId),
+              onClick: async () => {
+                if (!window.confirm(`卸载「${p.name}」并清理本地缓存（${formatBytes(p.cachedBytes)}）？`)) return;
+                busyId = p.id; paint();
+                try {
+                  data = await api("POST", `/api/galleries/market/${encodeURIComponent(p.id)}/uninstall`, { purgeCache: true });
+                  toast(`已卸载「${p.name}」`); refreshHub?.();
+                } catch (e) { toast(e.message || "卸载失败"); }
+                finally { busyId = ""; if (stage.isConnected) paint(); }
+              },
+            }, "卸载")
+          )
+        ));
+      });
+      gridHost.appendChild(listEl);
+      return;
+    }
+
     const list = packs.filter((p) => {
-      if (activeCat === "__installed__" && !p.installed) return false;
-      if (activeCat && activeCat !== "__installed__" && !(p.categories || []).includes(activeCat)) return false;
+      if (activeCat && !(p.categories || []).includes(activeCat)) return false;
       if (!q) return true;
       return `${p.id} ${p.name} ${p.nameEn || ""} ${p.description || ""} ${p.author || ""}`.toLowerCase().includes(q);
     });
 
     if (!list.length) {
-      gridHost.appendChild(el("div", { class: "card muted", style: { textAlign: "center", padding: "28px 16px" } }, "当前筛选下暂无扩展图库。"));
+      gridHost.appendChild(el("div", { class: "card muted", style: { textAlign: "center", padding: "28px 16px" } }, "暂无匹配的图库插件。"));
       return;
     }
 
@@ -469,7 +571,7 @@ export function renderGalleriesMarketTab(stage, ctx, helpers) {
               busyId = p.id; paint();
               try {
                 data = await api("POST", "/api/galleries/market/install", { id: p.id, mirror: getMirror() });
-                toast(`已安装「${p.name}」，可立即在画廊与生图参考图中使用`);
+                toast(`已安装「${p.name}」`);
                 refreshHub?.();
               } catch (e) { toast(e.message || "安装失败"); }
               finally { busyId = ""; if (stage.isConnected) paint(); }
@@ -538,7 +640,7 @@ export function renderGalleriesMarketTab(stage, ctx, helpers) {
 }
 
 // =========================================================================
-// 3. Skills Channel (Skill Market + Installed Skills Switcher)
+// 2. Skills Channel (Skills：页内独立管理 市场 / 已安装)
 // =========================================================================
 
 export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, helpers) {
@@ -556,7 +658,7 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
   const searchIn = el("input", {
     type: "search",
     class: "input pm-search-input",
-    placeholder: "搜索 Skill 名称、用途或标签…",
+    placeholder: "搜索 Skill…",
     "aria-label": "搜索 Skill",
   });
   searchIn.addEventListener("input", () => { query = searchIn.value; paint(); });
@@ -583,10 +685,7 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
   const openAddSkillSourceModal = () => {
     const urlIn = el("input", { class: "input", type: "url", placeholder: "https://.../index.json（Format 1 Skill 市场）" });
     const nameIn = el("input", { class: "input", type: "text", placeholder: "市场名称（可选）" });
-    showModal("添加 Skill 市场源", el("div", { class: "col", style: { gap: "8px" } },
-      el("span", { class: "muted", style: { fontSize: "12.5px" } }, "输入兼容 Handraw Format 1 规范的 Skill 市场 index.json 地址："),
-      urlIn, nameIn
-    ), [
+    showModal("添加 Skill 市场源", el("div", { class: "col", style: { gap: "8px" } }, urlIn, nameIn), [
       el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
       el("button", {
         type: "button", class: "btn btn-primary",
@@ -604,7 +703,6 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
   const openManualInstallSkillModal = () => {
     const srcIn = el("input", { class: "input", placeholder: "本地文件夹、SKILL.md 文件路径或 GitHub/HTTP 链接…" });
     showModal("手动安装 Skill", el("div", { class: "col", style: { gap: "8px" } },
-      el("span", { class: "muted", style: { fontSize: "12.5px" } }, "输入包含 SKILL.md 的本地目录、文件路径或远端链接："),
       el("div", { class: "row", style: { gap: "6px" } },
         srcIn,
         el("button", {
@@ -640,7 +738,6 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
         el("span", { class: "badge" }, formatSkillSourceLabel(sk)),
         sk.version ? el("span", { class: "badge" }, `v${sk.version}`) : null
       ),
-      el("span", { class: "muted", style: { fontSize: "12px" } }, "可在「聊天」、「文章 AI 改稿」及兼容插件中通过 Skill 选择器或 /" + sk.id + " 直接调用。"),
       editor
     ), [
       el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
@@ -661,7 +758,7 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
     clear(bodyHost);
 
     const subToggle = el("div", { class: "pm-seg-group", role: "tablist" },
-      el("button", { type: "button", class: "pm-seg-btn" + (subMode === "market" ? " is-active" : ""), onClick: () => { subMode = "market"; paint(); } }, `Skill 市场 (${(marketData?.skills || []).length})`),
+      el("button", { type: "button", class: "pm-seg-btn" + (subMode === "market" ? " is-active" : ""), onClick: () => { subMode = "market"; paint(); } }, `市场 (${(marketData?.skills || []).length})`),
       el("button", { type: "button", class: "pm-seg-btn" + (subMode === "installed" ? " is-active" : ""), onClick: () => { subMode = "installed"; paint(); } }, `已安装 (${installedSkills.length})`)
     );
 
@@ -674,7 +771,7 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
           } catch (e) { toast(e.message || "移除失败"); }
           finally { busyId = ""; if (stage.isConnected) paint(); }
         })
-      : null;
+      : el("div", { class: "row" });
 
     const catBar = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px", alignItems: "center" } }, subToggle);
     if (subMode === "market" && marketData) {
@@ -690,15 +787,11 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
 
     topHost.appendChild(el("div", { class: "card col", style: { gap: "10px" } },
       el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px", alignItems: "center" } },
-        el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
-          el("strong", null, "AI Skills 技能市场"),
-          srcChips,
-          el("a", { href: "https://gitee.com/yang02010/handraw-skills", class: "muted", style: { fontSize: "11.5px" }, onClick: (e) => { e.preventDefault(); openURL("https://gitee.com/yang02010/handraw-skills"); } }, "Gitee 镜像 ↗"),
-          el("a", { href: "https://github.com/yang0/handraw-skills/blob/main/CONTRIBUTING.md", class: "muted", style: { fontSize: "11.5px" }, onClick: (e) => { e.preventDefault(); openURL("https://github.com/yang0/handraw-skills/blob/main/CONTRIBUTING.md"); } }, "提交 Skill PR ↗")
-        ),
+        srcChips,
         el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
-          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openHarnessSkillImportModal({ onImported: () => { loadMarket(false); refreshHub?.(); } }) }, "📥 本机 AI 客户端导入"),
-          el("button", { type: "button", class: "btn btn-sm", onClick: openAddSkillSourceModal }, "+ 添加市场源"),
+          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openExtensionSubmitModal(ctx, { channel: "skill" }) }, "＋ 申请收录"),
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => openHarnessSkillImportModal({ onImported: () => { loadMarket(false); refreshHub?.(); } }) }, "📥 本机导入"),
+          el("button", { type: "button", class: "btn btn-sm", onClick: openAddSkillSourceModal }, "+ 添加源"),
           el("button", { type: "button", class: "btn btn-sm", onClick: openManualInstallSkillModal }, "＋ 手动安装"),
           el("button", { type: "button", class: "btn btn-sm", onClick: () => loadMarket(true) }, "↻ 刷新")
         )
@@ -719,7 +812,7 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
         return `${sk.id} ${sk.name} ${sk.nameEn || ""} ${sk.description || ""} ${(sk.tags || []).join(" ")}`.toLowerCase().includes(q);
       });
       if (!list.length) {
-        bodyHost.appendChild(el("div", { class: "card muted", style: { textAlign: "center", padding: "28px 16px" } }, "当前筛选下暂无匹配的 Skill。"));
+        bodyHost.appendChild(el("div", { class: "card muted", style: { textAlign: "center", padding: "28px 16px" } }, "暂无匹配的 Skill。"));
         return;
       }
       const grid = el("div", { class: "pm-grid" });
@@ -741,7 +834,7 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
                   marketData = res;
                   const refreshed = await api("GET", "/api/skills").catch(() => null);
                   if (Array.isArray(refreshed?.items)) installedSkills = refreshed.items;
-                  toast(`已安装 Skill「${sk.name}」，可在聊天与文章改稿中使用`);
+                  toast(`已安装 Skill「${sk.name}」`);
                   refreshHub?.();
                 } catch (e) { toast(e.message || "安装失败"); }
                 finally { busyId = ""; if (stage.isConnected) paint(); }
@@ -779,8 +872,8 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
     );
     if (!list.length) {
       bodyHost.appendChild(el("div", { class: "card col", style: { alignItems: "center", gap: "10px", padding: "28px 16px" } },
-        el("strong", null, "暂无匹配的已安装 Skill"),
-        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => { subMode = "market"; paint(); } }, "去 Skill 市场挑选")
+        el("span", { class: "muted" }, "暂无已安装的 Skill"),
+        el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => { subMode = "market"; paint(); } }, "浏览 Skill 市场")
       ));
       return;
     }
@@ -812,7 +905,22 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
             sk.version ? el("span", { class: "pm-ver mono" }, `v${sk.version}`) : null
           ),
           el("div", { class: "row", style: { gap: "6px" } },
-            el("button", { type: "button", class: "btn btn-sm", onClick: () => openSkillDetailModal(sk) }, "查看 / 编辑"),
+            el("button", { type: "button", class: "btn btn-sm", onClick: () => openSkillDetailModal(sk) }, "查看"),
+            !sk.builtin
+              ? el("button", {
+                  type: "button", class: "btn btn-sm",
+                  onClick: () => openExtensionSubmitModal(ctx, {
+                    channel: "skill",
+                    prefill: {
+                      name: sk.name || sk.id,
+                      slug: sk.id,
+                      repoUrl: /^https?:\/\//i.test(sk.source || "") ? sk.source : "",
+                      description: sk.description || "",
+                      version: sk.version || "",
+                    },
+                  }),
+                }, "申请收录")
+              : null,
             !sk.builtin
               ? el("button", {
                   type: "button", class: "btn btn-sm btn-danger",
@@ -836,12 +944,14 @@ export function renderSkillsHubTab(stage, root, ctx, initialInstalledSkills, hel
 }
 
 // =========================================================================
-// 4. Obsidian Writing Plugins Market Channel (/api/article/obsidian/market)
+// 3. Obsidian Writing Plugins Channel (写作插件：页内独立管理 市场 / 已安装)
 // =========================================================================
 
-export function renderObsidianMarketTab(stage, ctx, helpers) {
+export function renderObsidianMarketTab(stage, ctx, initialInstalledPlugins, helpers) {
   const { getMirror, makeSkeletonGrid, refreshHub } = helpers;
+  let subMode = "market"; // "market" | "installed"
   let data = null;
+  let installedPlugins = Array.isArray(initialInstalledPlugins) ? initialInstalledPlugins : [];
   let activeCat = "";
   let query = "";
   let includeCommunity = false;
@@ -853,13 +963,13 @@ export function renderObsidianMarketTab(stage, ctx, helpers) {
   const searchIn = el("input", {
     type: "search",
     class: "input pm-search-input",
-    placeholder: "搜索写作插件（支持公众号、排版、Dataview 等）…",
+    placeholder: "搜索写作插件…",
     "aria-label": "搜索写作插件",
   });
   let searchTimer = null;
   searchIn.addEventListener("input", () => {
     query = searchIn.value;
-    if (includeCommunity) {
+    if (subMode === "market" && includeCommunity) {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => load(false), 260);
     } else {
@@ -877,7 +987,12 @@ export function renderObsidianMarketTab(stage, ctx, helpers) {
       if (refresh) qs.set("refresh", "1");
       if (includeCommunity) qs.set("community", "1");
       if (includeCommunity && query.trim()) qs.set("q", query.trim());
-      data = await api("GET", `/api/article/obsidian/market?${qs.toString()}`);
+      const [mkt, inst] = await Promise.all([
+        api("GET", `/api/article/obsidian/market?${qs.toString()}`),
+        api("GET", "/api/article/obsidian/plugins").catch(() => ({ plugins: installedPlugins })),
+      ]);
+      data = mkt;
+      if (Array.isArray(inst?.plugins)) installedPlugins = inst.plugins;
     } catch (e) {
       data = { sources: [], categories: [], items: [], warning: e.message };
     }
@@ -904,10 +1019,7 @@ export function renderObsidianMarketTab(stage, ctx, helpers) {
 
   const openManualInstallObsModal = () => {
     const repoIn = el("input", { class: "input", placeholder: "GitHub 仓库（如 sunbooshi/note-to-mp）或本地插件目录" });
-    showModal("手动安装 Obsidian 写作插件", el("div", { class: "col", style: { gap: "8px" } },
-      el("span", { class: "muted", style: { fontSize: "12.5px" } }, "输入 GitHub 仓库名（owner/repo）或包含 manifest.json 与 main.js 的本地目录："),
-      repoIn
-    ), [
+    showModal("手动安装写作插件", el("div", { class: "col", style: { gap: "8px" } }, repoIn), [
       el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
       el("button", {
         type: "button", class: "btn btn-primary",
@@ -927,21 +1039,28 @@ export function renderObsidianMarketTab(stage, ctx, helpers) {
   const paint = () => {
     clear(topHost);
     clear(gridHost);
-    if (!data) {
+    if (!data && subMode === "market") {
       gridHost.appendChild(makeSkeletonGrid(6));
       return;
     }
 
-    const items = data.items || [];
-    const cats = data.categories || [];
-    const srcChips = renderSourceChips(data.sources, busyId, async (s) => {
-      busyId = "__rm__"; paint();
-      try {
-        data = await api("DELETE", `/api/article/obsidian/market/sources/${encodeURIComponent(s.id)}`);
-        toast(`已移除市场源「${s.name || s.id}」`);
-      } catch (e) { toast(e.message || "移除失败"); }
-      finally { busyId = ""; if (stage.isConnected) paint(); }
-    });
+    const items = data?.items || [];
+    const cats = data?.categories || [];
+    const srcChips = data
+      ? renderSourceChips(data.sources, busyId, async (s) => {
+          busyId = "__rm__"; paint();
+          try {
+            data = await api("DELETE", `/api/article/obsidian/market/sources/${encodeURIComponent(s.id)}`);
+            toast(`已移除市场源「${s.name || s.id}」`);
+          } catch (e) { toast(e.message || "移除失败"); }
+          finally { busyId = ""; if (stage.isConnected) paint(); }
+        })
+      : el("div", { class: "row" });
+
+    const subToggle = el("div", { class: "pm-seg-group", role: "tablist" },
+      el("button", { type: "button", class: "pm-seg-btn" + (subMode === "market" ? " is-active" : ""), onClick: () => { subMode = "market"; paint(); } }, `市场 (${items.length})`),
+      el("button", { type: "button", class: "pm-seg-btn" + (subMode === "installed" ? " is-active" : ""), onClick: () => { subMode = "installed"; paint(); } }, `已安装 (${installedPlugins.length})`)
+    );
 
     const commChk = el("input", { type: "checkbox", checked: includeCommunity });
     commChk.addEventListener("change", () => {
@@ -949,25 +1068,24 @@ export function renderObsidianMarketTab(stage, ctx, helpers) {
       load(false);
     });
 
-    const catBar = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } },
-      el("button", { type: "button", class: "btn btn-sm" + (activeCat === "" ? " btn-primary" : ""), onClick: () => { activeCat = ""; paint(); } }, `全部 (${items.length})`),
-      ...cats.map((c) => el("button", {
-        type: "button",
-        class: "btn btn-sm" + (activeCat === c.id ? " btn-primary" : ""),
-        onClick: () => { activeCat = c.id; paint(); },
-      }, `${c.name} (${c.count})`))
-    );
+    const catBar = el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px", alignItems: "center" } }, subToggle);
+    if (subMode === "market") {
+      catBar.appendChild(el("button", { type: "button", class: "btn btn-sm" + (activeCat === "" ? " btn-primary" : ""), onClick: () => { activeCat = ""; paint(); } }, "全部分类"));
+      cats.forEach((c) => {
+        catBar.appendChild(el("button", {
+          type: "button",
+          class: "btn btn-sm" + (activeCat === c.id ? " btn-primary" : ""),
+          onClick: () => { activeCat = c.id; paint(); },
+        }, `${c.name} (${c.count})`));
+      });
+    }
 
     topHost.appendChild(el("div", { class: "card col", style: { gap: "10px" } },
       el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px", alignItems: "center" } },
-        el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } },
-          el("strong", null, "写作插件市场（Obsidian 兼容）"),
-          srcChips,
-          el("a", { href: "https://gitee.com/yang02010/handraw-obsidian-plugins", class: "muted", style: { fontSize: "11.5px" }, onClick: (e) => { e.preventDefault(); openURL("https://gitee.com/yang02010/handraw-obsidian-plugins"); } }, "Gitee 镜像 ↗"),
-          el("a", { href: "https://github.com/yang0/handraw-obsidian-plugins/blob/main/CONTRIBUTING.md", class: "muted", style: { fontSize: "11.5px" }, onClick: (e) => { e.preventDefault(); openURL("https://github.com/yang0/handraw-obsidian-plugins/blob/main/CONTRIBUTING.md"); } }, "提交插件 PR ↗")
-        ),
+        srcChips,
         el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
-          el("button", { type: "button", class: "btn btn-sm", onClick: openAddObsSourceModal }, "+ 添加市场源"),
+          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => openExtensionSubmitModal(ctx, { channel: "obsidian" }) }, "＋ 申请收录"),
+          el("button", { type: "button", class: "btn btn-sm", onClick: openAddObsSourceModal }, "+ 添加源"),
           el("button", { type: "button", class: "btn btn-sm", onClick: openManualInstallObsModal }, "＋ 手动安装"),
           el("button", { type: "button", class: "btn btn-sm", onClick: () => load(true) }, "↻ 刷新")
         )
@@ -975,14 +1093,84 @@ export function renderObsidianMarketTab(stage, ctx, helpers) {
       el("div", { class: "pm-filter-bar" },
         catBar,
         el("div", { class: "row", style: { gap: "10px", flexWrap: "wrap", alignItems: "center" } },
-          el("label", { class: "pm-toggle-inline" }, commChk, el("span", null, "包含全量 Obsidian 社区")),
+          subMode === "market"
+            ? el("label", { class: "pm-toggle-inline" }, commChk, el("span", null, "包含全量 Obsidian 社区"))
+            : null,
           searchIn
         )
       ),
-      data.warning ? el("span", { class: "muted", style: { fontSize: "11.5px" } }, `⚠️ ${data.warning}`) : null
+      data?.warning ? el("span", { class: "muted", style: { fontSize: "11.5px" } }, `⚠️ ${data.warning}`) : null
     ));
 
     const q = query.trim().toLowerCase();
+
+    if (subMode === "installed") {
+      const list = installedPlugins.filter((op) =>
+        !q || `${op.id} ${op.manifest?.name || ""} ${op.manifest?.description || ""} ${op.manifest?.author || ""}`.toLowerCase().includes(q)
+      );
+      if (!list.length) {
+        gridHost.appendChild(el("div", { class: "card col", style: { alignItems: "center", gap: "10px", padding: "28px 16px" } },
+          el("span", { class: "muted" }, "暂无已安装的写作插件"),
+          el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => { subMode = "market"; paint(); } }, "浏览写作插件市场")
+        ));
+        return;
+      }
+      const listEl = el("div", { class: "pm-installed-list" });
+      list.forEach((op) => {
+        const chkId = `obs-inst-en-${op.id}`;
+        const chk = el("input", { id: chkId, type: "checkbox", checked: Boolean(op.enabled) });
+        chk.addEventListener("change", async () => {
+          try {
+            await api("PATCH", `/api/article/obsidian/plugins/${encodeURIComponent(op.id)}`, { enabled: chk.checked });
+            op.enabled = chk.checked;
+            toast(chk.checked ? `已启用「${op.manifest?.name || op.id}」` : "已停用写作插件");
+          } catch (e) { chk.checked = !chk.checked; toast(e.message); }
+        });
+        listEl.appendChild(el("div", { class: "pm-inst-row" + (!op.enabled ? " is-off" : "") },
+          el("div", { class: "row", style: { gap: "11px", minWidth: 0, flex: "1", alignItems: "center" } },
+            el("div", { class: "pm-logo", style: { fontSize: "18px" } }, "📝"),
+            el("div", { class: "col", style: { gap: "3px", minWidth: 0, flex: "1" } },
+              el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+                el("strong", { style: { fontSize: "13.5px" } }, op.manifest?.name || op.id),
+                op.manifest?.version ? el("span", { class: "pm-ver mono" }, `v${op.manifest.version}`) : null
+              ),
+              el("span", { class: "muted", style: { fontSize: "12px" } }, op.manifest?.description || op.id)
+            )
+          ),
+          el("div", { class: "row", style: { gap: "6px", flexShrink: 0 } },
+            el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("article") }, "去文章"),
+            el("button", {
+              type: "button", class: "btn btn-sm",
+              onClick: () => openExtensionSubmitModal(ctx, {
+                channel: "obsidian",
+                prefill: {
+                  name: op.manifest?.name || op.id,
+                  slug: op.id,
+                  repoUrl: op.sourceRepo || "",
+                  description: op.manifest?.description || "",
+                  authorName: op.manifest?.author || "",
+                  version: op.manifest?.version || "",
+                },
+              }),
+            }, "申请收录"),
+            el("label", { for: chkId, class: "row", style: { cursor: "pointer", fontSize: "12.5px" } }, chk, "启用"),
+            el("button", {
+              type: "button", class: "btn btn-sm btn-danger",
+              onClick: async () => {
+                if (!window.confirm(`卸载写作插件「${op.manifest?.name || op.id}」？`)) return;
+                try {
+                  await api("DELETE", `/api/article/obsidian/plugins/${encodeURIComponent(op.id)}`);
+                  toast("已卸载写作插件"); await load(false); refreshHub?.();
+                } catch (e) { toast(e.message); }
+              },
+            }, "卸载")
+          )
+        ));
+      });
+      gridHost.appendChild(listEl);
+      return;
+    }
+
     const list = items.filter((it) => {
       if (activeCat && !(it.categories || []).includes(activeCat)) return false;
       if (!q || includeCommunity) return true;
@@ -990,7 +1178,7 @@ export function renderObsidianMarketTab(stage, ctx, helpers) {
     });
 
     if (!list.length) {
-      gridHost.appendChild(el("div", { class: "card muted", style: { textAlign: "center", padding: "28px 16px" } }, "暂无匹配的写作插件。可勾选上方「包含全量 Obsidian 社区」搜索全部社区插件。"));
+      gridHost.appendChild(el("div", { class: "card muted", style: { textAlign: "center", padding: "28px 16px" } }, "暂无匹配的写作插件。"));
       return;
     }
 
@@ -998,7 +1186,7 @@ export function renderObsidianMarketTab(stage, ctx, helpers) {
     list.forEach((it) => {
       const isBusy = busyId === it.id;
       const actBtn = it.installed
-        ? el("button", { type: "button", class: "pm-act done", onClick: () => ctx.go("article") }, "去文章使用")
+        ? el("button", { type: "button", class: "pm-act done", onClick: () => ctx.go("article") }, "去文章")
         : el("button", {
             type: "button", class: "pm-act " + (isBusy ? "busy" : "get"), disabled: Boolean(busyId),
             onClick: async () => {
@@ -1013,7 +1201,7 @@ export function renderObsidianMarketTab(stage, ctx, helpers) {
                   mirror: getMirror(),
                   enable: true,
                 });
-                toast(`已安装并启用写作插件「${it.name}」`);
+                toast(`已安装并启用「${it.name}」`);
                 await load(false); refreshHub?.();
               } catch (e) { toast(e.message || "安装失败"); }
               finally { busyId = ""; if (stage.isConnected) paint(); }
@@ -1069,148 +1257,4 @@ export function renderObsidianMarketTab(stage, ctx, helpers) {
   };
 
   load(false);
-}
-
-// =========================================================================
-// 5. Unified Installed Extensions Summary (Galleries + Skills + Obsidian)
-// =========================================================================
-
-export function renderExtraInstalledSections(stage, ctx, { galleries, skills, obsidianPlugins, builtins, filterType, refreshHub, renderBuiltinList }) {
-  const showGal = filterType === "all" || filterType === "galleries";
-  const showSk = filterType === "all" || filterType === "skills";
-  const showObs = filterType === "all" || filterType === "obsidian";
-  const showBuilt = filterType === "builtin";
-
-  if (showBuilt) {
-    renderBuiltinList(stage);
-    return;
-  }
-
-  if (showGal && galleries.length > 0) {
-    const list = el("div", { class: "pm-installed-list" });
-    galleries.forEach((g) => {
-      list.appendChild(el("div", { class: "pm-inst-row" },
-        el("div", { class: "row", style: { gap: "11px", minWidth: 0, flex: "1", alignItems: "center" } },
-          el("div", { class: "pm-logo", style: { fontSize: "18px" } }, g.multiVariant ? "🧍" : "🖼️"),
-          el("div", { class: "col", style: { gap: "3px", minWidth: 0, flex: "1" } },
-            el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
-              el("strong", { style: { fontSize: "13.5px" } }, g.name),
-              el("span", { class: "badge badge-accent" }, "扩展图库"),
-              g.installedVersion ? el("span", { class: "pm-ver mono" }, `v${g.installedVersion}`) : null,
-              el("span", { class: "pm-chip soft" }, `${g.itemCount || 0} 条 · 缓存 ${formatBytes(g.cachedBytes)}`)
-            ),
-            el("span", { class: "muted", style: { fontSize: "12px" } }, g.description || g.id)
-          )
-        ),
-        el("div", { class: "row", style: { gap: "8px", flexShrink: 0 } },
-          el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("atlas", { tab: g.id }) }, "去画廊"),
-          el("button", {
-            type: "button", class: "btn btn-sm btn-danger",
-            onClick: async () => {
-              if (!window.confirm(`卸载扩展图库「${g.name}」并清理缓存？`)) return;
-              try {
-                await api("POST", `/api/galleries/market/${encodeURIComponent(g.id)}/uninstall`, { purgeCache: true });
-                toast(`已卸载「${g.name}」`); refreshHub?.();
-              } catch (e) { toast(e.message || "卸载失败"); }
-            },
-          }, "卸载")
-        )
-      ));
-    });
-    stage.appendChild(el("div", { class: "col", style: { gap: "6px" } },
-      el("strong", { style: { fontSize: "13px" } }, `已安装扩展图库 (${galleries.length})`),
-      list
-    ));
-  }
-
-  if (showSk && skills.length > 0) {
-    const list = el("div", { class: "pm-installed-list" });
-    skills.forEach((sk) => {
-      const chkId = `u-sk-${sk.id}`;
-      const chk = el("input", { id: chkId, type: "checkbox", checked: sk.enabled !== false });
-      chk.addEventListener("change", async () => {
-        try {
-          await api("PATCH", `/api/skills/${encodeURIComponent(sk.id)}`, { enabled: chk.checked });
-          toast(chk.checked ? `已启用 Skill「${sk.name}」` : `已停用 Skill「${sk.name}」`);
-        } catch (e) { chk.checked = !chk.checked; toast(e.message); }
-      });
-      list.appendChild(el("div", { class: "pm-inst-row" + (sk.enabled === false ? " is-off" : "") },
-        el("div", { class: "row", style: { gap: "11px", minWidth: 0, flex: "1", alignItems: "center" } },
-          el("div", { class: "pm-logo", style: { fontSize: "18px" } }, "⚡"),
-          el("div", { class: "col", style: { gap: "3px", minWidth: 0, flex: "1" } },
-            el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
-              el("strong", { style: { fontSize: "13.5px" } }, sk.name || sk.id),
-              el("span", { class: "badge" }, "AI Skill"),
-              el("span", { class: "pm-ver mono" }, `/${sk.id}`),
-              sk.builtin ? el("span", { class: "pm-chip soft" }, "官方内置") : null
-            ),
-            el("span", { class: "muted", style: { fontSize: "12px" } }, sk.description || "")
-          )
-        ),
-        el("div", { class: "row", style: { gap: "8px", flexShrink: 0 } },
-          el("label", { for: chkId, class: "row", style: { cursor: "pointer", fontSize: "12.5px" } }, chk, "启用"),
-          !sk.builtin
-            ? el("button", {
-                type: "button", class: "btn btn-sm btn-danger",
-                onClick: async () => {
-                  try {
-                    await api("DELETE", `/api/skills/${encodeURIComponent(sk.id)}`);
-                    toast(`已删除 Skill「${sk.name}」`); refreshHub?.();
-                  } catch (e) { toast(e.message); }
-                },
-              }, "卸载")
-            : null
-        )
-      ));
-    });
-    stage.appendChild(el("div", { class: "col", style: { gap: "6px" } },
-      el("strong", { style: { fontSize: "13px" } }, `已安装 AI Skills (${skills.length})`),
-      list
-    ));
-  }
-
-  if (showObs && obsidianPlugins.length > 0) {
-    const list = el("div", { class: "pm-installed-list" });
-    obsidianPlugins.forEach((op) => {
-      const chkId = `u-obs-${op.id}`;
-      const chk = el("input", { id: chkId, type: "checkbox", checked: Boolean(op.enabled) });
-      chk.addEventListener("change", async () => {
-        try {
-          await api("PATCH", `/api/article/obsidian/plugins/${encodeURIComponent(op.id)}`, { enabled: chk.checked });
-          toast(chk.checked ? `已启用写作插件「${op.manifest?.name || op.id}」` : `已停用写作插件`);
-        } catch (e) { chk.checked = !chk.checked; toast(e.message); }
-      });
-      list.appendChild(el("div", { class: "pm-inst-row" + (!op.enabled ? " is-off" : "") },
-        el("div", { class: "row", style: { gap: "11px", minWidth: 0, flex: "1", alignItems: "center" } },
-          el("div", { class: "pm-logo", style: { fontSize: "18px" } }, "📝"),
-          el("div", { class: "col", style: { gap: "3px", minWidth: 0, flex: "1" } },
-            el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
-              el("strong", { style: { fontSize: "13.5px" } }, op.manifest?.name || op.id),
-              el("span", { class: "badge" }, "写作插件"),
-              op.manifest?.version ? el("span", { class: "pm-ver mono" }, `v${op.manifest.version}`) : null
-            ),
-            el("span", { class: "muted", style: { fontSize: "12px" } }, op.manifest?.description || op.id)
-          )
-        ),
-        el("div", { class: "row", style: { gap: "8px", flexShrink: 0 } },
-          el("button", { type: "button", class: "btn btn-sm", onClick: () => ctx.go("article") }, "去文章"),
-          el("label", { for: chkId, class: "row", style: { cursor: "pointer", fontSize: "12.5px" } }, chk, "启用"),
-          el("button", {
-            type: "button", class: "btn btn-sm btn-danger",
-            onClick: async () => {
-              if (!window.confirm(`卸载写作插件「${op.manifest?.name || op.id}」？`)) return;
-              try {
-                await api("DELETE", `/api/article/obsidian/plugins/${encodeURIComponent(op.id)}`);
-                toast("已卸载写作插件"); refreshHub?.();
-              } catch (e) { toast(e.message); }
-            },
-          }, "卸载")
-        )
-      ));
-    });
-    stage.appendChild(el("div", { class: "col", style: { gap: "6px" } },
-      el("strong", { style: { fontSize: "13px" } }, `已安装写作插件 (${obsidianPlugins.length})`),
-      list
-    ));
-  }
 }
