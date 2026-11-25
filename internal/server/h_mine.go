@@ -642,8 +642,15 @@ func (s *Server) mineAssetCategorySave(w http.ResponseWriter, r *http.Request) (
 	}
 	cat := AssetCategory{Key: key, Label: label, Builtin: false}
 	b, _ := json.Marshal(cat)
-	if err := s.DB.PutDoc(&store.Doc{Kind: "asset_category", ID: key, Name: label, Data: b, Dirty: true}); err != nil {
+	remoteID := ""
+	if prev, err := s.DB.GetDoc("asset_category", key); err == nil {
+		remoteID = prev.RemoteID
+	}
+	if err := s.DB.PutDoc(&store.Doc{Kind: "asset_category", ID: key, Name: label, Data: b, RemoteID: remoteID, Dirty: true}); err != nil {
 		return nil, err
+	}
+	if s.Site.LoggedIn() && settings.Get().AutoSyncResources {
+		go func() { _, _ = s.syncAssetCategoriesInternal(context.Background()) }()
 	}
 	updatedAll, custom := s.listAssetCategories()
 	return map[string]any{"category": cat, "items": updatedAll, "custom": custom}, nil
@@ -657,7 +664,13 @@ func (s *Server) mineAssetCategoryDelete(w http.ResponseWriter, r *http.Request)
 	if isBuiltinAssetCategory(key) {
 		return nil, bad("内置分类不可删除")
 	}
-	_ = s.DB.DeleteDocHard("asset_category", key)
+	if prev, err := s.DB.GetDoc("asset_category", key); err == nil && prev.RemoteID != "" {
+		prev.Deleted = true
+		prev.Dirty = true
+		_ = s.DB.PutDoc(&prev)
+	} else {
+		_ = s.DB.DeleteDocHard("asset_category", key)
+	}
 
 	migrated := 0
 	docs, _ := s.DB.ListDocs("asset", false)
@@ -675,6 +688,12 @@ func (s *Server) mineAssetCategoryDelete(w http.ResponseWriter, r *http.Request)
 				migrated++
 			}
 		}
+	}
+	if s.Site.LoggedIn() && settings.Get().AutoSyncResources {
+		go func() {
+			_, _ = s.syncAssetCategoriesInternal(context.Background())
+			_, _ = s.syncGalleryAssetsInternal(context.Background())
+		}()
 	}
 	all, custom := s.listAssetCategories()
 	return map[string]any{"ok": true, "migrated": migrated, "items": all, "custom": custom}, nil
@@ -737,8 +756,16 @@ func (s *Server) putCustomAsset(r *http.Request) (any, error) {
 		Tags:   body.Tags,
 	}
 	b, _ := json.Marshal(asset)
-	if err := s.DB.PutDoc(&store.Doc{Kind: "asset", ID: asset.ID, Name: asset.Name, Data: b, Dirty: true}); err != nil {
+	remoteID, remoteRev := "", 0
+	if prevDoc, err := s.DB.GetDoc("asset", asset.ID); err == nil {
+		remoteID = prevDoc.RemoteID
+		remoteRev = prevDoc.RemoteRev
+	}
+	if err := s.DB.PutDoc(&store.Doc{Kind: "asset", ID: asset.ID, Name: asset.Name, Data: b, RemoteID: remoteID, RemoteRev: remoteRev, Dirty: true}); err != nil {
 		return nil, err
+	}
+	if s.Site.LoggedIn() && settings.Get().AutoSyncResources {
+		go func() { _, _ = s.syncGalleryAssetsInternal(context.Background()) }()
 	}
 	return map[string]any{"asset": asset}, nil
 }
@@ -776,6 +803,8 @@ func (s *Server) mineDelete(w http.ResponseWriter, r *http.Request) (any, error)
 		if needSync && settings.Get().AutoSyncResources && s.Site.LoggedIn() {
 			go func() { _, _ = s.syncResourcesInternal(context.Background()) }()
 		}
+	} else if kind == "asset" && needSync && settings.Get().AutoSyncResources && s.Site.LoggedIn() {
+		go func() { _, _ = s.syncGalleryAssetsInternal(context.Background()) }()
 	}
 	return okv, nil
 }
@@ -1110,7 +1139,396 @@ func (s *Server) syncResourcesInternal(ctx context.Context) (map[string]any, err
 			pulled += rpl
 		}
 	}
+	if cRes, cErr := s.syncAssetCategoriesInternal(ctx); cErr == nil {
+		if cp, ok := cRes["pushed"].(int); ok {
+			pushed += cp
+		}
+		if cpl, ok := cRes["pulled"].(int); ok {
+			pulled += cpl
+		}
+	}
+	if aRes, aErr := s.syncGalleryAssetsInternal(ctx); aErr == nil {
+		if ap, ok := aRes["pushed"].(int); ok {
+			pushed += ap
+		}
+		if apl, ok := aRes["pulled"].(int); ok {
+			pulled += apl
+		}
+	}
 	return map[string]any{"ok": true, "pushed": pushed, "pulled": pulled, "conflicts": conflicts}, nil
+}
+
+func clientCatToWebCat(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "character", "characters":
+		return "characters"
+	case "prop", "props":
+		return "props"
+	case "scene", "scenes":
+		return "scenes"
+	case "", "other":
+		return "other"
+	default:
+		return strings.ToLower(strings.TrimSpace(kind))
+	}
+}
+
+func webCatToClientCat(cat string) string {
+	switch strings.ToLower(strings.TrimSpace(cat)) {
+	case "characters", "character":
+		return "character"
+	case "props", "prop":
+		return "prop"
+	case "scenes", "scene":
+		return "scene"
+	case "", "other":
+		return "other"
+	default:
+		return strings.ToLower(strings.TrimSpace(cat))
+	}
+}
+
+func (s *Server) syncAssetCategoriesInternal(ctx context.Context) (map[string]any, error) {
+	if !s.Site.LoggedIn() {
+		return nil, site.ErrNotLoggedIn
+	}
+	pushed, pulled := 0, 0
+
+	// 1. Push dirty local custom categories (saves & deletes) to Web (#161).
+	localDocs, _ := s.DB.ListDocs("asset_category", true)
+	for _, d := range localDocs {
+		if !d.Dirty {
+			continue
+		}
+		if d.Deleted {
+			if d.RemoteID != "" {
+				_, err := s.Site.Send(ctx, "DELETE", "/api/studio/asset-categories/"+url.PathEscape(d.RemoteID), nil)
+				if err == nil || strings.Contains(err.Error(), "404") {
+					_ = s.DB.DeleteDocHard("asset_category", d.ID)
+					pushed++
+				}
+			} else {
+				_ = s.DB.DeleteDocHard("asset_category", d.ID)
+			}
+			continue
+		}
+		var cat AssetCategory
+		if json.Unmarshal(d.Data, &cat) != nil {
+			cat = AssetCategory{Key: d.ID, Label: d.Name}
+		}
+		cat.Key = strings.TrimSpace(firstStr(cat.Key, d.ID))
+		cat.Label = strings.TrimSpace(firstStr(cat.Label, d.Name))
+		if cat.Key == "" || cat.Label == "" || isBuiltinAssetCategory(cat.Key) {
+			continue
+		}
+		raw, err := s.Site.Send(ctx, "POST", "/api/studio/asset-categories", map[string]any{
+			"key":   cat.Key,
+			"label": cat.Label,
+		})
+		if err != nil {
+			continue
+		}
+		var resp struct {
+			Category AssetCategory `json:"category"`
+		}
+		if json.Unmarshal(raw, &resp) == nil && resp.Category.Key != "" {
+			cat.Key = resp.Category.Key
+			cat.Label = firstStr(resp.Category.Label, cat.Label)
+		}
+		b, _ := json.Marshal(AssetCategory{Key: cat.Key, Label: cat.Label, Builtin: false})
+		d.Name = cat.Label
+		d.Data = b
+		d.RemoteID = cat.Key
+		d.Dirty = false
+		_ = s.DB.PutDoc(&d)
+		pushed++
+	}
+
+	// 2. Pull remote custom categories from Web.
+	raw, err := s.Site.Get(ctx, "/api/studio/asset-categories")
+	if err != nil {
+		return map[string]any{"ok": true, "pushed": pushed, "pulled": pulled}, nil
+	}
+	var listing struct {
+		Items  []AssetCategory `json:"items"`
+		Custom []AssetCategory `json:"custom"`
+	}
+	if json.Unmarshal(raw, &listing) != nil {
+		return map[string]any{"ok": true, "pushed": pushed, "pulled": pulled}, nil
+	}
+	remoteList := listing.Custom
+	if len(remoteList) == 0 && len(listing.Items) > 0 {
+		for _, it := range listing.Items {
+			if !it.Builtin {
+				remoteList = append(remoteList, it)
+			}
+		}
+	}
+	remoteKeys := map[string]bool{}
+	for _, rc := range remoteList {
+		key := strings.TrimSpace(rc.Key)
+		label := strings.TrimSpace(rc.Label)
+		if key == "" || label == "" || isBuiltinAssetCategory(key) || clientCatToWebCat(key) != strings.ToLower(key) {
+			continue
+		}
+		remoteKeys[key] = true
+		existing, exErr := s.DB.GetDoc("asset_category", key)
+		if exErr == nil && existing.Dirty {
+			continue
+		}
+		if exErr == nil && !existing.Deleted && existing.Name == label && existing.RemoteID == key {
+			continue
+		}
+		b, _ := json.Marshal(AssetCategory{Key: key, Label: label, Builtin: false})
+		_ = s.DB.PutDoc(&store.Doc{Kind: "asset_category", ID: key, Name: label, Data: b, RemoteID: key, Dirty: false})
+		pulled++
+	}
+
+	// Remove categories that were previously synced from Web but deleted remotely.
+	freshLocal, _ := s.DB.ListDocs("asset_category", false)
+	for _, d := range freshLocal {
+		if d.RemoteID != "" && !d.Dirty && !remoteKeys[d.RemoteID] {
+			_ = s.DB.DeleteDocHard("asset_category", d.ID)
+			// Migrate assets under that deleted category back to "other".
+			assetDocs, _ := s.DB.ListDocs("asset", false)
+			for _, ad := range assetDocs {
+				var a resources.Asset
+				if json.Unmarshal(ad.Data, &a) == nil && a.Kind == d.ID {
+					a.Kind = "other"
+					if nb, mErr := json.Marshal(a); mErr == nil {
+						ad.Data = nb
+						_ = s.DB.PutDoc(&ad)
+					}
+				}
+			}
+		}
+	}
+	return map[string]any{"ok": true, "pushed": pushed, "pulled": pulled}, nil
+}
+
+func (s *Server) syncGalleryAssetsInternal(ctx context.Context) (map[string]any, error) {
+	if !s.Site.LoggedIn() {
+		return nil, site.ErrNotLoggedIn
+	}
+	me, err := s.Site.Me(ctx)
+	if err != nil {
+		return nil, err
+	}
+	username, _ := me["username"].(string)
+	syncState := profile.ReadSyncState(username)
+	pushed, pulled := 0, 0
+
+	// 1. Push dirty local gallery assets (creates, metadata/category updates, deletes) to Web (#161).
+	localDocs, _ := s.DB.ListDocs("asset", true)
+	for _, d := range localDocs {
+		if !d.Dirty {
+			continue
+		}
+		if d.Deleted {
+			if d.RemoteID != "" {
+				rev := d.RemoteRev
+				if rev <= 0 {
+					rev = 1
+				}
+				_, err := s.Site.Send(ctx, "DELETE", fmt.Sprintf("/api/library/assets/%s?baseRevision=%d", url.PathEscape(d.RemoteID), rev), nil)
+				if err == nil || strings.Contains(err.Error(), "404") {
+					_ = s.DB.DeleteDocHard("asset", d.ID)
+					pushed++
+				}
+			} else {
+				_ = s.DB.DeleteDocHard("asset", d.ID)
+			}
+			continue
+		}
+		var a resources.Asset
+		if json.Unmarshal(d.Data, &a) != nil {
+			continue
+		}
+		uid := strings.TrimSpace(d.RemoteID)
+		isCreate := uid == ""
+		if isCreate {
+			uid = uuid.NewString()
+		}
+		tags := a.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		payload := map[string]any{
+			"uid":     uid,
+			"cat":     clientCatToWebCat(a.Kind),
+			"name":    firstStr(a.Name, d.Name, "自建资产"),
+			"nameEn":  a.NameEn,
+			"localId": a.ID,
+			"tags":    tags,
+			"origin":  "skill",
+		}
+		if !isCreate && d.RemoteRev > 0 {
+			payload["baseRevision"] = d.RemoteRev
+		}
+		if isCreate {
+			imgPath := normalizeLocalRef(a.Image)
+			if imgPath == "" {
+				imgPath = strings.TrimSpace(a.Image)
+			}
+			rawImg, rErr := os.ReadFile(imgPath)
+			if rErr != nil || len(rawImg) == 0 || len(rawImg) > 15<<20 {
+				continue
+			}
+			mime := "image/png"
+			switch strings.ToLower(sniffImageExt(rawImg)) {
+			case ".jpg", ".jpeg":
+				mime = "image/jpeg"
+			case ".webp":
+				mime = "image/webp"
+			}
+			payload["dataUrl"] = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(rawImg)
+		}
+		raw, err := s.Site.Send(ctx, "PUT", "/api/library/assets/"+url.PathEscape(uid), payload)
+		if err != nil {
+			continue
+		}
+		var resp struct {
+			UID      string `json:"uid"`
+			Revision int    `json:"revision"`
+			Item     struct {
+				UID      string `json:"uid"`
+				Revision int    `json:"revision"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(raw, &resp) == nil {
+			d.RemoteID = firstStr(resp.Item.UID, resp.UID, uid)
+			rev := resp.Item.Revision
+			if rev <= 0 {
+				rev = resp.Revision
+			}
+			if rev <= 0 {
+				rev = d.RemoteRev + 1
+			}
+			d.RemoteRev = rev
+			d.Dirty = false
+			_ = s.DB.PutDoc(&d)
+			pushed++
+		}
+	}
+
+	// 2. Pull remote gallery assets from Web (incremental when cursor exists).
+	byRemote := map[string]store.Doc{}
+	byID := map[string]store.Doc{}
+	existingAll, _ := s.DB.ListDocs("asset", true)
+	for _, doc := range existingAll {
+		byID[doc.ID] = doc
+		if doc.RemoteID != "" {
+			byRemote[doc.RemoteID] = doc
+		}
+	}
+
+	since, _ := syncState.Cursors["library_assets"].(string)
+	for pageIdx := 0; pageIdx < 10; pageIdx++ {
+		endpoint := "/api/library/assets?limit=100"
+		if since != "" {
+			endpoint += "&since=" + url.QueryEscape(since)
+		}
+		raw, err := s.Site.Get(ctx, endpoint)
+		if err != nil {
+			break
+		}
+		var page struct {
+			Items []struct {
+				UID       string   `json:"uid"`
+				LocalID   string   `json:"localId"`
+				Cat       string   `json:"cat"`
+				Name      string   `json:"name"`
+				NameEn    string   `json:"nameEn"`
+				Tags      []string `json:"tags"`
+				Revision  int      `json:"revision"`
+				DeletedAt string   `json:"deletedAt"`
+				ImageURL  string   `json:"imageUrl"`
+			} `json:"items"`
+			HasMore    bool   `json:"hasMore"`
+			NextCursor string `json:"nextCursor"`
+		}
+		if json.Unmarshal(raw, &page) != nil {
+			break
+		}
+		for _, it := range page.Items {
+			if strings.TrimSpace(it.UID) == "" {
+				continue
+			}
+			existing, hasExisting := byRemote[it.UID]
+			if !hasExisting && it.LocalID != "" {
+				existing, hasExisting = byID[it.LocalID]
+			}
+			if it.DeletedAt != "" {
+				if hasExisting {
+					_ = s.DB.DeleteDocHard("asset", existing.ID)
+					delete(byRemote, it.UID)
+					delete(byID, existing.ID)
+				}
+				continue
+			}
+			if hasExisting && existing.Dirty && existing.RemoteRev != it.Revision {
+				continue
+			}
+			var prev resources.Asset
+			if hasExisting {
+				_ = json.Unmarshal(existing.Data, &prev)
+			}
+			localImg := prev.Image
+			if localImg == "" || !fileExists(localImg) {
+				if dl := s.downloadPrivateResourceCover(ctx, it.ImageURL); dl != "" {
+					localImg = dl
+				}
+			}
+			if localImg == "" {
+				continue
+			}
+			clientKind := webCatToClientCat(it.Cat)
+			localID := ""
+			if hasExisting {
+				localID = existing.ID
+			} else if strings.TrimSpace(it.LocalID) != "" {
+				localID = strings.TrimSpace(it.LocalID)
+			} else {
+				prefix := map[string]string{"character": "MY-CH-", "prop": "MY-PR-", "scene": "MY-SCN-"}[clientKind]
+				if prefix == "" {
+					prefix = "MY-AS-"
+				}
+				localID = s.nextCustomCode("asset", prefix)
+			}
+			asset := resources.Asset{
+				ID:     localID,
+				Kind:   clientKind,
+				Name:   firstStr(it.Name, prev.Name, "自建资产"),
+				NameEn: firstStr(it.NameEn, prev.NameEn, it.Name),
+				Image:  localImg,
+				Tags:   it.Tags,
+			}
+			b, _ := json.Marshal(asset)
+			doc := store.Doc{
+				Kind:      "asset",
+				ID:        localID,
+				Name:      asset.Name,
+				Data:      b,
+				RemoteID:  it.UID,
+				RemoteRev: it.Revision,
+				Dirty:     false,
+			}
+			if s.DB.PutDoc(&doc) == nil {
+				byRemote[it.UID] = doc
+				byID[localID] = doc
+				pulled++
+			}
+		}
+		if page.NextCursor != "" {
+			since = page.NextCursor
+			syncState.Cursors["library_assets"] = page.NextCursor
+		}
+		if !page.HasMore || len(page.Items) == 0 {
+			break
+		}
+	}
+	_ = profile.WriteSyncState(username, syncState)
+	return map[string]any{"ok": true, "pushed": pushed, "pulled": pulled}, nil
 }
 
 func fileExists(p string) bool {
