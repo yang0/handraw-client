@@ -163,9 +163,54 @@ export function closeArticleContextMenu() {
   }
 }
 
-export function openArticleContextMenu(ev, items) {
-  ev.preventDefault();
-  ev.stopPropagation();
+// Safely parse and sanitize an SVG markup string from Obsidian plugins (#133).
+export function sanitizeSvgElement(svgHtml, size = 15) {
+  let raw = String(svgHtml || "").trim();
+  if (!raw || !/<svg\b/i.test(raw)) return null;
+  // Ensure SVG namespace so DOMParser("image/svg+xml") produces real renderable SVG elements!
+  if (!/\bxmlns\s*=/i.test(raw)) {
+    raw = raw.replace(/<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  }
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(raw, "image/svg+xml");
+    if (doc.querySelector("parsererror")) return null;
+    const svg = doc.documentElement;
+    if (!svg || svg.tagName.toLowerCase() !== "svg") return null;
+
+    svg.querySelectorAll("script,foreignObject,iframe,object,embed,style,link").forEach((n) => n.remove());
+    const walk = (node) => {
+      if (node.nodeType !== 1) return;
+      for (const attr of Array.from(node.attributes || [])) {
+        const name = attr.name.toLowerCase();
+        const val = String(attr.value || "").trim().toLowerCase();
+        if (name.startsWith("on") || ((name === "href" || name === "xlink:href") && val.startsWith("javascript:"))) {
+          node.removeAttribute(attr.name);
+        }
+      }
+      for (const child of Array.from(node.children || [])) walk(child);
+    };
+    walk(svg);
+    if (!svg.getAttribute("viewBox")) {
+      const w = parseFloat(svg.getAttribute("width") || "");
+      const h = parseFloat(svg.getAttribute("height") || "");
+      if (w > 0 && h > 0) svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+      else svg.setAttribute("viewBox", "0 0 24 24");
+    }
+    const out = document.importNode(svg, true);
+    out.setAttribute("width", String(size));
+    out.setAttribute("height", String(size));
+    out.setAttribute("aria-hidden", "true");
+    out.classList.add("ic-svg-ico");
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+export function openArticleContextMenu(ev, items, menuOpts = {}) {
+  if (ev && typeof ev.preventDefault === "function") ev.preventDefault();
+  if (ev && typeof ev.stopPropagation === "function") ev.stopPropagation();
   closeArticleContextMenu();
   const validRoot = (items || []).filter(Boolean);
   if (!validRoot.length) return;
@@ -206,15 +251,23 @@ export function openArticleContextMenu(ev, items) {
         return;
       }
       const hasChildren = Array.isArray(it.children) && it.children.filter(Boolean).length > 0;
-      const icoNode = it.swatch
-        ? el("span", { class: "ic-ctx-swatch", style: { background: it.swatch }, "aria-hidden": "true" })
-        : el("span", { class: "ic-ctx-ico", "aria-hidden": "true" }, it.icon || "");
+      let icoNode;
+      if (it.swatch) {
+        icoNode = el("span", { class: "ic-ctx-swatch", style: { background: it.swatch }, "aria-hidden": "true" });
+      } else if (it.iconNode) {
+        icoNode = el("span", { class: "ic-ctx-ico", "aria-hidden": "true" }, it.iconNode);
+      } else if (it.iconSvg) {
+        const svgEl = sanitizeSvgElement(it.iconSvg, 14);
+        icoNode = el("span", { class: "ic-ctx-ico", "aria-hidden": "true" }, svgEl || it.icon || "");
+      } else {
+        icoNode = el("span", { class: "ic-ctx-ico", "aria-hidden": "true" }, it.icon || "");
+      }
 
       const btn = el("button", {
         type: "button",
         role: "menuitem",
         "aria-haspopup": hasChildren ? "menu" : undefined,
-        class: "ic-ctx-item" + (it.danger ? " is-danger" : "") + (hasChildren ? " has-sub" : ""),
+        class: "ic-ctx-item" + (it.danger || it.warning ? " is-danger" : "") + (hasChildren ? " has-sub" : ""),
         disabled: Boolean(it.disabled),
         onMouseEnter: () => {
           if (hasChildren && !it.disabled) {
@@ -239,11 +292,12 @@ export function openArticleContextMenu(ev, items) {
             return;
           }
           closeArticleContextMenu();
-          it.onClick?.();
+          it.onClick?.(clickEv);
         },
       },
         icoNode,
         el("span", { class: "ic-ctx-label" }, it.label || ""),
+        it.checked ? el("span", { class: "ic-ctx-check", "aria-hidden": "true" }, "✓") : null,
         it.shortcut ? el("span", { class: "ic-ctx-kbd" }, it.shortcut) : null,
         hasChildren ? el("span", { class: "ic-ctx-chev", "aria-hidden": "true" }, "›") : null
       );
@@ -274,7 +328,7 @@ export function openArticleContextMenu(ev, items) {
     return menu;
   }
 
-  buildMenuLevel(validRoot, 0, null, ev.clientX, ev.clientY);
+  buildMenuLevel(validRoot, 0, null, ev?.clientX ?? 24, ev?.clientY ?? 24);
 
   const isInsideAny = (target) => activeCtxMenus.some((m) => m && m.contains(target));
   const onDown = (e) => { if (!isInsideAny(e.target)) closeArticleContextMenu(); };
@@ -290,6 +344,7 @@ export function openArticleContextMenu(ev, items) {
     document.removeEventListener("keydown", onKey, true);
     window.removeEventListener("wheel", onWheel);
     window.removeEventListener("resize", onResize);
+    menuOpts.onClose?.();
   };
 }
 

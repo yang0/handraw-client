@@ -1250,6 +1250,7 @@ export async function renderArticle(root, ctx, params = {}) {
     },
     onExtractSelectionToNote: (selText) => extractSelectionToNote(selText),
     onOpenNoteNewTab: (relPath) => openVaultFile(relPath, { newTab: true }),
+    getPluginContextMenuItems: () => obsidianCtrl?.collectContextMenu?.("editor-menu", { path: state.activeFile || "" }) || [],
     tocHostEl: centerCol,
   });
 
@@ -1479,6 +1480,11 @@ export async function renderArticle(root, ctx, params = {}) {
           }
         },
         onContextMenu: (ev) => {
+          const tabPluginItems = obsidianCtrl.collectContextMenu("file-menu", {
+            path: relPath,
+            isFolder: false,
+            source: "tab-header",
+          });
           openArticleContextMenu(ev, [
             { header: relPath },
             { icon: "✕", label: "关闭当前标签", onClick: () => closeOpenTab(relPath) },
@@ -1527,6 +1533,7 @@ export async function renderArticle(root, ctx, params = {}) {
               label: "在系统文件夹中显示",
               onClick: () => revealVaultPath(relPath),
             },
+            ...(tabPluginItems.length ? [{ sep: true }, { header: "Obsidian 插件" }, ...tabPluginItems] : []),
           ]);
         },
       },
@@ -2201,7 +2208,7 @@ export async function renderArticle(root, ctx, params = {}) {
 
   root.appendChild(el("div", { class: "ic-wechat-editor-root" },
     topbar,
-    el("div", { class: "ic-wechat-body" }, sidebar, centerCol, copilotBackdrop, drawerResizer, aiDrawer),
+    el("div", { class: "ic-wechat-body" }, obsidianCtrl.ribbonRailEl, sidebar, centerCol, copilotBackdrop, drawerResizer, aiDrawer),
     bottombar,
     obsidianCtrl.hostWrap
   ));
@@ -3162,89 +3169,41 @@ export async function renderArticle(root, ctx, params = {}) {
       );
     }
 
-    const menu = el("div", {
-      class: "ic-vault-ctx-menu",
-      role: "menu",
-      "aria-label": kind === "dir" ? `文件夹操作：${target.name}` : (kind === "file" ? `文件操作：${target.name}` : "目录操作"),
-    });
-
     const headerText = kind === "root" ? `${vault.name || "根目录"}（根目录）` : relPath;
-    menu.appendChild(el("div", { class: "ic-vault-ctx-head mono", title: headerText }, headerText));
+    const menuItems = [
+      { header: headerText },
+      ...items.map((item) => (item.sep
+        ? { sep: true }
+        : {
+          iconNode: makeIconSvg(item.icon, 14),
+          label: item.label,
+          danger: Boolean(item.danger),
+          onClick: item.run,
+        })),
+    ];
 
-    const buttons = [];
-    items.forEach((item) => {
-      if (item.sep) {
-        menu.appendChild(el("div", { class: "ic-vault-ctx-sep", role: "separator" }));
-        return;
-      }
-      const btn = el("button", {
-        type: "button",
-        class: "ic-vault-ctx-item" + (item.danger ? " is-danger" : ""),
-        role: "menuitem",
-        onClick: () => {
-          closeTreeContextMenu();
-          item.run();
-        },
-      },
-        el("span", { class: "ic-vault-ctx-ico", "aria-hidden": "true" }, makeIconSvg(item.icon, 14)),
-        el("span", { class: "ic-vault-ctx-label" }, item.label)
-      );
-      buttons.push(btn);
-      menu.appendChild(btn);
+    // Append Obsidian plugin "file-menu" items (#133)
+    const pluginFileItems = obsidianCtrl.collectContextMenu("file-menu", {
+      path: relPath,
+      isFolder: kind === "dir" || kind === "root",
+      source: "file-explorer-context-menu",
     });
+    if (pluginFileItems.length > 0) {
+      menuItems.push({ sep: true }, { header: "Obsidian 插件" }, ...pluginFileItems);
+    }
 
-    menu.style.left = "0px";
-    menu.style.top = "0px";
-    menu.style.visibility = "hidden";
-    document.body.appendChild(menu);
-
-    const rect = menu.getBoundingClientRect();
-    const pad = 8;
-    const left = Math.max(pad, Math.min(ev.clientX, window.innerWidth - rect.width - pad));
-    const top = Math.max(pad, Math.min(ev.clientY, window.innerHeight - rect.height - pad));
-    menu.style.left = `${Math.round(left)}px`;
-    menu.style.top = `${Math.round(top)}px`;
-    menu.style.visibility = "visible";
-
-    treeCtxMenuEl = menu;
     if (rowEl) {
       rowEl.classList.add("is-ctx-target");
       treeCtxTargetEl = rowEl;
     }
-
-    let focusedIdx = -1;
-    const onDocDown = (e) => {
-      if (!menu.contains(e.target)) closeTreeContextMenu();
-    };
-    const onKeyDown = (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        closeTreeContextMenu();
-        return;
-      }
-      if (!buttons.length) return;
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        focusedIdx = (focusedIdx + 1) % buttons.length;
-        buttons[focusedIdx].focus();
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        focusedIdx = (focusedIdx - 1 + buttons.length) % buttons.length;
-        buttons[focusedIdx].focus();
-      }
-    };
-    const onResize = () => closeTreeContextMenu();
-    const onScroll = () => closeTreeContextMenu();
-    document.addEventListener("pointerdown", onDocDown, true);
-    document.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("resize", onResize);
-    treeBox.addEventListener("scroll", onScroll, { passive: true });
-    treeCtxMenuCleanup = () => {
-      document.removeEventListener("pointerdown", onDocDown, true);
-      document.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("resize", onResize);
-      treeBox.removeEventListener("scroll", onScroll);
-    };
+    openArticleContextMenu(ev, menuItems, {
+      onClose: () => {
+        if (treeCtxTargetEl) {
+          treeCtxTargetEl.classList.remove("is-ctx-target");
+          treeCtxTargetEl = null;
+        }
+      },
+    });
   }
 
   async function openVaultFile(relPath, openOpts = {}) {
@@ -3903,6 +3862,7 @@ export async function renderArticle(root, ctx, params = {}) {
     const isFocusFs = (isGraph || isEdgeless) && Boolean(state.graphFullscreen);
 
     sidebar.classList.toggle("hidden", Boolean(state.sidebarCollapsed) || isFocusFs);
+    obsidianCtrl.setRibbonSuppressed(isFocusFs);
     sidebarToggleBtn.classList.toggle("is-active", Boolean(state.sidebarCollapsed));
     sidebarToggleBtn.title = state.sidebarCollapsed ? "展开左侧文档目录 (Ctrl+\\)" : "折叠左侧文档目录 (Ctrl+\\)";
 

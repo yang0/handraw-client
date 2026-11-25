@@ -1,5 +1,6 @@
 import { api, clear, closeModal, el, openURL, showModal, toast } from "../api.js";
 import { CM6_SINGLETON_MODULES } from "./article-live.js";
+import { openArticleContextMenu, sanitizeSvgElement } from "./article-links.js";
 
 function compatBadge(compat) {
   const lvl = compat?.level || "full";
@@ -108,7 +109,62 @@ export function createArticleObsidianController(opts) {
     return res;
   }
 
-  // Expose live CodeMirror 6 singleton bridge for same-origin plugin host (#131).
+  function getObsHost() {
+    try {
+      return iframe.contentWindow?.__HANDRAW_OBS_HOST__ || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function mapObsidianMenuItems(sessionId, rawItems) {
+    const out = [];
+    for (const it of rawItems || []) {
+      if (!it) continue;
+      if (it.sep) {
+        if (out.length && !out[out.length - 1].sep) out.push({ sep: true });
+        continue;
+      }
+      if (it.isLabel) {
+        out.push({ header: it.title || "" });
+        continue;
+      }
+      const children = Array.isArray(it.submenu) && it.submenu.length
+        ? mapObsidianMenuItems(sessionId, it.submenu)
+        : undefined;
+      out.push({
+        iconSvg: it.svgHtml || "",
+        icon: it.svgHtml ? "" : "🧩",
+        label: it.title || "",
+        checked: Boolean(it.checked),
+        disabled: Boolean(it.disabled),
+        warning: Boolean(it.warning),
+        children,
+        onClick: (clickEv) => {
+          const host = getObsHost();
+          host?.invokeContextMenuItem?.(sessionId, it.id, clickEv?.clientX, clickEv?.clientY);
+        },
+      });
+    }
+    while (out.length && out[out.length - 1].sep) out.pop();
+    return out;
+  }
+
+  function collectContextMenu(eventName, ctx = {}) {
+    if (disposed || !state.hostReady) return [];
+    const host = getObsHost();
+    if (!host?.collectContextMenu) return [];
+    try {
+      const res = host.collectContextMenu(eventName, { ...ctx, doc: opts.getDoc?.() });
+      if (!res?.items?.length) return [];
+      return mapObsidianMenuItems(res.sessionId, res.items);
+    } catch (err) {
+      console.warn(`[article-obsidian] collectContextMenu(${eventName}) failed:`, err);
+      return [];
+    }
+  }
+
+  // Expose live CodeMirror 6 singleton & menu popup bridge for same-origin plugin host (#131, #133).
   const cm6Bridge = {
     modules: CM6_SINGLETON_MODULES,
     getEditorView: () => opts.getEditorView?.() || null,
@@ -128,8 +184,63 @@ export function createArticleObsidianController(opts) {
         syncPluginCm6Extensions();
       }
     },
+    openPopupMenu: (x, y, sessionId, rawItems) => {
+      if (disposed) return;
+      const items = mapObsidianMenuItems(sessionId, rawItems);
+      if (!items.length) return;
+      openArticleContextMenu({ clientX: x, clientY: y }, items);
+    },
   };
   window.__HANDRAW_CM6_BRIDGE__ = cm6Bridge;
+
+  // Obsidian-style slim left Ribbon Rail for direct 1-click plugin icons (#133)
+  const ribbonRailEl = el("nav", {
+    class: "ic-obs-ribbon-rail hidden",
+    "aria-label": "Obsidian 插件快捷图标栏",
+  });
+  let ribbonSuppressed = false;
+
+  function renderRibbonRail() {
+    clear(ribbonRailEl);
+    const items = state.ribbons || [];
+    const shouldHide = ribbonSuppressed || items.length === 0;
+    ribbonRailEl.classList.toggle("hidden", shouldHide);
+    if (!items.length) return;
+
+    const listEl = el("div", { class: "ic-obs-ribbon-list" });
+    items.forEach((r) => {
+      const svgEl = sanitizeSvgElement(r.svgHtml, 17);
+      const label = r.title || r.pluginName || "插件动作";
+      const tip = r.pluginName && r.title && r.title !== r.pluginName
+        ? `${r.title}（${r.pluginName}）`
+        : label;
+      listEl.appendChild(el("button", {
+        type: "button",
+        class: "ic-obs-ribbon-btn",
+        title: tip,
+        "aria-label": tip,
+        dataset: { pluginId: r.pluginId || "", ribbonId: r.id || "" },
+        onClick: (ev) => triggerRibbon(r.id, ev),
+      }, svgEl || el("span", { class: "ic-obs-ribbon-fallback", "aria-hidden": "true" }, "🧩")));
+    });
+
+    const footEl = el("div", { class: "ic-obs-ribbon-foot" },
+      el("button", {
+        type: "button",
+        class: "ic-obs-ribbon-btn ic-obs-ribbon-manage",
+        title: `管理 Obsidian 插件（${state.plugins.filter((p) => p.enabled).length} 已启用）`,
+        "aria-label": "管理 Obsidian 插件",
+        onClick: () => openManagerModal("installed"),
+      }, sanitizeSvgElement('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 0 1 0 4h-.09c-.66 0-1.25.4-1.51 1z"/></svg>', 16))
+    );
+
+    ribbonRailEl.append(listEl, footEl);
+  }
+
+  function setRibbonSuppressed(suppressed) {
+    ribbonSuppressed = Boolean(suppressed);
+    ribbonRailEl.classList.toggle("hidden", ribbonSuppressed || (state.ribbons || []).length === 0);
+  }
 
   const iframe = el("iframe", {
     src: "/obsidian-host.html",
@@ -262,6 +373,7 @@ export function createArticleObsidianController(opts) {
         state.settingsTabs = data.settingsTabs || [];
         state.runtimeErrors.clear();
         (data.errors || []).forEach((e) => state.runtimeErrors.set(e.pluginId, e.error));
+        renderRibbonRail();
         opts.onStateChange?.();
       } else if (event === "ui-state") {
         state.modalOpen = Boolean(data.modalOpen);
@@ -388,8 +500,15 @@ export function createArticleObsidianController(opts) {
     return sendCmd("exec-command", { fullId });
   }
 
-  async function triggerRibbon(ribbonId) {
+  async function triggerRibbon(ribbonId, ev = null) {
     syncDoc(true);
+    const host = getObsHost();
+    if (host?.triggerRibbon) {
+      const rect = ev?.currentTarget?.getBoundingClientRect?.();
+      const x = rect ? Math.round(rect.right + 6) : (ev?.clientX ?? 48);
+      const y = rect ? Math.round(rect.top) : (ev?.clientY ?? 80);
+      return host.triggerRibbon(ribbonId, x, y);
+    }
     return sendCmd("trigger-ribbon", { ribbonId });
   }
 
@@ -425,12 +544,13 @@ export function createArticleObsidianController(opts) {
     if (state.ribbons.length > 0) {
       body.appendChild(el("div", { class: "ic-obs-quick-sec" }, "快捷入口 (Ribbon)"));
       state.ribbons.forEach((r) => {
+        const svgEl = sanitizeSvgElement(r.svgHtml, 14);
         body.appendChild(el("button", {
           type: "button",
           class: "ic-obs-quick-item",
-          onClick: () => { closeQuickPopover(); triggerRibbon(r.id); },
+          onClick: (ev) => { closeQuickPopover(); triggerRibbon(r.id, ev); },
         },
-          el("span", { class: "ic-obs-quick-ico" }, "🧩"),
+          el("span", { class: "ic-obs-quick-ico" }, svgEl || "🧩"),
           el("span", { class: "ic-obs-quick-label" }, r.title || r.pluginName),
           el("span", { class: "ic-obs-quick-meta muted" }, r.pluginName)
         ));
@@ -1201,10 +1321,13 @@ export function createArticleObsidianController(opts) {
   return {
     state,
     hostWrap,
+    ribbonRailEl,
+    setRibbonSuppressed,
     setDockSlot,
     updateHostVisibility,
     syncDoc,
     syncVault,
+    collectContextMenu,
     openManagerModal,
     openQuickActionsPopover,
     execCommand,

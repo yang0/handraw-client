@@ -903,6 +903,7 @@ export function createArticleLiveEditor(opts) {
     onAskAiSelection,
     onExtractSelectionToNote,
     onOpenNoteNewTab,
+    getPluginContextMenuItems,
     tocHostEl,
   } = opts;
 
@@ -1317,6 +1318,12 @@ export function createArticleLiveEditor(opts) {
         },
       }
     );
+
+    // Append Obsidian plugin "editor-menu" items (#133)
+    const pluginMenuItems = typeof getPluginContextMenuItems === "function" ? (getPluginContextMenuItems() || []) : [];
+    if (pluginMenuItems.length > 0) {
+      items.push({ sep: true }, { header: "Obsidian 插件" }, ...pluginMenuItems);
+    }
 
     openArticleContextMenu(ev, items);
   }
