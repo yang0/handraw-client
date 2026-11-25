@@ -564,6 +564,25 @@ type generateItem struct {
 	RefSpecs []generateItemRef `json:"refSpecs,omitempty"`
 }
 
+func defaultRefRoleDirective(role string) string {
+	switch strings.TrimSpace(role) {
+	case "角色长相":
+		return "必须严格参考该图中的人物/角色五官、发型、神态与标志性外观特征作为画面主角，不得替换为其他无关角色"
+	case "构图姿势":
+		return "必须严格参考该图的画面构图、主体动作姿势与镜头机位角度"
+	case "画风质感":
+		return "必须严格参考该图的整体绘画风格、笔触线条、材质肌理与色彩氛围进行重绘"
+	case "服装道具":
+		return "必须严格参考该图中的服装款式、配色与关键道具细节并应用到画面主体"
+	case "场景氛围":
+		return "必须严格参考该图的背景环境、空间光影与整体氛围基调"
+	case "垫图重绘":
+		return "必须基于该图的整体构图与核心主体进行二次创作与风格化重绘"
+	default:
+		return ""
+	}
+}
+
 func resolveItemRefsAndDirective(baseRefs []string, baseMeta []RunRefMeta, it generateItem, guidePath string) (refs []string, directive string, metas []RunRefMeta) {
 	seen := map[string]bool{}
 	specByPath := map[string]generateItemRef{}
@@ -670,17 +689,20 @@ func resolveItemRefsAndDirective(baseRefs []string, baseMeta []RunRefMeta, it ge
 	if !hasAnyRoleOrNote || len(refs) == 0 {
 		return refs, "", metas
 	}
-	lines := make([]string, 0, len(refs)+1)
-	lines = append(lines, "【参考图使用说明】")
+	lines := make([]string, 0, len(refs)+2)
+	lines = append(lines, "【参考图使用说明（必须严格遵循所附参考图，优先级高于默认泛化想象）】")
 	for idx, p := range refs {
 		sp := specByPath[strings.ToLower(filepath.Clean(p))]
 		role := strings.TrimSpace(sp.Role)
 		note := strings.TrimSpace(sp.Note)
+		roleRule := defaultRefRoleDirective(role)
 		switch {
 		case role != "" && note != "":
 			lines = append(lines, fmt.Sprintf("- 参考图 %d（%s）：%s", idx+1, role, note))
+		case role != "" && roleRule != "":
+			lines = append(lines, fmt.Sprintf("- 参考图 %d（%s）：%s", idx+1, role, roleRule))
 		case role != "":
-			lines = append(lines, fmt.Sprintf("- 参考图 %d（%s）", idx+1, role))
+			lines = append(lines, fmt.Sprintf("- 参考图 %d（%s）：请重点参考该图对应特征", idx+1, role))
 		case note != "":
 			lines = append(lines, fmt.Sprintf("- 参考图 %d：%s", idx+1, note))
 		default:
@@ -1036,9 +1058,9 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 				siteTheme = itemPrompts[i]
 			}
 			siteCreationSource := body.Mode
-			// Local desktop Markdown articles are not cloud-saved articles with remote articleId/slotId;
-			// the website rejects creationSource="article" without those cloud bindings (#72).
-			if siteCreationSource == "article" {
+			// Local desktop Markdown articles and local canvases do not have cloud articleId/canvasBatchId bindings;
+			// the website rejects creationSource="article" and creationSource="canvas" without those cloud IDs (#72, #156).
+			if siteCreationSource == "article" || siteCreationSource == "canvas" {
 				if len(body.Items) > 1 {
 					siteCreationSource = "series"
 				} else {

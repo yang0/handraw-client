@@ -571,6 +571,18 @@ export async function renderCanvas(host, ctx, params = {}) {
     return Boolean(simpleFlow());
   }
 
+  function customModelLacksRefFlag(modelRef) {
+    const ref = String(modelRef || "").trim();
+    if (!ref || ref.startsWith("site:")) return false;
+    const colon = ref.indexOf(":");
+    if (colon <= 0) return false;
+    const pid = ref.slice(0, colon);
+    const mid = ref.slice(colon + 1);
+    const prov = (modRes.providers || []).find((p) => p.id === pid);
+    const mod = (prov?.models || []).find((m) => m.id === mid);
+    return Boolean(mod && mod.canRefImage === false);
+  }
+
   function formatValueSummary(fieldName, val) {
     if (fieldName === "refs") {
       const list = normalizeRefList(val);
@@ -1930,9 +1942,10 @@ export async function renderCanvas(host, ctx, params = {}) {
     } else if (node.type === "combine") {
       body.appendChild(buildMatchingBlock(node));
     } else if (node.type === "output") {
-      const mSel = buildGroupedModelSelect(modRes, node.modelRef || state.modelRef);
+      const effModel = node.modelRef || state.modelRef;
+      const mSel = buildGroupedModelSelect(modRes, effModel);
       mSel.style.maxWidth = "100%";
-      mSel.addEventListener("change", () => { node.modelRef = mSel.value; state.modelRef = mSel.value; recordEdit(false); });
+      mSel.addEventListener("change", () => { node.modelRef = mSel.value; state.modelRef = mSel.value; recordEdit(true); });
       const repIn = el("input", { class: "input", type: "number", min: "1", max: "200", value: String(node.repeat ?? 1), style: { width: "70px" } });
       repIn.addEventListener("input", () => { node.repeat = Math.max(1, Math.min(200, Number(repIn.value) || 1)); updateStatusAndSummaries(); recordEdit(false); });
       const curRes = RESOLUTIONS.includes(node.resolution) ? node.resolution : "2k";
@@ -1944,6 +1957,13 @@ export async function renderCanvas(host, ctx, params = {}) {
         }, rv.toUpperCase()))
       );
       const exp = expandOutputNode(node);
+      const hasRefs = exp.items.some((it) => Array.isArray(it.refs) && it.refs.length > 0);
+      const refWarn = hasRefs && customModelLacksRefFlag(effModel)
+        ? el("div", {
+            class: "badge badge-warn",
+            style: { whiteSpace: "normal", lineHeight: "1.45", fontSize: "11px" },
+          }, "⚠ 当前自有模型未标记支持参考图，若该接口不支持 /images/edits 多图上传，参考图可能不生效（可改用官网模型或在设置确认）")
+        : null;
 
       body.append(
         el("div", { class: "row", style: { gap: "6px" } }, el("span", { class: "muted", style: { flexShrink: "0" } }, "模型"), mSel),
@@ -1952,17 +1972,19 @@ export async function renderCanvas(host, ctx, params = {}) {
           el("div", { class: "row", style: { gap: "5px" } }, el("span", { class: "muted" }, "张数"), repIn)
         ),
         el("div", { class: "badge" + (exp.error ? " badge-warn" : " badge-accent"), dataset: { outputSummary: node.id } }, exp.error || `预计输出 ${exp.count} 张 · ${curRes.toUpperCase()}`),
+        refWarn,
         el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } },
           el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => runOutputNode(node, false) }, "▶ 运行生成"),
           el("button", { type: "button", class: "btn btn-sm", onClick: () => { state.outputNodeId = node.id; state.activePanel = "preview"; renderDrawer(); } }, "预览清单")
         )
       );
 
-      // Embedded Live Results & Result-to-Reference Loop inside Output Node (#155)
+      // Embedded Live Results & Result-to-Reference Loop inside Output Node (#155, #156)
       const nodeRun = node.runId ? state.runsById.get(node.runId) : null;
       if (nodeRun && Array.isArray(nodeRun.images) && nodeRun.images.length) {
         const imgs = nodeRun.images;
         const doneCnt = imgs.filter((im) => im.status === "done").length;
+        const failCnt = imgs.filter((im) => im.status === "failed").length;
         const activeCnt = imgs.filter((im) => im.status === "queued" || im.status === "running").length;
         const thumbs = el("div", { class: "pc-out-thumbs" });
         imgs.slice(0, 6).forEach((im) => {
@@ -1988,16 +2010,24 @@ export async function renderCanvas(host, ctx, params = {}) {
               }, "🔁 设参考")
             ));
           } else {
-            thumbs.appendChild(el("div", { class: "pc-out-thumb-card" },
-              el("span", { class: "muted", style: { fontSize: "10.5px", textAlign: "center", padding: "4px" } },
-                im.status === "failed" ? "失败" : im.status === "running" ? "绘制中…" : "排队中"
+            thumbs.appendChild(el("div", {
+              class: "pc-out-thumb-card",
+              title: im.status === "failed" ? (im.error || "生成失败，点击全部结果查看详情") : "",
+              onClick: im.status === "failed" ? () => { state.activeRun = nodeRun; state.activePanel = "history"; renderDrawer(); } : null,
+              style: im.status === "failed" ? { cursor: "pointer", borderColor: "var(--err)" } : {},
+            },
+              el("span", {
+                class: im.status === "failed" ? "" : "muted",
+                style: { fontSize: "10.5px", textAlign: "center", padding: "4px", color: im.status === "failed" ? "var(--err)" : "" },
+              },
+                im.status === "failed" ? "失败（点看原因）" : im.status === "running" ? "绘制中…" : "排队中"
               )
             ));
           }
         });
         body.appendChild(el("div", { class: "pc-out-results" },
           el("div", { class: "pc-out-results-head" },
-            el("span", null, activeCnt > 0 ? `绘制中 ${doneCnt}/${imgs.length}` : `最近结果 ${doneCnt}/${imgs.length}`),
+            el("span", null, activeCnt > 0 ? `绘制中 ${doneCnt}/${imgs.length}` : `最近结果 ${doneCnt}/${imgs.length}${failCnt ? ` · 失败 ${failCnt}` : ""}`),
             el("button", {
               type: "button",
               class: "btn btn-sm",
@@ -2214,6 +2244,12 @@ export async function renderCanvas(host, ctx, params = {}) {
           el("button", { type: "button", class: "btn btn-sm", onClick: () => promoteImageToReferenceNode(im) }, "🔁 设为参考图节点")
         ));
       } else if (im.status === "failed") {
+        if (im.error) {
+          card.appendChild(el("p", {
+            class: "badge badge-err",
+            style: { margin: "0", whiteSpace: "normal", lineHeight: "1.45", fontSize: "11.5px", wordBreak: "break-word" },
+          }, im.error));
+        }
         card.appendChild(el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => api("POST", `/api/images/${encodeURIComponent(im.id)}/retry`).then(() => toast("已重新入队")) }, "重试"));
       }
       gallery.appendChild(card);

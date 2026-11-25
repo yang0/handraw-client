@@ -4,12 +4,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yang0/handraw-client/internal/jobs"
+	"github.com/yang0/handraw-client/internal/secrets"
 	"github.com/yang0/handraw-client/internal/settings"
 )
 
@@ -98,7 +100,7 @@ func TestGeneratePerItemRefsRoleDirectivesAndV2CanvasTemplates(t *testing.T) {
 	if len(spec0.Refs) < 2 || spec0.Refs[0] != charRef || spec0.Refs[1] != poseRef {
 		t.Fatalf("expected item 0 to have [charRef, poseRef], got %+v", spec0.Refs)
 	}
-	if !strings.Contains(spec0.Prompt, "【参考图使用说明】") ||
+	if !strings.Contains(spec0.Prompt, "【参考图使用说明") ||
 		!strings.Contains(spec0.Prompt, "- 参考图 1（角色长相）：保持橘白花纹与圆眼镜") ||
 		!strings.Contains(spec0.Prompt, "- 参考图 2（构图姿势）：仅参考动作与机位，不照搬背景") {
 		t.Fatalf("item 0 prompt missing structured reference directives: %s", spec0.Prompt)
@@ -132,5 +134,109 @@ func TestGeneratePerItemRefsRoleDirectivesAndV2CanvasTemplates(t *testing.T) {
 	tplBody := rrTpl.Body.String()
 	if !strings.Contains(tplBody, "tpl_char_scenes") || !strings.Contains(tplBody, "tpl_multi_ref_fusion") || !strings.Contains(tplBody, `"type":"reference"`) {
 		t.Fatalf("expected v2 reference templates in builtin list, got: %s", tplBody)
+	}
+}
+
+func TestCanvasSiteCreationSourceRemapAndDefaultRoleDirective(t *testing.T) {
+	mockSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/economy/public-models":
+			_, _ = w.Write([]byte(`{"specifications":[{"id":"spec-gpt-25-1k","model":"gpt-image-2.5","resolution":"1k","quality":"standard","enabled":true,"verified":true}]}`))
+		case "/api/studio/quote":
+			_, _ = w.Write([]byte(`{"quoteId":"q_canvas_156","totalCents":0,"freeCount":2}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer mockSite.Close()
+
+	srv, _ := setupTestServer(t, mockSite.URL)
+	t.Cleanup(func() { _ = secrets.Delete(secrets.SiteToken) })
+	_ = secrets.Set(secrets.SiteToken, "hwt_canvas_156")
+	h := srv.Handler()
+
+	const tinyPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+	pngBytes, _ := base64.StdEncoding.DecodeString(tinyPNG)
+	refPath := filepath.Join(t.TempDir(), "hero.png")
+	_ = os.WriteFile(refPath, pngBytes, 0o644)
+
+	// 1. Multi-item desktop canvas on site:* must remap creationSource="canvas" -> "series" (#156),
+	//    and role-only refSpecs (empty note) must expand into an actionable directive.
+	rrMulti := doReq(t, h, srv.Token, http.MethodPost, "/api/generate", map[string]any{
+		"mode":       "canvas",
+		"title":      "线上画布批量测试",
+		"modelRef":   "site:gpt-image-2.5",
+		"resolution": "1k",
+		"confirmed":  true,
+		"items": []map[string]any{
+			{
+				"theme": "主角在咖啡馆看书",
+				"style": "FA-001",
+				"ratio": "3:4",
+				"refs":  []string{refPath},
+				"refSpecs": []map[string]any{
+					{"path": refPath, "role": "角色长相", "note": ""},
+				},
+			},
+			{
+				"theme": "主角在公园散步",
+				"style": "FA-001",
+				"ratio": "3:4",
+				"refs":  []string{refPath},
+				"refSpecs": []map[string]any{
+					{"path": refPath, "role": "构图姿势", "note": ""},
+				},
+			},
+		},
+	})
+	if rrMulti.Code != 200 {
+		t.Fatalf("site canvas multi generate failed: %d %s", rrMulti.Code, rrMulti.Body.String())
+	}
+	var multiRes struct {
+		Images []struct {
+			Prompt string          `json:"prompt"`
+			Meta   json.RawMessage `json:"meta"`
+		} `json:"images"`
+	}
+	_ = json.Unmarshal(rrMulti.Body.Bytes(), &multiRes)
+	if len(multiRes.Images) != 2 {
+		t.Fatalf("expected 2 site images, got %d", len(multiRes.Images))
+	}
+	var sp0 jobs.Spec
+	_ = json.Unmarshal(multiRes.Images[0].Meta, &sp0)
+	if got := sp0.SiteBody["creationSource"]; got != "series" {
+		t.Fatalf("expected multi-item site canvas creationSource='series', got %v", got)
+	}
+	if !strings.Contains(multiRes.Images[0].Prompt, "必须严格参考该图中的人物/角色五官") {
+		t.Fatalf("expected strong default directive for role-only 角色长相, got: %s", multiRes.Images[0].Prompt)
+	}
+	if !strings.Contains(multiRes.Images[1].Prompt, "必须严格参考该图的画面构图、主体动作姿势") {
+		t.Fatalf("expected strong default directive for role-only 构图姿势, got: %s", multiRes.Images[1].Prompt)
+	}
+
+	// 2. Single-item desktop canvas on site:* must remap creationSource="canvas" -> "single".
+	rrSingle := doReq(t, h, srv.Token, http.MethodPost, "/api/generate", map[string]any{
+		"mode":       "canvas",
+		"title":      "线上画布单张测试",
+		"modelRef":   "site:gpt-image-2.5",
+		"resolution": "1k",
+		"confirmed":  true,
+		"items": []map[string]any{
+			{"theme": "雨夜书店", "style": "FA-001", "ratio": "3:4"},
+		},
+	})
+	if rrSingle.Code != 200 {
+		t.Fatalf("site canvas single generate failed: %d %s", rrSingle.Code, rrSingle.Body.String())
+	}
+	var singleRes struct {
+		Images []struct {
+			Meta json.RawMessage `json:"meta"`
+		} `json:"images"`
+	}
+	_ = json.Unmarshal(rrSingle.Body.Bytes(), &singleRes)
+	var spSingle jobs.Spec
+	_ = json.Unmarshal(singleRes.Images[0].Meta, &spSingle)
+	if got := spSingle.SiteBody["creationSource"]; got != "single" {
+		t.Fatalf("expected single-item site canvas creationSource='single', got %v", got)
 	}
 }
