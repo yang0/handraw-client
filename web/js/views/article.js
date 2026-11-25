@@ -312,7 +312,7 @@ export async function renderArticle(root, ctx, params = {}) {
   const liveSwitchBtn = el("button", {
     type: "button",
     class: "ic-article-seg-btn",
-    title: "Obsidian 风格所见即所得实时预览编辑",
+    title: "所见即所得文章编辑",
     onClick: () => {
       state.viewMode = "live";
       lastEditorViewMode = "live";
@@ -321,7 +321,7 @@ export async function renderArticle(root, ctx, params = {}) {
       renderStageMode();
       session.persist();
     },
-  }, "实时预览");
+  }, "编辑");
   const edgelessSwitchBtn = el("button", {
     type: "button",
     class: "ic-article-seg-btn",

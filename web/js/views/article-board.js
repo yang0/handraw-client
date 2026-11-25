@@ -171,7 +171,7 @@ export function createArticleBoardController(opts) {
     const curStatus = getRowStatus(row);
     openArticleContextMenu(ev, [
       { header: row.path },
-      { icon: "↗", label: "打开实时预览编辑", onClick: () => onOpenNote?.(row.path) },
+      { icon: "↗", label: "打开编辑", onClick: () => onOpenNote?.(row.path) },
       { icon: "📑", label: "在新标签页打开", onClick: () => onOpenNote?.(row.path, { newTab: true }) },
       { icon: "🕸", label: "查看局部关系图谱", onClick: () => onOpenLocalGraph?.(row.path) },
       { sep: true },
