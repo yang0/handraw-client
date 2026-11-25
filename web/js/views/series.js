@@ -229,28 +229,38 @@ export async function renderSeries(host, ctx, params = {}) {
   });
   state.textModelRef = textModelPicker.value;
 
-  const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
+  const modelSel = buildGroupedModelSelect(modRes, state.modelRef, {
+    className: "studio-model-select",
+    name: "seriesImageModelRef",
+    ariaLabel: "系列图出图模型",
+  });
   state.modelRef = modelSel.value;
   modelSel.addEventListener("change", () => { state.modelRef = modelSel.value; refreshQuote(); });
 
-  const quoteSpan = el("span", { class: "badge", role: "status" }, "请先规划或添加画面");
+  const quoteSpan = el("span", { class: "badge make-image-quote", role: "status" }, "请先规划或添加画面");
   const planNotice = el("span", { class: "studio-notice", role: "status" }, state.planNotice || "");
   const planBtn = el("button", { type: "button", class: "btn btn-sm", onClick: planFromTopic }, "✨ AI 规划");
   const sampleBtn = el("button", { type: "button", class: "btn btn-sm", onClick: () => generateBatch(true, false) }, "先出第 1 张样张");
-  const batchBtn = el("button", { type: "button", class: "btn btn-primary", onClick: () => generateBatch(false, false) }, "生成系列图");
+  const batchBtn = el("button", { type: "button", class: "btn btn-primary make-image-submit-btn", onClick: () => generateBatch(false, false) }, "生成系列图");
 
   const dock = el("div", { class: "batch-series-dock" },
     composerModesBar,
     composerInput,
     el("div", { class: "batch-series-dock-footer" },
-      el("div", { class: "row", style: { flexWrap: "wrap", gap: "8px" } },
-        el("div", { class: "make-image-model-field" }, el("span", { class: "make-image-model-lbl" }, "规划"), textModelPicker.el),
-        el("div", { class: "make-image-model-field" }, el("span", { class: "make-image-model-lbl" }, "出图"), modelSel),
+      el("div", { class: "make-image-composer-tools", style: { flexWrap: "wrap" } },
+        el("div", { class: "studio-model-pill is-plan", title: "系列图 AI 规划与分镜引擎" },
+          el("span", { class: "studio-model-pill-tag" }, "规划"),
+          textModelPicker.el
+        ),
+        el("label", { class: "studio-model-pill is-image", title: "系列图出图渲染模型" },
+          el("span", { class: "studio-model-pill-tag" }, "出图"),
+          modelSel
+        ),
         el("label", { class: "row", style: { gap: "4px", fontSize: "12px" } }, "张数", countIn),
         planBtn,
         quoteSpan
       ),
-      el("div", { class: "row" }, sampleBtn, batchBtn)
+      el("div", { class: "row", style: { flexShrink: "0" } }, sampleBtn, batchBtn)
     ),
     planNotice
   );

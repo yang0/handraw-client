@@ -17,8 +17,19 @@ import {
   studioSession,
 } from "./studio-controls.js";
 
-export function buildGroupedModelSelect(modelsData = {}, currentRef = "") {
-  const sel = el("select", { class: "select select-sm", style: { maxWidth: "220px" }, "aria-label": "生图模型" });
+export function buildGroupedModelSelect(modelsData = {}, currentRef = "", opts = {}) {
+  const customClass = opts?.className || "";
+  const sel = el("select", {
+    class: customClass || "select select-sm",
+    name: opts?.name || "imageModelRef",
+    style: customClass ? undefined : { maxWidth: "220px" },
+    "aria-label": opts?.ariaLabel || "生图模型",
+  });
+  if (customClass === "studio-model-select" && typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("appearance", "base-select")) {
+    const selectedContent = document.createElement("selectedcontent");
+    selectedContent.className = "studio-model-select-val";
+    sel.appendChild(el("button", { type: "button", class: "studio-model-select-btn" }, selectedContent));
+  }
   const rawSite = modelsData.site;
   const siteModels = Array.isArray(rawSite)
     ? rawSite
@@ -784,6 +795,7 @@ export async function renderCreate(root, ctx, params = {}) {
         }, "×")
       ));
     });
+    syncClearBtn();
   }
 
   const expandComposerBtn = el("button", {
@@ -828,20 +840,24 @@ export async function renderCreate(root, ctx, params = {}) {
 
   const subjectInput = el("textarea", {
     class: "make-image-composer-subject",
-    rows: "3",
+    rows: "2",
     "aria-label": "创作描述",
-    placeholder: "描述想画的内容，支持单图或一次规划多张（如：画 4 张咖啡店治愈日常手账，或每行写一条场景）…（Ctrl/⌘ + Enter 发送）",
+    placeholder: "描述想画的内容，支持单图或一次规划多张…（Ctrl/⌘ + Enter 发送）",
   });
 
+  const supportsFieldSizing = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("field-sizing", "content");
+
   function autoResizeTextarea() {
-    if (state.composerExpanded) {
+    if (state.composerExpanded || supportsFieldSizing) {
       subjectInput.style.height = "";
       return;
     }
     subjectInput.style.height = "auto";
-    const next = Math.min(180, Math.max(66, subjectInput.scrollHeight));
+    const next = Math.min(160, Math.max(54, subjectInput.scrollHeight));
     subjectInput.style.height = `${next}px`;
   }
+
+  let syncClearBtn = () => {};
 
   subjectInput.addEventListener("input", () => {
     const item = currentItem();
@@ -851,6 +867,7 @@ export async function renderCreate(root, ctx, params = {}) {
       state.draftInput = subjectInput.value;
     }
     autoResizeTextarea();
+    syncClearBtn();
   });
 
   subjectInput.addEventListener("keydown", (e) => {
@@ -900,28 +917,34 @@ export async function renderCreate(root, ctx, params = {}) {
     className: "hm-trigger-sm",
   });
   state.textModelRef = textModelPicker.value;
-  const planModelField = el("div", { class: "make-image-model-field", title: "对话规划与画面分镜引擎（支持第三方接口与本地 AI Harness）" },
-    el("span", { class: "make-image-model-lbl" }, "规划"),
+  const planModelField = el("div", { class: "studio-model-pill is-plan", title: "对话规划与画面分镜引擎（支持第三方接口与本地 AI Harness）" },
+    el("span", { class: "studio-model-pill-tag" }, "规划"),
     textModelPicker.el
   );
 
-  const modelSel = buildGroupedModelSelect(modRes, state.modelRef);
+  const modelSel = buildGroupedModelSelect(modRes, state.modelRef, {
+    className: "studio-model-select",
+    name: "imageModelRef",
+    ariaLabel: "生图出图模型",
+  });
   state.modelRef = modelSel.value;
   modelSel.addEventListener("change", () => {
     state.modelRef = modelSel.value;
     refreshQuote();
     session.persist();
   });
-  const imageModelField = el("div", { class: "make-image-model-field", title: "出图渲染模型（支持网站模型与第三方生图接口）" },
-    el("span", { class: "make-image-model-lbl" }, "出图"),
+  const imageModelField = el("label", { class: "studio-model-pill is-image", title: "出图渲染模型（支持网站模型与第三方生图接口）" },
+    el("span", { class: "studio-model-pill-tag" }, "出图"),
     modelSel
   );
 
-  const quoteBadge = el("span", { class: "badge", title: "生成前预估费用" }, "报价计算中…");
+  const quoteBadge = el("span", { class: "badge make-image-quote", title: "生成前预估费用" }, "计算中…");
 
   const clearBtn = el("button", {
     type: "button",
-    class: "btn btn-sm",
+    class: "make-image-clear-btn hidden",
+    title: "清空当前描述与参考图",
+    "aria-label": "清空表单",
     onClick: () => {
       if (state.composerMode === "image") {
         const item = currentItem();
@@ -934,18 +957,28 @@ export async function renderCreate(root, ctx, params = {}) {
       subjectInput.value = "";
       autoResizeTextarea();
       renderRefs();
+      syncClearBtn();
       session.persist();
     },
-  }, "清空表单");
+  }, "清空");
+
+  syncClearBtn = () => {
+    const hasDraft = Boolean(
+      (subjectInput.value || "").trim()
+      || (state.refs && state.refs.length)
+      || (state.galleryRefs && state.galleryRefs.length)
+    );
+    clearBtn.classList.toggle("hidden", !hasDraft);
+  };
 
   const stopBtn = el("button", {
     type: "button",
     class: "btn btn-sm hidden",
-    style: { color: "var(--err, #b83227)", borderColor: "var(--err, #b83227)" },
+    style: { color: "var(--err, #b83227)", borderColor: "var(--err, #b83227)", borderRadius: "999px" },
     onClick: () => cancelTurnRunning(currentTurn()),
   }, "停止生成");
 
-  const submitBtn = el("button", { type: "submit", class: "btn btn-primary" }, "开始生成");
+  const submitBtn = el("button", { type: "submit", class: "btn btn-primary make-image-submit-btn" }, "开始生成");
 
   const composer = el("form", { class: "make-image-composer", action: "/api/studio/chat-plan", method: "post" },
     expandComposerBtn,
@@ -954,11 +987,12 @@ export async function renderCreate(root, ctx, params = {}) {
     refsStrip,
     subjectInput,
     el("div", { class: "make-image-composer-bottom" },
-      addRefBtn,
-      planModelField,
-      imageModelField,
-      quoteBadge,
-      el("div", { class: "make-image-composer-actions" }, clearBtn, stopBtn, submitBtn)
+      el("div", { class: "make-image-composer-tools" },
+        addRefBtn,
+        planModelField,
+        imageModelField
+      ),
+      el("div", { class: "make-image-composer-actions" }, quoteBadge, clearBtn, stopBtn, submitBtn)
     )
   );
   composer.addEventListener("submit", (e) => {
@@ -1075,8 +1109,8 @@ export async function renderCreate(root, ctx, params = {}) {
     } else {
       subjectInput.value = state.draftInput || "";
       subjectInput.placeholder = turn
-        ? "继续补充或调整需求，例如：整体色调更暖一点、改成 4 张分镜…（Ctrl/⌘ + Enter 发送）"
-        : "描述想画的内容，支持单图或一次规划多张（如：画 4 张咖啡店治愈日常手账，或每行写一条场景）…（Ctrl/⌘ + Enter 发送）";
+        ? "继续补充或调整需求，例如：色调更暖、改成 4 张分镜…（Ctrl/⌘ + Enter）"
+        : "描述想画的内容，支持单图或一次规划多张…（Ctrl/⌘ + Enter 发送）";
       submitBtn.textContent = isPlanning ? "规划中…" : (turn ? "发送并生成" : "开始生成");
     }
 
@@ -1084,6 +1118,7 @@ export async function renderCreate(root, ctx, params = {}) {
     stopBtn.classList.toggle("hidden", !turnHasRunning(turn));
     planModelField.classList.toggle("hidden", isDirect);
     autoResizeTextarea();
+    syncClearBtn();
     refreshQuote();
   }
 
@@ -1700,17 +1735,21 @@ export async function renderCreate(root, ctx, params = {}) {
         quality: state.quality,
         count,
       });
-      quoteBadge.className = "badge" + (q.overLimit ? " badge-warn" : (q.freeCount > 0 || q.source === "provider" ? " badge-ok" : ""));
+      quoteBadge.className = "badge make-image-quote" + (q.overLimit ? " badge-warn" : (q.freeCount > 0 || q.source === "provider" ? " badge-ok" : ""));
       if (q.source === "provider") {
-        quoteBadge.textContent = "自带接口直出";
+        quoteBadge.textContent = "自带接口";
+        quoteBadge.title = "使用第三方接口直出，不消耗网站额度";
       } else if (q.freeCount > 0 && q.totalCents === 0) {
-        quoteBadge.textContent = `免费额度（${q.freeCount} 次）`;
+        quoteBadge.textContent = `免费 ${q.freeCount} 次`;
+        quoteBadge.title = `当前可用免费额度（${q.freeCount} 次）`;
       } else {
-        quoteBadge.textContent = `单张约 ${money(q.totalCents)}` + (q.freeCount > 0 ? `（含免费 ${q.freeCount} 次）` : "");
+        quoteBadge.textContent = `约 ${money(q.totalCents)}/张`;
+        quoteBadge.title = `单张约 ${money(q.totalCents)}` + (q.freeCount > 0 ? `（含免费 ${q.freeCount} 次）` : "");
       }
     } catch {
-      quoteBadge.textContent = state.modelRef.startsWith("site:") && !modRes.loggedIn ? "使用网站模型需登录" : "报价待定";
-      quoteBadge.className = "badge";
+      quoteBadge.textContent = state.modelRef.startsWith("site:") && !modRes.loggedIn ? "需登录" : "待报价";
+      quoteBadge.title = state.modelRef.startsWith("site:") && !modRes.loggedIn ? "使用网站模型需先登录账号" : "生成前预估费用";
+      quoteBadge.className = "badge make-image-quote";
     }
   }
 

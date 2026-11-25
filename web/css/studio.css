@@ -586,35 +586,36 @@ dialog.modal-picker .modal-body {
   flex: 0 0 auto;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 15px;
-  padding: 12px 14px;
-  box-shadow: var(--shadow);
+  border-radius: 16px;
+  padding: 12px 14px 10px;
+  box-shadow: 0 4px 18px rgba(34, 24, 16, 0.05);
   display: flex;
   flex-direction: column;
   gap: 8px;
   transition: border-color 0.14s ease, box-shadow 0.14s ease;
 }
 .make-image-composer:focus-within {
-  border-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: 0 6px 22px rgba(209, 75, 40, 0.08);
 }
 .make-image-composer.is-dragover {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .make-image-composer.is-expanded .make-image-composer-subject {
-  min-height: 220px;
-  max-height: 44vh;
+  min-block-size: 220px;
+  max-block-size: 44vh;
   height: 36vh;
 }
 .sc-composer-expand-btn {
   position: absolute;
-  top: 10px;
-  right: 10px;
+  top: 9px;
+  right: 9px;
   width: 26px;
   height: 26px;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 7px;
-  background: var(--paper);
+  background: transparent;
   color: var(--ink-muted);
   font-size: 13px;
   line-height: 1;
@@ -625,9 +626,9 @@ dialog.modal-picker .modal-body {
   transition: border-color 0.14s ease, color 0.14s ease, background-color 0.14s ease;
 }
 .sc-composer-expand-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--ink);
+  background: var(--paper);
 }
 .sc-composer-modes {
   display: inline-flex;
@@ -696,11 +697,14 @@ dialog.modal-picker .modal-body {
   display: grid;
   place-items: center;
 }
+.creation-page .make-image-composer-subject,
 .make-image-composer-subject {
   width: 100%;
-  min-height: 70px;
-  max-height: 160px;
-  padding: 4px 36px 4px 2px;
+  height: auto;
+  field-sizing: content;
+  min-block-size: 54px;
+  max-block-size: 160px;
+  padding: 2px 32px 2px 2px;
   font: inherit;
   font-size: 14px;
   line-height: 1.55;
@@ -708,7 +712,10 @@ dialog.modal-picker .modal-body {
   background: transparent;
   border: 0;
   outline: none;
-  resize: vertical;
+  resize: none;
+}
+.make-image-composer-subject::placeholder {
+  color: color-mix(in srgb, var(--ink-muted) 86%, transparent);
 }
 .make-image-composer-subject:focus-visible {
   outline: none;
@@ -716,44 +723,255 @@ dialog.modal-picker .modal-body {
 .make-image-composer-bottom {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  flex-wrap: nowrap;
   gap: 8px;
-  padding-top: 6px;
-  border-top: 1px solid var(--line);
-}
-.make-image-model-field {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
   min-width: 0;
 }
-.make-image-model-lbl {
-  font-size: 11.5px;
+.make-image-composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.studio-model-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  overflow: hidden;
+  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
+}
+.studio-model-pill.is-plan {
+  flex: 0 1 auto;
+  min-width: 112px;
+  max-width: 264px;
+}
+.studio-model-pill.is-image {
+  flex: 0 1 auto;
+  min-width: 112px;
+  max-width: 264px;
+  cursor: pointer;
+}
+.studio-model-pill:hover {
+  border-color: color-mix(in srgb, var(--ink) 26%, var(--line));
+  background: var(--surface);
+}
+.studio-model-pill:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  background: var(--surface);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.studio-model-pill-tag {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
   color: var(--ink-muted);
+  padding: 0 7px 0 10px;
+  border-right: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  line-height: 1;
   white-space: nowrap;
   user-select: none;
 }
-.make-image-add-reference {
-  flex: 0 0 34px;
-  width: 34px;
-  height: 34px;
+.studio-model-pill .hm-picker {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+.studio-model-pill .hm-trigger {
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0 9px 0 7px;
+  gap: 5px;
+  font-size: 12px;
+  box-shadow: none;
+}
+.studio-model-pill .hm-trigger:hover,
+.studio-model-pill .hm-trigger.is-open,
+.studio-model-pill .hm-trigger:focus-visible {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+.studio-model-select {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  max-inline-size: 100%;
+  field-sizing: content;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0 9px 0 7px;
+  cursor: pointer;
+  outline: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.studio-model-select,
+.studio-model-select::picker(select) {
+  appearance: base-select;
+}
+.studio-model-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.studio-model-select-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.studio-model-select-val {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.studio-model-select::picker-icon {
+  content: "▾";
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: transform 0.14s ease;
+}
+.studio-model-select:open::picker-icon {
+  transform: rotate(180deg);
+}
+.studio-model-select::picker(select) {
+  background: var(--surface);
+  color: var(--ink);
   border: 1px solid var(--line);
-  border-radius: 50%;
+  border-radius: 12px;
+  padding: 5px;
+  margin-top: 6px;
+  margin-bottom: 6px;
+  box-shadow: 0 14px 36px rgba(24, 20, 16, 0.16), 0 2px 8px rgba(24, 20, 16, 0.06);
+  font-size: 12px;
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 24px));
+}
+.studio-model-select optgroup {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink-muted);
+  padding: 6px 8px 3px;
+}
+.studio-model-select option {
+  padding: 6px 9px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+  cursor: pointer;
+  gap: 6px;
+}
+.studio-model-select option:hover,
+.studio-model-select option:focus-visible {
+  background: var(--paper);
+}
+.studio-model-select option:checked {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.studio-model-select option::checkmark {
+  color: var(--accent);
+  font-size: 11px;
+}
+.make-image-add-reference {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
   background: var(--paper);
   color: var(--ink);
-  font-size: 20px;
+  font-size: 17px;
   line-height: 1;
   display: grid;
   place-items: center;
   cursor: pointer;
+  transition: border-color 0.14s ease, color 0.14s ease, background-color 0.14s ease;
 }
-.make-image-add-reference:hover { border-color: var(--accent); color: var(--accent); }
+.make-image-add-reference:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface);
+}
 .make-image-composer-actions {
   margin-left: auto;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+.make-image-quote {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.make-image-clear-btn {
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.14s ease, background-color 0.14s ease, border-color 0.14s ease;
+}
+.make-image-clear-btn:hover {
+  color: var(--ink);
+  background: var(--paper);
+  border-color: var(--line);
+}
+.make-image-submit-btn {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+@media (max-width: 900px) {
+  .make-image-composer-bottom {
+    flex-wrap: wrap;
+  }
 }
 
 /* Recent drafts strip in Single */
