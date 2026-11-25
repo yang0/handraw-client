@@ -63,7 +63,7 @@ export async function renderArticle(root, ctx, params = {}) {
     includeCover: true,
     resolution: "2k",
     modelRef: modRes.defaultModel || "site:seedream-4.5",
-    textModelRef: modRes.defaultTextModel || "",
+    textModelRef: modRes.sceneModels?.articleEdit || modRes.defaultTextModel || "",
     aiSkillIds: [],
     aiDrawerOpen: typeof window !== "undefined" ? window.innerWidth >= 1240 : true,
     rightDrawerTab: "ai", // ai | obsidian
@@ -167,14 +167,23 @@ export async function renderArticle(root, ctx, params = {}) {
   });
 
   // Format helper applied to active markdown segment textarea
+  function getEditorTextarea() {
+    return activeSegTextarea && activeSegTextarea.isConnected
+      ? activeSegTextarea
+      : flowBox.querySelector("textarea.ic-art-seg-ta");
+  }
+
   function applyFormat(fmt) {
     if (fmt === "illust") {
       insertSlotAt("");
       return;
     }
-    const ta = activeSegTextarea && activeSegTextarea.isConnected
-      ? activeSegTextarea
-      : flowBox.querySelector("textarea.ic-art-seg-ta");
+    if (fmt === "wikilink") {
+      const ta = getEditorTextarea();
+      if (ta) linksCtrl.triggerInsertWikilink(ta);
+      return;
+    }
+    const ta = getEditorTextarea();
     if (!ta) return;
     const start = ta.selectionStart ?? ta.value.length;
     const end = ta.selectionEnd ?? ta.value.length;
@@ -215,8 +224,54 @@ export async function renderArticle(root, ctx, params = {}) {
       ["code", "</>"],
     ].map(([k, lbl]) => el("button", { type: "button", class: "ic-wechat-tool-btn", onClick: () => applyFormat(k) }, lbl)),
     el("div", { class: "ic-wechat-tool-sep" }),
+    el("button", { type: "button", class: "ic-wechat-tool-btn", title: "插入 Obsidian 双链 [[笔记]]", onClick: () => applyFormat("wikilink") }, "[[ 双链"),
     el("button", { type: "button", class: "ic-wechat-tool-btn", onClick: () => applyFormat("illust") }, "＋ 插入配图位")
   );
+
+  // Back / Forward note navigation history (#120)
+  const navHistory = [];
+  let navIndex = -1;
+  const navBackBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm ic-nav-hist-btn",
+    title: "后退到上一篇笔记 (Alt+←)",
+    "aria-label": "后退到上一篇笔记",
+    disabled: true,
+    onClick: () => navigateHistory(-1),
+  }, "←");
+  const navFwdBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm ic-nav-hist-btn",
+    title: "前进到下一篇笔记 (Alt+→)",
+    "aria-label": "前进到下一篇笔记",
+    disabled: true,
+    onClick: () => navigateHistory(1),
+  }, "→");
+  function syncNavHistoryButtons() {
+    navBackBtn.disabled = navIndex <= 0;
+    navFwdBtn.disabled = navIndex < 0 || navIndex >= navHistory.length - 1;
+    navBackBtn.title = navIndex > 0 ? `返回：${navHistory[navIndex - 1]} (Alt+←)` : "后退 (Alt+←)";
+    navFwdBtn.title = navIndex >= 0 && navIndex < navHistory.length - 1 ? `前进：${navHistory[navIndex + 1]} (Alt+→)` : "前进 (Alt+→)";
+  }
+  function pushNavHistory(relPath) {
+    if (!relPath) return;
+    if (navIndex >= 0 && navHistory[navIndex] === relPath) return;
+    navHistory.splice(navIndex + 1);
+    navHistory.push(relPath);
+    if (navHistory.length > 50) navHistory.shift();
+    navIndex = navHistory.length - 1;
+    syncNavHistoryButtons();
+  }
+  function navigateHistory(delta) {
+    const nextIdx = navIndex + delta;
+    if (nextIdx < 0 || nextIdx >= navHistory.length) return;
+    const targetPath = navHistory[nextIdx];
+    guardDirtyBeforeSwitch(async () => {
+      navIndex = nextIdx;
+      syncNavHistoryButtons();
+      await openVaultFile(targetPath, { fromHistory: true });
+    });
+  }
 
   const editSwitchBtn = el("button", {
     type: "button",
@@ -262,8 +317,9 @@ export async function renderArticle(root, ctx, params = {}) {
   const saveBtn = el("button", { type: "button", class: "btn btn-sm", onClick: saveDraft }, "💾 保存");
 
   const topbar = el("header", { class: "ic-wechat-topbar" },
-    el("div", { class: "row", style: { minWidth: "0", gap: "8px" } },
+    el("div", { class: "row", style: { minWidth: "0", gap: "6px" } },
       fileIn,
+      el("div", { class: "ic-nav-hist-group" }, navBackBtn, navFwdBtn),
       activeBreadcrumb,
       el("button", { type: "button", class: "btn btn-sm", onClick: () => fileIn.click() }, "📄 导入"),
       el("button", { type: "button", class: "btn btn-sm", onClick: openURLImportDialog }, "🔗 抓取链接")
@@ -471,9 +527,11 @@ export async function renderArticle(root, ctx, params = {}) {
   const batchSummaryBox = el("div", { class: "hidden" });
   const flowBox = el("div", { id: "art-editor-flow" });
 
+  const paperLinksBar = el("div", { class: "ic-paper-links-bar" });
   const paperSheet = el("article", { class: "ic-wechat-paper" },
     el("div", { class: "ic-wechat-title-box" }, titleInput, titleCount),
     el("div", { class: "ic-wechat-paper-divider" }),
+    paperLinksBar,
     recStylesBar,
     planNotice,
     batchSummaryBox,
@@ -815,7 +873,7 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   // Copilot Sidebar Controls
-  const textModelSel = buildTextModelSelect(modRes, state.textModelRef);
+  const textModelSel = buildTextModelSelect(modRes, state.textModelRef, "articleEdit");
   textModelSel.classList.add("ic-cop-model-sel");
   state.textModelRef = textModelSel.value;
   textModelSel.addEventListener("change", () => {
@@ -974,9 +1032,25 @@ export async function renderArticle(root, ctx, params = {}) {
       }
     },
     onCloseDrawer: () => toggleAiDrawer(false),
+    onOpenLinksTab: () => {
+      state.rightDrawerTab = "links";
+      state.aiDrawerOpen = true;
+      renderStageMode();
+      linksCtrl.refresh(state.activeFile || "");
+      session.persist();
+    },
+    onTriggerInsertLink: () => {
+      if (state.viewMode !== "editor") {
+        state.viewMode = "editor";
+        renderStageMode();
+      }
+      applyFormat("wikilink");
+    },
     onLinksUpdated: (d) => {
       const cnt = (d.backlinks?.length || 0) + (d.outgoing || []).filter((x) => !x.isImage).length;
       drawerTabLinksBtn.textContent = cnt > 0 ? `🔗 双链 (${cnt})` : "🔗 双链";
+      linksCtrl.renderPaperLinksBar(paperLinksBar);
+      if (state.viewMode === "preview") renderPreviewStage();
     },
   });
 
@@ -1098,6 +1172,48 @@ export async function renderArticle(root, ctx, params = {}) {
     linksPaneBody,
     obsPaneBody
   );
+
+  // Draggable resizer for right drawer (#120)
+  const DRAWER_W_KEY = "article-right-drawer-w";
+  const DEFAULT_DRAWER_W = 390;
+  function applyDrawerWidth(px) {
+    const clamped = Math.max(320, Math.min(640, Math.round(px || DEFAULT_DRAWER_W)));
+    aiDrawer.style.flexBasis = `${clamped}px`;
+    aiDrawer.style.width = `${clamped}px`;
+    try { localStorage.setItem(DRAWER_W_KEY, String(clamped)); } catch {}
+  }
+  try {
+    const savedW = parseInt(localStorage.getItem(DRAWER_W_KEY) || "", 10);
+    if (savedW >= 320 && savedW <= 640) applyDrawerWidth(savedW);
+    else applyDrawerWidth(DEFAULT_DRAWER_W);
+  } catch { applyDrawerWidth(DEFAULT_DRAWER_W); }
+
+  const drawerResizer = el("div", {
+    class: "ic-cop-resizer hidden",
+    role: "separator",
+    "aria-orientation": "vertical",
+    "aria-label": "拖动调整右侧面板宽度",
+    title: "拖动调整宽度，双击恢复默认",
+  });
+  drawerResizer.addEventListener("dblclick", () => applyDrawerWidth(DEFAULT_DRAWER_W));
+  drawerResizer.addEventListener("mousedown", (ev) => {
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startW = aiDrawer.getBoundingClientRect().width || DEFAULT_DRAWER_W;
+    drawerResizer.classList.add("is-dragging");
+    document.body.style.userSelect = "none";
+    const onMove = (mEv) => {
+      applyDrawerWidth(startW + (startX - mEv.clientX));
+    };
+    const onUp = () => {
+      drawerResizer.classList.remove("is-dragging");
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
 
   function toggleAiDrawer(force) {
     const next = typeof force === "boolean" ? force : !state.aiDrawerOpen;
@@ -1538,7 +1654,7 @@ export async function renderArticle(root, ctx, params = {}) {
 
   root.appendChild(el("div", { class: "ic-wechat-editor-root" },
     topbar,
-    el("div", { class: "ic-wechat-body" }, sidebar, centerCol, copilotBackdrop, aiDrawer),
+    el("div", { class: "ic-wechat-body" }, sidebar, centerCol, copilotBackdrop, drawerResizer, aiDrawer),
     bottombar,
     obsidianCtrl.hostWrap
   ));
@@ -1554,6 +1670,12 @@ export async function renderArticle(root, ctx, params = {}) {
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l" && state.editorActive) {
       e.preventDefault();
       toggleAiDrawer();
+    } else if (e.altKey && e.key === "ArrowLeft" && state.editorActive) {
+      e.preventDefault();
+      navigateHistory(-1);
+    } else if (e.altKey && e.key === "ArrowRight" && state.editorActive) {
+      e.preventDefault();
+      navigateHistory(1);
     }
   };
   document.addEventListener("keydown", onArticleGlobalKeydown);
@@ -2486,10 +2608,11 @@ export async function renderArticle(root, ctx, params = {}) {
     };
   }
 
-  async function openVaultFile(relPath) {
+  async function openVaultFile(relPath, openOpts = {}) {
     if (!relPath) return;
     try {
       const res = await api("GET", `/api/article/vault/file?path=${encodeURIComponent(relPath)}`);
+      if (!openOpts.fromHistory) pushNavHistory(res.path || relPath);
       let meta = {};
       try {
         meta = typeof res.meta === "string" ? JSON.parse(res.meta) : (res.meta || {});
@@ -3281,6 +3404,7 @@ export async function renderArticle(root, ctx, params = {}) {
 
     const sheet = el("article", { class: "ic-pv-article-sheet" + (state.previewKind === "wechat_mobile" ? " is-mobile" : "") });
     if (state.title) sheet.appendChild(el("h2", { style: { margin: "0 0 8px" } }, state.title));
+    linksCtrl.renderPropertiesBar(sheet, state.content || "");
     if (coverSlot) {
       sheet.appendChild(coverSlot.imagePath
         ? el("img", { src: localImg(coverSlot.imagePath), alt: coverSlot.title || "封面", style: { width: "100%", borderRadius: "8px" } })
@@ -3299,6 +3423,7 @@ export async function renderArticle(root, ctx, params = {}) {
     if (!state.title && paras.length === 0) {
       sheet.appendChild(el("p", { class: "muted", style: { textAlign: "center", padding: "32px 0" } }, "导入或输入文章正文后，这里将实时预览公众号图文效果。"));
     }
+    linksCtrl.renderPreviewBacklinksFooter(sheet);
     previewStageBox.appendChild(sheet);
   }
 
@@ -3312,6 +3437,7 @@ export async function renderArticle(root, ctx, params = {}) {
       diffReviewBox.classList.add("hidden");
       previewStageBox.classList.add("hidden");
       aiDrawer.classList.add("hidden");
+      drawerResizer.classList.add("hidden");
       copilotBackdrop.classList.add("hidden");
       obsidianCtrl.updateHostVisibility(false);
       closeSelectionBubble();
@@ -3332,6 +3458,7 @@ export async function renderArticle(root, ctx, params = {}) {
     previewStageBox.classList.toggle("hidden", isEditor);
 
     aiDrawer.classList.toggle("hidden", !drawerOpen);
+    drawerResizer.classList.toggle("hidden", !drawerOpen);
     copilotBackdrop.classList.toggle("hidden", !drawerOpen);
     const tab = state.rightDrawerTab || "ai";
     drawerTabAiBtn.classList.toggle("is-active", tab === "ai");
@@ -3462,7 +3589,7 @@ export async function renderArticle(root, ctx, params = {}) {
       coverRatio: state.coverRatio,
       inlineRatio: state.inlineRatio,
       includeCover: state.includeCover,
-      modelRef: state.textModelRef || "",
+      modelRef: modRes.sceneModels?.articlePlan || state.textModelRef || "",
     };
     try {
       const res = await api("POST", "/api/article/plan", request);
@@ -3471,7 +3598,7 @@ export async function renderArticle(root, ctx, params = {}) {
         return;
       }
       const fresh = (res.slots || []).map((sl) => ({ ...sl, id: crypto.randomUUID(), imagePath: "", variants: [], selected: true }));
-      const viaModel = res.model ? `（${res.model}）` : (res.source === "site" ? "（官方智能文字服务）" : (res.source === "provider" ? "（自定义文本模型）" : ""));
+      const viaModel = res.model ? `（${res.model}）` : (res.source === "harness" ? "（本地 Harness）" : (res.source === "site" ? "（官方智能文字服务）" : (res.source === "provider" ? "（自定义文本模型）" : "")));
       const noticeMsg = res.source === "local"
         ? (res.fallbackReason
             ? `AI 规划暂不可用（${res.fallbackReason}），已降级为本地规则分段模板。`

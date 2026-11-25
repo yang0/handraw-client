@@ -1,7 +1,6 @@
 import { api, clear, closeModal, el, getToken, openURL, showModal, toast } from "../api.js";
 
 const WIKILINK_RE = /(!)?\[\[([^\[\]\r\n]+)\]\]/g;
-const MDLINK_RE = /(!)?\[([^\]]*)\]\(([^)\r\n]+)\)/g;
 
 function vaultAssetUrl(rawPath, fromNote = "") {
   const q = new URLSearchParams({ path: String(rawPath || ""), t: getToken() });
@@ -30,6 +29,88 @@ function parseWikilinkInner(inner) {
   return { target: targetPart.trim(), heading, alias };
 }
 
+function parseFrontmatterEntries(rawContent) {
+  const m = String(rawContent || "").match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!m) return [];
+  const entries = [];
+  const lines = m[1].split(/\r?\n/);
+  let cur = null;
+  for (const raw of lines) {
+    const t = raw.trim();
+    if (!t || t.startsWith("#")) continue;
+    if (/^\s*-\s+/.test(raw) && cur) {
+      cur.values.push(t.replace(/^-\s+/, "").replace(/^["']|["']$/g, ""));
+      continue;
+    }
+    const idx = raw.indexOf(":");
+    if (idx > 0 && !raw.startsWith(" ")) {
+      const key = raw.slice(0, idx).trim();
+      const val = raw.slice(idx + 1).trim();
+      let values = [];
+      if (val.startsWith("[") && val.endsWith("]")) {
+        values = val.slice(1, -1).split(",").map((x) => x.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+      } else if (val) {
+        values = [val.replace(/^["']|["']$/g, "")];
+      }
+      cur = { key, values };
+      entries.push(cur);
+    }
+  }
+  return entries.filter((e) => e.values.length > 0);
+}
+
+function appendHighlightedSnippet(container, snippet, highlightTerm = "") {
+  const text = String(snippet || "");
+  if (!text) return;
+  // Highlight [[...]] wikilinks and optional match term
+  const parts = [];
+  const re = /(!?\[\[[^\[\]\r\n]+\]\])/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push({ kind: "text", val: text.slice(last, m.index) });
+    parts.push({ kind: "link", val: m[0] });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push({ kind: "text", val: text.slice(last) });
+
+  const termLow = String(highlightTerm || "").trim().toLowerCase();
+  for (const p of parts) {
+    if (p.kind === "link") {
+      container.appendChild(el("mark", { class: "ic-links-mark" }, p.val));
+    } else if (termLow) {
+      const low = p.val.toLowerCase();
+      const idx = low.indexOf(termLow);
+      if (idx >= 0) {
+        if (idx > 0) container.appendChild(document.createTextNode(p.val.slice(0, idx)));
+        container.appendChild(el("mark", { class: "ic-links-mark is-mention" }, p.val.slice(idx, idx + termLow.length)));
+        if (idx + termLow.length < p.val.length) container.appendChild(document.createTextNode(p.val.slice(idx + termLow.length)));
+      } else {
+        container.appendChild(document.createTextNode(p.val));
+      }
+    } else {
+      container.appendChild(document.createTextNode(p.val));
+    }
+  }
+}
+
+function appendMatchHighlight(parent, text, query) {
+  const s = String(text || "");
+  const q = String(query || "").trim();
+  if (!q) {
+    parent.textContent = s;
+    return;
+  }
+  const idx = s.toLowerCase().indexOf(q.toLowerCase());
+  if (idx < 0) {
+    parent.textContent = s;
+    return;
+  }
+  if (idx > 0) parent.appendChild(document.createTextNode(s.slice(0, idx)));
+  parent.appendChild(el("mark", { class: "ic-link-ac-hl" }, s.slice(idx, idx + q.length)));
+  if (idx + q.length < s.length) parent.appendChild(document.createTextNode(s.slice(idx + q.length)));
+}
+
 function getTextareaCaretCoords(ta, pos) {
   const rect = ta.getBoundingClientRect();
   const cs = window.getComputedStyle(ta);
@@ -52,12 +133,17 @@ function getTextareaCaretCoords(ta, pos) {
   marker.textContent = "\u200b";
   mirror.appendChild(marker);
   document.body.appendChild(mirror);
+  const lh = parseFloat(cs.lineHeight || "22") || 22;
   const left = rect.left + marker.offsetLeft - ta.scrollLeft;
-  const top = rect.top + marker.offsetTop - ta.scrollTop + parseFloat(cs.lineHeight || "22");
+  const top = rect.top + marker.offsetTop - ta.scrollTop + lh;
   mirror.remove();
+  const popW = 340;
+  const popH = 290;
   return {
-    left: Math.max(12, Math.min(left, window.innerWidth - 330)),
-    top: Math.max(40, Math.min(top + 4, window.innerHeight - 250)),
+    left: Math.max(12, Math.min(left, window.innerWidth - popW - 14)),
+    top: top + popH > window.innerHeight - 16
+      ? Math.max(48, top - lh - popH - 6)
+      : Math.max(48, top + 4),
   };
 }
 
@@ -65,13 +151,15 @@ function prefersReducedMotion() {
   return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
 }
 
-// ---------- Interactive Canvas Force-Directed Graph ----------
+// ---------- Interactive Canvas Force-Directed Graph (with Auto-Fit, Arrows, Controls & Legend) ----------
 function mountForceGraph(container, rawGraph, opts = {}) {
   const {
     mode = "local", // local | global
     activePath = "",
     hops = 1,
     showUnresolved = true,
+    showLegend = false,
+    showControls = true,
     query = "",
     interactive = true,
     onNodeClick = null,
@@ -81,7 +169,6 @@ function mountForceGraph(container, rawGraph, opts = {}) {
   const allNodes = Array.isArray(rawGraph?.nodes) ? rawGraph.nodes : [];
   const allEdges = Array.isArray(rawGraph?.edges) ? rawGraph.edges : [];
 
-  // Filter graph based on local vs global mode
   let keptIds = new Set();
   if (mode === "local" && activePath) {
     const startNode = allNodes.find((n) => n.path?.toLowerCase() === activePath.toLowerCase() || n.id?.toLowerCase() === activePath.toLowerCase());
@@ -103,40 +190,51 @@ function mountForceGraph(container, rawGraph, opts = {}) {
 
   let nodes = allNodes
     .filter((n) => keptIds.has(n.id) && (showUnresolved || n.exists))
-    .map((n, i) => ({
-      ...n,
-      isCurrent: Boolean(activePath && n.path && n.path.toLowerCase() === activePath.toLowerCase()),
-      x: 0,
-      y: 0,
-      vx: 0,
-      vy: 0,
-      radius: n.isCurrent || (activePath && n.path?.toLowerCase() === activePath.toLowerCase()) ? 9 : Math.min(11, 5.2 + Math.sqrt(n.degree || 0) * 1.4),
-      _seed: i,
-    }));
+    .map((n, i) => {
+      const isCur = Boolean(activePath && n.path && n.path.toLowerCase() === activePath.toLowerCase());
+      return {
+        ...n,
+        isCurrent: isCur,
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        inDeg: 0,
+        outDeg: 0,
+        radius: isCur ? 10 : Math.min(11.5, 5.8 + Math.sqrt(n.degree || 0) * 1.45),
+        _seed: i,
+      };
+    });
 
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
   const edges = allEdges
     .filter((e) => nodeById.has(e.source) && nodeById.has(e.target))
-    .map((e) => ({ source: nodeById.get(e.source), target: nodeById.get(e.target), isEmbed: Boolean(e.isEmbed) }));
+    .map((e) => {
+      const src = nodeById.get(e.source);
+      const dst = nodeById.get(e.target);
+      src.outDeg++;
+      dst.inDeg++;
+      return { source: src, target: dst, isEmbed: Boolean(e.isEmbed) };
+    });
 
   if (!nodes.length) {
     container.appendChild(el("div", { class: "ic-link-graph-empty muted" },
-      mode === "local" ? "当前文章还没有双向链接。在正文输入 [[ 即可关联其他笔记。" : "当前文章库暂无笔记节点。"
+      mode === "local" ? "当前文章还没有双向链接。点击「＋ 插入双链」或在正文输入 [[ 即可关联笔记。" : "当前文章库暂无笔记节点。"
     ));
-    return { destroy() {}, resetView() {} };
+    return { destroy() {}, fitToView() {}, zoomBy() {} };
   }
 
   const canvas = el("canvas", { class: "ic-link-graph-canvas" });
   const tooltip = el("div", { class: "ic-link-graph-tip hidden" });
   container.append(canvas, tooltip);
 
-  let width = container.clientWidth || 320;
-  let height = container.clientHeight || 200;
+  let width = container.clientWidth || 340;
+  let height = container.clientHeight || 220;
   const dpr = Math.min(2, window.devicePixelRatio || 1);
 
   const resize = () => {
-    width = container.clientWidth || 320;
-    height = container.clientHeight || 200;
+    width = container.clientWidth || 340;
+    height = container.clientHeight || 220;
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(height * dpr);
     canvas.style.width = `${width}px`;
@@ -144,21 +242,20 @@ function mountForceGraph(container, rawGraph, opts = {}) {
   };
   resize();
 
-  // Deterministic initial ring placement
-  const initR = Math.min(width, height) * 0.28;
+  const isLarge = width >= 500;
+  const initR = Math.min(width, height) * (isLarge ? 0.32 : 0.28);
   nodes.forEach((n, i) => {
     if (n.isCurrent) {
       n.x = 0;
       n.y = 0;
     } else {
-      const angle = (i / Math.max(1, nodes.length)) * Math.PI * 2 + 0.3;
-      const dist = initR * (0.55 + ((i * 37) % 10) / 16);
+      const angle = (i / Math.max(1, nodes.length)) * Math.PI * 2 - Math.PI / 2;
+      const dist = initR * (0.65 + ((i * 29) % 10) / 22);
       n.x = Math.cos(angle) * dist;
       n.y = Math.sin(angle) * dist;
     }
   });
 
-  // Adjacency for hover highlighting
   const neighbors = new Map();
   nodes.forEach((n) => neighbors.set(n.id, new Set([n.id])));
   edges.forEach((e) => {
@@ -180,10 +277,10 @@ function mountForceGraph(container, rawGraph, opts = {}) {
   const ql = String(query || "").trim().toLowerCase();
 
   function tickPhysics(steps = 1) {
-    const isLarge = width >= 500;
-    const repulse = isLarge ? 4600 : 2400;
-    const linkDist = isLarge ? 112 : 70;
-    const springK = 0.045;
+    const big = width >= 500;
+    const repulse = big ? 5200 : 2800;
+    const linkDist = big ? 124 : 78;
+    const springK = 0.048;
     const centerK = 0.012;
     for (let s = 0; s < steps; s++) {
       for (let i = 0; i < nodes.length; i++) {
@@ -192,9 +289,9 @@ function mountForceGraph(container, rawGraph, opts = {}) {
         a.vy += -a.y * centerK * alpha;
         for (let j = i + 1; j < nodes.length; j++) {
           const b = nodes[j];
-          let dx = a.x - b.x;
-          let dy = a.y - b.y;
-          const d2 = dx * dx + dy * dy + 16;
+          const dx = a.x - b.x;
+          const dy = a.y - b.y;
+          const d2 = dx * dx + dy * dy + 24;
           const d = Math.sqrt(d2);
           const f = (repulse / d2) * alpha;
           const fx = (dx / d) * f;
@@ -215,13 +312,33 @@ function mountForceGraph(container, rawGraph, opts = {}) {
       }
       for (const n of nodes) {
         if (n === draggingNode) { n.vx = 0; n.vy = 0; continue; }
-        n.vx *= 0.82;
-        n.vy *= 0.82;
+        n.vx *= 0.80;
+        n.vy *= 0.80;
         n.x += Math.max(-18, Math.min(18, n.vx));
         n.y += Math.max(-18, Math.min(18, n.vy));
       }
-      alpha *= 0.985;
+      alpha *= 0.98;
     }
+  }
+
+  function fitToView() {
+    if (!nodes.length) return;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      const labelPadX = Math.min(68, Math.max(36, n.label.length * 5.8));
+      minX = Math.min(minX, n.x - labelPadX);
+      maxX = Math.max(maxX, n.x + labelPadX);
+      minY = Math.min(minY, n.y - n.radius - 20);
+      maxY = Math.max(maxY, n.y + n.radius + 32);
+    }
+    const spanX = Math.max(120, maxX - minX);
+    const spanY = Math.max(90, maxY - minY);
+    const padRatio = width >= 500 ? 0.84 : 0.88;
+    const maxScale = width >= 500 ? 1.55 : 1.05;
+    camX = -(minX + maxX) / 2;
+    camY = -(minY + maxY) / 2;
+    camScale = Math.max(0.35, Math.min(maxScale, Math.min((width * padRatio) / spanX, (height * padRatio) / spanY)));
+    draw();
   }
 
   function screenToWorld(sx, sy) {
@@ -244,7 +361,7 @@ function mountForceGraph(container, rawGraph, opts = {}) {
       const n = nodes[i];
       const dx = w.x - n.x;
       const dy = w.y - n.y;
-      const hitR = Math.max(10 / camScale, n.radius + 4);
+      const hitR = Math.max(12 / camScale, n.radius + 5);
       if (dx * dx + dy * dy <= hitR * hitR) return n;
     }
     return null;
@@ -256,17 +373,28 @@ function mountForceGraph(container, rawGraph, opts = {}) {
     const isDark = document.querySelector('meta[name="color-scheme"]')?.content === "dark" ||
       (document.querySelector('meta[name="color-scheme"]')?.content !== "light" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
 
-    const bgColor = isDark ? "#1c1916" : "#faf7f2";
+    const bgColor = isDark ? "#1a1714" : "#fbf8f3";
+    const dotColor = isDark ? "rgba(239,232,220,0.06)" : "rgba(44,36,27,0.065)";
     const inkColor = isDark ? "#efe8dc" : "#2c241b";
-    const mutedNode = isDark ? "#7c7266" : "#8e8070";
-    const unresolvedColor = isDark ? "#5c5349" : "#bfb4a5";
-    const edgeColor = isDark ? "rgba(239,232,220,0.16)" : "rgba(44,36,27,0.16)";
-    const accent = isDark ? "#e0674c" : "#c84b31";
+    const mutedNode = isDark ? "#8b7f72" : "#7c6e5f";
+    const unresolvedColor = isDark ? "#5c5349" : "#c7bcb0";
+    const edgeColor = isDark ? "rgba(239,232,220,0.20)" : "rgba(44,36,27,0.20)";
+    const accent = isDark ? "#e26a4f" : "#c84b31";
+    const accentHalo = isDark ? "rgba(226,106,79,0.22)" : "rgba(200,75,49,0.16)";
 
     ctx.save();
     ctx.scale(dpr, dpr);
     ctx.fillStyle = bgColor;
     ctx.fillRect(0, 0, width, height);
+
+    // Subtle tactile warm paper dot grid
+    const gridStep = 22;
+    ctx.fillStyle = dotColor;
+    for (let gx = (width / 2) % gridStep; gx < width; gx += gridStep) {
+      for (let gy = (height / 2) % gridStep; gy < height; gy += gridStep) {
+        ctx.fillRect(gx, gy, 1.2, 1.2);
+      }
+    }
 
     ctx.translate(width / 2, height / 2);
     ctx.scale(camScale, camScale);
@@ -274,52 +402,90 @@ function mountForceGraph(container, rawGraph, opts = {}) {
 
     const focusSet = hoveredNode ? neighbors.get(hoveredNode.id) : null;
 
-    // Edges
+    // Edges with directional arrowheads
     for (const e of edges) {
       const lit = !focusSet || (focusSet.has(e.source.id) && focusSet.has(e.target.id) && (e.source === hoveredNode || e.target === hoveredNode));
+      const dx = e.target.x - e.source.x;
+      const dy = e.target.y - e.source.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const ux = dx / dist;
+      const uy = dy / dist;
+      const startX = e.source.x + ux * (e.source.radius + 2);
+      const startY = e.source.y + uy * (e.source.radius + 2);
+      const endX = e.target.x - ux * (e.target.radius + 4);
+      const endY = e.target.y - uy * (e.target.radius + 4);
+
       ctx.beginPath();
-      ctx.moveTo(e.source.x, e.source.y);
-      ctx.lineTo(e.target.x, e.target.y);
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
       ctx.strokeStyle = lit && focusSet ? accent : edgeColor;
-      ctx.lineWidth = (lit && focusSet ? 1.8 : 1.05) / Math.sqrt(camScale);
-      if (e.isEmbed) ctx.setLineDash([4, 3]);
+      ctx.globalAlpha = lit ? 1 : 0.25;
+      ctx.lineWidth = (lit && focusSet ? 1.85 : 1.15) / Math.sqrt(camScale);
+      if (e.isEmbed) ctx.setLineDash([4.5, 3]);
       else ctx.setLineDash([]);
       ctx.stroke();
-    }
-    ctx.setLineDash([]);
+      ctx.setLineDash([]);
 
-    // Nodes + labels
-    const showLabels = camScale >= 0.65 || nodes.length <= 35;
+      // Directional arrow head
+      if (dist > e.source.radius + e.target.radius + 14) {
+        const aLen = 6 / Math.sqrt(camScale);
+        const angle = Math.atan2(dy, dx);
+        ctx.beginPath();
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(endX - aLen * Math.cos(angle - Math.PI / 6), endY - aLen * Math.sin(angle - Math.PI / 6));
+        ctx.lineTo(endX - aLen * Math.cos(angle + Math.PI / 6), endY - aLen * Math.sin(angle + Math.PI / 6));
+        ctx.closePath();
+        ctx.fillStyle = lit && focusSet ? accent : edgeColor;
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // Nodes + crisp labels
+    const showLabels = camScale >= 0.55 || nodes.length <= 40;
     for (const n of nodes) {
       const matchesQ = !ql || n.label.toLowerCase().includes(ql) || (n.path || "").toLowerCase().includes(ql);
       const lit = (!focusSet || focusSet.has(n.id)) && matchesQ;
-      ctx.globalAlpha = lit ? 1 : 0.22;
+      ctx.globalAlpha = lit ? 1 : 0.2;
+
+      // Halo ring on current or hovered node
+      if (n.isCurrent || hoveredNode === n) {
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.radius + 5.5, 0, Math.PI * 2);
+        ctx.fillStyle = accentHalo;
+        ctx.fill();
+      }
 
       ctx.beginPath();
       ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
       ctx.fillStyle = n.isCurrent ? accent : (n.exists ? (hoveredNode === n ? accent : mutedNode) : unresolvedColor);
       ctx.fill();
+
       if (n.isCurrent || hoveredNode === n) {
         ctx.lineWidth = 2 / Math.sqrt(camScale);
         ctx.strokeStyle = isDark ? "#faf7f2" : "#ffffff";
         ctx.stroke();
-      }
-      if (!n.exists) {
-        ctx.setLineDash([2, 2]);
-        ctx.lineWidth = 1.2 / Math.sqrt(camScale);
+      } else if (!n.exists) {
+        ctx.setLineDash([2.5, 2]);
+        ctx.lineWidth = 1.25 / Math.sqrt(camScale);
         ctx.strokeStyle = mutedNode;
         ctx.stroke();
         ctx.setLineDash([]);
       }
 
       if (showLabels || n.isCurrent || hoveredNode === n || (ql && matchesQ)) {
-        const fontSize = Math.max(9.5, Math.min(12.5, (n.isCurrent ? 12 : 11) / Math.sqrt(camScale)));
-        ctx.font = `${n.isCurrent ? "600" : "400"} ${fontSize}px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
-        ctx.fillStyle = n.isCurrent ? accent : inkColor;
+        const fontSize = Math.max(10, Math.min(13, (n.isCurrent ? 12.2 : 11.2) / Math.sqrt(camScale)));
+        ctx.font = `${n.isCurrent || hoveredNode === n ? "600" : "500"} ${fontSize}px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
-        const label = n.label.length > 18 ? n.label.slice(0, 17) + "…" : n.label;
-        ctx.fillText(label, n.x, n.y + n.radius + 4);
+        const label = n.label.length > 20 ? n.label.slice(0, 19) + "…" : n.label;
+        const ly = n.y + n.radius + 5;
+        // Soft pill halo behind text so labels never clash with edges
+        const tw = ctx.measureText(label).width;
+        ctx.fillStyle = isDark ? "rgba(26,23,20,0.78)" : "rgba(251,248,243,0.82)";
+        ctx.fillRect(n.x - tw / 2 - 3, ly - 1, tw + 6, fontSize + 3);
+        ctx.fillStyle = n.isCurrent || hoveredNode === n ? accent : (n.exists ? inkColor : mutedNode);
+        ctx.fillText(label, n.x, ly);
       }
     }
 
@@ -327,13 +493,13 @@ function mountForceGraph(container, rawGraph, opts = {}) {
     ctx.restore();
   }
 
-  // Settle initial positions cleanly
-  tickPhysics(prefersReducedMotion() ? 130 : 70);
-  draw();
+  // Settle initial physics completely, THEN auto-fit camera cleanly!
+  tickPhysics(110);
+  fitToView();
 
   function loop() {
     if (destroyed) return;
-    if (alpha > 0.03 || draggingNode) {
+    if (alpha > 0.04 || draggingNode) {
       tickPhysics(1);
       draw();
       rafId = requestAnimationFrame(loop);
@@ -341,18 +507,41 @@ function mountForceGraph(container, rawGraph, opts = {}) {
       rafId = 0;
     }
   }
-  if (!prefersReducedMotion()) {
+  if (!prefersReducedMotion() && alpha > 0.04) {
     rafId = requestAnimationFrame(loop);
   }
 
   function wake(newAlpha = 0.25) {
     alpha = Math.max(alpha, newAlpha);
     if (prefersReducedMotion()) {
-      tickPhysics(8);
+      tickPhysics(10);
       draw();
       return;
     }
     if (!rafId) rafId = requestAnimationFrame(loop);
+  }
+
+  function zoomBy(factor) {
+    camScale = Math.max(0.28, Math.min(3.5, camScale * factor));
+    draw();
+  }
+
+  if (showControls) {
+    container.appendChild(el("div", { class: "ic-link-graph-ctrls" },
+      el("button", { type: "button", class: "ic-link-graph-ctrl-btn", title: "放大", onClick: () => zoomBy(1.22) }, "＋"),
+      el("button", { type: "button", class: "ic-link-graph-ctrl-btn", title: "缩小", onClick: () => zoomBy(0.82) }, "－"),
+      el("button", { type: "button", class: "ic-link-graph-ctrl-btn", title: "自适应居中", onClick: () => fitToView() }, "⌖")
+    ));
+  }
+
+  if (showLegend) {
+    container.appendChild(el("div", { class: "ic-link-graph-legend" },
+      el("span", { class: "ic-lg-item" }, el("i", { class: "ic-lg-dot is-current" }), "当前文章"),
+      el("span", { class: "ic-lg-item" }, el("i", { class: "ic-lg-dot is-note" }), "已有笔记"),
+      el("span", { class: "ic-lg-item" }, el("i", { class: "ic-lg-dot is-unres" }), "未创建"),
+      el("span", { class: "ic-lg-item" }, el("i", { class: "ic-lg-line" }), "引用"),
+      el("span", { class: "ic-lg-item" }, el("i", { class: "ic-lg-line is-embed" }), "嵌入")
+    ));
   }
 
   if (interactive) {
@@ -365,7 +554,7 @@ function mountForceGraph(container, rawGraph, opts = {}) {
         draggingNode.x = w.x;
         draggingNode.y = w.y;
         dragStart.moved = true;
-        wake(0.18);
+        wake(0.14);
         draw();
         return;
       }
@@ -383,7 +572,15 @@ function mountForceGraph(container, rawGraph, opts = {}) {
         hoveredNode = hit;
         canvas.style.cursor = hit ? "pointer" : "grab";
         if (hit) {
-          tooltip.textContent = `${hit.label}${hit.exists ? "" : "（未创建，点击新建）"} · ${hit.degree || 0} 条关联`;
+          clear(tooltip);
+          tooltip.append(
+            el("div", { style: { fontWeight: "600" } }, hit.label),
+            el("div", { style: { opacity: "0.85", fontSize: "11px" } },
+              hit.exists
+                ? `${hit.path || ""} · 入链 ${hit.inDeg} · 出链 ${hit.outDeg}`
+                : "尚未创建 · 点击立即新建笔记"
+            )
+          );
           tooltip.classList.remove("hidden");
         } else {
           tooltip.classList.add("hidden");
@@ -392,8 +589,16 @@ function mountForceGraph(container, rawGraph, opts = {}) {
       }
       if (hit) {
         const pos = worldToScreen(hit.x, hit.y);
-        tooltip.style.left = `${Math.max(8, Math.min(pos.x + 12, width - 190))}px`;
-        tooltip.style.top = `${Math.max(8, pos.y - 28)}px`;
+        tooltip.style.left = `${Math.max(8, Math.min(pos.x + 14, width - 220))}px`;
+        tooltip.style.top = `${Math.max(8, Math.min(pos.y - 36, height - 56))}px`;
+      }
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+      if (hoveredNode) {
+        hoveredNode = null;
+        tooltip.classList.add("hidden");
+        draw();
       }
     });
 
@@ -424,12 +629,10 @@ function mountForceGraph(container, rawGraph, opts = {}) {
 
     canvas.addEventListener("wheel", (ev) => {
       ev.preventDefault();
-      const factor = ev.deltaY < 0 ? 1.12 : 0.89;
-      camScale = Math.max(0.3, Math.min(3.2, camScale * factor));
-      draw();
+      zoomBy(ev.deltaY < 0 ? 1.14 : 0.88);
     }, { passive: false });
 
-    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => { resize(); draw(); }) : null;
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => { resize(); fitToView(); }) : null;
     if (ro) ro.observe(container);
 
     return {
@@ -439,17 +642,15 @@ function mountForceGraph(container, rawGraph, opts = {}) {
         window.removeEventListener("mouseup", onUp);
         if (ro) ro.disconnect();
       },
-      resetView() {
-        camX = 0; camY = 0; camScale = 1;
-        wake(0.4);
-        draw();
-      },
+      fitToView,
+      zoomBy,
     };
   }
 
   return {
     destroy() { destroyed = true; if (rafId) cancelAnimationFrame(rafId); },
-    resetView() {},
+    fitToView,
+    zoomBy,
   };
 }
 
@@ -466,9 +667,14 @@ export function createArticleLinksController(opts) {
   };
 
   let acEl = null;
-  let acState = null; // { ta, startIdx, endIdx, isEmbed, headingMode, baseNote, items, selected }
+  let acState = null;
   let miniGraphHandle = null;
   const notePreviewCache = new Map();
+
+  // Hover Page Preview state (Obsidian-style floating note preview card)
+  let hoverEl = null;
+  let hoverShowTimer = null;
+  let hoverHideTimer = null;
 
   const panelEl = el("div", { class: "ic-links-panel" });
 
@@ -497,6 +703,7 @@ export function createArticleLinksController(opts) {
   }
 
   async function navigateToLink(rawTarget, sourcePath = "") {
+    hideHoverPreview(true);
     const { target } = parseWikilinkInner(rawTarget);
     if (!target) return;
     const res = resolveLocalTarget(target, sourcePath || opts.getActivePath?.() || "");
@@ -505,19 +712,108 @@ export function createArticleLinksController(opts) {
       return;
     }
     if (res?.kind === "attachment") {
-      toast(`附件：${res.item.path}`);
+      toast(`附件路径：${res.item.path}`);
       return;
     }
-    // Unresolved note -> create and open directly!
     await opts.createAndOpenNote?.(target);
+  }
+
+  // ---------- Hover Page Preview Card ----------
+  function hideHoverPreview(immediate = false) {
+    if (hoverShowTimer) { clearTimeout(hoverShowTimer); hoverShowTimer = null; }
+    if (hoverHideTimer) { clearTimeout(hoverHideTimer); hoverHideTimer = null; }
+    const doHide = () => {
+      if (hoverEl) { hoverEl.remove(); hoverEl = null; }
+    };
+    if (immediate) doHide();
+    else hoverHideTimer = setTimeout(doHide, 180);
+  }
+
+  async function fetchNoteText(relPath) {
+    if (notePreviewCache.has(relPath)) return notePreviewCache.get(relPath);
+    const res = await api("GET", `/api/article/vault/file?path=${encodeURIComponent(relPath)}`);
+    const content = res.content || "";
+    notePreviewCache.set(relPath, content);
+    return content;
+  }
+
+  function bindHoverPreview(anchorEl, targetOrPath, sourcePath = "") {
+    if (!anchorEl) return;
+    anchorEl.addEventListener("mouseenter", () => {
+      if (hoverHideTimer) { clearTimeout(hoverHideTimer); hoverHideTimer = null; }
+      if (hoverShowTimer) clearTimeout(hoverShowTimer);
+      hoverShowTimer = setTimeout(async () => {
+        const res = resolveLocalTarget(targetOrPath, sourcePath || opts.getActivePath?.() || "");
+        if (!res || res.kind !== "note") return;
+        const note = res.item;
+        const rect = anchorEl.getBoundingClientRect();
+
+        if (hoverEl) hoverEl.remove();
+        const bodyBox = el("div", { class: "ic-hover-pv-body muted" }, "正在加载预览…");
+        const card = el("div", { class: "ic-hover-pv" },
+          el("div", { class: "ic-hover-pv-head" },
+            el("div", { class: "ic-hover-pv-title-wrap" },
+              el("strong", null, note.title || note.basename),
+              el("span", { class: "mono muted", style: { fontSize: "10.5px" } }, note.path)
+            ),
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              onClick: () => { hideHoverPreview(true); opts.openNote?.(note.path); },
+            }, "打开 ↗")
+          ),
+          note.aliases?.length
+            ? el("div", { class: "ic-hover-pv-aliases" }, ...note.aliases.map((a) => el("span", { class: "badge" }, a)))
+            : null,
+          bodyBox
+        );
+        card.addEventListener("mouseenter", () => {
+          if (hoverHideTimer) { clearTimeout(hoverHideTimer); hoverHideTimer = null; }
+        });
+        card.addEventListener("mouseleave", () => hideHoverPreview(false));
+
+        document.body.appendChild(card);
+        hoverEl = card;
+
+        const cw = 340;
+        const ch = 220;
+        const left = rect.right + cw + 16 < window.innerWidth
+          ? rect.left
+          : Math.max(12, window.innerWidth - cw - 14);
+        const top = rect.bottom + ch + 16 < window.innerHeight
+          ? rect.bottom + 8
+          : Math.max(12, rect.top - ch - 8);
+        card.style.left = `${Math.max(12, Math.min(left, window.innerWidth - cw - 14))}px`;
+        card.style.top = `${top}px`;
+
+        try {
+          const text = await fetchNoteText(note.path);
+          if (!card.isConnected) return;
+          clear(bodyBox);
+          bodyBox.classList.remove("muted");
+          const stripped = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
+          const lines = stripped.split(/\r?\n/).filter((l) => l.trim()).slice(0, 7);
+          if (!lines.length) {
+            bodyBox.textContent = "（空白笔记）";
+          } else {
+            lines.forEach((ln) => {
+              const p = el("p", { class: "ic-hover-pv-line" });
+              appendHighlightedSnippet(p, ln.replace(/^#+\s*/, ""), "");
+              bodyBox.appendChild(p);
+            });
+          }
+        } catch {
+          if (card.isConnected) bodyBox.textContent = "无法读取该笔记";
+        }
+      }, 280);
+    });
+    anchorEl.addEventListener("mouseleave", () => hideHoverPreview(false));
+    anchorEl.addEventListener("mousedown", () => hideHoverPreview(true));
   }
 
   // ---------- Autocomplete Popup for [[ and ![[ ----------
   function closeAutocomplete() {
-    if (acEl) {
-      acEl.remove();
-      acEl = null;
-    }
+    if (acEl) { acEl.remove(); acEl = null; }
     acState = null;
   }
 
@@ -542,13 +838,16 @@ export function createArticleLinksController(opts) {
       document.body.appendChild(acEl);
     }
     clear(acEl);
-    const { items, selected, isEmbed, headingMode } = acState;
+    const { items, selected, isEmbed, headingMode, rawQuery } = acState;
     acEl.appendChild(el("div", { class: "ic-link-ac-head" },
-      headingMode ? "选择文内标题 (#)" : (isEmbed ? "嵌入笔记或图片 (![[…]])" : "插入双链笔记 ([[…]])"),
-      el("span", { class: "muted", style: { fontSize: "11px" } }, "↑↓ 切换 · Enter 插入")
+      el("span", null, headingMode ? "选择文内标题 (#)" : (isEmbed ? "嵌入笔记或图片 (![[…]])" : "插入双链笔记 ([[…]])")),
+      el("span", { class: "muted", style: { fontSize: "10.5px" } }, "↑↓ 选 · Enter 确认")
     ));
     const list = el("div", { class: "ic-link-ac-list" });
+    let selectedBtn = null;
     items.forEach((it, idx) => {
+      const titleEl = el("div", { class: "ic-link-ac-title" });
+      appendMatchHighlight(titleEl, it.label, rawQuery);
       const row = el("button", {
         type: "button",
         role: "option",
@@ -560,16 +859,20 @@ export function createArticleLinksController(opts) {
       },
         el("span", { class: "ic-link-ac-ico" }, it.icon),
         el("div", { class: "ic-link-ac-text" },
-          el("div", { class: "ic-link-ac-title" }, it.label),
+          titleEl,
           it.sub ? el("div", { class: "ic-link-ac-sub muted" }, it.sub) : null
-        )
+        ),
+        it.tag ? el("span", { class: "ic-link-ac-tag" + (it.tagKind ? ` is-${it.tagKind}` : "") }, it.tag) : null
       );
+      if (idx === selected) selectedBtn = row;
       list.appendChild(row);
     });
     acEl.appendChild(list);
+    acEl.appendChild(el("div", { class: "ic-link-ac-foot muted" }, "输入 # 可补全标题 · Ctrl/⌘+点击 可跳转"));
     const coords = getTextareaCaretCoords(acState.ta, acState.endIdx);
     acEl.style.left = `${coords.left}px`;
     acEl.style.top = `${coords.top}px`;
+    if (selectedBtn) selectedBtn.scrollIntoView({ block: "nearest" });
   }
 
   function updateAutocomplete(ta) {
@@ -597,32 +900,36 @@ export function createArticleLinksController(opts) {
       if (resolved?.headings?.length) {
         resolved.headings
           .filter((h) => !headQuery || h.toLowerCase().includes(headQuery))
-          .slice(0, 12)
+          .slice(0, 14)
           .forEach((h) => {
             items.push({
               icon: "#",
               label: h,
               sub: resolved.basename,
+              tag: "标题",
               insertValue: `${noteQuery ? resolved.basename : ""}#${h}`,
             });
           });
       }
     } else {
       const ql = rawQuery.trim().toLowerCase();
-      // Matching notes
       for (const n of data.notes) {
-        const hay = `${n.basename} ${n.path} ${n.title} ${(n.aliases || []).join(" ")}`.toLowerCase();
+        const aliasStr = (n.aliases || []).join(" / ");
+        const hay = `${n.basename} ${n.path} ${n.title} ${aliasStr}`.toLowerCase();
         if (!ql || hay.includes(ql)) {
+          const subParts = [];
+          if (n.path !== n.name) subParts.push(n.path);
+          if (aliasStr) subParts.push(`别名: ${aliasStr}`);
           items.push({
             icon: "📄",
             label: n.basename,
-            sub: n.path !== n.name ? n.path : (n.title && n.title !== n.basename ? n.title : ""),
+            sub: subParts.join(" · "),
+            tag: "笔记",
             insertValue: n.basename,
           });
         }
-        if (items.length >= 12) break;
+        if (items.length >= 14) break;
       }
-      // Matching images/attachments (especially when ![[ is used)
       if (isEmbed || ql) {
         for (const a of data.attachments) {
           if (!isEmbed && !a.isImage) continue;
@@ -632,18 +939,21 @@ export function createArticleLinksController(opts) {
               icon: a.isImage ? "🖼" : "📎",
               label: a.name,
               sub: a.path,
+              tag: a.isImage ? "图片" : "附件",
+              tagKind: "img",
               insertValue: a.path,
             });
           }
-          if (items.length >= 18) break;
+          if (items.length >= 20) break;
         }
       }
-      // Offer creating a new note link when typing custom title
       if (rawQuery.trim() && !items.some((x) => x.label.toLowerCase() === ql)) {
         items.push({
           icon: "＋",
           label: `链接新笔记「${rawQuery.trim()}」`,
-          sub: "插入双链，点击即可一键创建",
+          sub: "插入后点击双链即可一键新建",
+          tag: "新建",
+          tagKind: "new",
           insertValue: rawQuery.trim(),
         });
       }
@@ -656,10 +966,28 @@ export function createArticleLinksController(opts) {
       endIdx: pos,
       isEmbed,
       headingMode,
+      rawQuery: headingMode ? rawQuery.slice(hashIdx + 1).trim() : rawQuery.trim(),
       items,
       selected: 0,
     };
     renderAutocomplete();
+  }
+
+  function triggerInsertWikilink(ta) {
+    if (!ta) return;
+    const start = ta.selectionStart ?? ta.value.length;
+    const end = ta.selectionEnd ?? ta.value.length;
+    const sel = ta.value.slice(start, end).trim();
+    if (sel) {
+      ta.setRangeText(`[[${sel}]]`, start, end, "end");
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.focus();
+      return;
+    }
+    ta.setRangeText("[[", start, end, "end");
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    ta.focus();
+    updateAutocomplete(ta);
   }
 
   function attachTextarea(ta) {
@@ -671,7 +999,6 @@ export function createArticleLinksController(opts) {
       if (ev.ctrlKey || ev.metaKey) {
         const pos = ta.selectionStart ?? 0;
         const val = ta.value || "";
-        // Find [[...]] containing clicked offset
         const re = new RegExp(WIKILINK_RE.source, "g");
         let m;
         while ((m = re.exec(val)) !== null) {
@@ -704,10 +1031,76 @@ export function createArticleLinksController(opts) {
       }
     });
     ta.addEventListener("blur", () => {
-      setTimeout(() => {
-        if (acState?.ta === ta) closeAutocomplete();
-      }, 150);
+      setTimeout(() => { if (acState?.ta === ta) closeAutocomplete(); }, 160);
     });
+  }
+
+  // ---------- Interactive Paper Header Quick-Link Bar (1-click in Editor mode!) ----------
+  function renderPaperLinksBar(containerEl) {
+    if (!containerEl) return;
+    clear(containerEl);
+    const activePath = opts.getActivePath?.() || "";
+    const noteOutgoing = [];
+    const seen = new Set();
+    for (const o of data.outgoing) {
+      if (o.isImage) continue;
+      const key = (o.resolvedPath || o.target).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      noteOutgoing.push(o);
+    }
+
+    const leftPills = el("div", { class: "ic-paper-links-pills" });
+
+    // Backlinks summary pill
+    if (data.backlinks.length > 0) {
+      leftPills.appendChild(el("button", {
+        type: "button",
+        class: "ic-pl-pill is-backlink",
+        title: "在右侧打开反向链接列表",
+        onClick: () => opts.onOpenLinksTab?.(),
+      }, `↩ ${data.backlinks.length} 篇引用本文`));
+    }
+
+    // Outgoing note pills (1-click open/create + hover preview!)
+    noteOutgoing.slice(0, 8).forEach((o) => {
+      const btn = el("button", {
+        type: "button",
+        class: "ic-pl-pill" + (o.exists ? "" : " is-unresolved"),
+        title: o.exists ? `点击打开「${o.target}」` : `「${o.target}」尚未创建，点击一键新建`,
+        onClick: () => navigateToLink(o.target, activePath),
+      }, `${o.exists ? (o.isEmbed ? "📌 " : "🔗 ") : "＋ "}${o.alias || o.target}`);
+      if (o.exists) bindHoverPreview(btn, o.resolvedPath || o.target, activePath);
+      leftPills.appendChild(btn);
+    });
+    if (noteOutgoing.length > 8) {
+      leftPills.appendChild(el("button", {
+        type: "button",
+        class: "ic-pl-pill is-more",
+        onClick: () => opts.onOpenLinksTab?.(),
+      }, `+${noteOutgoing.length - 8} 更多`));
+    }
+
+    if (!data.backlinks.length && !noteOutgoing.length) {
+      leftPills.appendChild(el("span", { class: "ic-pl-hint muted" }, "输入 [[ 可建立笔记双链，点击胶囊直接跳转"));
+    }
+
+    const rightActs = el("div", { class: "ic-paper-links-acts" },
+      el("button", {
+        type: "button",
+        class: "ic-pl-act-btn",
+        title: "在正文插入 [[ 双链并打开补全",
+        onClick: () => opts.onTriggerInsertLink?.(),
+      }, "＋ 双链"),
+      el("button", {
+        type: "button",
+        class: "ic-pl-act-btn",
+        title: "查看当前文章的关系图谱",
+        onClick: () => openGraphModal(activePath ? "local" : "global"),
+      }, "🕸 图谱")
+    );
+
+    containerEl.append(leftPills, rightActs);
   }
 
   // ---------- Rich Preview & Embed Renderer ----------
@@ -725,13 +1118,12 @@ export function createArticleLinksController(opts) {
         const res = resolveLocalTarget(target, sourcePath);
         if (res?.kind === "attachment" || isImagePath(target)) {
           const widthNum = /^\d+$/.test(alias) ? parseInt(alias, 10) : 0;
-          const img = el("img", {
+          parent.appendChild(el("img", {
             src: vaultAssetUrl(res?.item?.path || target, sourcePath),
             alt: widthNum ? target : (alias || target),
             class: "ic-link-embed-img",
             style: widthNum ? { maxWidth: `${widthNum}px`, width: "100%" } : { width: "100%" },
-          });
-          parent.appendChild(img);
+          }));
         } else if (res?.kind === "note" && depth < 1) {
           parent.appendChild(buildEmbeddedNoteCard(res.item, depth + 1));
         } else {
@@ -781,19 +1173,25 @@ export function createArticleLinksController(opts) {
   }
 
   function buildWikilinkPill(target, label, exists, sourcePath) {
-    return el("button", {
+    const btn = el("button", {
       type: "button",
       class: "ic-wikilink" + (exists ? "" : " is-unresolved"),
-      title: exists ? `跳转到「${target}」` : `「${target}」尚未创建，点击一键新建`,
+      title: exists ? `点击跳转到「${target}」` : `「${target}」尚未创建，点击一键新建`,
       onClick: () => navigateToLink(target, sourcePath),
     }, label);
+    if (exists) bindHoverPreview(btn, target, sourcePath);
+    return btn;
   }
 
   function buildEmbeddedNoteCard(noteItem, depth) {
     const bodyEl = el("div", { class: "ic-embed-note-body muted" }, "正在加载嵌入笔记…");
     const card = el("div", { class: "ic-embed-note" },
       el("div", { class: "ic-embed-note-head" },
-        el("span", null, `📄 ${noteItem.title || noteItem.basename}`),
+        el("div", { class: "row", style: { gap: "6px", minWidth: "0" } },
+          el("span", { style: { fontSize: "13px" } }, "📄"),
+          el("strong", { style: { fontSize: "13px" } }, noteItem.title || noteItem.basename),
+          el("span", { class: "mono muted", style: { fontSize: "11px" } }, noteItem.path)
+        ),
         el("button", {
           type: "button",
           class: "btn btn-sm",
@@ -807,41 +1205,60 @@ export function createArticleLinksController(opts) {
       clear(bodyEl);
       bodyEl.classList.remove("muted");
       const stripped = String(content || "").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
-      const lines = stripped.split(/\r?\n/).filter((l) => l.trim()).slice(0, 8);
+      const lines = stripped.split(/\r?\n/).filter((l) => l.trim()).slice(0, 10);
       if (!lines.length) {
         bodyEl.textContent = "（空白笔记）";
         return;
       }
       lines.forEach((ln) => {
-        const p = el("p", { style: { margin: "4px 0", lineHeight: "1.65" } });
-        appendInlineWithLinks(p, ln.replace(/^#+\s*/, ""), noteItem.path, depth);
-        bodyEl.appendChild(p);
+        const t = ln.trim();
+        const hm = t.match(/^(#{1,6})\s+(.+)$/);
+        if (hm) {
+          const h = el("div", { class: "ic-embed-note-h" });
+          appendInlineWithLinks(h, hm[2], noteItem.path, depth);
+          bodyEl.appendChild(h);
+        } else {
+          const p = el("p", { style: { margin: "4px 0", lineHeight: "1.7" } });
+          appendInlineWithLinks(p, t, noteItem.path, depth);
+          bodyEl.appendChild(p);
+        }
       });
     };
 
-    if (notePreviewCache.has(noteItem.path)) {
-      renderBody(notePreviewCache.get(noteItem.path));
-    } else {
-      api("GET", `/api/article/vault/file?path=${encodeURIComponent(noteItem.path)}`)
-        .then((res) => {
-          notePreviewCache.set(noteItem.path, res.content || "");
-          renderBody(res.content || "");
-        })
-        .catch(() => { bodyEl.textContent = "无法加载嵌入笔记内容"; });
-    }
+    fetchNoteText(noteItem.path)
+      .then(renderBody)
+      .catch(() => { bodyEl.textContent = "无法加载嵌入笔记内容"; });
     return card;
+  }
+
+  function renderPropertiesBar(sheet, rawContent) {
+    const entries = parseFrontmatterEntries(rawContent);
+    if (!entries.length) return;
+    const keyLabels = { aliases: "别名", alias: "别名", tags: "标签", tag: "标签", author: "作者", date: "日期", title: "标题" };
+    const grid = el("div", { class: "ic-pv-props-grid" });
+    entries.forEach((e) => {
+      grid.appendChild(el("div", { class: "ic-pv-prop-row" },
+        el("span", { class: "ic-pv-prop-key" }, keyLabels[e.key.toLowerCase()] || e.key),
+        el("div", { class: "ic-pv-prop-vals" },
+          ...e.values.map((v) => el("span", { class: "ic-pv-prop-chip" }, v))
+        )
+      ));
+    });
+    sheet.appendChild(el("details", { class: "ic-pv-props", open: true },
+      el("summary", { class: "ic-pv-props-head" }, `文档属性 (${entries.length})`),
+      grid
+    ));
   }
 
   function renderPreviewBlock(sheet, blockText, sourcePath) {
     const trimmed = String(blockText || "").trim();
     if (!trimmed) return;
-    // Skip raw YAML frontmatter block in preview
     if (trimmed.startsWith("---") && trimmed.endsWith("---") && trimmed.includes("\n")) return;
 
     const hm = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (hm) {
       const level = Math.min(4, hm[1].length + 1);
-      const h = el(`h${level}`, { style: { margin: "12px 0 4px" } });
+      const h = el(`h${level}`, { style: { margin: "14px 0 6px" } });
       appendInlineWithLinks(h, hm[2], sourcePath, 0);
       sheet.appendChild(h);
       return;
@@ -858,9 +1275,38 @@ export function createArticleLinksController(opts) {
       sheet.appendChild(wrap);
       return;
     }
-    const p = el("p", { style: { margin: "0 0 8px", lineHeight: "1.8" } });
+    const p = el("p", { style: { margin: "0 0 10px", lineHeight: "1.85" } });
     appendInlineWithLinks(p, trimmed, sourcePath, 0);
     sheet.appendChild(p);
+  }
+
+  function renderPreviewBacklinksFooter(sheet) {
+    if (!data.backlinks.length) return;
+    const box = el("section", { class: "ic-pv-backlinks-foot" },
+      el("div", { class: "ic-pv-backlinks-head" },
+        el("strong", null, `↩ 反向链接 (${data.backlinks.length})`),
+        el("button", { type: "button", class: "btn btn-sm", onClick: () => openGraphModal("local") }, "🕸 查看局部图谱")
+      ),
+      el("div", { class: "ic-pv-backlinks-grid" },
+        ...data.backlinks.map((b) => {
+          const card = el("button", {
+            type: "button",
+            class: "ic-pv-bl-card",
+            onClick: () => opts.openNote?.(b.sourcePath),
+          },
+            el("div", { class: "ic-pv-bl-card-top" },
+              el("strong", null, b.sourceName),
+              el("span", { class: "mono muted", style: { fontSize: "11px" } }, `L${b.line}`)
+            ),
+            el("div", { class: "ic-pv-bl-card-snip muted" })
+          );
+          appendHighlightedSnippet(card.lastChild, b.snippet || b.raw, "");
+          bindHoverPreview(card, b.sourcePath, data.activePath);
+          return card;
+        })
+      )
+    );
+    sheet.appendChild(box);
   }
 
   // ---------- Full Relationship Graph Modal ----------
@@ -875,7 +1321,7 @@ export function createArticleLinksController(opts) {
     const searchIn = el("input", {
       type: "search",
       class: "input",
-      style: { width: "200px" },
+      style: { width: "210px" },
       placeholder: "筛选笔记节点…",
     });
 
@@ -887,7 +1333,7 @@ export function createArticleLinksController(opts) {
 
     const unresCb = el("input", { type: "checkbox" });
     unresCb.checked = showUnresolved;
-    const statsLbl = el("span", { class: "muted", style: { fontSize: "12px" } }, "");
+    const statsLbl = el("span", { class: "badge" }, "");
 
     const mount = () => {
       if (graphHandle) { graphHandle.destroy(); graphHandle = null; }
@@ -906,6 +1352,8 @@ export function createArticleLinksController(opts) {
         activePath: opts.getActivePath?.() || data.activePath || "",
         hops,
         showUnresolved,
+        showLegend: true,
+        showControls: true,
         query,
         interactive: true,
         onNodeClick: async (node) => {
@@ -934,11 +1382,11 @@ export function createArticleLinksController(opts) {
         ),
         el("div", { class: "row", style: { gap: "8px" } },
           statsLbl,
-          el("button", { type: "button", class: "btn btn-sm", onClick: () => graphHandle?.resetView() }, "重置视角")
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => graphHandle?.fitToView() }, "⌖ 自适应居中")
         )
       ),
       canvasWrap,
-      el("div", { class: "muted", style: { fontSize: "11.5px" } }, "滚轮缩放 · 拖拽画布平移 · 拖动节点调布局 · 点击节点跳转或新建笔记")
+      el("div", { class: "muted", style: { fontSize: "11.5px" } }, "滚轮缩放 · 拖拽空白处平移 · 拖动节点调整布局 · 悬停高亮子图 · 点击节点直达或新建笔记")
     );
 
     showModal("关系图谱（Obsidian 双链网络）", body, [
@@ -947,7 +1395,7 @@ export function createArticleLinksController(opts) {
     requestAnimationFrame(() => mount());
   }
 
-  // ---------- Right Drawer "🔗 双链" Panel ----------
+  // ---------- Right Drawer "🔗 双链" Panel (zero clipping, full scroll, highlighted snippets) ----------
   function renderPanel() {
     if (miniGraphHandle) { miniGraphHandle.destroy(); miniGraphHandle = null; }
     clear(panelEl);
@@ -956,9 +1404,11 @@ export function createArticleLinksController(opts) {
     const activeNote = data.notes.find((n) => n.path.toLowerCase() === activePath.toLowerCase());
 
     const head = el("div", { class: "ic-obs-pane-head" },
-      el("strong", { style: { fontSize: "13px" } }, "双向链接与图谱"),
+      el("div", { class: "row", style: { gap: "6px", minWidth: "0" } },
+        el("strong", { style: { fontSize: "13px" } }, "双向链接与图谱")
+      ),
       el("div", { class: "row", style: { gap: "4px" } },
-        el("button", { type: "button", class: "btn btn-sm", title: "打开全库关系图谱", onClick: () => openGraphModal("global") }, "🕸 图谱"),
+        el("button", { type: "button", class: "btn btn-sm", title: "打开全库关系图谱", onClick: () => openGraphModal("global") }, "🕸 全库"),
         el("button", { type: "button", class: "btn btn-sm", title: "刷新双链索引", onClick: () => refresh(activePath) }, "↻"),
         el("button", { type: "button", class: "btn btn-sm", title: "关闭右侧抽屉", onClick: () => opts.onCloseDrawer?.() }, "✕")
       )
@@ -967,16 +1417,16 @@ export function createArticleLinksController(opts) {
 
     const scroll = el("div", { class: "ic-links-scroll" });
 
-    // 1. Mini Local Graph Card
+    // 1. Mini Local Graph Card (with auto-fit + controls!)
     const miniCanvasWrap = el("div", { class: "ic-link-mini-graph" });
-    scroll.appendChild(el("div", { class: "ic-links-sec" },
-      el("div", { class: "ic-links-sec-head" },
+    scroll.appendChild(el("section", { class: "ic-links-sec" },
+      el("div", { class: "ic-links-sec-head is-static" },
         el("strong", null, "局部关系图谱"),
         el("button", {
           type: "button",
           class: "btn btn-sm",
           onClick: () => openGraphModal(activePath ? "local" : "global"),
-        }, "放大 ⤢")
+        }, "大屏展开 ⤢")
       ),
       miniCanvasWrap
     ));
@@ -984,7 +1434,11 @@ export function createArticleLinksController(opts) {
     // 2. Backlinks
     const blSec = el("details", { class: "ic-links-sec", open: true });
     blSec.appendChild(el("summary", { class: "ic-links-sec-head" },
-      el("strong", null, `反向链接 (${data.backlinks.length})`),
+      el("span", { class: "ic-links-sec-title" },
+        el("span", { class: "ic-links-chev", "aria-hidden": "true" }, "▾"),
+        el("strong", null, "反向链接"),
+        el("span", { class: "ic-links-count-pill" }, String(data.backlinks.length))
+      ),
       el("span", { class: "muted", style: { fontSize: "11px" } }, "谁引用了本文")
     ));
     if (!data.backlinks.length) {
@@ -992,45 +1446,74 @@ export function createArticleLinksController(opts) {
     } else {
       const list = el("div", { class: "ic-links-list" });
       data.backlinks.forEach((b) => {
-        list.appendChild(el("button", {
+        const snipEl = el("div", { class: "ic-links-snippet" });
+        appendHighlightedSnippet(snipEl, b.snippet || b.raw, "");
+        const itemBtn = el("button", {
           type: "button",
           class: "ic-links-item",
           onClick: () => opts.openNote?.(b.sourcePath),
         },
           el("div", { class: "ic-links-item-top" },
-            el("strong", null, b.sourceName),
-            el("span", { class: "mono muted", style: { fontSize: "11px" } }, `L${b.line}`)
+            el("strong", { class: "ic-links-item-name" }, b.sourceName),
+            el("span", { class: "ic-links-line-pill mono" }, `L${b.line}`)
           ),
-          el("div", { class: "ic-links-snippet muted" }, b.snippet || b.raw)
-        ));
+          snipEl
+        );
+        bindHoverPreview(itemBtn, b.sourcePath, activePath);
+        list.appendChild(itemBtn);
       });
       blSec.appendChild(list);
     }
     scroll.appendChild(blSec);
 
-    // 3. Outgoing Links
-    const noteOutgoing = data.outgoing.filter((x) => !x.isImage);
+    // 3. Outgoing Links (deduplicated with occurrence count)
+    const outGrouped = [];
+    const outMap = new Map();
+    for (const o of data.outgoing) {
+      if (o.isImage) continue;
+      const key = `${o.isEmbed ? "e:" : "l:"}${(o.resolvedPath || o.target).toLowerCase()}`;
+      if (outMap.has(key)) {
+        outMap.get(key).count += 1;
+      } else {
+        const entry = { ...o, count: 1 };
+        outMap.set(key, entry);
+        outGrouped.push(entry);
+      }
+    }
+
     const outSec = el("details", { class: "ic-links-sec", open: true });
     outSec.appendChild(el("summary", { class: "ic-links-sec-head" },
-      el("strong", null, `出链 (${noteOutgoing.length})`),
-      el("span", { class: "muted", style: { fontSize: "11px" } }, "本文引用的笔记")
+      el("span", { class: "ic-links-sec-title" },
+        el("span", { class: "ic-links-chev", "aria-hidden": "true" }, "▾"),
+        el("strong", null, "出链"),
+        el("span", { class: "ic-links-count-pill" }, String(outGrouped.length))
+      ),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: (ev) => { ev.preventDefault(); ev.stopPropagation(); opts.onTriggerInsertLink?.(); },
+      }, "＋ 插入")
     ));
-    if (!noteOutgoing.length) {
-      outSec.appendChild(el("div", { class: "ic-links-empty muted" }, "在正文输入 [[ 可快速插入双链；按 Ctrl/⌘+点击 可直接跳转。"));
+    if (!outGrouped.length) {
+      outSec.appendChild(el("div", { class: "ic-links-empty muted" }, "点击「＋ 插入」或在正文输入 [[ 即可建立笔记关联。"));
     } else {
       const list = el("div", { class: "ic-links-list" });
-      noteOutgoing.forEach((o) => {
-        list.appendChild(el("button", {
+      outGrouped.forEach((o) => {
+        const itemBtn = el("button", {
           type: "button",
           class: "ic-links-item",
           onClick: () => navigateToLink(o.target, activePath),
         },
           el("div", { class: "ic-links-item-top" },
-            el("span", { class: o.exists ? "" : "muted" }, `${o.isEmbed ? "📌 " : "🔗 "}${o.alias || o.target}`),
+            el("span", { class: "ic-links-item-name" + (o.exists ? "" : " muted") },
+              `${o.isEmbed ? "📌 " : "🔗 "}${o.alias || o.target}${o.count > 1 ? ` ×${o.count}` : ""}`
+            ),
             el("span", { class: "badge" + (o.exists ? " ic-obs-badge-ok" : "") }, o.exists ? "打开 ↗" : "＋ 新建")
           ),
-          o.resolvedPath ? el("div", { class: "mono muted", style: { fontSize: "11px" } }, o.resolvedPath) : null
-        ));
+          o.resolvedPath ? el("div", { class: "mono muted", style: { fontSize: "11px", wordBreak: "break-all" } }, o.resolvedPath) : null
+        );
+        if (o.exists) bindHoverPreview(itemBtn, o.resolvedPath || o.target, activePath);
+        list.appendChild(itemBtn);
       });
       outSec.appendChild(list);
     }
@@ -1039,24 +1522,32 @@ export function createArticleLinksController(opts) {
     // 4. Unlinked Mentions
     const umSec = el("details", { class: "ic-links-sec", open: data.unlinkedMentions.length > 0 });
     umSec.appendChild(el("summary", { class: "ic-links-sec-head" },
-      el("strong", null, `未链接提及 (${data.unlinkedMentions.length})`),
-      el("span", { class: "muted", style: { fontSize: "11px" } }, "可一键转为双链")
+      el("span", { class: "ic-links-sec-title" },
+        el("span", { class: "ic-links-chev", "aria-hidden": "true" }, "▾"),
+        el("strong", null, "未链接提及"),
+        el("span", { class: "ic-links-count-pill" }, String(data.unlinkedMentions.length))
+      ),
+      el("span", { class: "muted", style: { fontSize: "11px" } }, "一键转双链")
     ));
     if (!data.unlinkedMentions.length) {
-      umSec.appendChild(el("div", { class: "ic-links-empty muted" }, "未发现其他文章中的未链接提及。"));
+      umSec.appendChild(el("div", { class: "ic-links-empty muted" }, "未发现其他文章中尚未加双链的提及。"));
     } else {
       const list = el("div", { class: "ic-links-list" });
       data.unlinkedMentions.forEach((u) => {
+        const snipEl = el("div", { class: "ic-links-snippet" });
+        appendHighlightedSnippet(snipEl, u.snippet, u.matchText);
+        const srcBtn = el("button", {
+          type: "button",
+          class: "ic-links-source-btn",
+          onClick: () => opts.openNote?.(u.sourcePath),
+        }, u.sourceName);
+        bindHoverPreview(srcBtn, u.sourcePath, activePath);
         const row = el("div", { class: "ic-links-mention-row" },
           el("div", { class: "ic-links-item-top" },
+            srcBtn,
             el("button", {
               type: "button",
-              class: "ic-links-source-btn",
-              onClick: () => opts.openNote?.(u.sourcePath),
-            }, u.sourceName),
-            el("button", {
-              type: "button",
-              class: "btn btn-sm",
+              class: "btn btn-sm btn-primary",
               onClick: async () => {
                 try {
                   await api("POST", "/api/article/vault/links/linkify", {
@@ -1073,7 +1564,7 @@ export function createArticleLinksController(opts) {
               },
             }, "转为双链")
           ),
-          el("div", { class: "ic-links-snippet muted" }, u.snippet)
+          snipEl
         );
         list.appendChild(row);
       });
@@ -1083,7 +1574,6 @@ export function createArticleLinksController(opts) {
 
     panelEl.appendChild(scroll);
 
-    // Mount mini graph once element is laid out
     requestAnimationFrame(() => {
       if (!miniCanvasWrap.isConnected) return;
       miniGraphHandle = mountForceGraph(miniCanvasWrap, data.graph, {
@@ -1091,6 +1581,8 @@ export function createArticleLinksController(opts) {
         activePath,
         hops: 1,
         showUnresolved: true,
+        showLegend: false,
+        showControls: true,
         interactive: true,
         onNodeClick: async (node) => {
           if (node.exists && node.path) await opts.openNote?.(node.path);
@@ -1120,6 +1612,7 @@ export function createArticleLinksController(opts) {
 
   function dispose() {
     closeAutocomplete();
+    hideHoverPreview(true);
     if (miniGraphHandle) { miniGraphHandle.destroy(); miniGraphHandle = null; }
   }
 
@@ -1128,8 +1621,12 @@ export function createArticleLinksController(opts) {
     panelEl,
     refresh,
     renderPanel,
-    attachTextarea,
+    renderPaperLinksBar,
+    renderPropertiesBar,
     renderPreviewBlock,
+    renderPreviewBacklinksFooter,
+    triggerInsertWikilink,
+    attachTextarea,
     openGraphModal,
     navigateToLink,
     dispose,
