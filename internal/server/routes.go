@@ -149,6 +149,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/article/obsidian/desktop/spawn", s.h(s.articleObsidianDesktopSpawn))
 
 	m.HandleFunc("POST /api/canvas/assistant", s.h(s.canvasAssistant))
+	m.HandleFunc("POST /api/canvas/copy", s.h(s.canvasCopy))
 	m.HandleFunc("POST /api/images/import", s.h(s.uploadImage))
 
 	// docs: articles, canvases (+ sync)

@@ -240,3 +240,87 @@ func TestCanvasSiteCreationSourceRemapAndDefaultRoleDirective(t *testing.T) {
 		t.Fatalf("expected single-item site canvas creationSource='single', got %v", got)
 	}
 }
+
+func TestCanvasCopyGenerationAndXhsTemplate(t *testing.T) {
+	var capturedSystem, capturedUser string
+	mockText := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		for _, m := range req.Messages {
+			if m.Role == "system" {
+				capturedSystem = m.Content
+			}
+			if m.Role == "user" {
+				capturedUser = m.Content
+			}
+		}
+		reply, _ := json.Marshal(map[string]any{
+			"titles":  []string{"新手手冲咖啡别再瞎买豆！5个避坑点", "喝完这杯我再也不去咖啡店了☕️", "1:15万能手冲公式，新手一次成功"},
+			"content": "姐妹们！刚入坑手冲最容易踩的 5 个坑我帮你们踩完了👇\n\n1️⃣ 豆子别选出油深烘\n2️⃣ 92℃ 水温最清甜\n\n你们平时最常翻车在哪一步？评论区聊聊！",
+			"tags":    []string{"#手冲咖啡", "新手避坑", "咖啡日常"},
+		})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": string(reply)}}},
+		})
+	}))
+	defer mockText.Close()
+
+	srv, _ := setupTestServer(t, "")
+	h := srv.Handler()
+	_, err := settings.Update(func(st *settings.Settings) error {
+		st.Providers = append(st.Providers, settings.Provider{
+			ID:      "mockcopy",
+			Name:    "MockCopy",
+			Kind:    "openai",
+			Purpose: "text",
+			BaseURL: mockText.URL + "/v1",
+			Enabled: true,
+			Models:  []settings.Model{{ID: "xhs-writer", Label: "XHS Writer"}},
+		})
+		st.DefaultTextModel = "mockcopy:xhs-writer"
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("update text provider: %v", err)
+	}
+
+	rr := doReq(t, h, srv.Token, http.MethodPost, "/api/canvas/copy", map[string]any{
+		"platform":    "xiaohongshu",
+		"tone":        "干货种草",
+		"title":       "手冲咖啡避坑",
+		"requirement": "语气像朋友分享",
+		"modelRef":    "mockcopy:xhs-writer",
+		"items": []map[string]any{
+			{"theme": "封面：新手手冲咖啡 5 大翻车坑", "text": "手冲避坑指南"},
+			{"theme": "92℃ 水温控制与三段注水"},
+		},
+	})
+	if rr.Code != 200 {
+		t.Fatalf("canvas copy failed: %d %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(capturedSystem, "小红书") || !strings.Contains(capturedUser, "手冲避坑指南") {
+		t.Fatalf("expected Xiaohongshu platform prompt and slide text forwarded, sys=%q user=%q", capturedSystem, capturedUser)
+	}
+	var res struct {
+		OK       bool     `json:"ok"`
+		Platform string   `json:"platform"`
+		Titles   []string `json:"titles"`
+		Content  string   `json:"content"`
+		Tags     []string `json:"tags"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &res)
+	if !res.OK || res.Platform != "xiaohongshu" || len(res.Titles) != 3 || !strings.Contains(res.Content, "92℃") || len(res.Tags) != 3 || res.Tags[0] != "手冲咖啡" {
+		t.Fatalf("unexpected canvas copy response: %+v", res)
+	}
+
+	// Verify built-in templates include tpl_xhs_full with both output and copy nodes.
+	rrTpl := doReq(t, h, srv.Token, http.MethodGet, "/api/docs/template", nil)
+	if rrTpl.Code != 200 || !strings.Contains(rrTpl.Body.String(), "tpl_xhs_full") || !strings.Contains(rrTpl.Body.String(), `"type":"copy"`) {
+		t.Fatalf("expected tpl_xhs_full with copy node in templates, got %d %s", rrTpl.Code, rrTpl.Body.String())
+	}
+}

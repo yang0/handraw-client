@@ -1657,16 +1657,22 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 	canvasPromptSchema := `根据用户需求「%s」生成手绘风节点画布 v2 工作流 JSON（严格只输出 JSON）：
 {
   "nodes": [
-    {"id":"ref1","type":"reference","title":"角色参考图","refMode":"bundle","x":36,"y":36,"refs":[{"path":"","role":"角色长相","note":"保持人物五官、发型和服装主色"}]},
-    {"id":"params","type":"parameters","mode":"cartesian","x":36,"y":280,"fieldOrder":["prompt","style1","layout","ratio"],"fields":{"prompt":["场景1","场景2"],"style1":["FA-013"],"layout":[""],"ratio":["3:4"]}},
-    {"id":"output","type":"output","mode":"cartesian","repeat":1,"resolution":"2k","x":492,"y":160}
+    {"id":"params","type":"parameters","mode":"cartesian","x":36,"y":36,"fieldOrder":["prompt","style1","layout","ratio","mode"],"fields":{"prompt":["封面：主题亮点","1. 核心要点一","2. 核心要点二"],"style1":["FA-001"],"layout":["SC-008"],"ratio":["3:4"],"mode":["graphic-text"]}},
+    {"id":"output","type":"output","mode":"cartesian","repeat":1,"resolution":"2k","x":500,"y":36},
+    {"id":"copy1","type":"copy","title":"小红书文案","platform":"xiaohongshu","tone":"干货种草","requirement":"","x":500,"y":380}
   ],
   "edges": [
-    {"id":"e1","from":"ref1","to":"output"},
-    {"id":"e2","from":"params","to":"output"}
+    {"id":"e1","from":"params","to":"output"},
+    {"id":"e2","from":"params","to":"copy1"}
   ]
 }
-节点类型支持：parameters(多参数卡)、reference(参考图节点，仅当用户提到参考图/角色一致性/换装/垫图时添加)、parameter(单项参数 prompt|style1|layout|ratio|colors|tones|moods|mode)、combine(参数组合)、output(批量出图)。`
+节点类型支持：
+- parameters(多参数卡，fields 支持 prompt|text|style1|layout|ratio|colors|tones|moods|mode|refs)
+- reference(参考图节点，仅当用户提到参考图/角色一致性/换装/垫图时添加)
+- parameter(单项参数)
+- combine(参数组合)
+- output(批量出图)
+- copy(社媒文案生成节点，platform 支持 xiaohongshu|wechat|douyin|moments；当用户提到小红书、发笔记、配图和文案一起出、写标题/正文/标签时，务必添加 copy 节点并将上游参数同时连向 output 和 copy！)`
 	buildWithHarness := func() (map[string]any, error) {
 		ask := fmt.Sprintf(canvasPromptSchema, body.Prompt)
 		res, err := s.callHarnessText(r.Context(), route, []providers.ChatMessage{{Role: "user", Content: ask}}, true)
@@ -1744,6 +1750,38 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 		}
 	}
 	tpl := builtinTemplates()[0]
+	lowPrompt := strings.ToLower(body.Prompt)
+	wantsCopy := strings.Contains(body.Prompt, "小红书") || strings.Contains(body.Prompt, "文案") || strings.Contains(body.Prompt, "种草") || strings.Contains(body.Prompt, "笔记") || strings.Contains(lowPrompt, "xhs")
+	if wantsCopy {
+		return map[string]any{
+			"source": "local",
+			"nodes": []any{
+				map[string]any{
+					"id": "params", "type": "parameters", "mode": "cartesian", "x": 36, "y": 36,
+					"fieldOrder": []string{"prompt", "style1", "layout", "ratio", "mode"},
+					"fields": map[string]any{
+						"prompt": []string{
+							"封面：" + body.Prompt + "（视觉冲击主图）",
+							"痛点场景：" + body.Prompt + "常见问题拆解",
+							"核心干货 1：" + body.Prompt + "关键步骤演示",
+							"核心干货 2：" + body.Prompt + "实用技巧对比",
+							"收尾总结：" + body.Prompt + "一图速记清单",
+						},
+						"style1": []string{"FA-001"},
+						"layout": []string{"SC-008"},
+						"ratio":  []string{"3:4"},
+						"mode":   []string{"graphic-text"},
+					},
+				},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 500, "y": 36},
+				map[string]any{"id": "copy1", "type": "copy", "title": "小红书文案", "platform": "xiaohongshu", "tone": "干货种草", "x": 500, "y": 330},
+			},
+			"edges": []any{
+				map[string]any{"id": "e1", "from": "params", "to": "output"},
+				map[string]any{"id": "e2", "from": "params", "to": "copy1"},
+			},
+		}, nil
+	}
 	return map[string]any{
 		"source": "local",
 		"nodes": []any{
@@ -1753,6 +1791,227 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 		},
 		"edges": tpl.Edges[:2],
 	}, nil
+}
+
+type canvasCopyRefSpec struct {
+	Label string `json:"label"`
+	Role  string `json:"role"`
+	Note  string `json:"note"`
+}
+
+type canvasCopySlideItem struct {
+	Theme    string              `json:"theme"`
+	Text     string              `json:"text"`
+	Style    string              `json:"style"`
+	Layout   string              `json:"layout"`
+	Ratio    string              `json:"ratio"`
+	RefSpecs []canvasCopyRefSpec `json:"refSpecs"`
+}
+
+type canvasCopyRequest struct {
+	Platform    string                `json:"platform"`
+	Tone        string                `json:"tone"`
+	Title       string                `json:"title"`
+	Requirement string                `json:"requirement"`
+	ModelRef    string                `json:"modelRef"`
+	SkillIDs    []string              `json:"skillIds"`
+	Items       []canvasCopySlideItem `json:"items"`
+}
+
+func normalizeCanvasCopyPlatform(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "wechat", "gzh", "公众号":
+		return "wechat"
+	case "douyin", "dy", "抖音":
+		return "douyin"
+	case "moments", "pyq", "朋友圈":
+		return "moments"
+	default:
+		return "xiaohongshu"
+	}
+}
+
+func canvasCopyPlatformPrompt(platform string) (name string, rule string) {
+	switch platform {
+	case "wechat":
+		return "微信公众号", "你是资深微信公众号图文专栏主笔。输出 3~4 个兼顾点击率与克制感的公众号标题；正文 400~800 字，逻辑清晰、分小节呼应每张配图，有观点和可执行建议，结尾自然引导点赞/在看/留言；提供 3~6 个关键词标签。"
+	case "douyin":
+		return "抖音图文/短视频", "你是高完播抖音图文与口播编导。输出 3~4 个前 3 秒强钩子标题；正文 150~300 字，按滑屏/翻页节奏逐页给出短句解说与口播词，结尾留评论互动问题；提供 4~6 个高热话题标签。"
+	case "moments":
+		return "微信朋友圈", "你是擅长写自然真诚微信朋友圈的内容创作者。输出 2~3 个简短主句；正文 80~180 字，像真人朋友随手分享，去掉营销腔和套话；提供 2~4 个简短话题标签。"
+	default:
+		return "小红书", "你是擅长打造高收藏、高互动图文笔记的小红书爆款内容主笔。输出 4 个备选吸睛标题（每条控制在 20 字以内，善用数字、反常识、痛点或场景，适度使用 emoji）；正文 250~500 字，首行强钩子，短句分段并自然呼应每张配图顺序，结尾留真实互动提问；提供 5~8 个高搜索量话题标签。"
+	}
+}
+
+func (s *Server) canvasCopy(w http.ResponseWriter, r *http.Request) (any, error) {
+	var req canvasCopyRequest
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	platform := normalizeCanvasCopyPlatform(req.Platform)
+	platName, platRule := canvasCopyPlatformPrompt(platform)
+	tone := strings.TrimSpace(req.Tone)
+	if tone == "" {
+		tone = "干货种草"
+	}
+	requirement := strings.TrimSpace(req.Requirement)
+
+	var slides []canvasCopySlideItem
+	for _, it := range req.Items {
+		if strings.TrimSpace(it.Theme) == "" && strings.TrimSpace(it.Text) == "" && len(it.RefSpecs) == 0 {
+			continue
+		}
+		slides = append(slides, it)
+		if len(slides) >= 24 {
+			break
+		}
+	}
+	if len(slides) == 0 && strings.TrimSpace(req.Title) == "" && requirement == "" {
+		return nil, bad("请先连接上游参数节点，或填写至少一条主题/文案要求")
+	}
+
+	allSkills, _ := s.skillsManager().List()
+	activeSkills, _, cleanedReq := resolveActiveSkills(allSkills, req.SkillIDs, requirement)
+	usedSkills := make([]map[string]string, 0, len(activeSkills))
+	activeIDs := make([]string, 0, len(activeSkills))
+	for _, sk := range activeSkills {
+		usedSkills = append(usedSkills, map[string]string{"id": sk.ID, "name": sk.Name})
+		activeIDs = append(activeIDs, sk.ID)
+	}
+
+	sysPrompt := strings.TrimSpace(platRule + `
+
+写作硬约束：
+1. 必须紧扣用户提供的分镜主题、画面文字与参考元素，不要凭空编造与配图无关的内容。
+2. 去 AI 套话（禁用「总而言之」「综上所述」「值得一提」「赋能」「一站式」「解锁」等空泛表达），像真实创作者在说话。
+3. 严格只输出一个 JSON 对象，不要包含 Markdown 代码块或任何额外解释，格式如下：
+{
+  "titles": ["备选标题1", "备选标题2", "备选标题3", "备选标题4"],
+  "content": "完整正文内容（可使用换行分段与适量 emoji）",
+  "tags": ["话题标签1", "话题标签2", "话题标签3"]
+}
+其中 tags 只需返回纯标签词（不要重复带 # 号）。`)
+
+	var userMsg strings.Builder
+	userMsg.WriteString("【目标平台】" + platName + "\n")
+	userMsg.WriteString("【文案风格】" + tone + "\n")
+	if t := strings.TrimSpace(req.Title); t != "" {
+		userMsg.WriteString("【画布/专栏主题】" + t + "\n")
+	}
+	if cleanedReq != "" {
+		userMsg.WriteString("【补充要求】" + cleanedReq + "\n")
+	}
+	if len(slides) > 0 {
+		userMsg.WriteString(fmt.Sprintf("\n【配图分镜清单（共 %d 张，请让文案与配图呼应）】\n", len(slides)))
+		for i, sl := range slides {
+			line := fmt.Sprintf("%d. 主题：%s", i+1, firstNRunes(strings.TrimSpace(sl.Theme), 160))
+			if txt := strings.TrimSpace(sl.Text); txt != "" {
+				line += "｜画面文字：" + firstNRunes(txt, 80)
+			}
+			if len(sl.RefSpecs) > 0 {
+				var rParts []string
+				for _, rs := range sl.RefSpecs {
+					part := strings.TrimSpace(strings.TrimSpace(rs.Role) + " " + strings.TrimSpace(rs.Note))
+					if part == "" {
+						part = strings.TrimSpace(rs.Label)
+					}
+					if part != "" {
+						rParts = append(rParts, firstNRunes(part, 40))
+					}
+				}
+				if len(rParts) > 0 {
+					line += "｜参考元素：" + strings.Join(rParts, "；")
+				}
+			}
+			userMsg.WriteString(line + "\n")
+		}
+	}
+
+	chatRes, err := s.executeHostChatWithJSONFallback(r.Context(), hostChatRequest{
+		ModelRef:   strings.TrimSpace(req.ModelRef),
+		Scene:      "canvas",
+		Capability: "text",
+		System:     sysPrompt,
+		SkillIDs:   activeIDs,
+		Messages:   []providers.ChatMessage{{Role: "user", Content: userMsg.String()}},
+		JSONMode:   true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	rawReply := strings.TrimSpace(asString(chatRes["text"]))
+	if rawReply == "" {
+		return nil, bad("AI 返回的文案为空，请重试或切换文本模型")
+	}
+
+	var parsed struct {
+		Titles  []string `json:"titles"`
+		Title   string   `json:"title"`
+		Content string   `json:"content"`
+		Body    string   `json:"body"`
+		Tags    []string `json:"tags"`
+	}
+	cand := stripJSONCandidate(rawReply)
+	if err := json.Unmarshal([]byte(cand), &parsed); err != nil {
+		// Graceful plain-text fallback when model ignores JSON formatting
+		lines := strings.Split(strings.ReplaceAll(rawReply, "\r\n", "\n"), "\n")
+		first := ""
+		var rest []string
+		for _, ln := range lines {
+			tr := strings.TrimSpace(ln)
+			if first == "" && tr != "" {
+				first = strings.TrimLeft(tr, "# ")
+				continue
+			}
+			rest = append(rest, ln)
+		}
+		if first != "" {
+			parsed.Titles = []string{firstNRunes(first, 40)}
+		}
+		parsed.Content = strings.TrimSpace(strings.Join(rest, "\n"))
+		if parsed.Content == "" {
+			parsed.Content = rawReply
+		}
+	}
+
+	var cleanTitles []string
+	seenTitle := map[string]bool{}
+	for _, t := range append(parsed.Titles, parsed.Title) {
+		tr := strings.TrimSpace(t)
+		if tr == "" || seenTitle[tr] {
+			continue
+		}
+		seenTitle[tr] = true
+		cleanTitles = append(cleanTitles, tr)
+		if len(cleanTitles) >= 6 {
+			break
+		}
+	}
+	content := strings.TrimSpace(firstStr(parsed.Content, parsed.Body))
+	if content == "" {
+		content = rawReply
+	}
+	if len(cleanTitles) == 0 {
+		cleanTitles = []string{firstNRunes(firstStr(strings.TrimSpace(req.Title), "新图文笔记"), 24)}
+	}
+	var rawTags []string
+	for _, tg := range parsed.Tags {
+		tr := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(tg), "#＃"))
+		if tr != "" {
+			rawTags = append(rawTags, tr)
+		}
+	}
+	cleanTags := dedupeShortTags(rawTags)
+
+	return attachChatMeta(map[string]any{
+		"ok":         true,
+		"platform":   platform,
+		"titles":     cleanTitles,
+		"content":    content,
+		"tags":       cleanTags,
+		"usedSkills": usedSkills,
+	}, chatRes), nil
 }
 
 // ---------- helpers ----------

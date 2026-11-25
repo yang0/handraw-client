@@ -21,6 +21,37 @@ type workflowTemplate struct {
 func builtinTemplates() []workflowTemplate {
 	return []workflowTemplate{
 		{
+			ID:   "tpl_xhs_full",
+			Name: "小红书图文爆款（配图 + 文案同步出）",
+			Desc: "1 套 6 页分镜主题同时输出 6 张 3:4 小红书配图 + 爆款标题、分段正文与热门 #标签",
+			Nodes: []any{
+				map[string]any{
+					"id": "params", "type": "parameters", "mode": "cartesian", "x": 36, "y": 36,
+					"fieldOrder": []string{"prompt", "style1", "layout", "ratio", "mode"},
+					"fields": map[string]any{
+						"prompt": []string{
+							"封面：新手手冲咖啡 5 大翻车避坑指南",
+							"1. 别买深烘油豆，浅中烘更不容易苦涩",
+							"2. 磨豆粗细对照：白砂糖颗粒最稳妥",
+							"3. 90~92℃ 水温控制，开水直冲必发苦",
+							"4. 三段式注水节奏，闷蒸 30 秒看鼓包",
+							"5. 懒人万能比例 1:15，一杯清甜不翻车",
+						},
+						"style1": []string{"FA-001"},
+						"layout": []string{"SC-008"},
+						"ratio":  []string{"3:4"},
+						"mode":   []string{"graphic-text"},
+					},
+				},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 500, "y": 36},
+				map[string]any{"id": "copy1", "type": "copy", "title": "小红书文案", "platform": "xiaohongshu", "tone": "干货种草", "requirement": "结合 6 页分镜写出新手秒懂的避坑正文，结尾加一句互动提问", "x": 500, "y": 360},
+			},
+			Edges: []any{
+				map[string]any{"id": "e1", "from": "params", "to": "output"},
+				map[string]any{"id": "e2", "from": "params", "to": "copy1"},
+			},
+		},
+		{
 			ID:   "tpl_char_scenes",
 			Name: "固定角色多场景连载",
 			Desc: "1 张角色参考图（锁定五官特征）× 4 个连载场景，批量保持 IP 角色一致性",

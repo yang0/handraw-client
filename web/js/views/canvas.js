@@ -1,5 +1,5 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
-import { createTextModelPicker } from "../skills-ui.js";
+import { createTextModelPicker, openSharedSkillPickerModal } from "../skills-ui.js";
 import { buildGroupedModelSelect } from "./create.js";
 import {
   MAX_REF_IMAGES,
@@ -30,8 +30,41 @@ const REF_ROLES = [
 
 const RESOLUTIONS = ["1k", "2k", "4k"];
 
+const COPY_PLATFORMS = [
+  { id: "xiaohongshu", label: "📕 小红书", defaultTitle: "小红书文案" },
+  { id: "wechat", label: "💚 公众号", defaultTitle: "公众号文案" },
+  { id: "douyin", label: "🎵 抖音", defaultTitle: "抖音文案" },
+  { id: "moments", label: "💬 朋友圈", defaultTitle: "朋友圈文案" },
+];
+
+const COPY_TONES = ["干货种草", "真实体验", "痛点反常识", "温暖治愈"];
+
+const AI_STARTER_CHIPS = [
+  {
+    title: "📕 小红书图文（配图 + 文案同步出）",
+    desc: "自动拆解 6 页分镜主题，并同时连好批量出图与小红书文案节点",
+    prompt: "帮我做一个小红书干货图文工作流：主题是「手冲咖啡新手 5 大避坑指南」，拆成 6 页 3:4 竖版手绘配图，同时连一个小红书文案生成节点，配图和爆款文案一起出。",
+  },
+  {
+    title: "🧑‍🎨 固定角色多场景连载",
+    desc: "挂载角色参考图锁定五官发型，批量铺开 4 个连续日常场景",
+    prompt: "帮我搭建一个角色连载工作流：放一个「主角参考图」节点保持角色长相一致，连接 4 个春夏秋冬不同场景主题，使用同一手绘画风批量出图。",
+  },
+  {
+    title: "🎨 多画风横评对比矩阵",
+    desc: "用同一组主题交叉测试 3 种手绘画风，快速挑出最出片的视觉方案",
+    prompt: "帮我搭建一个画风横评工作流：2 个核心视觉主题交叉对比 3 种不同风格的手绘画风，1:1 构图，方便挑出最合适的系列画风。",
+  },
+  {
+    title: "🧩 多参考图元素融合",
+    desc: "分别挂载人物参考图 + 构图参考图，再与参数节点汇入统一出图",
+    prompt: "帮我搭建一个多参考图融合工作流：放 2 个参考图节点（一个定角色长相，一个定构图姿势），和主题画风参数一起连入批量出图节点。",
+  },
+];
+
 const PARAM_LABELS = {
   prompt: "主题",
+  text: "画面文字",
   refs: "参考图",
   style1: "画风方案",
   layout: "图型",
@@ -45,8 +78,9 @@ const PARAM_LABELS = {
 
 const NODE_MENU_ENTRIES = [
   { type: "reference", name: "🖼️ 参考图", group: "生成流程", detail: "添加 1~6 张参考图并说明每张图的作用（角色/姿势/画风等）", out: true },
-  { type: "parameters", name: "🎛️ 出图参数", group: "生成流程", detail: "在一张卡里编辑主题、参考图、画风、图型和比例", out: true },
+  { type: "parameters", name: "🎛️ 出图参数", group: "生成流程", detail: "在一张卡里编辑主题、画面文字、参考图、画风、图型和比例", out: true },
   { type: "output", name: "🚀 批量出图", group: "生成流程", detail: "接收参数与参考图，设置模型、分辨率与每组张数", in: true },
+  { type: "copy", name: "📝 文案生成", group: "生成流程", detail: "读取上游分镜主题与参考元素，同步生成小红书/公众号/抖音/朋友圈标题、正文与标签", in: true },
   { type: "combine", name: "🔀 参数组合", group: "高级节点", detail: "把多条连线的参考图与参数合成出图方案", in: true, out: true },
   ...Object.entries(PARAM_LABELS).filter(([k]) => k !== "refs").map(([parameter, name]) => ({
     type: "parameter",
@@ -127,9 +161,8 @@ function initialCandidate(field, catalog) {
   return "";
 }
 
-function defaultGraph(catalog) {
+function blankGraph(catalog) {
   const s1 = catalog?.styles?.[0]?.number || "FA-013";
-  const s2 = catalog?.styles?.[1]?.number || "FB-001";
   return {
     format: 2,
     nodes: [
@@ -141,8 +174,8 @@ function defaultGraph(catalog) {
         y: 36,
         fieldOrder: ["prompt", "style1", "layout", "ratio"],
         fields: {
-          prompt: ["雨夜街角亮着暖灯的小书店", "周末草地上打盹的橘猫"],
-          style1: [s1, s2],
+          prompt: [""],
+          style1: [s1],
           layout: [""],
           ratio: ["3:4"],
         },
@@ -165,9 +198,9 @@ function defaultGraph(catalog) {
 function normalizeGraphData(raw, catalog, recipes) {
   const nodes = Array.isArray(raw?.nodes) ? structuredClone(raw.nodes) : [];
   const edges = Array.isArray(raw?.edges) ? structuredClone(raw.edges) : [];
-  const hasV2 = nodes.some((n) => ["parameters", "parameter", "reference", "combine", "output"].includes(n.type));
+  const hasV2 = nodes.some((n) => ["parameters", "parameter", "reference", "combine", "output", "copy"].includes(n.type));
   if (hasV2 || !nodes.length) {
-    const cleanNodes = (nodes.length ? nodes : defaultGraph(catalog).nodes).map((n) => {
+    const cleanNodes = (nodes.length ? nodes : blankGraph(catalog).nodes).map((n) => {
       if (n.type === "reference") {
         return {
           ...n,
@@ -185,12 +218,26 @@ function normalizeGraphData(raw, catalog, recipes) {
           resolution: RESOLUTIONS.includes(n.resolution) ? n.resolution : "2k",
         };
       }
+      if (n.type === "copy") {
+        const plat = COPY_PLATFORMS.some((p) => p.id === n.platform) ? n.platform : "xiaohongshu";
+        const platObj = COPY_PLATFORMS.find((p) => p.id === plat);
+        return {
+          ...n,
+          title: n.title || platObj?.defaultTitle || "文案生成",
+          platform: plat,
+          tone: String(n.tone || "干货种草"),
+          requirement: String(n.requirement || ""),
+          modelRef: String(n.modelRef || ""),
+          skillIds: Array.isArray(n.skillIds) ? n.skillIds.filter(Boolean) : [],
+          result: n.result && typeof n.result === "object" ? n.result : null,
+        };
+      }
       return n;
     });
     return {
       format: 2,
       nodes: cleanNodes,
-      edges: nodes.length ? edges : defaultGraph(catalog).edges,
+      edges: nodes.length ? edges : blankGraph(catalog).edges,
     };
   }
 
@@ -234,7 +281,7 @@ function normalizeGraphData(raw, catalog, recipes) {
   const migratedEdges = edges.filter((e) => idMap.has(e.from) && idMap.has(e.to));
   return {
     format: 2,
-    nodes: migratedNodes.length ? migratedNodes : defaultGraph(catalog).nodes,
+    nodes: migratedNodes.length ? migratedNodes : blankGraph(catalog).nodes,
     edges: migratedEdges,
   };
 }
@@ -275,7 +322,7 @@ export async function renderCanvas(host, ctx, params = {}) {
 
   const state = {
     docId: params.docId || docs[0]?.id || "",
-    name: docs[0]?.name || "参数组合画布",
+    name: docs[0]?.name || "未命名画布",
     modelRef: modRes.defaultModel || "site:seedream-4.5",
     view: "free", // free | guided
     panX: 0,
@@ -285,11 +332,15 @@ export async function renderCanvas(host, ctx, params = {}) {
     selectedEdgeId: "",
     connectFrom: "",
     dirty: false,
-    activePanel: "", // "" | "preview" | "history"
+    activePanel: (!params.docId && !docs.length) ? "assistant" : "", // "" | "assistant" | "preview" | "history"
+    assistantPrompt: "",
+    assistantModelRef: modRes.sceneModels?.canvas || modRes.defaultTextModel || "",
+    assistantBusy: false,
+    copyRunningIds: new Set(),
     outputNodeId: "",
     selectedOrdinals: new Set(),
     activeFieldTabs: new Map(),
-    graph: defaultGraph(catalog),
+    graph: blankGraph(catalog),
     activeRun: initialRuns[0] || null,
     recentRuns: initialRuns,
     runsById,
@@ -512,6 +563,7 @@ export async function renderCanvas(host, ctx, params = {}) {
     }));
     return {
       theme: String(row.prompt || "").trim() || (refSpecs.length ? "基于所附参考图的手绘创作" : "手绘视觉主题展示"),
+      text: String(row.text || "").trim(),
       style: s1,
       style2: s2,
       layout: row.layout || "",
@@ -524,6 +576,42 @@ export async function renderCanvas(host, ctx, params = {}) {
       refs: refSpecs.map((r) => r.path),
       refSpecs,
     };
+  }
+
+  function expandCopyNode(copyNode) {
+    if (!copyNode) return { items: [], error: "请添加「文案生成」节点", count: 0 };
+    const sources = upstreamSources(copyNode.id);
+    if (!sources.length) {
+      return { items: [], error: "请将左侧参数或参考图节点的输出圆点连到这里", count: 0 };
+    }
+    const errSource = sources.find((s) => s.error);
+    if (errSource) return { items: [], error: errSource.error, count: 0 };
+    const mode = sources.length === 1 ? "cartesian" : (copyNode.mode || "cartesian");
+    const expanded = expandRowsFromSources(sources, mode);
+    if (expanded.error) return { items: [], error: expanded.error, count: 0 };
+    const seen = new Set();
+    const items = [];
+    for (const row of expanded.rows) {
+      const hasContent = String(row.prompt || "").trim() || String(row.text || "").trim() || (Array.isArray(row.refs) && row.refs.length > 0);
+      if (!hasContent) continue;
+      const it = rowToGenerateItem(row);
+      const dedupeKey = `${it.theme}\n${it.text}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      items.push({
+        theme: it.theme,
+        text: it.text,
+        style: it.style,
+        layout: it.layout,
+        ratio: it.ratio,
+        refSpecs: (it.refSpecs || []).map((r) => ({ label: r.label || "", role: r.role || "", note: r.note || "" })),
+      });
+      if (items.length >= 24) break;
+    }
+    if (!items.length) {
+      return { items: [], error: "请先在上游参数节点填写至少 1 条主题内容", count: 0 };
+    }
+    return { items, error: "", count: items.length };
   }
 
   function expandOutputNode(outNode) {
@@ -711,10 +799,18 @@ export async function renderCanvas(host, ctx, params = {}) {
       renderDrawer();
     },
   }, "预览清单");
+  const assistantBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    onClick: () => {
+      state.activePanel = state.activePanel === "assistant" ? "" : "assistant";
+      renderDrawer();
+    },
+  }, "✨ AI 助手");
   const runAllBtn = el("button", {
     type: "button",
     class: "btn btn-sm btn-primary",
-    onClick: () => runOutputNode(primaryOutputNode(), false),
+    onClick: () => runAllOutputs(),
   }, "▶ 运行生成");
 
   const headerBar = el("header", { class: "pc-header" },
@@ -724,7 +820,7 @@ export async function renderCanvas(host, ctx, params = {}) {
       el("button", { type: "button", class: "btn btn-sm", onClick: openSaveDialog }, "💾 保存"),
       recentWrap,
       el("button", { type: "button", class: "btn btn-sm", onClick: openTemplatesModal }, "📐 模板库"),
-      el("button", { type: "button", class: "btn btn-sm", onClick: openAssistantModal }, "✨ AI 助手"),
+      assistantBtn,
       el("button", { type: "button", class: "btn btn-sm", onClick: syncCanvas }, "☁ 同步")
     ),
     el("div", { class: "pc-toolbar" },
@@ -806,6 +902,7 @@ export async function renderCanvas(host, ctx, params = {}) {
       { label: "🖼️ 添加参考图节点", hint: "支持多图与作用说明", fn: () => addNodeOfType("reference", "", ctxWorldPos) },
       { label: "🎛️ 添加出图参数卡", hint: "主题/画风/图型/比例", fn: () => addNodeOfType("parameters", "", ctxWorldPos) },
       { label: "🚀 添加批量出图节点", hint: "模型/分辨率/预览", fn: () => addNodeOfType("output", "", ctxWorldPos) },
+      { label: "📝 添加文案生成节点", hint: "小红书/公众号/抖音配文", fn: () => addNodeOfType("copy", "", ctxWorldPos) },
       { label: "🔀 添加参数组合节点", hint: "汇聚多条连线", fn: () => addNodeOfType("combine", "", ctxWorldPos) },
       { sep: true },
       { label: "⊞ 自动整理节点排布", fn: () => autoLayoutNodes() },
@@ -884,7 +981,7 @@ export async function renderCanvas(host, ctx, params = {}) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     state.graph.nodes.forEach((n) => {
       const card = nodesLayer.querySelector(`[data-card="${n.id}"]`);
-      const w = card?.offsetWidth || (n.type === "parameters" ? 390 : n.type === "reference" ? 340 : 300);
+      const w = card?.offsetWidth || (n.type === "parameters" ? 390 : n.type === "copy" ? 360 : n.type === "reference" ? 340 : 300);
       const h = card?.offsetHeight || 260;
       const x = n.x || 0;
       const y = n.y || 0;
@@ -923,7 +1020,7 @@ export async function renderCanvas(host, ctx, params = {}) {
     nodes.forEach((n) => getDepth(n.id));
     const maxDepth = Math.max(1, ...Array.from(depth.values()));
     nodes.forEach((n) => {
-      if (n.type === "output") depth.set(n.id, Math.max(depth.get(n.id) || 1, maxDepth));
+      if (n.type === "output" || n.type === "copy") depth.set(n.id, Math.max(depth.get(n.id) || 1, maxDepth));
     });
 
     const cols = new Map();
@@ -940,7 +1037,7 @@ export async function renderCanvas(host, ctx, params = {}) {
       let curY = 56;
       colNodes.forEach((n) => {
         const card = nodesLayer.querySelector(`[data-card="${n.id}"]`);
-        const w = card?.offsetWidth || (n.type === "parameters" ? 390 : n.type === "reference" ? 340 : 310);
+        const w = card?.offsetWidth || (n.type === "parameters" ? 390 : n.type === "copy" ? 360 : n.type === "reference" ? 340 : 310);
         const h = card?.offsetHeight || 260;
         n.x = curX;
         n.y = curY;
@@ -1115,8 +1212,8 @@ export async function renderCanvas(host, ctx, params = {}) {
     const fromNode = state.graph.nodes.find((n) => n.id === fromId);
     const toNode = state.graph.nodes.find((n) => n.id === toId);
     if (!fromNode || !toNode) return "节点不存在";
-    if (fromNode.type === "output" || toNode.type === "parameter" || toNode.type === "parameters" || toNode.type === "reference") {
-      return "只能从参考图/参数/组合右侧连接到组合/出图左侧";
+    if (fromNode.type === "output" || fromNode.type === "copy" || toNode.type === "parameter" || toNode.type === "parameters" || toNode.type === "reference") {
+      return "只能从参考图/参数/组合右侧连接到组合/出图/文案左侧";
     }
     if (state.graph.edges.some((e) => e.from === fromId && e.to === toId)) return "连线已存在";
     // Cycle detection
@@ -1143,7 +1240,7 @@ export async function renderCanvas(host, ctx, params = {}) {
     }
     const n = state.graph.nodes.find((x) => x.id === nodeId);
     if (!n) return { x: 0, y: 0 };
-    const w = n.type === "parameters" ? 390 : n.type === "reference" ? 340 : 300;
+    const w = n.type === "parameters" ? 390 : n.type === "copy" ? 360 : n.type === "reference" ? 340 : 300;
     return { x: (n.x || 0) + (direction === "out" ? w : 0), y: (n.y || 0) + 60 };
   }
 
@@ -1479,6 +1576,10 @@ export async function renderCanvas(host, ctx, params = {}) {
         ta.value = String(val || "");
         ta.addEventListener("input", () => { values[idx] = ta.value; recordEdit(false); });
         card.appendChild(ta);
+      } else if (fieldName === "text") {
+        const inp = el("input", { class: "input", type: "text", style: { fontSize: "12.5px" }, value: String(val || ""), placeholder: "可选：画面主标/角标文字，如「新手避坑指南」…" });
+        inp.addEventListener("input", () => { values[idx] = inp.value; recordEdit(false); });
+        card.appendChild(inp);
       } else if (fieldName === "style1") {
         const pair = typeof val === "object" && val ? { ...val } : { style1: String(val || ""), style2: "" };
         const makeStyleCard = (subKey, lbl) => {
@@ -1667,6 +1768,7 @@ export async function renderCanvas(host, ctx, params = {}) {
     copy.x = Math.round((node.x || 40) + 36);
     copy.y = Math.round((node.y || 40) + 36);
     if (copy.type === "output") delete copy.runId;
+    if (copy.type === "copy") copy.result = null;
     state.graph.nodes.push(copy);
     state.selectedId = copy.id;
     recordEdit(true);
@@ -1678,11 +1780,13 @@ export async function renderCanvas(host, ctx, params = {}) {
       : node.type === "parameters" ? "出图参数"
       : node.type === "parameter" ? (PARAM_LABELS[node.parameter] || node.parameter)
       : node.type === "combine" ? "参数组合"
+      : node.type === "copy" ? (node.title || "文案生成")
       : "批量出图";
 
     const typeCls = node.type === "parameters" ? " pc-parameter-group"
       : node.type === "reference" ? " pc-reference-node"
       : node.type === "output" ? " pc-output-node"
+      : node.type === "copy" ? " pc-copy-node"
       : "";
 
     const card = el("section", {
@@ -1692,8 +1796,8 @@ export async function renderCanvas(host, ctx, params = {}) {
     });
 
     if (!guidedMode) {
-      const hasIn = node.type === "output" || node.type === "combine";
-      const hasOut = node.type !== "output";
+      const hasIn = node.type === "output" || node.type === "combine" || node.type === "copy";
+      const hasOut = node.type !== "output" && node.type !== "copy";
       if (hasIn) {
         const inPort = el("button", {
           type: "button",
@@ -1777,13 +1881,13 @@ export async function renderCanvas(host, ctx, params = {}) {
       }
     }
 
-    const headTitleEl = node.type === "reference"
+    const headTitleEl = (node.type === "reference" || node.type === "copy")
       ? (() => {
           const inp = el("input", {
             type: "text",
             class: "pc-node-title-in",
-            value: node.title || "参考图",
-            "aria-label": "参考图节点名称",
+            value: node.title || (node.type === "copy" ? "文案生成" : "参考图"),
+            "aria-label": node.type === "copy" ? "文案节点名称" : "参考图节点名称",
           });
           inp.addEventListener("input", () => { node.title = inp.value; recordEdit(false); });
           return inp;
@@ -1965,7 +2069,7 @@ export async function renderCanvas(host, ctx, params = {}) {
           }, "⚠ 当前自有模型未标记支持参考图，若该接口不支持 /images/edits 多图上传，参考图可能不生效（可改用官网模型或在设置确认）")
         : null;
 
-      body.append(
+      body.append(...[
         el("div", { class: "row", style: { gap: "6px" } }, el("span", { class: "muted", style: { flexShrink: "0" } }, "模型"), mSel),
         el("div", { class: "row", style: { gap: "10px", justifyContent: "space-between", flexWrap: "wrap" } },
           el("div", { class: "row", style: { gap: "6px" } }, el("span", { class: "muted" }, "分辨率"), resPills),
@@ -1976,8 +2080,8 @@ export async function renderCanvas(host, ctx, params = {}) {
         el("div", { class: "row", style: { flexWrap: "wrap", gap: "6px" } },
           el("button", { type: "button", class: "btn btn-sm btn-primary", onClick: () => runOutputNode(node, false) }, "▶ 运行生成"),
           el("button", { type: "button", class: "btn btn-sm", onClick: () => { state.outputNodeId = node.id; state.activePanel = "preview"; renderDrawer(); } }, "预览清单")
-        )
-      );
+        ),
+      ].filter(Boolean));
 
       // Embedded Live Results & Result-to-Reference Loop inside Output Node (#155, #156)
       const nodeRun = node.runId ? state.runsById.get(node.runId) : null;
@@ -2037,6 +2141,178 @@ export async function renderCanvas(host, ctx, params = {}) {
           ),
           thumbs
         ));
+      }
+    } else if (node.type === "copy") {
+      const curPlat = COPY_PLATFORMS.some((p) => p.id === node.platform) ? node.platform : "xiaohongshu";
+      const curTone = node.tone || "干货种草";
+      const copyExp = expandCopyNode(node);
+      const isBusy = state.copyRunningIds.has(node.id);
+
+      const platPills = el("div", { class: "pc-copy-pills", role: "group", "aria-label": "发布平台" },
+        ...COPY_PLATFORMS.map((p) => el("button", {
+          type: "button",
+          class: "pc-copy-pill",
+          "aria-pressed": String(curPlat === p.id),
+          onClick: () => {
+            const oldPlat = COPY_PLATFORMS.find((x) => x.id === curPlat);
+            node.platform = p.id;
+            if (!node.title || node.title === "文案生成" || (oldPlat && node.title === oldPlat.defaultTitle)) {
+              node.title = p.defaultTitle;
+            }
+            recordEdit(true);
+          },
+        }, p.label))
+      );
+
+      const tonePills = el("div", { class: "pc-copy-pills", role: "group", "aria-label": "文案风格" },
+        ...COPY_TONES.map((tn) => el("button", {
+          type: "button",
+          class: "pc-copy-pill",
+          "aria-pressed": String(curTone === tn),
+          onClick: () => { node.tone = tn; recordEdit(true); },
+        }, tn))
+      );
+
+      const textPicker = createTextModelPicker(
+        modRes,
+        node.modelRef || modRes.sceneModels?.canvas || modRes.defaultTextModel || "",
+        "canvas",
+        (val) => { node.modelRef = val; recordEdit(false); }
+      );
+      textPicker.el.style.flex = "1";
+      textPicker.el.style.minWidth = "0";
+
+      const skillCount = Array.isArray(node.skillIds) ? node.skillIds.length : 0;
+      const skillBtn = el("button", {
+        type: "button",
+        class: "btn btn-sm" + (skillCount ? " btn-primary" : ""),
+        title: "可选挂载已安装写作 Skill（如去 AI 味、小红书爆款公式等）",
+        onClick: () => {
+          openSharedSkillPickerModal({
+            title: "选择文案写作 Skill",
+            selectedIds: Array.isArray(node.skillIds) ? node.skillIds : [],
+            onChange: (ids) => {
+              node.skillIds = ids;
+              recordEdit(true);
+            },
+          });
+        },
+      }, skillCount ? `⚡ Skill (${skillCount})` : "⚡ Skill");
+
+      const reqIn = el("input", {
+        type: "text",
+        class: "input",
+        style: { fontSize: "12px" },
+        value: node.requirement || "",
+        placeholder: "补充文案要求（选填，如：面向零基础新手、口语像朋友分享）…",
+        "aria-label": "补充文案要求",
+      });
+      reqIn.addEventListener("input", () => { node.requirement = reqIn.value; recordEdit(false); });
+
+      body.append(
+        platPills,
+        tonePills,
+        el("div", { class: "row", style: { gap: "6px", alignItems: "center" } }, textPicker.el, skillBtn),
+        reqIn,
+        el("div", {
+          class: "badge" + (copyExp.error ? " badge-warn" : " badge-accent"),
+          dataset: { copySummary: node.id },
+        }, copyExp.error || `已接入 ${copyExp.count} 页分镜主题 · 将同步生成标题、正文与标签`),
+        el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+          el("button", {
+            type: "button",
+            class: "btn btn-sm btn-primary",
+            disabled: isBusy,
+            onClick: () => runCopyNode(node),
+          }, isBusy ? "⏳ 正在撰写文案…" : (node.result ? "↻ 重新生成文案" : "✨ 生成文案"))
+        )
+      );
+
+      if (node.result && typeof node.result === "object") {
+        const res = node.result;
+        const titles = Array.isArray(res.titles) && res.titles.length ? res.titles : [""];
+        const selIdx = Math.max(0, Math.min(titles.length - 1, Number(res.selectedTitleIdx || 0)));
+        res.selectedTitleIdx = selIdx;
+        const activeTitle = typeof res.activeTitle === "string" && res.activeTitle ? res.activeTitle : (titles[selIdx] || "");
+        res.activeTitle = activeTitle;
+
+        const titleInput = el("input", {
+          type: "text",
+          class: "input",
+          style: { fontSize: "12.5px", fontWeight: "600" },
+          value: activeTitle,
+          "aria-label": "当前选中标题",
+        });
+        titleInput.addEventListener("input", () => {
+          res.activeTitle = titleInput.value;
+          recordEdit(false);
+        });
+
+        const titleChips = titles.length > 1
+          ? el("div", { class: "pc-copy-titles", role: "group", "aria-label": "备选标题" },
+              ...titles.map((t, idx) => el("button", {
+                type: "button",
+                class: "pc-copy-title-chip",
+                "aria-pressed": String(idx === selIdx),
+                onClick: () => {
+                  res.selectedTitleIdx = idx;
+                  res.activeTitle = t;
+                  recordEdit(true);
+                },
+              }, `${idx + 1}. ${t}`))
+            )
+          : null;
+
+        const bodyTa = el("textarea", {
+          class: "textarea",
+          rows: "6",
+          style: { minHeight: "120px", fontSize: "12px", lineHeight: "1.55" },
+          "aria-label": "生成文案正文",
+        });
+        bodyTa.value = String(res.content || "");
+        bodyTa.addEventListener("input", () => {
+          res.content = bodyTa.value;
+          recordEdit(false);
+        });
+
+        const tags = Array.isArray(res.tags) ? res.tags.filter(Boolean) : [];
+        const tagsRow = tags.length
+          ? el("div", { class: "pc-copy-tags" }, ...tags.map((tg) => el("span", { class: "pc-copy-tag" }, `#${String(tg).replace(/^#+/, "")}`)))
+          : null;
+
+        const copyFullBtn = el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: () => {
+            const headLine = String(res.activeTitle || titles[selIdx] || "").trim();
+            const contentText = String(res.content || "").trim();
+            const tagLine = tags.map((tg) => `#${String(tg).replace(/^#+/, "")}`).join(" ");
+            const full = [headLine, contentText, tagLine].filter(Boolean).join("\n\n");
+            copyTextToClipboard(full).then(() => toast("已复制完整笔记（标题 + 正文 + 话题标签）"));
+          },
+        }, "📋 复制完整笔记");
+
+        const resultBox = el("div", { class: "pc-copy-result" });
+        resultBox.append(...[
+          el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "6px" } },
+            el("strong", { style: { fontSize: "12px" } }, "生成结果"),
+            res.model ? el("span", { class: "muted mono", style: { fontSize: "10.5px" } }, String(res.model).slice(0, 26)) : null
+          ),
+          titleChips,
+          titleInput,
+          bodyTa,
+          tagsRow,
+          el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+            copyFullBtn,
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              disabled: isBusy,
+              onClick: () => runCopyNode(node),
+            }, "↻ 换一版")
+          ),
+        ].filter(Boolean));
+        body.appendChild(resultBox);
       }
     }
 
@@ -2102,21 +2378,126 @@ export async function renderCanvas(host, ctx, params = {}) {
     guidedContainer.append(leftMain, sidebarRight);
   }
 
-  // ==================== Right Drawer (Preview Plan & History Runs) ====================
+  // ==================== Right Drawer (AI Assistant, Preview Plan & History Runs) ====================
   async function renderDrawer() {
     if (!state.activePanel) {
       drawerEl.hidden = true;
+      assistantBtn.classList.remove("btn-primary");
       historyBtn.classList.remove("btn-primary");
       previewBtn.classList.remove("btn-primary");
       return;
     }
     drawerEl.hidden = false;
+    assistantBtn.classList.toggle("btn-primary", state.activePanel === "assistant");
     historyBtn.classList.toggle("btn-primary", state.activePanel === "history");
     previewBtn.classList.toggle("btn-primary", state.activePanel === "preview");
     clear(drawerBody);
 
+    if (state.activePanel === "assistant") {
+      drawerTitle.textContent = "✨ AI 画布助手";
+      const promptIn = el("textarea", {
+        class: "textarea",
+        rows: "4",
+        style: { minHeight: "92px", fontSize: "12.5px", lineHeight: "1.5" },
+        placeholder: "描述你想做的图文或批量创作流程，例如：做一个小红书手冲咖啡避坑 6 图工作流，同时配好小红书文案节点…",
+      });
+      promptIn.value = state.assistantPrompt || "";
+      promptIn.addEventListener("input", () => { state.assistantPrompt = promptIn.value; });
+
+      const textPicker = createTextModelPicker(
+        modRes,
+        state.assistantModelRef || modRes.sceneModels?.canvas || modRes.defaultTextModel || "",
+        "canvas",
+        (val) => { state.assistantModelRef = val; }
+      );
+      textPicker.el.style.maxWidth = "220px";
+
+      const chipsBox = el("div", { class: "pc-ai-chips" },
+        ...AI_STARTER_CHIPS.map((ch) => el("button", {
+          type: "button",
+          class: "pc-ai-chip",
+          onClick: () => {
+            state.assistantPrompt = ch.prompt;
+            promptIn.value = ch.prompt;
+            promptIn.focus();
+          },
+        }, el("strong", null, ch.title), el("span", null, ch.desc)))
+      );
+
+      const buildBtn = el("button", {
+        type: "button",
+        class: "btn btn-primary",
+        disabled: state.assistantBusy,
+        onClick: async () => {
+          const text = promptIn.value.trim();
+          if (!text) {
+            toast("请先输入想法，或点击上方场景快速填入");
+            promptIn.focus();
+            return;
+          }
+          state.assistantPrompt = text;
+          state.assistantBusy = true;
+          renderDrawer();
+          try {
+            const res = await api("POST", "/api/canvas/assistant", {
+              prompt: text,
+              modelRef: state.assistantModelRef || textPicker.value,
+            });
+            const nodes = res.nodes || res.raw?.nodes;
+            const edges = res.edges || res.raw?.edges;
+            if (!Array.isArray(nodes) || !nodes.length) {
+              toast("助手未能解析出节点图，请换个描述重试");
+              return;
+            }
+            state.graph = normalizeGraphData({ nodes, edges }, catalog, recipes);
+            state.activePanel = "";
+            recordEdit(true);
+            setTimeout(fitView, 25);
+            toast("已自动搭建画布流程，可直接点击「▶ 运行生成」");
+          } catch (e) {
+            toast(e.message || "AI 搭建失败");
+          } finally {
+            state.assistantBusy = false;
+            if (state.activePanel === "assistant") renderDrawer();
+          }
+        },
+      }, state.assistantBusy ? "⏳ AI 正在搭建节点…" : "✨ AI 自动搭建画布");
+
+      drawerBody.append(
+        el("p", { class: "pc-ai-drawer-intro" }, "说说你要做的系列图或小红书图文，AI 会自动帮你拆解主题、配好画风与文案节点；你也可以直接操作左侧画布手动连线。"),
+        el("span", { class: "studio-row-label" }, "常用场景一键填入"),
+        chipsBox,
+        el("span", { class: "studio-row-label" }, "你的需求描述"),
+        promptIn,
+        el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px" } },
+          el("span", { class: "muted", style: { fontSize: "12px", flexShrink: "0" } }, "文字模型"),
+          textPicker.el
+        ),
+        buildBtn,
+        el("div", { class: "row", style: { justifyContent: "space-between", gap: "6px", marginTop: "2px" } },
+          el("button", { type: "button", class: "btn btn-sm", onClick: openTemplatesModal }, "📐 浏览内置模板"),
+          el("button", { type: "button", class: "btn btn-sm", onClick: () => { state.activePanel = ""; renderDrawer(); } }, "手动搭建 →")
+        )
+      );
+      return;
+    }
+
     if (state.activePanel === "preview") {
       drawerTitle.textContent = "预览清单";
+      const copyNodes = state.graph.nodes.filter((n) => n.type === "copy");
+      if (copyNodes.length) {
+        const copyCard = el("div", { class: "card col", style: { padding: "9px 10px", gap: "4px" } },
+          el("strong", { style: { fontSize: "12.5px" } }, `📝 同步文案任务 (${copyNodes.length})`),
+          ...copyNodes.map((cn) => {
+            const ce = expandCopyNode(cn);
+            const platLabel = COPY_PLATFORMS.find((p) => p.id === cn.platform)?.label || "小红书";
+            return el("span", { class: "muted", style: { fontSize: "11.5px" } },
+              `${cn.title || "文案生成"} · ${platLabel} · ${cn.tone || "干货种草"} · ${ce.error || `接入 ${ce.count} 页分镜`}`
+            );
+          })
+        );
+        drawerBody.appendChild(copyCard);
+      }
       const out = primaryOutputNode();
       const exp = expandOutputNode(out);
       if (exp.error || !exp.items.length) {
@@ -2271,6 +2652,14 @@ export async function renderCanvas(host, ctx, params = {}) {
         badge.textContent = exp.error || `预计输出 ${exp.count} 张 · ${curRes.toUpperCase()}`;
       }
     });
+    state.graph.nodes.filter((n) => n.type === "copy").forEach((n) => {
+      const badge = nodesLayer.querySelector(`[data-copy-summary="${n.id}"]`);
+      if (badge) {
+        const ce = expandCopyNode(n);
+        badge.className = "badge" + (ce.error ? " badge-warn" : " badge-accent");
+        badge.textContent = ce.error || `已接入 ${ce.count} 页分镜主题 · 将同步生成标题、正文与标签`;
+      }
+    });
   }
 
   function renderWorkspace() {
@@ -2303,15 +2692,17 @@ export async function renderCanvas(host, ctx, params = {}) {
   // ==================== Actions ====================
   function newCanvas() {
     state.docId = "";
-    state.name = "参数组合画布";
-    state.graph = defaultGraph(catalog);
+    state.name = "未命名画布";
+    state.graph = blankGraph(catalog);
     state.view = "free";
+    state.activePanel = "assistant";
+    state.assistantPrompt = "";
     state.dirty = false;
     state.undoStack = [];
     state.redoStack = [];
     lastSnapshot = JSON.stringify({ name: state.name, graph: state.graph });
     renderWorkspace();
-    toast("已新建空白画布");
+    toast("已新建空白画布，可直接用右侧 AI 助手快速搭建");
   }
 
   function addNodeOfType(type, parameter = "", customPos = null) {
@@ -2349,10 +2740,31 @@ export async function renderCanvas(host, ctx, params = {}) {
       node = { id, type: "parameter", parameter, values: [initialCandidate(parameter, catalog)], x, y };
     } else if (type === "combine") {
       node = { id, type: "combine", mode: "cartesian", x, y };
+    } else if (type === "copy") {
+      const outNode = existing.find((n) => n.type === "output");
+      node = {
+        id,
+        type: "copy",
+        title: "小红书文案",
+        platform: "xiaohongshu",
+        tone: "干货种草",
+        requirement: "",
+        modelRef: "",
+        skillIds: [],
+        result: null,
+        x: customPos ? customPos.x : (outNode ? Math.round(outNode.x || 500) : x),
+        y: customPos ? customPos.y : (outNode ? Math.round((outNode.y || 120) + 310) : y),
+      };
     } else {
       node = { id, type: "output", mode: "cartesian", repeat: 1, resolution: "2k", x, y };
     }
     state.graph.nodes.push(node);
+    if (type === "copy" && !customPos) {
+      const src = existing.find((n) => n.type === "combine") || existing.find((n) => n.type === "parameters");
+      if (src && !canConnect(src.id, id)) {
+        state.graph.edges.push({ id: uid("edge"), from: src.id, to: id });
+      }
+    }
     state.selectedId = id;
     recordEdit(true);
   }
@@ -2443,6 +2855,91 @@ export async function renderCanvas(host, ctx, params = {}) {
     } catch (e) { toast(e.message); }
   }
 
+  async function copyTextToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch {}
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } finally { ta.remove(); }
+  }
+
+  async function runCopyNode(copyNode) {
+    if (!copyNode || state.copyRunningIds.has(copyNode.id)) return;
+    const exp = expandCopyNode(copyNode);
+    if (exp.error && !copyNode.requirement?.trim()) {
+      toast(exp.error);
+      return;
+    }
+    state.copyRunningIds.add(copyNode.id);
+    renderWorkspace();
+    try {
+      const res = await api("POST", "/api/canvas/copy", {
+        platform: copyNode.platform || "xiaohongshu",
+        tone: copyNode.tone || "干货种草",
+        title: state.name || copyNode.title || "",
+        requirement: copyNode.requirement || "",
+        modelRef: copyNode.modelRef || modRes.sceneModels?.canvas || modRes.defaultTextModel || "",
+        skillIds: Array.isArray(copyNode.skillIds) ? copyNode.skillIds : [],
+        items: exp.items,
+      });
+      const titles = Array.isArray(res.titles) && res.titles.length ? res.titles : [state.name || "新图文笔记"];
+      copyNode.result = {
+        platform: res.platform || copyNode.platform || "xiaohongshu",
+        titles,
+        selectedTitleIdx: 0,
+        activeTitle: titles[0] || "",
+        content: String(res.content || ""),
+        tags: Array.isArray(res.tags) ? res.tags : [],
+        model: res.model || res.harnessName || "",
+        usedSkills: Array.isArray(res.usedSkills) ? res.usedSkills : [],
+      };
+      recordEdit(true);
+      toast(`「${copyNode.title || "文案生成"}」已生成 ${titles.length} 个备选标题与正文`);
+    } catch (e) {
+      toast(e.message || "文案生成失败");
+    } finally {
+      state.copyRunningIds.delete(copyNode.id);
+      renderWorkspace();
+    }
+  }
+
+  async function runAllOutputs() {
+    const outNodes = state.graph.nodes.filter((n) => n.type === "output");
+    const copyNodes = state.graph.nodes.filter((n) => n.type === "copy");
+    const validOuts = outNodes.filter((n) => {
+      const e = expandOutputNode(n);
+      return !e.error && e.items.length > 0;
+    });
+    const validCopies = copyNodes.filter((n) => {
+      const e = expandCopyNode(n);
+      return (!e.error && e.items.length > 0) || Boolean(n.requirement?.trim());
+    });
+    if (!validOuts.length && !validCopies.length) {
+      const firstOut = primaryOutputNode();
+      if (firstOut) {
+        await runOutputNode(firstOut, false);
+      } else if (copyNodes[0]) {
+        await runCopyNode(copyNodes[0]);
+      } else {
+        toast("请先添加并连接「批量出图」或「文案生成」节点");
+      }
+      return;
+    }
+    const tasks = [
+      ...validOuts.map((n) => runOutputNode(n, false)),
+      ...validCopies.map((n) => runCopyNode(n)),
+    ];
+    await Promise.allSettled(tasks);
+  }
+
   async function runOutputNode(outNode, confirmed) {
     const exp = expandOutputNode(outNode);
     if (exp.error || !exp.items.length) {
@@ -2477,7 +2974,11 @@ export async function renderCanvas(host, ctx, params = {}) {
       upsertRun(runObj);
       state.activeRun = runObj;
       if (targetOut) targetOut.runId = runObj.id;
-      state.activePanel = "history";
+      if (state.activePanel !== "history" && !state.graph.nodes.some((n) => n.type === "copy")) {
+        state.activePanel = "history";
+      } else if (state.activePanel === "assistant") {
+        state.activePanel = "";
+      }
       renderWorkspace();
       toast(`已提交 ${items.length} 张组合生图（${effRes.toUpperCase()}）`);
     } catch (e) { toast(e.message); }
@@ -2488,10 +2989,12 @@ export async function renderCanvas(host, ctx, params = {}) {
     [...builtins, ...userTpls].forEach((tpl) => {
       const data = typeof tpl.data === "string" ? JSON.parse(tpl.data) : (tpl.data || tpl);
       const hasRef = (data.nodes || []).some((n) => n.type === "reference");
+      const hasCopy = (data.nodes || []).some((n) => n.type === "copy");
       body.appendChild(el("div", { class: "card row", style: { justifyContent: "space-between", padding: "10px 12px", gap: "10px" } },
         el("div", { class: "col", style: { gap: "3px", minWidth: "0" } },
-          el("div", { class: "row", style: { gap: "6px" } },
+          el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
             el("strong", null, tpl.name),
+            hasCopy ? el("span", { class: "badge badge-ok" }, "配图 + 文案") : null,
             hasRef ? el("span", { class: "badge badge-accent" }, "含参考图") : null
           ),
           el("span", { class: "muted", style: { fontSize: "12px" } }, data.desc || `包含 ${(data.nodes || []).length} 个节点`)
@@ -2503,6 +3006,7 @@ export async function renderCanvas(host, ctx, params = {}) {
           onClick: () => {
             state.name = tpl.name;
             state.graph = normalizeGraphData(data, catalog, recipes);
+            if (state.activePanel === "assistant") state.activePanel = "";
             closeModal();
             recordEdit(true);
             setTimeout(fitView, 20);
@@ -2512,43 +3016,6 @@ export async function renderCanvas(host, ctx, params = {}) {
       ));
     });
     showModal("工作流模板库", body, [el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭")]);
-  }
-
-  function openAssistantModal() {
-    const promptIn = el("textarea", {
-      class: "textarea",
-      rows: "4",
-      placeholder: "描述你想搭建的流程，例如：用 1 张角色参考图保持主角五官，在 4 个四季场景里批量出图，并用 2 种画风横评…",
-    });
-    const textPicker = createTextModelPicker(modRes, modRes.sceneModels?.canvas || modRes.defaultTextModel || "", "canvas");
-    const textSel = textPicker.el;
-    textSel.style.maxWidth = "290px";
-    showModal("✨ 画布工作流助手", el("div", { class: "col" },
-      promptIn,
-      el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "10px" } },
-        el("span", { class: "muted", style: { fontSize: "12px", flexShrink: "0" } }, "文字服务接口"),
-        textSel
-      )
-    ), [
-      el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
-      el("button", {
-        type: "button",
-        class: "btn btn-primary",
-        onClick: async () => {
-          try {
-            const res = await api("POST", "/api/canvas/assistant", { prompt: promptIn.value.trim(), modelRef: textSel.value });
-            const nodes = res.nodes || res.raw?.nodes;
-            const edges = res.edges || res.raw?.edges;
-            if (!Array.isArray(nodes) || !nodes.length) { toast("助手未能解析出节点图"); return; }
-            state.graph = normalizeGraphData({ nodes, edges }, catalog, recipes);
-            closeModal();
-            recordEdit(true);
-            setTimeout(fitView, 20);
-            toast("已生成画布节点流程");
-          } catch (e) { toast(e.message); }
-        },
-      }, "自动搭建"),
-    ]);
   }
 
   // ==================== SSE Live Updates (Multi-Run & Embedded Output Cards) ====================
