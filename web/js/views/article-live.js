@@ -616,6 +616,45 @@ function buildLiveDecorations(state, env) {
       continue;
     }
 
+    // Standalone HTML <video ...> / <audio ...> embed block (single-line or multi-line, #141)
+    const htmlMediaStart = trimmed.match(/^<(video|audio)\b/i);
+    if (htmlMediaStart) {
+      const tagName = htmlMediaStart[1].toLowerCase();
+      const closeRe = new RegExp(`</${tagName}\\s*>\\s*$`, "i");
+      let mediaEndLn = ln;
+      if (!closeRe.test(trimmed) && !/\/>\s*$/.test(trimmed)) {
+        const maxScan = Math.min(lineCount, ln + 12);
+        let foundClose = false;
+        for (let k = ln + 1; k <= maxScan; k++) {
+          if (closeRe.test(doc.line(k).text.trim())) {
+            mediaEndLn = k;
+            foundClose = true;
+            break;
+          }
+        }
+        if (!foundClose) mediaEndLn = -1;
+      }
+      if (mediaEndLn >= ln) {
+        inCallout = false;
+        const mFrom = line.from;
+        const mTo = doc.line(mediaEndLn).to;
+        const rawHtml = doc.sliceString(mFrom, mTo);
+        addOp(mTo, mTo, Decoration.widget({
+          widget: new EmbedWidget(rawHtml, sourcePath, linksCtrl),
+          block: true,
+          side: 1,
+        }), 50);
+        if (!overlapsSelection(sel, mFrom, mTo)) {
+          for (let k = ln; k <= mediaEndLn; k++) {
+            const ml = doc.line(k);
+            addOp(ml.from, ml.to, Decoration.mark({ class: "cm-lp-embed-src-dim" }), 0);
+          }
+        }
+        ln = mediaEndLn;
+        continue;
+      }
+    }
+
     // Blockquote / Obsidian Callout
     const qm = text.match(/^(\s*>\s?)(.*)$/);
     if (qm) {

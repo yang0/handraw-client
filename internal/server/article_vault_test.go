@@ -320,10 +320,16 @@ func TestArticleVaultMultiFormatPreviewRenameAndDelete(t *testing.T) {
 		t.Fatalf("expected 400 for traversal preview, got %d", rrEsc.Code)
 	}
 
-	// Serve /files/vault-asset sets proper Content-Type for webp & mp4
+	// Serve /files/vault-asset sets proper Content-Type for webp & mp4, including relative fromNote & percent-encoded spaces
+	_ = os.MkdirAll(filepath.Join(vault, "posts", "assets"), 0o755)
+	_ = os.WriteFile(filepath.Join(vault, "posts", "assets", "my clip.mp4"), []byte("\x00\x00\x00\x18ftypmp42data"), 0o644)
 	rrAsset := doReq(t, h, srv.Token, "GET", "/files/vault-asset?path=media/clip.mp4", nil)
 	if rrAsset.Code != 200 || !strings.Contains(rrAsset.Header().Get("Content-Type"), "video/mp4") {
 		t.Fatalf("expected video/mp4 Content-Type, got %d %q", rrAsset.Code, rrAsset.Header().Get("Content-Type"))
+	}
+	rrRelEnc := doReq(t, h, srv.Token, "GET", "/files/vault-asset?path=assets/my%2520clip.mp4&from=posts/demo.md", nil)
+	if rrRelEnc.Code != 200 || !strings.Contains(rrRelEnc.Header().Get("Content-Type"), "video/mp4") {
+		t.Fatalf("expected note-relative percent-encoded video/mp4, got %d %q", rrRelEnc.Code, rrRelEnc.Header().Get("Content-Type"))
 	}
 
 	// Rename image without extension keeps .webp (does NOT append .md!)

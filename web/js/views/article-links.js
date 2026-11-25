@@ -9,7 +9,73 @@ function vaultAssetUrl(rawPath, fromNote = "") {
 }
 
 function isImagePath(p) {
-  return /\.(png|jpe?g|webp|gif|svg|bmp|avif)$/i.test(String(p || "").trim());
+  return /\.(png|jpe?g|webp|gif|svg|bmp|avif|ico)(?:[?#].*)?$/i.test(String(p || "").trim());
+}
+
+function isVideoPath(p) {
+  return /\.(mp4|webm|mov|m4v|ogv|mkv)(?:[?#].*)?$/i.test(String(p || "").trim());
+}
+
+function isAudioPath(p) {
+  return /\.(mp3|wav|ogg|m4a|flac|aac|opus)(?:[?#].*)?$/i.test(String(p || "").trim());
+}
+
+function isPdfPath(p) {
+  return /\.pdf(?:[?#].*)?$/i.test(String(p || "").trim());
+}
+
+function classifyEmbedMediaKind(p) {
+  if (isVideoPath(p)) return "video";
+  if (isAudioPath(p)) return "audio";
+  if (isPdfPath(p)) return "pdf";
+  if (isImagePath(p)) return "image";
+  return "";
+}
+
+function parseMarkdownLinkHref(rawHref) {
+  let s = String(rawHref || "").trim();
+  if (!s) return "";
+  if (s.startsWith("<")) {
+    const end = s.indexOf(">");
+    if (end > 1) return s.slice(1, end).trim();
+  }
+  // Strip optional Markdown title suffix: path "title" or path 'title'
+  const titleIdx = s.search(/\s+["']/);
+  if (titleIdx > 0) s = s.slice(0, titleIdx).trim();
+  return s;
+}
+
+function parseHtmlMediaTag(rawBlock) {
+  const s = String(rawBlock || "").trim();
+  const open = s.match(/^<(video|audio)\b([^>]*)>([\s\S]*?)<\/\1>$/i) || s.match(/^<(video|audio)\b([^>]*)\/?>$/i);
+  if (!open) return null;
+  const tag = open[1].toLowerCase();
+  const attrs = open[2] || "";
+  const inner = open[3] || "";
+  const readAttr = (str, name) => {
+    const m = str.match(new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i"));
+    return m ? (m[1] ?? m[2] ?? m[3] ?? "").trim() : "";
+  };
+  let src = readAttr(attrs, "src");
+  if (!src && inner) {
+    const sm = inner.match(/<source\b([^>]*)>/i);
+    if (sm) src = readAttr(sm[1], "src");
+  }
+  if (!src) return null;
+  const poster = readAttr(attrs, "poster");
+  const wRaw = readAttr(attrs, "width");
+  const width = /^\d+$/.test(wRaw) ? parseInt(wRaw, 10) : 0;
+  return { tag, src, poster, width };
+}
+
+function formatDurationMini(sec) {
+  const total = Math.floor(Number(sec) || 0);
+  if (!Number.isFinite(total) || total <= 0) return "";
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (v) => String(v).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
 function parseWikilinkInner(inner) {
@@ -1230,11 +1296,14 @@ export function createArticleLinksController(opts) {
           if (!isEmbed && !a.isImage) continue;
           const hay = `${a.name} ${a.path}`.toLowerCase();
           if (!ql || hay.includes(ql)) {
+            const mk = classifyEmbedMediaKind(a.path || a.name);
+            const icon = mk === "video" ? "🎬" : (mk === "audio" ? "🎵" : (mk === "pdf" ? "📕" : (a.isImage || mk === "image" ? "🖼" : "📎")));
+            const tag = mk === "video" ? "视频" : (mk === "audio" ? "音频" : (mk === "pdf" ? "PDF" : (a.isImage || mk === "image" ? "图片" : "附件")));
             items.push({
-              icon: a.isImage ? "🖼" : "📎",
+              icon,
               label: a.name,
               sub: a.path,
-              tag: a.isImage ? "图片" : "附件",
+              tag,
               tagKind: "img",
               insertValue: a.path,
             });
@@ -1424,7 +1493,7 @@ export function createArticleLinksController(opts) {
     const noteOutgoing = [];
     const seen = new Set();
     for (const o of data.outgoing) {
-      if (o.isImage) continue;
+      if (o.isImage || (o.isEmbed && classifyEmbedMediaKind(parseMarkdownLinkHref(o.resolvedPath || o.target)))) continue;
       const key = (o.resolvedPath || o.target).toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
@@ -1485,6 +1554,134 @@ export function createArticleLinksController(opts) {
   }
 
   // ---------- Rich Preview & Embed Renderer ----------
+  function resolveMediaAssetSrc(rawHref, sourcePath) {
+    const href = String(rawHref || "").trim();
+    if (!href) return { src: "", localPath: "", isExternal: false };
+    if (/^https?:\/\/|^data:|^\//i.test(href)) {
+      return { src: href, localPath: "", isExternal: true };
+    }
+    const res = resolveLocalTarget(href, sourcePath);
+    const localPath = res?.item?.path || href;
+    return {
+      src: vaultAssetUrl(localPath, sourcePath),
+      localPath,
+      isExternal: false,
+    };
+  }
+
+  function buildEmbeddedMediaNode({ kind, src, localPath = "", label = "", width = 0, poster = "" }) {
+    const displayName = label || (localPath || src).split("/").pop().split("?")[0] || "媒体文件";
+    const openExternal = async () => {
+      if (!localPath) return;
+      try {
+        await api("POST", "/api/article/vault/reveal", { path: localPath, openFile: true });
+        toast("已调用系统默认程序打开");
+      } catch (e) {
+        toast(e.message || "系统打开失败");
+      }
+    };
+
+    if (kind === "video") {
+      const metaPill = el("span", { class: "ic-link-embed-meta hidden" });
+      const errBox = el("div", { class: "ic-link-embed-err hidden" },
+        el("span", null, "当前浏览器内核无法解码此视频格式"),
+        localPath ? el("button", { type: "button", class: "btn btn-sm", onClick: openExternal }, "↗ 系统播放器打开") : null
+      );
+      const vAttrs = {
+        src,
+        controls: true,
+        playsinline: true,
+        preload: "metadata",
+        class: "ic-link-embed-video",
+      };
+      if (poster) vAttrs.poster = poster;
+      const videoEl = el("video", vAttrs);
+      videoEl.addEventListener("loadedmetadata", () => {
+        const parts = [];
+        if (videoEl.videoWidth && videoEl.videoHeight) parts.push(`${videoEl.videoWidth}×${videoEl.videoHeight}`);
+        const dur = formatDurationMini(videoEl.duration);
+        if (dur) parts.push(dur);
+        if (parts.length) {
+          metaPill.textContent = parts.join(" · ");
+          metaPill.classList.remove("hidden");
+        }
+      });
+      videoEl.addEventListener("error", () => errBox.classList.remove("hidden"));
+
+      return el("div", {
+        class: "ic-link-embed-media is-video",
+        style: width ? { maxWidth: `${width}px` } : undefined,
+      },
+        el("div", { class: "ic-link-embed-media-head" },
+          el("div", { class: "ic-link-embed-media-title", title: localPath || src },
+            el("span", { "aria-hidden": "true" }, "🎬"),
+            el("span", { class: "ic-link-embed-media-name" }, displayName),
+            metaPill
+          ),
+          localPath ? el("div", { class: "ic-link-embed-media-acts" },
+            el("button", { type: "button", class: "ic-link-embed-act", title: "在标签页中全屏查看", onClick: () => opts.openNote?.(localPath) }, "查看"),
+            el("button", { type: "button", class: "ic-link-embed-act", title: "用系统默认播放器打开", onClick: openExternal }, "↗ 播放")
+          ) : null
+        ),
+        videoEl,
+        errBox
+      );
+    }
+
+    if (kind === "audio") {
+      const metaPill = el("span", { class: "ic-link-embed-meta hidden" });
+      const audioEl = el("audio", {
+        src,
+        controls: true,
+        preload: "metadata",
+        class: "ic-link-embed-audio",
+      });
+      audioEl.addEventListener("loadedmetadata", () => {
+        const dur = formatDurationMini(audioEl.duration);
+        if (dur) {
+          metaPill.textContent = dur;
+          metaPill.classList.remove("hidden");
+        }
+      });
+      return el("div", { class: "ic-link-embed-media is-audio" },
+        el("div", { class: "ic-link-embed-media-head" },
+          el("div", { class: "ic-link-embed-media-title", title: localPath || src },
+            el("span", { "aria-hidden": "true" }, "🎵"),
+            el("span", { class: "ic-link-embed-media-name" }, displayName),
+            metaPill
+          ),
+          localPath ? el("div", { class: "ic-link-embed-media-acts" },
+            el("button", { type: "button", class: "ic-link-embed-act", onClick: () => opts.openNote?.(localPath) }, "查看")
+          ) : null
+        ),
+        audioEl
+      );
+    }
+
+    if (kind === "pdf") {
+      return el("div", { class: "ic-link-embed-media is-pdf" },
+        el("div", { class: "ic-link-embed-media-head" },
+          el("div", { class: "ic-link-embed-media-title", title: localPath || src },
+            el("span", { "aria-hidden": "true" }, "📕"),
+            el("span", { class: "ic-link-embed-media-name" }, displayName)
+          ),
+          localPath ? el("div", { class: "ic-link-embed-media-acts" },
+            el("button", { type: "button", class: "ic-link-embed-act", onClick: () => opts.openNote?.(localPath) }, "全屏查看"),
+            el("button", { type: "button", class: "ic-link-embed-act", onClick: openExternal }, "↗ 系统打开")
+          ) : null
+        ),
+        el("iframe", { src, class: "ic-link-embed-pdf", title: displayName })
+      );
+    }
+
+    return el("img", {
+      src,
+      alt: displayName,
+      class: "ic-link-embed-img",
+      style: width ? { maxWidth: `${width}px`, width: "100%" } : { width: "100%" },
+    });
+  }
+
   function appendInlineWithLinks(parent, text, sourcePath, depth = 0) {
     const s = String(text || "");
     const tokenRe = /(!?\[\[[^\[\]\r\n]+\]\]|!?\[[^\]]*\]\([^)\r\n]+\)|\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/g;
@@ -1497,13 +1694,17 @@ export function createArticleLinksController(opts) {
       if (tok.startsWith("![[") && tok.endsWith("]]")) {
         const { target, alias } = parseWikilinkInner(tok.slice(3, -2));
         const res = resolveLocalTarget(target, sourcePath);
-        if (res?.kind === "attachment" || isImagePath(target)) {
+        const resolvedPath = res?.item?.path || target;
+        const mediaKind = classifyEmbedMediaKind(resolvedPath) || classifyEmbedMediaKind(target);
+        if (mediaKind || res?.kind === "attachment") {
           const widthNum = /^\d+$/.test(alias) ? parseInt(alias, 10) : 0;
-          parent.appendChild(el("img", {
-            src: vaultAssetUrl(res?.item?.path || target, sourcePath),
-            alt: widthNum ? target : (alias || target),
-            class: "ic-link-embed-img",
-            style: widthNum ? { maxWidth: `${widthNum}px`, width: "100%" } : { width: "100%" },
+          const kind = mediaKind || "image";
+          parent.appendChild(buildEmbeddedMediaNode({
+            kind,
+            src: vaultAssetUrl(resolvedPath, sourcePath),
+            localPath: resolvedPath,
+            label: widthNum ? "" : (alias || ""),
+            width: widthNum,
           }));
         } else if (res?.kind === "note" && depth < 1) {
           parent.appendChild(buildEmbeddedNoteCard(res.item, depth + 1));
@@ -1516,12 +1717,18 @@ export function createArticleLinksController(opts) {
         const label = alias || (heading ? `${target} › ${heading}` : target);
         parent.appendChild(buildWikilinkPill(target, label, Boolean(res), sourcePath));
       } else if (tok.startsWith("![")) {
-        const im = tok.match(/^!\[([^\]]*)\]\(([^)\s]+)/);
+        const im = tok.match(/^!\[([^\]]*)\]\(([^)\r\n]+)\)$/);
         if (im) {
           const alt = im[1] || "";
-          const href = im[2] || "";
-          const src = /^https?:\/\/|^data:|^\//i.test(href) ? href : vaultAssetUrl(href, sourcePath);
-          parent.appendChild(el("img", { src, alt, class: "ic-link-embed-img", style: { width: "100%" } }));
+          const href = parseMarkdownLinkHref(im[2] || "");
+          const resolved = resolveMediaAssetSrc(href, sourcePath);
+          const mediaKind = classifyEmbedMediaKind(resolved.localPath || href) || "image";
+          parent.appendChild(buildEmbeddedMediaNode({
+            kind: mediaKind,
+            src: resolved.src,
+            localPath: resolved.localPath,
+            label: alt,
+          }));
         }
       } else if (tok.startsWith("[")) {
         const lm = tok.match(/^\[([^\]]+)\]\(([^)\s]+)/);
@@ -1648,6 +1855,20 @@ export function createArticleLinksController(opts) {
       const bq = el("blockquote", { class: "ic-pv-quote" });
       appendInlineWithLinks(bq, trimmed.replace(/^>\s?/gm, ""), sourcePath, 0);
       sheet.appendChild(bq);
+      return;
+    }
+    const htmlMedia = parseHtmlMediaTag(trimmed);
+    if (htmlMedia) {
+      const resolved = resolveMediaAssetSrc(htmlMedia.src, sourcePath);
+      const posterRes = htmlMedia.poster ? resolveMediaAssetSrc(htmlMedia.poster, sourcePath) : { src: "" };
+      const wrap = el("div", { style: { margin: "10px 0" } }, buildEmbeddedMediaNode({
+        kind: htmlMedia.tag,
+        src: resolved.src,
+        localPath: resolved.localPath,
+        width: htmlMedia.width,
+        poster: posterRes.src,
+      }));
+      sheet.appendChild(wrap);
       return;
     }
     if (/^!\[/.test(trimmed) && !trimmed.includes("\n")) {
@@ -1995,7 +2216,7 @@ export function createArticleLinksController(opts) {
     const outGrouped = [];
     const outMap = new Map();
     for (const o of data.outgoing) {
-      if (o.isImage) continue;
+      if (o.isImage || (o.isEmbed && classifyEmbedMediaKind(parseMarkdownLinkHref(o.resolvedPath || o.target)))) continue;
       const key = `${o.isEmbed ? "e:" : "l:"}${(o.resolvedPath || o.target).toLowerCase()}`;
       if (outMap.has(key)) {
         outMap.get(key).count += 1;

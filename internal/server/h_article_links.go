@@ -822,15 +822,41 @@ func (s *Server) fileVaultAsset(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Try direct relative path first, then Obsidian shortest-path lookup.
-	resolved := rawPath
-	if abs, _, rErr := resolveVaultAnyFilePath(rootAbs, rawPath); rErr == nil {
-		if st, sErr := os.Stat(abs); sErr == nil && !st.IsDir() {
-			setVaultAssetHeaders(w, abs)
-			http.ServeFile(w, r, abs)
-			return
+
+	normCand := func(p string) string {
+		s := strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
+		if unesc, uErr := url.PathUnescape(s); uErr == nil && unesc != "" {
+			s = unesc
+		}
+		return strings.TrimPrefix(s, "./")
+	}
+
+	// O(1) fast-path candidates (relative to source note first, then direct vault-relative)
+	// so video Range scrubbing never rescans the entire vault (#141).
+	var fastCandidates []string
+	cand := normCand(rawPath)
+	if fromNote != "" {
+		srcDir := path.Dir(strings.ReplaceAll(fromNote, "\\", "/"))
+		if srcDir != "." && srcDir != "" && srcDir != "/" {
+			fastCandidates = append(fastCandidates, path.Clean(srcDir+"/"+cand))
 		}
 	}
+	fastCandidates = append(fastCandidates, cand)
+	if cand != rawPath {
+		fastCandidates = append(fastCandidates, rawPath)
+	}
+	for _, c := range fastCandidates {
+		if abs, _, rErr := resolveVaultAnyFilePath(rootAbs, c); rErr == nil {
+			if st, sErr := os.Stat(abs); sErr == nil && !st.IsDir() {
+				setVaultAssetHeaders(w, abs)
+				http.ServeFile(w, r, abs)
+				return
+			}
+		}
+	}
+
+	// Fallback: Obsidian shortest-path lookup across vault attachments.
+	resolved := cand
 	idx := buildVaultLinkIndex(rootAbs)
 	if rp, ok, _ := idx.resolveTarget(rawPath, fromNote); ok {
 		resolved = rp

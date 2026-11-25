@@ -420,18 +420,85 @@ export function compileWeChatInlineHTML({ title, content, slots, activeFile, cfg
       continue;
     }
 
-    // 5. Standalone image embed ![[img.png]] or ![alt](src)
+    // 5. Standalone media/image embed ![[...]], ![alt](src), or HTML <video>/<audio> (#141)
+    const videoExtRe = /\.(mp4|webm|mov|m4v|ogv|mkv)(?:[?#].*)?$/i;
+    const audioExtRe = /\.(mp3|wav|ogg|m4a|flac|aac|opus)(?:[?#].*)?$/i;
+    const imgExtRe = /\.(png|jpe?g|webp|gif|svg|bmp|avif|ico)(?:[?#].*)?$/i;
+    const cleanMdHref = (h) => {
+      let s = String(h || "").trim();
+      if (s.startsWith("<") && s.endsWith(">")) s = s.slice(1, -1).trim();
+      const ti = s.search(/\s+["']/);
+      return ti > 0 ? s.slice(0, ti).trim() : s;
+    };
+    const videoFigureHTML = (src, caption, widthPx = 0) => {
+      const capHtml = caption ? `<figcaption style="margin-top:6px;font-size:12px;color:${theme.muted};text-align:center;">${escHtml(caption)}</figcaption>` : "";
+      const wStyle = widthPx ? `max-width:${widthPx}px;` : "max-width:100%;";
+      return `<figure style="margin:18px 0;text-align:center;"><video controls playsinline preload="metadata" src="${escHtml(src)}" style="${wStyle}width:100%;border-radius:10px;background:#141210;display:block;margin:0 auto;"></video>${capHtml}</figure>`;
+    };
+    const audioFigureHTML = (src, caption) => {
+      const capHtml = caption ? `<figcaption style="margin-top:6px;font-size:12px;color:${theme.muted};text-align:center;">${escHtml(caption)}</figcaption>` : "";
+      return `<figure style="margin:18px 0;padding:12px 14px;border-radius:10px;border:1px solid ${theme.border};background:${theme.quoteBg};"><audio controls preload="metadata" src="${escHtml(src)}" style="width:100%;display:block;"></audio>${capHtml}</figure>`;
+    };
+
     const imgWiki = trimmed.match(/^!\[\[([^\[\]|]+?)(?:\|([^\[\]]*))?\]\]$/);
-    if (imgWiki && /\.(png|jpe?g|webp|gif|svg|bmp|avif)$/i.test(imgWiki[1].trim())) {
-      out.push(figureHTML(resolveImgSrc(imgWiki[1], activeFile), imgWiki[2] || "", cfg, theme));
-      i++;
-      continue;
+    if (imgWiki) {
+      const wTarget = imgWiki[1].trim();
+      const wAlias = (imgWiki[2] || "").trim();
+      const wNum = /^\d+$/.test(wAlias) ? parseInt(wAlias, 10) : 0;
+      const wCap = wNum ? "" : wAlias;
+      if (videoExtRe.test(wTarget)) {
+        out.push(videoFigureHTML(resolveImgSrc(wTarget, activeFile), wCap, wNum));
+        i++;
+        continue;
+      }
+      if (audioExtRe.test(wTarget)) {
+        out.push(audioFigureHTML(resolveImgSrc(wTarget, activeFile), wCap));
+        i++;
+        continue;
+      }
+      if (imgExtRe.test(wTarget)) {
+        out.push(figureHTML(resolveImgSrc(wTarget, activeFile), wCap, cfg, theme));
+        i++;
+        continue;
+      }
     }
     const imgMd = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
     if (imgMd) {
-      out.push(figureHTML(resolveImgSrc(imgMd[2], activeFile), imgMd[1] || "", cfg, theme));
+      const mAlt = imgMd[1] || "";
+      const mHref = cleanMdHref(imgMd[2]);
+      if (videoExtRe.test(mHref)) {
+        out.push(videoFigureHTML(resolveImgSrc(mHref, activeFile), mAlt));
+      } else if (audioExtRe.test(mHref)) {
+        out.push(audioFigureHTML(resolveImgSrc(mHref, activeFile), mAlt));
+      } else {
+        out.push(figureHTML(resolveImgSrc(mHref, activeFile), mAlt, cfg, theme));
+      }
       i++;
       continue;
+    }
+    const htmlMediaStart = trimmed.match(/^<(video|audio)\b/i);
+    if (htmlMediaStart) {
+      const tagName = htmlMediaStart[1].toLowerCase();
+      const closeRe = new RegExp(`</${tagName}\\s*>\\s*$`, "i");
+      let j = i;
+      let block = trimmed;
+      if (!closeRe.test(trimmed) && !/\/>\s*$/.test(trimmed)) {
+        while (j + 1 < lines.length && j - i < 12) {
+          j++;
+          block += "\n" + lines[j].trim();
+          if (closeRe.test(lines[j].trim())) break;
+        }
+      }
+      const srcM = block.match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const rawSrc = srcM ? (srcM[1] || srcM[2] || srcM[3] || "").trim() : "";
+      if (rawSrc) {
+        const wM = block.match(/\bwidth\s*=\s*(?:"(\d+)"|'(\d+)'|(\d+))/i);
+        const wPx = wM ? parseInt(wM[1] || wM[2] || wM[3], 10) : 0;
+        const resolvedSrc = resolveImgSrc(rawSrc, activeFile);
+        out.push(tagName === "video" ? videoFigureHTML(resolvedSrc, "", wPx) : audioFigureHTML(resolvedSrc, ""));
+        i = j + 1;
+        continue;
+      }
     }
 
     // 6. Blockquote / Obsidian Callout
