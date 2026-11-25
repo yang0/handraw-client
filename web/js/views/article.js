@@ -1678,7 +1678,7 @@ export async function renderArticle(root, ctx, params = {}) {
         aiCloseDrawerBtn
       )
     ),
-    el("div", { class: "ic-cop-controls", style: { alignItems: "flex-start" } },
+    el("div", { class: "ic-cop-controls" },
       el("div", { class: "ic-cop-mode-seg", role: "group", "aria-label": "助手工作模式" },
         aiModeEditBtn,
         aiModeAdviseBtn

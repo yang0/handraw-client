@@ -252,6 +252,26 @@ export function createArticleObsidianController(opts) {
         }
       };
     })(),
+    // Generic synchronous desktop FS bridge for node:fs *Sync calls (#139)
+    desktopFsSync: (pluginId, req) => {
+      if (disposed || !pluginId || !req) return { ok: false, error: "unavailable" };
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/article/obsidian/desktop/fs", false);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        const tok = getToken();
+        if (tok) xhr.setRequestHeader("X-Handraw-Token", tok);
+        xhr.send(JSON.stringify({ pluginId, req }));
+        if (xhr.status >= 200 && xhr.status < 300) {
+          return { ok: true, data: JSON.parse(xhr.responseText || "{}") };
+        }
+        let errMsg = `HTTP ${xhr.status}`;
+        try { errMsg = JSON.parse(xhr.responseText || "{}").error || errMsg; } catch {}
+        return { ok: false, status: xhr.status, error: errMsg };
+      } catch (err) {
+        return { ok: false, error: err?.message || "fs sync failed" };
+      }
+    },
   };
   window.__HANDRAW_CM6_BRIDGE__ = cm6Bridge;
 

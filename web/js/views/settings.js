@@ -1,5 +1,6 @@
 import { api, clear, closeModal, copyText, el, money, onEvent, openURL, setColorScheme, showModal, toast } from "../api.js";
 import { economySyncHint, formatQuotaSummary, parseEconomy } from "../economy.js";
+import { createTextModelPicker } from "../skills-ui.js";
 import { openClipperSetupModal } from "./inspirations.js";
 
 const VALID_SETTINGS_TABS = new Set([
@@ -622,46 +623,17 @@ export async function renderSettings(root, ctx, params = {}) {
   const sceneModels = Object.assign({}, settings.sceneModels || harnessRes?.sceneModels || {});
   const readyHarnessCount = harnesses.filter((h) => h && h.available).length;
 
-  function buildSceneModelSelect(currentValue, allowFollowDefault = true) {
-    const sel = el("select", { class: "select select-sm harness-scene-select" });
-    if (allowFollowDefault) {
-      sel.appendChild(el("option", { value: "" }, "跟随通用默认文字引擎"));
-    } else {
-      sel.appendChild(el("option", { value: "" }, "自动调度（优先官网，回退第三方）"));
-    }
-    const gSite = el("optgroup", { label: modRes?.loggedIn ? "手绘风官方服务" : "手绘风官方服务（需先登录）" });
-    gSite.appendChild(el("option", { value: "site:auto" }, "官网智能文字服务"));
-    sel.appendChild(gSite);
+  const pickerModRes = {
+    ...(modRes || {}),
+    harnesses,
+  };
 
-    const readyList = harnesses.filter((h) => h && h.available);
-    if (readyList.length) {
-      const gH = el("optgroup", { label: "本地 AI Harness（本机 CLI）" });
-      readyList.forEach((h) => {
-        const ref = h.defaultRef || `harness:${h.id}`;
-        gH.appendChild(el("option", { value: ref }, `${h.name}${h.model ? " · " + h.model : ""}`));
-      });
-      sel.appendChild(gH);
-    }
-
-    const txtProvs = Array.isArray(modRes?.textProviders) ? modRes.textProviders : [];
-    txtProvs.forEach((p) => {
-      const ms = p.models || [];
-      if (!ms.length) return;
-      const gP = el("optgroup", { label: `第三方 OpenAI 接口 · ${p.name || p.id}` });
-      ms.forEach((m) => {
-        gP.appendChild(el("option", { value: `${p.id}:${m.id}` }, m.label || m.name || m.id));
-      });
-      sel.appendChild(gP);
+  function buildSceneModelSelect(currentValue, allowFollowDefault = true, sceneKey = "") {
+    const picker = createTextModelPicker(pickerModRes, currentValue || "", sceneKey, null, {
+      allowEmpty: true,
+      emptyLabel: allowFollowDefault ? "跟随通用默认文字引擎" : "自动调度（优先官网，回退第三方）",
     });
-
-    const target = String(currentValue || "").trim();
-    if (target && !Array.from(sel.options).some((o) => o.value === target)) {
-      const gKeep = el("optgroup", { label: "当前已配置（暂不可用）" });
-      gKeep.appendChild(el("option", { value: target }, `${target}（未就绪）`));
-      sel.appendChild(gKeep);
-    }
-    sel.value = target;
-    return sel;
+    return picker.el;
   }
 
   const sceneRowsWrap = el("div", { class: "harness-scene-list" });
@@ -683,7 +655,7 @@ export async function renderSettings(root, ctx, params = {}) {
   ));
 
   harnessScenes.forEach((sc) => {
-    const sel = buildSceneModelSelect(sceneModels[sc.key] || "", true);
+    const sel = buildSceneModelSelect(sceneModels[sc.key] || "", true, sc.key);
     sel.addEventListener("change", async () => {
       try {
         await api("PATCH", "/api/settings", { sceneModels: { [sc.key]: sel.value } });

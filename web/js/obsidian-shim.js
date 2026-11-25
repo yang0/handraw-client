@@ -2380,6 +2380,78 @@ function createDesktopFsModules(pluginId) {
     lstatSync(p, opts) {
       return fsMod.statSync(p, opts);
     },
+    readFileSync(p, opts) {
+      const raw = String(p || "").trim();
+      const res = getCM6Bridge()?.desktopFsSync?.(pluginId, { op: "readFile", path: raw });
+      if (!res?.ok) {
+        const err = new Error(res?.error || `ENOENT: no such file or directory, open '${raw}'`);
+        err.code = "ENOENT";
+        throw err;
+      }
+      const buf = BufferPolyfill.from(res.data?.base64 || "", "base64");
+      const enc = typeof opts === "string" ? opts : opts?.encoding;
+      return enc ? buf.toString(enc) : buf;
+    },
+    writeFileSync(p, data) {
+      const raw = String(p || "").trim();
+      const req = { op: "writeFile", path: raw };
+      if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) req.dataBase64 = arrayBufferToBase64(data);
+      else req.dataText = String(data ?? "");
+      const res = getCM6Bridge()?.desktopFsSync?.(pluginId, req);
+      if (!res?.ok) throw new Error(res?.error || `writeFileSync failed: ${raw}`);
+      knownExistingPaths.add(normFsKey(raw));
+    },
+    readdirSync(p, opts) {
+      const raw = String(p || "").trim();
+      const res = getCM6Bridge()?.desktopFsSync?.(pluginId, { op: "readdir", path: raw });
+      if (!res?.ok) {
+        const err = new Error(res?.error || `ENOENT: no such file or directory, scandir '${raw}'`);
+        err.code = "ENOENT";
+        throw err;
+      }
+      const entries = res.data?.entries || [];
+      if (opts?.withFileTypes) {
+        return entries.map((e) => ({ name: e.name, isDirectory: () => Boolean(e.isDir), isFile: () => !e.isDir }));
+      }
+      return entries.map((e) => e.name);
+    },
+    realpathSync(p) {
+      const raw = String(p || "").trim();
+      const res = getCM6Bridge()?.desktopFsSync?.(pluginId, { op: "realpath", path: raw });
+      if (!res?.ok) {
+        const err = new Error(res?.error || `ENOENT: no such file or directory, realpath '${raw}'`);
+        err.code = "ENOENT";
+        throw err;
+      }
+      return res.data?.path || raw;
+    },
+    accessSync(p) {
+      if (!fsMod.existsSync(p)) {
+        const err = new Error(`ENOENT: no such file or directory, access '${p}'`);
+        err.code = "ENOENT";
+        throw err;
+      }
+    },
+    mkdirSync(p, opts) {
+      const raw = String(p || "").trim();
+      const res = getCM6Bridge()?.desktopFsSync?.(pluginId, { op: "mkdir", path: raw, recursive: Boolean(opts?.recursive) });
+      if (!res?.ok) throw new Error(res?.error || `mkdirSync failed: ${raw}`);
+      knownExistingPaths.add(normFsKey(raw));
+    },
+    rmSync(p, opts) {
+      const raw = String(p || "").trim();
+      const res = getCM6Bridge()?.desktopFsSync?.(pluginId, { op: "rm", path: raw, recursive: Boolean(opts?.recursive), force: Boolean(opts?.force) });
+      if (!res?.ok && !opts?.force) throw new Error(res?.error || `rmSync failed: ${raw}`);
+      knownExistingPaths.delete(normFsKey(raw));
+    },
+    unlinkSync(p) {
+      fsMod.rmSync(p, { force: false });
+    },
+    copyFileSync(src, dst) {
+      const res = getCM6Bridge()?.desktopFsSync?.(pluginId, { op: "copyFile", path: String(src), destPath: String(dst) });
+      if (!res?.ok) throw new Error(res?.error || `copyFileSync failed`);
+      knownExistingPaths.add(normFsKey(dst));
+    },
     constants: { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 },
   };
   fsMod.default = fsMod;

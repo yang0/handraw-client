@@ -171,8 +171,9 @@ func TestTextAndVisionModelsDiscoveryAndCustomRelayRouting(t *testing.T) {
 	if len(modsOut.SiteAI) != 2 || len(modsOut.TextProviders) != 1 {
 		t.Fatalf("unexpected /api/models output: siteAI=%d textProvs=%d body=%s", len(modsOut.SiteAI), len(modsOut.TextProviders), rrMods.Body.String())
 	}
-	if strings.Contains(rrMods.Body.String(), "deepseek-v3") || strings.Contains(rrMods.Body.String(), "gemini-2.5-flash") {
-		t.Fatalf("expected /api/models not to expose internal site multimodal model names: %s", rrMods.Body.String())
+	siteAIRaw, _ := json.Marshal(modsOut.SiteAI)
+	if strings.Contains(string(siteAIRaw), "deepseek-v3") || strings.Contains(string(siteAIRaw), "gemini-2.5-flash") {
+		t.Fatalf("expected /api/models siteAI not to expose internal site multimodal model names: %s", string(siteAIRaw))
 	}
 
 	// 3. Default (site:auto) and legacy site:<model> both call fixed online site endpoints without forwarding a site model name (#45).

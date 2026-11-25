@@ -1,6 +1,6 @@
 import { api, clear, closeModal, copyText, el, localImg, money, onEvent, showModal, toast } from "../api.js";
-import { openHarnessSkillImportModal } from "../skills-ui.js";
-import { buildGroupedAIModelSelect, buildGroupedModelSelect } from "./create.js";
+import { createTextModelPicker, openHarnessSkillImportModal } from "../skills-ui.js";
+import { buildGroupedModelSelect } from "./create.js";
 import { bindPageImagePaste, importTempReferenceFile, MAX_REF_IMAGES, openReferencePickerModal } from "./ref-picker.js";
 import { RATIOS } from "./studio-controls.js";
 import { openShareInspirationModal } from "./work-remix-modal.js";
@@ -650,9 +650,10 @@ export async function renderChat(root, ctx, params = {}) {
     }
   });
 
-  // Model & Ratio selects live inside the dedicated clean floating popover
-  const textModelSel = buildGroupedAIModelSelect(modRes, activeSession().data.textModelRef, "text", "chat");
-  textModelSel.style.maxWidth = "100%";
+  // Model & Ratio selects live inside the dedicated clean floating popover (#139: unified single-pill harness/model picker)
+  const textModelPicker = createTextModelPicker(modRes, activeSession().data.textModelRef, "chat");
+  const textModelSel = textModelPicker.el;
+  textModelSel.style.width = "100%";
   textModelSel.addEventListener("change", () => {
     const s = activeSession();
     s.data.textModelRef = textModelSel.value;
@@ -767,7 +768,8 @@ export async function renderChat(root, ctx, params = {}) {
       path.includes(modelPopover) ||
       modelPopover.contains(e.target) ||
       modelCapsuleBtn.contains(e.target) ||
-      headerModelChip.contains(e.target)
+      headerModelChip.contains(e.target) ||
+      Boolean(e.target?.closest?.(".hm-popover"))
     ) {
       return;
     }
@@ -1078,7 +1080,7 @@ export async function renderChat(root, ctx, params = {}) {
 
   function syncModelPickers() {
     const s = activeSession();
-    if (s.data.textModelRef && Array.from(textModelSel.options).some((o) => o.value === s.data.textModelRef)) {
+    if (s.data.textModelRef) {
       textModelSel.value = s.data.textModelRef;
     }
     if (s.data.imageModelRef && Array.from(imageModelSel.options).some((o) => o.value === s.data.imageModelRef)) {

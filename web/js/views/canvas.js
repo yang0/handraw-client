@@ -1,5 +1,6 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
-import { buildGroupedAIModelSelect, buildGroupedModelSelect } from "./create.js";
+import { createTextModelPicker } from "../skills-ui.js";
+import { buildGroupedModelSelect } from "./create.js";
 import {
   DEFAULT_MOODS,
   RATIOS,
@@ -1476,11 +1477,13 @@ export async function renderCanvas(host, ctx, params = {}) {
       rows: "4",
       placeholder: "描述你想生成的组合流程，例如：把清晨咖啡的 4 个步骤做成 2 种不同画风的对比矩阵…",
     });
-    const textSel = buildGroupedAIModelSelect(modRes, modRes.sceneModels?.canvas || modRes.defaultTextModel || "", "text", "canvas");
+    const textPicker = createTextModelPicker(modRes, modRes.sceneModels?.canvas || modRes.defaultTextModel || "", "canvas");
+    const textSel = textPicker.el;
+    textSel.style.maxWidth = "290px";
     showModal("✨ 画布工作流助手", el("div", { class: "col" },
       promptIn,
-      el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center" } },
-        el("span", { class: "muted", style: { fontSize: "12px" } }, "文字服务接口"),
+      el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "10px" } },
+        el("span", { class: "muted", style: { fontSize: "12px", flexShrink: "0" } }, "文字服务接口"),
         textSel
       )
     ), [
