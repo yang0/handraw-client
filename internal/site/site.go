@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yang0/handraw-client/internal/netutil"
 	"github.com/yang0/handraw-client/internal/secrets"
 	"github.com/yang0/handraw-client/internal/settings"
 )
@@ -41,10 +42,17 @@ type Client struct {
 
 func New(version string) *Client {
 	return &Client{
-		HTTP:    &http.Client{Timeout: 60 * time.Second},
+		HTTP:    netutil.NewClient(60 * time.Second),
 		Version: version,
 		base:    func() string { return strings.TrimRight(settings.Get().SiteBase, "/") },
 	}
+}
+
+func (c *Client) transport() http.RoundTripper {
+	if c != nil && c.HTTP != nil && c.HTTP.Transport != nil {
+		return c.HTTP.Transport
+	}
+	return netutil.SharedTransport()
 }
 
 // NewWithBase is for tests.
@@ -96,33 +104,60 @@ func (c *Client) Public(ctx context.Context, method, path string, body, out any)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any, auth bool) error {
-	var rd io.Reader
+	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		rd = bytes.NewReader(b)
+		bodyBytes = b
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base()+path, rd)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "handraw-client/"+c.Version)
-	req.Header.Set("X-Handraw-Client", "desktop/"+c.Version)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
+	var tok string
 	if auth {
-		tok := c.token()
+		tok = c.token()
 		if tok == "" {
 			return ErrNotLoggedIn
 		}
-		req.Header.Set("Authorization", "Bearer "+tok)
 	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
+
+	var resp *http.Response
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		var rd io.Reader
+		if bodyBytes != nil {
+			rd = bytes.NewReader(bodyBytes)
+		}
+		req, rErr := http.NewRequestWithContext(ctx, method, c.base()+path, rd)
+		if rErr != nil {
+			return rErr
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "handraw-client/"+c.Version)
+		req.Header.Set("X-Handraw-Client", "desktop/"+c.Version)
+		if bodyBytes != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if auth {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err = c.HTTP.Do(req)
+		if err == nil {
+			break
+		}
+		if attempt == 0 && ctx.Err() == nil && netutil.IsTransientReset(err) {
+			if tr, ok := c.transport().(*http.Transport); ok {
+				tr.CloseIdleConnections()
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("无法连接网站：%w", ctx.Err())
+			case <-time.After(250 * time.Millisecond):
+			}
+			continue
+		}
+		if friendly := netutil.FriendlyNetworkError(err); friendly != "" {
+			return fmt.Errorf("无法连接网站：%s（%w）", friendly, err)
+		}
 		return fmt.Errorf("无法连接网站：%w", err)
 	}
 	defer resp.Body.Close()
@@ -202,11 +237,6 @@ func (c *Client) Fetch(ctx context.Context, ref string) ([]byte, string, error) 
 	if err != nil {
 		return nil, "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	req.Header.Set("User-Agent", "handraw-client/"+c.Version)
 	// Only send the token to the exact same scheme + host as siteBase, and only
 	// where it is needed: prevents plaintext http:// downgrade leaks (#179).
 	bu, _ := url.Parse(c.base())
@@ -215,13 +245,9 @@ func (c *Client) Fetch(ctx context.Context, ref string) ([]byte, string, error) 
 			strings.EqualFold(target.Scheme, bu.Scheme) &&
 			strings.EqualFold(target.Host, bu.Host)
 	}
-	if sameOrigin(pu) && needsToken(pu.Path) {
-		if tok := c.token(); tok != "" {
-			req.Header.Set("Authorization", "Bearer "+tok)
-		}
-	}
 	hc := &http.Client{
-		Timeout: 5 * time.Minute,
+		Timeout:   5 * time.Minute,
+		Transport: c.transport(),
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("重定向次数过多")
@@ -232,8 +258,33 @@ func (c *Client) Fetch(ctx context.Context, ref string) ([]byte, string, error) 
 			return nil
 		},
 	}
-	resp, err := hc.Do(req)
-	if err != nil {
+	var resp *http.Response
+	for attempt := 0; attempt < 2; attempt++ {
+		req, rErr := http.NewRequestWithContext(ctx, "GET", u, nil)
+		if rErr != nil {
+			return nil, "", rErr
+		}
+		req.Header.Set("User-Agent", "handraw-client/"+c.Version)
+		if sameOrigin(pu) && needsToken(pu.Path) {
+			if tok := c.token(); tok != "" {
+				req.Header.Set("Authorization", "Bearer "+tok)
+			}
+		}
+		resp, err = hc.Do(req)
+		if err == nil {
+			break
+		}
+		if attempt == 0 && ctx.Err() == nil && netutil.IsTransientReset(err) {
+			if tr, ok := c.transport().(*http.Transport); ok {
+				tr.CloseIdleConnections()
+			}
+			select {
+			case <-ctx.Done():
+				return nil, "", ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
 		return nil, "", err
 	}
 	defer resp.Body.Close()
@@ -435,7 +486,7 @@ func (c *Client) ChatPlan(ctx context.Context, body map[string]any) (json.RawMes
 func (c *Client) AnalyzeStyle(ctx context.Context, images []string, purpose string, model ...string) (json.RawMessage, error) {
 	var out json.RawMessage
 	c2 := *c
-	c2.HTTP = &http.Client{Timeout: 3 * time.Minute}
+	c2.HTTP = &http.Client{Timeout: 3 * time.Minute, Transport: c.transport()}
 	body := map[string]any{"images": images, "purpose": purpose}
 	if len(model) > 0 && strings.TrimSpace(model[0]) != "" {
 		body["model"] = strings.TrimSpace(model[0])

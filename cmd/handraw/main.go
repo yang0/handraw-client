@@ -15,6 +15,7 @@ import (
 	"github.com/yang0/handraw-client/internal/appdir"
 	"github.com/yang0/handraw-client/internal/desktop"
 	"github.com/yang0/handraw-client/internal/jobs"
+	"github.com/yang0/handraw-client/internal/netutil"
 	"github.com/yang0/handraw-client/internal/resources"
 	"github.com/yang0/handraw-client/internal/secrets"
 	"github.com/yang0/handraw-client/internal/server"
@@ -36,6 +37,7 @@ func main() {
 		return
 	}
 
+	netutil.InstallDefaultTransport()
 	updater.CleanupOld()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

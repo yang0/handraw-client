@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yang0/handraw-client/internal/netutil"
 )
 
 // PublicKey verifies release signatures. Set at build time with
@@ -96,7 +98,7 @@ type Updater struct {
 }
 
 func New(version, dir string) *Updater {
-	return &Updater{Version: version, Dir: dir, HTTP: &http.Client{Timeout: 30 * time.Minute}, status: Status{Current: version}}
+	return &Updater{Version: version, Dir: dir, HTTP: netutil.NewClient(30 * time.Minute), status: Status{Current: version}}
 }
 
 func (u *Updater) Status() Status {
@@ -169,7 +171,7 @@ func (u *Updater) Check(ctx context.Context) (Status, error) {
 }
 
 func (u *Updater) fetchRelease(ctx context.Context, feed string) (*Release, error) {
-	c := &http.Client{Timeout: 20 * time.Second}
+	c := netutil.NewClient(20 * time.Second)
 	req, err := http.NewRequestWithContext(ctx, "GET", feed, nil)
 	if err != nil {
 		return nil, err
