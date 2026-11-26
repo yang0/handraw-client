@@ -32,6 +32,16 @@ var PublicKey = ""
 
 const Repo = "yang0/handraw-client"
 
+const (
+	maxMetadataBytes     = 4 << 20   // 4 MiB for SHA256SUMS / manifest.json
+	maxSigBytes          = 16 << 10  // 16 KiB for ed25519 signature files
+	maxBinaryBytes       = 256 << 20 // 256 MiB max installer download
+	maxResourceFileBytes = 64 << 20  // 64 MiB max single resource pack file
+	maxUnzipTotalBytes   = 512 << 20 // 512 MiB max total extracted bundle size
+	maxUnzipFileBytes    = 256 << 20 // 256 MiB max single extracted file
+	maxUnzipFiles        = 2000      // max archive entries in macOS bundle zip
+)
+
 // Feeds are tried in order; the first that answers wins.
 // Gitee is preferred by default for faster mainland China access, falling back
 // to the official website mirror and GitHub Releases (#173).
@@ -218,7 +228,8 @@ func assetName() string {
 	return "handraw-" + runtime.GOOS + "-" + runtime.GOARCH
 }
 
-// Newer reports whether version a is newer than b (dotted numbers, "dev" is oldest).
+// Newer reports whether SemVer a is newer than b ("dev" is treated as oldest).
+// Prerelease suffixes follow SemVer 2.0 precedence: 1.0.0 > 1.0.0-rc.1 > 1.0.0-beta.2 > 1.0.0-beta.1.
 func Newer(a, b string) bool {
 	if a == "" {
 		return false
@@ -226,7 +237,11 @@ func Newer(a, b string) bool {
 	if b == "" || b == "dev" {
 		return a != "dev"
 	}
-	pa, pb := parts(a), parts(b)
+	if a == "dev" {
+		return false
+	}
+	pa, preA := parseSemver(a)
+	pb, preB := parseSemver(b)
 	for i := 0; i < len(pa) || i < len(pb); i++ {
 		var x, y int
 		if i < len(pa) {
@@ -239,12 +254,26 @@ func Newer(a, b string) bool {
 			return x > y
 		}
 	}
-	return false
+	if preA == preB {
+		return false
+	}
+	if preA == "" {
+		return true // release beats prerelease of the same core version
+	}
+	if preB == "" {
+		return false // prerelease never beats its own release
+	}
+	return comparePrerelease(preA, preB) > 0
 }
 
-func parts(v string) []int {
-	v = strings.TrimPrefix(v, "v")
-	if i := strings.IndexAny(v, "-+"); i >= 0 {
+func parseSemver(v string) ([]int, string) {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
+	pre := ""
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		pre = v[i+1:]
 		v = v[:i]
 	}
 	var out []int
@@ -252,7 +281,41 @@ func parts(v string) []int {
 		n, _ := strconv.Atoi(p)
 		out = append(out, n)
 	}
-	return out
+	return out, pre
+}
+
+func comparePrerelease(a, b string) int {
+	pa := strings.Split(a, ".")
+	pb := strings.Split(b, ".")
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		if pa[i] == pb[i] {
+			continue
+		}
+		na, errA := strconv.Atoi(pa[i])
+		nb, errB := strconv.Atoi(pb[i])
+		switch {
+		case errA == nil && errB == nil:
+			if na < nb {
+				return -1
+			}
+			return 1
+		case errA == nil:
+			return -1 // SemVer 2.0: numeric identifiers have lower precedence than non-numeric
+		case errB == nil:
+			return 1
+		case pa[i] < pb[i]:
+			return -1
+		default:
+			return 1
+		}
+	}
+	if len(pa) < len(pb) {
+		return -1
+	}
+	if len(pa) > len(pb) {
+		return 1
+	}
+	return 0
 }
 
 func (u *Updater) asset(name string) (Asset, bool) {
@@ -319,11 +382,11 @@ func (u *Updater) Download(ctx context.Context) error {
 		u.set(func(s *Status) { s.Downloading = false; s.Error = err.Error() })
 		return err
 	}
-	sums, err := u.get(ctx, sumsA.URL, nil)
+	sums, err := u.getLimit(ctx, sumsA.URL, maxMetadataBytes, nil)
 	if err != nil {
 		return fail(err)
 	}
-	sig, err := u.get(ctx, sigA.URL, nil)
+	sig, err := u.getLimit(ctx, sigA.URL, maxSigBytes, nil)
 	if err != nil {
 		return fail(err)
 	}
@@ -335,21 +398,33 @@ func (u *Updater) Download(ctx context.Context) error {
 	if want == "" {
 		return fail(fmt.Errorf("签名清单中没有 %s", name))
 	}
-	data, err := u.get(ctx, a.URL, func(n int64) {
+	if err := os.MkdirAll(u.Dir, 0o755); err != nil {
+		return fail(err)
+	}
+	staged := filepath.Join(u.Dir, name)
+	tmpPath := staged + ".part"
+	_ = os.Remove(tmpPath)
+	gotHash, err := u.downloadToFile(ctx, a.URL, tmpPath, maxBinaryBytes, func(n int64) {
 		if a.Size > 0 {
-			u.set(func(s *Status) { s.Progress = int(n * 100 / a.Size) })
+			pct := int(n * 100 / a.Size)
+			if pct > 100 {
+				pct = 100
+			}
+			u.set(func(s *Status) { s.Progress = pct })
 		}
 	})
 	if err != nil {
+		_ = os.Remove(tmpPath)
 		return fail(err)
 	}
-	sum := sha256.Sum256(data)
-	if hex.EncodeToString(sum[:]) != want {
+	if gotHash != want {
+		_ = os.Remove(tmpPath)
 		return fail(errors.New("安装包校验失败，已丢弃"))
 	}
-	_ = os.MkdirAll(u.Dir, 0o755)
-	staged := filepath.Join(u.Dir, name)
-	if err := os.WriteFile(staged, data, 0o755); err != nil {
+	_ = os.Chmod(tmpPath, 0o755)
+	_ = os.Remove(staged)
+	if err := os.Rename(tmpPath, staged); err != nil {
+		_ = os.Remove(tmpPath)
 		return fail(err)
 	}
 	u.mu.Lock()
@@ -359,7 +434,7 @@ func (u *Updater) Download(ctx context.Context) error {
 	return nil
 }
 
-func (u *Updater) get(ctx context.Context, url string, progress func(int64)) ([]byte, error) {
+func (u *Updater) getLimit(ctx context.Context, url string, maxBytes int64, progress func(int64)) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -373,14 +448,20 @@ func (u *Updater) get(ctx context.Context, url string, progress func(int64)) ([]
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("下载失败：%d", resp.StatusCode)
 	}
+	if maxBytes > 0 && resp.ContentLength > maxBytes {
+		return nil, fmt.Errorf("下载内容超过体积上限（%d 字节）", maxBytes)
+	}
 	var buf bytes.Buffer
 	var n int64
 	chunk := make([]byte, 64<<10)
 	for {
 		k, err := resp.Body.Read(chunk)
 		if k > 0 {
-			buf.Write(chunk[:k])
 			n += int64(k)
+			if maxBytes > 0 && n > maxBytes {
+				return nil, fmt.Errorf("下载内容超过体积上限（%d 字节）", maxBytes)
+			}
+			buf.Write(chunk[:k])
 			if progress != nil {
 				progress(n)
 			}
@@ -393,6 +474,63 @@ func (u *Updater) get(ctx context.Context, url string, progress func(int64)) ([]
 		}
 	}
 	return buf.Bytes(), nil
+}
+
+// downloadToFile streams url directly to dstPath while computing SHA-256 and
+// enforcing maxBytes, avoiding holding large installers in memory (#176).
+func (u *Updater) downloadToFile(ctx context.Context, url, dstPath string, maxBytes int64, progress func(int64)) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "handraw-client/"+u.Version)
+	resp, err := u.HTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("下载失败：%d", resp.StatusCode)
+	}
+	if maxBytes > 0 && resp.ContentLength > maxBytes {
+		return "", fmt.Errorf("安装包超过体积上限（%d 字节）", maxBytes)
+	}
+	out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o700)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	var n int64
+	chunk := make([]byte, 64<<10)
+	for {
+		k, rerr := resp.Body.Read(chunk)
+		if k > 0 {
+			n += int64(k)
+			if maxBytes > 0 && n > maxBytes {
+				out.Close()
+				return "", fmt.Errorf("安装包超过体积上限（%d 字节）", maxBytes)
+			}
+			if _, werr := out.Write(chunk[:k]); werr != nil {
+				out.Close()
+				return "", werr
+			}
+			_, _ = h.Write(chunk[:k])
+			if progress != nil {
+				progress(n)
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			out.Close()
+			return "", rerr
+		}
+	}
+	if err := out.Close(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Apply swaps the running program for the staged one. The caller restarts.
@@ -465,26 +603,99 @@ func applyMac(exe, staged string) (string, error) {
 }
 
 func unzipBundle(zipPath, dst string) error {
+	return unzipBundleWithLimits(zipPath, dst, maxUnzipTotalBytes, maxUnzipFileBytes, maxUnzipFiles)
+}
+
+func isWithinDir(root, candidate string) bool {
+	cleanRoot := filepath.Clean(root)
+	cleanCand := filepath.Clean(candidate)
+	if cleanCand == cleanRoot {
+		return true
+	}
+	return strings.HasPrefix(cleanCand, cleanRoot+string(os.PathSeparator))
+}
+
+// ensureNoSymlinkEscape verifies that no existing path segment between root and
+// target is a symlink, preventing zip entries from writing outside root via an
+// earlier symlink entry (#176).
+func ensureNoSymlinkEscape(root, target string) error {
+	cleanRoot := filepath.Clean(root)
+	rel, err := filepath.Rel(cleanRoot, filepath.Clean(target))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return errors.New("更新包含有非法路径")
+	}
+	if rel == "." {
+		return nil
+	}
+	cur := cleanRoot
+	parts := strings.Split(rel, string(os.PathSeparator))
+	for _, seg := range parts[:len(parts)-1] {
+		cur = filepath.Join(cur, seg)
+		if info, err := os.Lstat(cur); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return errors.New("更新包路径经过符号链接，已拒绝")
+			}
+		}
+	}
+	return nil
+}
+
+func unzipBundleWithLimits(zipPath, dst string, maxTotal, maxFile int64, maxFiles int) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
+	if maxFiles > 0 && len(r.File) > maxFiles {
+		return fmt.Errorf("更新包文件数量超过上限（%d）", maxFiles)
+	}
+	cleanDst := filepath.Clean(dst)
+	if err := os.MkdirAll(cleanDst, 0o755); err != nil {
+		return err
+	}
+	var totalWritten int64
 	for _, f := range r.File {
-		target := filepath.Join(dst, filepath.FromSlash(f.Name))
-		if !strings.HasPrefix(target, filepath.Clean(dst)+string(os.PathSeparator)) {
+		target := filepath.Join(cleanDst, filepath.FromSlash(f.Name))
+		if !isWithinDir(cleanDst, target) || target == cleanDst {
 			return errors.New("更新包含有非法路径")
 		}
+		if err := ensureNoSymlinkEscape(cleanDst, target); err != nil {
+			return err
+		}
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(target, 0o755)
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
 			continue
 		}
-		os.MkdirAll(filepath.Dir(target), 0o755)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
 		if f.Mode()&os.ModeSymlink != 0 {
-			rc, _ := f.Open()
-			link, _ := io.ReadAll(rc)
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+			linkBytes, err := io.ReadAll(io.LimitReader(rc, 4096+1))
 			rc.Close()
-			_ = os.Symlink(string(link), target)
+			if err != nil {
+				return err
+			}
+			if len(linkBytes) > 4096 {
+				return errors.New("更新包符号链接目标过长")
+			}
+			linkTarget := strings.TrimSpace(string(linkBytes))
+			if linkTarget == "" || filepath.IsAbs(linkTarget) || strings.HasPrefix(linkTarget, `\`) {
+				return errors.New("更新包含有越界符号链接")
+			}
+			resolved := filepath.Clean(filepath.Join(filepath.Dir(target), filepath.FromSlash(linkTarget)))
+			if !isWithinDir(cleanDst, resolved) {
+				return errors.New("更新包含有越界符号链接")
+			}
+			_ = os.Remove(target)
+			if err := os.Symlink(linkTarget, target); err != nil {
+				return err
+			}
 			continue
 		}
 		rc, err := f.Open()
@@ -496,12 +707,34 @@ func unzipBundle(zipPath, dst string) error {
 			rc.Close()
 			return err
 		}
-		_, err = io.Copy(out, rc)
+		limit := maxFile
+		if maxTotal > 0 {
+			rem := maxTotal - totalWritten
+			if rem < 0 {
+				rem = 0
+			}
+			if limit <= 0 || rem < limit {
+				limit = rem
+			}
+		}
+		var n int64
+		if limit > 0 {
+			n, err = io.Copy(out, io.LimitReader(rc, limit+1))
+			if err == nil && n > limit {
+				err = errors.New("更新包解压体积超过上限")
+			}
+		} else {
+			n, err = io.Copy(out, rc)
+		}
 		rc.Close()
-		out.Close()
+		cerr := out.Close()
 		if err != nil {
 			return err
 		}
+		if cerr != nil {
+			return cerr
+		}
+		totalWritten += n
 	}
 	return nil
 }

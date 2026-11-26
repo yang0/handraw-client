@@ -60,25 +60,29 @@ func readManifest(dir string) Manifest {
 func LocalResourceVersion(dir string) string { return readManifest(dir).Version }
 
 // PlanResources compares the remote manifest with local files by SHA-256.
+// Signature verification is strictly fail-closed: without a valid PublicKey
+// and matching signature, remote resource packs are refused (#176).
 func (u *Updater) PlanResources(ctx context.Context, dir string) (*Plan, error) {
 	var lastErr error
 	for _, base := range ResourceFeed {
-		raw, err := u.get(ctx, base+"/manifest.json", nil)
+		raw, err := u.getLimit(ctx, base+"/manifest.json", maxMetadataBytes, nil)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		sig, _ := u.get(ctx, base+"/manifest.json.sig", nil)
+		sig, err := u.getLimit(ctx, base+"/manifest.json.sig", maxSigBytes, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
 		var remote Manifest
 		if err := json.Unmarshal(raw, &remote); err != nil {
 			lastErr = err
 			continue
 		}
-		if PublicKey != "" {
-			if _, err := VerifySums("resources-"+remote.Version, raw, sig, PublicKey); err != nil {
-				lastErr = err
-				continue
-			}
+		if _, err := VerifySums("resources-"+remote.Version, raw, sig, PublicKey); err != nil {
+			lastErr = err
+			continue
 		}
 		local := readManifest(dir)
 		have := map[string]string{}
@@ -89,7 +93,7 @@ func (u *Updater) PlanResources(ctx context.Context, dir string) (*Plan, error) 
 		want := map[string]bool{}
 		for _, f := range remote.Files {
 			want[f.Path] = true
-			if have[f.Path] == f.SHA256 && fileHashOK(filepath.Join(dir, filepath.FromSlash(f.Path)), f.Size) {
+			if have[f.Path] == f.SHA256 && fileHashOK(filepath.Join(dir, filepath.FromSlash(f.Path)), f.Size, f.SHA256) {
 				continue
 			}
 			p.Changed = append(p.Changed, f)
@@ -118,9 +122,26 @@ func (u *Updater) PlanResources(ctx context.Context, dir string) (*Plan, error) 
 	return nil, lastErr
 }
 
-func fileHashOK(path string, size int64) bool {
+// fileHashOK verifies both size and actual SHA-256 content digest of the local
+// file so same-size corrupted or modified files are detected and repaired (#176).
+func fileHashOK(path string, size int64, wantSHA256 string) bool {
+	if strings.TrimSpace(wantSHA256) == "" {
+		return false
+	}
 	st, err := os.Stat(path)
-	return err == nil && st.Size() == size
+	if err != nil || st.IsDir() || st.Size() != size {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return false
+	}
+	return strings.EqualFold(hex.EncodeToString(h.Sum(nil)), strings.TrimSpace(wantSHA256))
 }
 
 // ApplyResources downloads changed files into a staging dir, verifies each,
@@ -133,13 +154,14 @@ func (u *Updater) ApplyResources(ctx context.Context, dir string, p *Plan, progr
 	}
 	defer os.RemoveAll(stage)
 	for i, f := range p.Changed {
-		if strings.Contains(f.Path, "..") || filepath.IsAbs(f.Path) {
+		dst := filepath.Join(stage, filepath.FromSlash(f.Path))
+		if strings.Contains(f.Path, "..") || filepath.IsAbs(f.Path) || !isWithinDir(stage, dst) || dst == filepath.Clean(stage) {
 			return fmt.Errorf("资源路径非法：%s", f.Path)
 		}
 		var data []byte
 		var err error
 		for attempt := 0; attempt < 3; attempt++ {
-			data, err = u.get(ctx, p.Base+"/"+f.Path, nil)
+			data, err = u.getLimit(ctx, p.Base+"/"+f.Path, maxResourceFileBytes, nil)
 			if err == nil {
 				break
 			}
@@ -149,11 +171,12 @@ func (u *Updater) ApplyResources(ctx context.Context, dir string, p *Plan, progr
 			return fmt.Errorf("下载 %s 失败：%w", f.Path, err)
 		}
 		sum := sha256.Sum256(data)
-		if hex.EncodeToString(sum[:]) != f.SHA256 {
+		if !strings.EqualFold(hex.EncodeToString(sum[:]), strings.TrimSpace(f.SHA256)) {
 			return fmt.Errorf("%s 校验失败", f.Path)
 		}
-		dst := filepath.Join(stage, filepath.FromSlash(f.Path))
-		os.MkdirAll(filepath.Dir(dst), 0o755)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
 		if err := os.WriteFile(dst, data, 0o644); err != nil {
 			return err
 		}

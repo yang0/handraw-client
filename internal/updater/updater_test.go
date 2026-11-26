@@ -1,6 +1,8 @@
 package updater
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -27,8 +29,15 @@ func TestNewer(t *testing.T) {
 		{"0.1.0", "0.1.0", false},
 		{"0.1.0", "0.2.0", false},
 		{"0.1.0", "dev", true},
+		{"dev", "0.1.0", false},
 		{"v1.0.0", "0.9.9", true},
 		{"1.0.0-beta", "1.0.0", false},
+		{"1.0.0", "1.0.0-beta", true},
+		{"1.0.0-beta.2", "1.0.0-beta.1", true},
+		{"1.0.0-beta.10", "1.0.0-beta.2", true},
+		{"1.0.0-rc.1", "1.0.0-beta.9", true},
+		{"1.0.0-beta.1", "1.0.0-beta.1", false},
+		{"1.0.0+build1", "1.0.0+build2", false},
 	}
 	for _, c := range cases {
 		if got := Newer(c.a, c.b); got != c.want {
@@ -320,4 +329,161 @@ func TestHelperApplyV060ToV061(t *testing.T) {
 		t.Fatalf("Apply failed: %v", err)
 	}
 	t.Logf("SWAPPED_OK exe=%s latest=%s", exe, st.Latest)
+}
+
+// #176 audit items #1 and #2: PlanResources must fail closed without PublicKey,
+// and must verify real SHA-256 contents to catch same-size corrupted files.
+func TestResourcesFailClosedAndRealSHA256(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origPub := PublicKey
+	origResFeed := ResourceFeed
+	t.Cleanup(func() {
+		PublicKey = origPub
+		ResourceFeed = origResFeed
+	})
+
+	goodBody := []byte("hello-world-good-content")
+	corruptSameSize := []byte("hello-world-BAD!-content")
+	if len(goodBody) != len(corruptSameSize) {
+		t.Fatalf("test fixture sizes differ")
+	}
+	goodSum := sha256.Sum256(goodBody)
+	goodHex := hex.EncodeToString(goodSum[:])
+
+	manifest := Manifest{
+		Version: "1.2.3",
+		Files: []ManifestFile{
+			{Path: "styles/sample.txt", Size: int64(len(goodBody)), SHA256: goodHex},
+		},
+	}
+	manifestRaw, _ := json.Marshal(manifest)
+	sig := ed25519.Sign(priv, append([]byte("handraw release resources-1.2.3\n"), manifestRaw...))
+	sigB64 := base64.StdEncoding.EncodeToString(sig)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write(manifestRaw)
+		case "/manifest.json.sig":
+			_, _ = w.Write([]byte(sigB64))
+		case "/styles/sample.txt":
+			_, _ = w.Write(goodBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	ResourceFeed = []string{srv.URL}
+
+	packDir := t.TempDir()
+	u := New("v0.6.3", t.TempDir())
+
+	// 1. Fail-closed when PublicKey is empty.
+	PublicKey = ""
+	if _, err := u.PlanResources(context.Background(), packDir); err == nil {
+		t.Fatalf("PlanResources must fail closed when PublicKey is empty")
+	}
+
+	// 2. Valid PublicKey succeeds and detects same-size corrupted local file.
+	PublicKey = base64.StdEncoding.EncodeToString(pub)
+	if err := os.MkdirAll(filepath.Join(packDir, "styles"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "manifest.json"), manifestRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "styles", "sample.txt"), corruptSameSize, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := u.PlanResources(context.Background(), packDir)
+	if err != nil {
+		t.Fatalf("PlanResources with valid key failed: %v", err)
+	}
+	if len(plan.Changed) != 1 || plan.Changed[0].Path != "styles/sample.txt" {
+		t.Fatalf("expected corrupted same-size file to be scheduled for repair, got %+v", plan.Changed)
+	}
+
+	// 3. ApplyResources repairs it; next PlanResources sees 0 changes.
+	if err := u.ApplyResources(context.Background(), packDir, plan, nil); err != nil {
+		t.Fatalf("ApplyResources failed: %v", err)
+	}
+	repaired, err := os.ReadFile(filepath.Join(packDir, "styles", "sample.txt"))
+	if err != nil || string(repaired) != string(goodBody) {
+		t.Fatalf("expected repaired content, got %q (err=%v)", string(repaired), err)
+	}
+	plan2, err := u.PlanResources(context.Background(), packDir)
+	if err != nil {
+		t.Fatalf("second PlanResources failed: %v", err)
+	}
+	if len(plan2.Changed) != 0 {
+		t.Fatalf("expected 0 changes after repair, got %+v", plan2.Changed)
+	}
+}
+
+// #176 audit items #3 and #4: downloadToFile enforces size caps, and unzipBundle
+// rejects symlink traversal and zip-bomb total byte expansion.
+func TestDownloadLimitAndUnzipBundleSecurity(t *testing.T) {
+	// 1. Streaming download rejects payload exceeding maxBytes.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("A"), 2048))
+	}))
+	defer srv.Close()
+	u := New("v0.6.3", t.TempDir())
+	if _, err := u.downloadToFile(context.Background(), srv.URL, filepath.Join(t.TempDir(), "out.bin"), 1024, nil); err == nil {
+		t.Fatalf("expected oversized download to be rejected")
+	}
+
+	// 2. Zip with symlink escaping destination root must be rejected.
+	makeZip := func(entries []struct {
+		name string
+		mode os.FileMode
+		data []byte
+	}) string {
+		zp := filepath.Join(t.TempDir(), "bundle.zip")
+		f, err := os.Create(zp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zw := zip.NewWriter(f)
+		for _, e := range entries {
+			hdr := &zip.FileHeader{Name: e.name, Method: zip.Deflate}
+			hdr.SetMode(e.mode)
+			w, err := zw.CreateHeader(hdr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write(e.data)
+		}
+		_ = zw.Close()
+		_ = f.Close()
+		return zp
+	}
+
+	escapeZip := makeZip([]struct {
+		name string
+		mode os.FileMode
+		data []byte
+	}{
+		{name: "app/escape", mode: os.ModeSymlink | 0o777, data: []byte("../../outside.txt")},
+	})
+	if err := unzipBundleWithLimits(escapeZip, filepath.Join(t.TempDir(), "dst"), 1<<20, 1<<20, 100); err == nil {
+		t.Fatalf("expected escaping symlink in zip to be rejected")
+	}
+
+	// 3. Zip exceeding total extracted byte limit must be rejected.
+	bombZip := makeZip([]struct {
+		name string
+		mode os.FileMode
+		data []byte
+	}{
+		{name: "app/a.bin", mode: 0o644, data: bytes.Repeat([]byte("X"), 4096)},
+		{name: "app/b.bin", mode: 0o644, data: bytes.Repeat([]byte("Y"), 4096)},
+	})
+	if err := unzipBundleWithLimits(bombZip, filepath.Join(t.TempDir(), "dst2"), 5000, 5000, 100); err == nil {
+		t.Fatalf("expected zip exceeding total byte limit to be rejected")
+	}
 }
