@@ -1,6 +1,6 @@
-// Package updater checks GitHub Releases for new versions, verifies the
-// ed25519-signed SHA256SUMS (like Magpie), replaces the program, and updates
-// the resource pack file by file.
+// Package updater checks Gitee / official mirror / GitHub Releases for new
+// versions, verifies the ed25519-signed SHA256SUMS (like Magpie), replaces the
+// program, and updates the resource pack file by file.
 package updater
 
 import (
@@ -33,10 +33,12 @@ var PublicKey = ""
 const Repo = "yang0/handraw-client"
 
 // Feeds are tried in order; the first that answers wins.
+// Gitee is preferred by default for faster mainland China access, falling back
+// to the official website mirror and GitHub Releases (#173).
 var Feeds = []string{
-	"https://api.github.com/repos/" + Repo + "/releases/latest",
 	"https://gitee.com/api/v5/repos/yang02010/handraw-client/releases/latest",
 	"https://handraw-style.com/static/client/latest.json",
+	"https://api.github.com/repos/" + Repo + "/releases/latest",
 }
 
 type Asset struct {
@@ -162,7 +164,7 @@ func (u *Updater) fetchRelease(ctx context.Context, feed string) (*Release, erro
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Accept", "application/vnd.github+json, application/json;q=0.9")
 	req.Header.Set("User-Agent", "handraw-client/"+u.Version)
 	resp, err := c.Do(req)
 	if err != nil {

@@ -45,7 +45,7 @@ macOS 验证完成后，手动运行 Release，`tag` 填同一个版本、`platf
 
 ## 备用更新源自动同步（Gitee & 官网镜像）
 
-客户端按顺序尝试 3 个更新源：GitHub Releases → Gitee Releases → `https://handraw-style.com/static/client/latest.json`。
+客户端默认按顺序尝试 3 个更新源：Gitee Releases（默认主源）→ `https://handraw-style.com/static/client/latest.json`（官网镜像）→ GitHub Releases。
 
 - **官网镜像（已自动生效）**：生产服务器上的 `handraw-sync-client.timer` 每 30 分钟自动从 GitHub Releases 同步最新签名版本到 `https://handraw-style.com/static/client/latest.json`（校验 SHA256 后原子切换）。
 - **Gitee 代码仓库自动同步（与 `handraw-style` 一致，已配置 `GITEE_RSA_PRIVATE_KEY`）**：

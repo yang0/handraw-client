@@ -31,8 +31,9 @@ type ManifestFile struct {
 // ResourceFeed is the base URL of the published resource pack: <base>/manifest.json,
 // <base>/manifest.json.sig, <base>/<path>.
 var ResourceFeed = []string{
-	"https://github.com/yang0/handraw-client/releases/download/resources",
+	"https://gitee.com/yang02010/handraw-client/releases/download/resources",
 	"https://handraw-style.com/static/client/resources",
+	"https://github.com/yang0/handraw-client/releases/download/resources",
 }
 
 type Plan struct {
