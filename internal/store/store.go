@@ -336,6 +336,55 @@ type RunQuery struct {
 	Offset    int
 }
 
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
+
+// ImagesByRunIDs fetches images for multiple runs in a single batched query
+// to avoid N+1 round-trips in ListRuns (#177).
+func (d *DB) ImagesByRunIDs(runIDs []string) (map[string][]Image, error) {
+	res := make(map[string][]Image, len(runIDs))
+	if len(runIDs) == 0 {
+		return res, nil
+	}
+	const chunkSize = 400
+	for start := 0; start < len(runIDs); start += chunkSize {
+		end := start + chunkSize
+		if end > len(runIDs) {
+			end = len(runIDs)
+		}
+		batch := runIDs[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		q := `SELECT id, run_id, idx, status, path, thumb, width, height, sha256, theme, prompt, error, remote_task_id, cost_cents, created_at, updated_at, meta FROM images WHERE run_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY run_id, idx`
+		rows, err := d.sql.Query(q, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var im Image
+			var meta string
+			if err := rows.Scan(&im.ID, &im.RunID, &im.Idx, &im.Status, &im.Path, &im.Thumb, &im.Width, &im.Height, &im.SHA256, &im.Theme, &im.Prompt, &im.Error, &im.RemoteTaskID, &im.CostCents, &im.CreatedAt, &im.UpdatedAt, &meta); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			im.Meta = json.RawMessage(meta)
+			res[im.RunID] = append(res[im.RunID], im)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return res, nil
+}
+
 func (d *DB) ListRuns(q RunQuery) ([]Run, int, error) {
 	where := []string{"r.deleted_at = ''"}
 	args := []any{}
@@ -345,8 +394,8 @@ func (d *DB) ListRuns(q RunQuery) ([]Run, int, error) {
 			where = append(where, "r.id IN (SELECT run_id FROM runs_fts WHERE runs_fts MATCH ?)")
 			args = append(args, `"`+strings.ReplaceAll(s, `"`, `""`)+`"`)
 		} else {
-			where = append(where, "(r.title LIKE ? OR r.original_request LIKE ? OR r.recipe LIKE ?)")
-			like := "%" + s + "%"
+			where = append(where, `(r.title LIKE ? ESCAPE '\' OR r.original_request LIKE ? ESCAPE '\' OR r.recipe LIKE ? ESCAPE '\')`)
+			like := "%" + escapeLike(s) + "%"
 			args = append(args, like, like, like)
 		}
 	}
@@ -387,6 +436,7 @@ func (d *DB) ListRuns(q RunQuery) ([]Run, int, error) {
 		return nil, 0, err
 	}
 	var out []Run
+	var runIDs []string
 	for rows.Next() {
 		r, err := scanRun(rows)
 		if err != nil {
@@ -394,10 +444,25 @@ func (d *DB) ListRuns(q RunQuery) ([]Run, int, error) {
 			return nil, 0, err
 		}
 		out = append(out, r)
+		runIDs = append(runIDs, r.ID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, 0, err
 	}
 	rows.Close()
-	for i := range out {
-		out[i].Images, _ = d.Images(out[i].ID)
+	if len(runIDs) > 0 {
+		byRun, err := d.ImagesByRunIDs(runIDs)
+		if err != nil {
+			return nil, 0, err
+		}
+		for i := range out {
+			if imgs := byRun[out[i].ID]; imgs != nil {
+				out[i].Images = imgs
+			} else {
+				out[i].Images = []Image{}
+			}
+		}
 	}
 	if out == nil {
 		out = []Run{}
@@ -407,24 +472,22 @@ func (d *DB) ListRuns(q RunQuery) ([]Run, int, error) {
 
 // ActiveImages returns images still queued or running (to resume after restart).
 func (d *DB) ActiveImages() ([]Image, error) {
-	rows, err := d.sql.Query(`SELECT id FROM images WHERE status IN ('queued','running') ORDER BY created_at, idx`)
+	rows, err := d.sql.Query(`SELECT id, run_id, idx, status, path, thumb, width, height, sha256, theme, prompt, error, remote_task_id, cost_cents, created_at, updated_at, meta FROM images WHERE status IN ('queued','running') ORDER BY created_at, idx`)
 	if err != nil {
 		return nil, err
 	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		rows.Scan(&id)
-		ids = append(ids, id)
-	}
-	rows.Close()
+	defer rows.Close()
 	out := []Image{}
-	for _, id := range ids {
-		if im, err := d.GetImage(id); err == nil {
-			out = append(out, im)
+	for rows.Next() {
+		var im Image
+		var meta string
+		if err := rows.Scan(&im.ID, &im.RunID, &im.Idx, &im.Status, &im.Path, &im.Thumb, &im.Width, &im.Height, &im.SHA256, &im.Theme, &im.Prompt, &im.Error, &im.RemoteTaskID, &im.CostCents, &im.CreatedAt, &im.UpdatedAt, &meta); err != nil {
+			return nil, err
 		}
+		im.Meta = json.RawMessage(meta)
+		out = append(out, im)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func (d *DB) SoftDeleteRun(id string) error {

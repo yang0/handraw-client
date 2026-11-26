@@ -84,6 +84,7 @@ type Manager struct {
 	busyFirstAt     map[string]time.Time
 	canceled        map[string]bool // user-canceled ids; guards against resurrection (#167)
 	slotSignal      chan struct{}
+	runCtx          context.Context
 	wg              sync.WaitGroup
 }
 
@@ -113,14 +114,20 @@ func (m *Manager) Start(ctx context.Context, workers int) {
 	}
 	m.mu.Lock()
 	m.workers = workers
+	m.runCtx = ctx
 	m.mu.Unlock()
 	for i := 0; i < workers; i++ {
 		m.wg.Add(1)
 		go m.worker(ctx)
 	}
+	m.wg.Add(1)
 	go func() {
+		defer m.wg.Done()
 		active, _ := m.DB.ActiveImages()
 		for _, im := range active {
+			if ctx.Err() != nil {
+				return
+			}
 			m.Enqueue(im.ID)
 		}
 	}()
@@ -133,10 +140,30 @@ func (m *Manager) Enqueue(imageID string) { m.enqueueAsync(imageID) }
 func (m *Manager) Wait() { m.wg.Wait() }
 
 func (m *Manager) enqueueAsync(imageID string) {
+	m.mu.Lock()
+	ctx := m.runCtx
+	m.mu.Unlock()
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
 	select {
 	case m.queue <- imageID:
 	default:
-		go func() { m.queue <- imageID }()
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			if ctx == nil {
+				select {
+				case m.queue <- imageID:
+				case <-time.After(30 * time.Second):
+				}
+				return
+			}
+			select {
+			case m.queue <- imageID:
+			case <-ctx.Done():
+			}
+		}()
 	}
 }
 

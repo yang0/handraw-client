@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -129,8 +130,8 @@ func (c *Client) sanitizeProps(raw map[string]any) map[string]any {
 			out[ck] = val
 		case string:
 			s := strings.TrimSpace(val)
-			if len(s) > 80 {
-				s = s[:80]
+			if utf8.RuneCountInString(s) > 80 {
+				s = string([]rune(s)[:80])
 			}
 			out[ck] = s
 		}

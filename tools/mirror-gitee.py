@@ -25,15 +25,16 @@ API_BASE = "https://gitee.com/api/v5"
 
 
 def _api(method: str, path: str, token: str, payload: dict[str, Any] | None = None) -> tuple[int, Any]:
-    sep = "&" if "?" in path else "?"
-    url = f"{API_BASE}{path}{sep}access_token={urllib.parse.quote(token, safe='')}"
+    url = f"{API_BASE}{path}"
     data = None
-    headers = {"User-Agent": "handraw-release-mirror/1.0", "Accept": "application/json"}
+    headers = {
+        "User-Agent": "handraw-release-mirror/1.0",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
     if payload is not None:
-        body = dict(payload, access_token=token)
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json; charset=utf-8"
-        url = f"{API_BASE}{path}"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -50,6 +51,9 @@ def _api(method: str, path: str, token: str, payload: dict[str, Any] | None = No
 
 def _upload_attachment(owner: str, repo: str, release_id: int, token: str, file_path: Path) -> None:
     url = f"{API_BASE}/repos/{owner}/{repo}/releases/{release_id}/attach_files"
+    # Pass the bearer token via curl stdin config (-K -) so it never appears in
+    # process command-line arguments (#177).
+    curl_cfg = f'header = "Authorization: Bearer {token}"\n'
     for attempt in range(1, 4):
         t0 = time.monotonic()
         proc = subprocess.run(
@@ -67,14 +71,15 @@ def _upload_attachment(owner: str, repo: str, release_id: int, token: str, file_
                 "45",
                 "--max-time",
                 "300",
+                "-K",
+                "-",
                 "-X",
                 "POST",
                 url,
                 "-F",
-                f"access_token={token}",
-                "-F",
                 f"file=@{file_path}",
             ],
+            input=curl_cfg,
             capture_output=True,
             text=True,
         )

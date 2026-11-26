@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestTelemetryFlushAndSanitize(t *testing.T) {
@@ -44,6 +46,7 @@ func TestTelemetryFlushAndSanitize(t *testing.T) {
 		"prompt":   "must-not-leave-machine",
 		"apiKey":   "sk-12345",
 		"worksDir": "C:\\Users\\secret",
+		"note":     strings.Repeat("手绘风测试", 25), // 125 runes (> 80)
 	})
 	c.Track("client_generate_done", map[string]any{
 		"providerMode": "byok",
@@ -78,6 +81,9 @@ func TestTelemetryFlushAndSanitize(t *testing.T) {
 		if _, exists := ev0.Props[bad]; exists {
 			t.Fatalf("sensitive prop %q leaked into payload", bad)
 		}
+	}
+	if note, ok := ev0.Props["note"].(string); !ok || !utf8.ValidString(note) || utf8.RuneCountInString(note) != 80 {
+		t.Fatalf("expected valid 80-rune UTF-8 string, got valid=%v runes=%d val=%q", utf8.ValidString(note), utf8.RuneCountInString(note), note)
 	}
 }
 
