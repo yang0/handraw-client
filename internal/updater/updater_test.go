@@ -53,3 +53,21 @@ func TestVerifySums(t *testing.T) {
 		t.Fatal("accepted without a public key")
 	}
 }
+
+// A Windows-first release must not be offered to macOS clients (and vice versa).
+func TestReleaseHasPlatformAsset(t *testing.T) {
+	winOnly := &Release{Tag: "v0.6.0", Assets: []Asset{
+		{Name: "handraw-windows-amd64.exe"}, {Name: "handraw-windows-arm64.exe"},
+		{Name: "SHA256SUMS"}, {Name: "SHA256SUMS.sig"},
+	}}
+	if !releaseHas(winOnly, "handraw-windows-amd64.exe", "SHA256SUMS", "SHA256SUMS.sig") {
+		t.Fatalf("windows asset should be found")
+	}
+	if releaseHas(winOnly, "handraw-darwin-arm64.zip", "SHA256SUMS", "SHA256SUMS.sig") {
+		t.Fatalf("darwin asset must be reported missing")
+	}
+	unsigned := &Release{Assets: []Asset{{Name: "handraw-windows-amd64.exe"}}}
+	if releaseHas(unsigned, "handraw-windows-amd64.exe", "SHA256SUMS", "SHA256SUMS.sig") {
+		t.Fatalf("release without signed checksums must not be offered")
+	}
+}

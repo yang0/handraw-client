@@ -133,8 +133,11 @@ func (u *Updater) Check(ctx context.Context) (Status, error) {
 		u.release = rel
 		u.mu.Unlock()
 		latest := strings.TrimPrefix(rel.Tag, "v")
-		avail := Newer(latest, u.Version)
 		asset := assetName()
+		// A release may ship some platforms first (e.g. Windows before macOS).
+		// Only offer it when it carries this platform's program and the signed
+		// checksums, otherwise the user would be told to update and then fail.
+		avail := Newer(latest, u.Version) && releaseHas(rel, asset, "SHA256SUMS", "SHA256SUMS.sig")
 		u.set(func(s *Status) {
 			s.Checking = false
 			s.Latest = latest
@@ -186,6 +189,20 @@ func hostOf(u string) string {
 		return u[:i]
 	}
 	return u
+}
+
+// releaseHas reports whether every named asset is attached to rel.
+func releaseHas(rel *Release, names ...string) bool {
+	have := map[string]bool{}
+	for _, a := range rel.Assets {
+		have[a.Name] = true
+	}
+	for _, n := range names {
+		if !have[n] {
+			return false
+		}
+	}
+	return true
 }
 
 // assetName is the program file for this platform, e.g. handraw-windows-amd64.exe.

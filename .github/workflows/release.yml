@@ -12,6 +12,11 @@ on:
       tag:
         description: "Existing tag to (re)build, e.g. v0.5.0"
         required: true
+      platforms:
+        description: "all = Windows + macOS; windows = publish Windows only (macOS added later by re-running with all)"
+        type: choice
+        options: [all, windows]
+        default: all
 
 permissions:
   contents: write
@@ -61,6 +66,9 @@ jobs:
 
   macos:
     needs: preflight
+    # Skipped for a Windows-first release: manual input, or repository variable
+    # HANDRAW_RELEASE_PLATFORMS=windows for tag pushes (see docs/release.md).
+    if: ${{ (github.event.inputs.platforms || vars.HANDRAW_RELEASE_PLATFORMS || 'all') != 'windows' }}
     runs-on: macos-latest
     strategy:
       matrix:
@@ -93,6 +101,9 @@ jobs:
 
   publish:
     needs: [windows, macos]
+    # Publish when Windows succeeded and macOS either succeeded or was skipped on
+    # purpose. A failed macOS build still blocks the release.
+    if: ${{ !cancelled() && needs.windows.result == 'success' && (needs.macos.result == 'success' || needs.macos.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

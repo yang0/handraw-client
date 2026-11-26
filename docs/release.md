@@ -26,6 +26,23 @@ git push origin v0.5.0
 
 签名内容是 `handraw release <版本号>` 加 `SHA256SUMS`，一个签名只对一个版本有效，旧版本的签名不能冒充新版本。
 
+## 只先发 Windows
+
+某个平台还没验证完时，可以先发布 Windows，macOS 之后补上：
+
+```sh
+gh variable set HANDRAW_RELEASE_PLATFORMS --body windows   # 本次只发 Windows
+git tag -a v0.6.0 -m "……"
+git push origin v0.6.0
+gh variable delete HANDRAW_RELEASE_PLATFORMS              # 流水线启动后恢复默认
+```
+
+也可以在 Actions 页面手动运行 Release，`platforms` 选 `windows`。
+
+macOS 验证完成后，手动运行 Release，`tag` 填同一个版本、`platforms` 选 `all`：会把 macOS 安装包补进同一个 Release，并重新生成签名后的 `SHA256SUMS`。
+
+客户端只在 Release 里有本平台安装包和签名文件时才提示更新（v0.6.0 起）。v0.5.0 及更早的 macOS 客户端会先看到新版本，点更新时提示“新版本没有 handraw-darwin-… 安装包”，补齐 macOS 安装包后即可正常更新。
+
 ## 已知限制
 
 - macOS 包没有 Apple 开发者签名和公证，用户第一次打开需要在「系统设置 → 隐私与安全性」里允许，或右键「打开」。上架前需要 Apple 开发者账号。
