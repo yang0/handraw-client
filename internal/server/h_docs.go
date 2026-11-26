@@ -45,10 +45,13 @@ func builtinTemplates() []workflowTemplate {
 				},
 				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 500, "y": 36},
 				map[string]any{"id": "copy1", "type": "copy", "title": "小红书文案", "platform": "xiaohongshu", "tone": "干货种草", "requirement": "结合 6 页分镜写出新手秒懂的避坑正文，结尾加一句互动提问", "x": 500, "y": 360},
+				map[string]any{"id": "post1", "type": "post", "title": "小红书笔记", "platform": "xiaohongshu", "x": 920, "y": 200},
 			},
 			Edges: []any{
 				map[string]any{"id": "e1", "from": "params", "to": "output"},
 				map[string]any{"id": "e2", "from": "params", "to": "copy1"},
+				map[string]any{"id": "e3", "from": "output", "to": "post1"},
+				map[string]any{"id": "e4", "from": "copy1", "to": "post1"},
 			},
 		},
 		{

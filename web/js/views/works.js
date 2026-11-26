@@ -1,9 +1,10 @@
 import { api, clear, closeModal, copyText, el, localImg, onEvent, openURL, remoteThumb, showModal, toast, toWebp } from "../api.js";
 import { createCardSizeSwitcher, masonry } from "../masonry.js";
 import { openLayoutEditorModal, openStyleEditorModal } from "./resource-editor.js";
+import { drawPosts, openPostEditor } from "./posts.js";
 
 const state = {
-  tab: "local", // local | history | collections
+  tab: "local", // local | posts | history | collections
   q: "",
   mode: "",
   starred: false,
@@ -13,10 +14,15 @@ const state = {
 export async function renderWorks(root, ctx, params = {}) {
   if (params.tab) state.tab = params.tab;
   clear(root);
+  if (params.openPost) {
+    state.tab = "posts";
+    return openPostEditor(root, ctx, params.openPost, () => renderWorks(root, ctx));
+  }
 
   const tabBar = el("div", { class: "tabs" });
   [
     ["local", "本地作品库"],
+    ["posts", "笔记"],
     ["history", "网站生图历史"],
     ["collections", "网站收藏"],
   ].forEach(([k, label]) => {
@@ -49,6 +55,7 @@ export async function renderWorks(root, ctx, params = {}) {
   async function draw() {
     clear(stage);
     if (state.tab === "local") await drawLocal(stage, ctx, root);
+    else if (state.tab === "posts") await drawPosts(stage, ctx, (id) => renderWorks(root, ctx, { openPost: id }));
     else if (state.tab === "history") await drawSiteHistory(stage, ctx);
     else await drawSiteCollections(stage, ctx);
   }

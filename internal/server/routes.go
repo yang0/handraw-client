@@ -162,6 +162,14 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/canvas/sync", s.h(s.canvasSync))
 
 	// works
+	// posts (#164): finished social notes (images + copy)
+	m.HandleFunc("GET /api/posts", s.h(s.postList))
+	m.HandleFunc("POST /api/posts", s.h(s.postCreate))
+	m.HandleFunc("POST /api/posts/assemble", s.h(s.postAssemble))
+	m.HandleFunc("GET /api/posts/{id}", s.h(s.postGet))
+	m.HandleFunc("PUT /api/posts/{id}", s.h(s.postUpdate))
+	m.HandleFunc("DELETE /api/posts/{id}", s.h(s.postDelete))
+	m.HandleFunc("POST /api/posts/{id}/export", s.h(s.postExport))
 	m.HandleFunc("GET /api/works", s.h(s.works))
 	m.HandleFunc("GET /api/works/{id}", s.h(s.work))
 	m.HandleFunc("PATCH /api/works/{id}", s.h(s.workPatch))

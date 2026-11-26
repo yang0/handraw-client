@@ -1732,11 +1732,14 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
   "nodes": [
     {"id":"params","type":"parameters","mode":"cartesian","x":36,"y":36,"fieldOrder":["prompt","style1","layout","ratio","mode"],"fields":{"prompt":["封面：主题亮点","1. 核心要点一","2. 核心要点二"],"style1":["FA-001"],"layout":["SC-008"],"ratio":["3:4"],"mode":["graphic-text"]}},
     {"id":"output","type":"output","mode":"cartesian","repeat":1,"resolution":"2k","x":500,"y":36},
-    {"id":"copy1","type":"copy","title":"小红书文案","platform":"xiaohongshu","tone":"干货种草","requirement":"","x":500,"y":380}
+    {"id":"copy1","type":"copy","title":"小红书文案","platform":"xiaohongshu","tone":"干货种草","requirement":"","x":500,"y":380},
+    {"id":"post1","type":"post","title":"小红书笔记","platform":"xiaohongshu","x":920,"y":200}
   ],
   "edges": [
     {"id":"e1","from":"params","to":"output"},
-    {"id":"e2","from":"params","to":"copy1"}
+    {"id":"e2","from":"params","to":"copy1"},
+    {"id":"e3","from":"output","to":"post1"},
+    {"id":"e4","from":"copy1","to":"post1"}
   ]
 }
 节点类型支持：
@@ -1745,7 +1748,8 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 - parameter(单项参数)
 - combine(参数组合)
 - output(批量出图)
-- copy(社媒文案生成节点，platform 支持 xiaohongshu|wechat|douyin|moments；当用户提到小红书、发笔记、配图和文案一起出、写标题/正文/标签时，务必添加 copy 节点并将上游参数同时连向 output 和 copy！)`
+- copy(社媒文案生成节点，platform 支持 xiaohongshu|wechat|douyin|moments；当用户提到小红书、发笔记、配图和文案一起出、写标题/正文/标签时，务必添加 copy 节点并将上游参数同时连向 output 和 copy！)
+- post(笔记汇聚节点，不调用模型；有 copy 节点时添加，把 output 与 copy 都连向 post，组成可预览、导出的图文笔记)`
 	buildWithHarness := func() (map[string]any, error) {
 		ask := fmt.Sprintf(canvasPromptSchema, body.Prompt)
 		res, err := s.callHarnessText(r.Context(), route, []providers.ChatMessage{{Role: "user", Content: ask}}, true)
@@ -1848,10 +1852,13 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 				},
 				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 500, "y": 36},
 				map[string]any{"id": "copy1", "type": "copy", "title": "小红书文案", "platform": "xiaohongshu", "tone": "干货种草", "x": 500, "y": 330},
+				map[string]any{"id": "post1", "type": "post", "title": "小红书笔记", "platform": "xiaohongshu", "x": 920, "y": 180},
 			},
 			"edges": []any{
 				map[string]any{"id": "e1", "from": "params", "to": "output"},
 				map[string]any{"id": "e2", "from": "params", "to": "copy1"},
+				map[string]any{"id": "e3", "from": "output", "to": "post1"},
+				map[string]any{"id": "e4", "from": "copy1", "to": "post1"},
 			},
 		}, nil
 	}

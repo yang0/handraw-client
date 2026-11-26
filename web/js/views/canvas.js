@@ -81,6 +81,7 @@ const NODE_MENU_ENTRIES = [
   { type: "parameters", name: "🎛️ 出图参数", group: "生成流程", detail: "在一张卡里编辑主题、画面文字、参考图、画风、图型和比例", out: true },
   { type: "output", name: "🚀 批量出图", group: "生成流程", detail: "接收参数与参考图，设置模型、分辨率与每组张数", in: true },
   { type: "copy", name: "📝 文案生成", group: "生成流程", detail: "读取上游分镜主题与参考元素，同步生成小红书/公众号/抖音/朋友圈标题、正文与标签", in: true },
+  { type: "post", name: "📕 笔记", group: "生成流程", detail: "汇聚出图结果与文案，组成可手机预览、导出的图文笔记（不调用模型、不花钱）", in: true },
   { type: "combine", name: "🔀 参数组合", group: "高级节点", detail: "把多条连线的参考图与参数合成出图方案", in: true, out: true },
   ...Object.entries(PARAM_LABELS).filter(([k]) => k !== "refs").map(([parameter, name]) => ({
     type: "parameter",
@@ -198,7 +199,7 @@ function blankGraph(catalog) {
 function normalizeGraphData(raw, catalog, recipes) {
   const nodes = Array.isArray(raw?.nodes) ? structuredClone(raw.nodes) : [];
   const edges = Array.isArray(raw?.edges) ? structuredClone(raw.edges) : [];
-  const hasV2 = nodes.some((n) => ["parameters", "parameter", "reference", "combine", "output", "copy"].includes(n.type));
+  const hasV2 = nodes.some((n) => ["parameters", "parameter", "reference", "combine", "output", "copy", "post"].includes(n.type));
   if (hasV2 || !nodes.length) {
     const cleanNodes = (nodes.length ? nodes : blankGraph(catalog).nodes).map((n) => {
       if (n.type === "reference") {
@@ -230,6 +231,17 @@ function normalizeGraphData(raw, catalog, recipes) {
           modelRef: String(n.modelRef || ""),
           skillIds: Array.isArray(n.skillIds) ? n.skillIds.filter(Boolean) : [],
           result: n.result && typeof n.result === "object" ? n.result : null,
+        };
+      }
+      if (n.type === "post") {
+        return {
+          ...n,
+          title: n.title || "小红书笔记",
+          platform: COPY_PLATFORMS.some((p) => p.id === n.platform) ? n.platform : "xiaohongshu",
+          postId: String(n.postId || ""),
+          postSig: String(n.postSig || ""),
+          textConflict: Boolean(n.textConflict),
+          preview: n.preview && typeof n.preview === "object" ? n.preview : null,
         };
       }
       return n;
@@ -284,6 +296,36 @@ function normalizeGraphData(raw, catalog, recipes) {
     nodes: migratedNodes.length ? migratedNodes : blankGraph(catalog).nodes,
     edges: migratedEdges,
   };
+}
+
+// Templates / AI-built graphs that pair images with copy get a post node so the
+// result lands in Works → 笔记 without manual wiring (#165).
+function ensurePostNode(graph) {
+  const nodes = graph.nodes || [];
+  const edges = graph.edges || [];
+  if (nodes.some((n) => n.type === "post")) return graph;
+  const outs = nodes.filter((n) => n.type === "output");
+  const copyNode = nodes.find((n) => n.type === "copy");
+  if (!outs.length || !copyNode) return graph;
+  const all = [...outs, copyNode];
+  const id = uid("post");
+  nodes.push({
+    id,
+    type: "post",
+    title: copyNode.platform && copyNode.platform !== "xiaohongshu" ? "图文笔记" : "小红书笔记",
+    platform: copyNode.platform || "xiaohongshu",
+    postId: "",
+    postSig: "",
+    textConflict: false,
+    preview: null,
+    x: Math.round(Math.max(...all.map((n) => (n.x || 0) + (n.type === "copy" ? 380 : 340))) + 60),
+    y: Math.round(Math.min(...all.map((n) => n.y || 0)) + 120),
+  });
+  outs.forEach((o) => edges.push({ id: uid("edge"), from: o.id, to: id }));
+  edges.push({ id: uid("edge"), from: copyNode.id, to: id });
+  graph.nodes = nodes;
+  graph.edges = edges;
+  return graph;
 }
 
 export async function renderCanvas(host, ctx, params = {}) {
@@ -903,6 +945,7 @@ export async function renderCanvas(host, ctx, params = {}) {
       { label: "🎛️ 添加出图参数卡", hint: "主题/画风/图型/比例", fn: () => addNodeOfType("parameters", "", ctxWorldPos) },
       { label: "🚀 添加批量出图节点", hint: "模型/分辨率/预览", fn: () => addNodeOfType("output", "", ctxWorldPos) },
       { label: "📝 添加文案生成节点", hint: "小红书/公众号/抖音配文", fn: () => addNodeOfType("copy", "", ctxWorldPos) },
+      { label: "📕 添加笔记节点", hint: "图 + 文案 → 可预览笔记", fn: () => addNodeOfType("post", "", ctxWorldPos) },
       { label: "🔀 添加参数组合节点", hint: "汇聚多条连线", fn: () => addNodeOfType("combine", "", ctxWorldPos) },
       { sep: true },
       { label: "⊞ 自动整理节点排布", fn: () => autoLayoutNodes() },
@@ -1021,6 +1064,10 @@ export async function renderCanvas(host, ctx, params = {}) {
     const maxDepth = Math.max(1, ...Array.from(depth.values()));
     nodes.forEach((n) => {
       if (n.type === "output" || n.type === "copy") depth.set(n.id, Math.max(depth.get(n.id) || 1, maxDepth));
+    });
+    const outDepth = Math.max(1, ...nodes.filter((n) => n.type === "output" || n.type === "copy").map((n) => depth.get(n.id) || 1));
+    nodes.forEach((n) => {
+      if (n.type === "post") depth.set(n.id, outDepth + 1);
     });
 
     const cols = new Map();
@@ -1212,8 +1259,15 @@ export async function renderCanvas(host, ctx, params = {}) {
     const fromNode = state.graph.nodes.find((n) => n.id === fromId);
     const toNode = state.graph.nodes.find((n) => n.id === toId);
     if (!fromNode || !toNode) return "节点不存在";
-    if (fromNode.type === "output" || fromNode.type === "copy" || toNode.type === "parameter" || toNode.type === "parameters" || toNode.type === "reference") {
-      return "只能从参考图/参数/组合右侧连接到组合/出图/文案左侧";
+    if (toNode.type === "post") {
+      if (fromNode.type !== "output" && fromNode.type !== "copy") return "笔记节点只接收「批量出图」和「文案生成」节点";
+      if (fromNode.type === "copy" && state.graph.edges.some((e) => e.to === toId && state.graph.nodes.find((n) => n.id === e.from)?.type === "copy")) {
+        return "一个笔记节点只能连接一个文案节点";
+      }
+    } else if (fromNode.type === "output" || fromNode.type === "copy" || fromNode.type === "post" || toNode.type === "parameter" || toNode.type === "parameters" || toNode.type === "reference") {
+      return fromNode.type === "output" || fromNode.type === "copy"
+        ? "出图/文案节点的结果只能连到「笔记」节点"
+        : "只能从参考图/参数/组合右侧连接到组合/出图/文案左侧";
     }
     if (state.graph.edges.some((e) => e.from === fromId && e.to === toId)) return "连线已存在";
     // Cycle detection
@@ -1769,6 +1823,7 @@ export async function renderCanvas(host, ctx, params = {}) {
     copy.y = Math.round((node.y || 40) + 36);
     if (copy.type === "output") delete copy.runId;
     if (copy.type === "copy") copy.result = null;
+    if (copy.type === "post") { copy.postId = ""; copy.postSig = ""; copy.preview = null; copy.textConflict = false; }
     state.graph.nodes.push(copy);
     state.selectedId = copy.id;
     recordEdit(true);
@@ -1781,12 +1836,14 @@ export async function renderCanvas(host, ctx, params = {}) {
       : node.type === "parameter" ? (PARAM_LABELS[node.parameter] || node.parameter)
       : node.type === "combine" ? "参数组合"
       : node.type === "copy" ? (node.title || "文案生成")
+      : node.type === "post" ? (node.title || "笔记")
       : "批量出图";
 
     const typeCls = node.type === "parameters" ? " pc-parameter-group"
       : node.type === "reference" ? " pc-reference-node"
       : node.type === "output" ? " pc-output-node"
       : node.type === "copy" ? " pc-copy-node"
+      : node.type === "post" ? " pc-post-node"
       : "";
 
     const card = el("section", {
@@ -1796,8 +1853,8 @@ export async function renderCanvas(host, ctx, params = {}) {
     });
 
     if (!guidedMode) {
-      const hasIn = node.type === "output" || node.type === "combine" || node.type === "copy";
-      const hasOut = node.type !== "output" && node.type !== "copy";
+      const hasIn = node.type === "output" || node.type === "combine" || node.type === "copy" || node.type === "post";
+      const hasOut = node.type !== "post";
       if (hasIn) {
         const inPort = el("button", {
           type: "button",
@@ -1881,13 +1938,13 @@ export async function renderCanvas(host, ctx, params = {}) {
       }
     }
 
-    const headTitleEl = (node.type === "reference" || node.type === "copy")
+    const headTitleEl = (node.type === "reference" || node.type === "copy" || node.type === "post")
       ? (() => {
           const inp = el("input", {
             type: "text",
             class: "pc-node-title-in",
-            value: node.title || (node.type === "copy" ? "文案生成" : "参考图"),
-            "aria-label": node.type === "copy" ? "文案节点名称" : "参考图节点名称",
+            value: node.title || (node.type === "copy" ? "文案生成" : node.type === "post" ? "笔记" : "参考图"),
+            "aria-label": node.type === "copy" ? "文案节点名称" : node.type === "post" ? "笔记节点名称" : "参考图节点名称",
           });
           inp.addEventListener("input", () => { node.title = inp.value; recordEdit(false); });
           return inp;
@@ -2314,11 +2371,230 @@ export async function renderCanvas(host, ctx, params = {}) {
         ].filter(Boolean));
         body.appendChild(resultBox);
       }
+      if (node.result && !postNodeFor(node)) {
+        body.appendChild(el("button", {
+          type: "button",
+          class: "btn btn-sm pc-post-compose",
+          title: "把这份文案和上游出图结果组成一篇可预览、导出的笔记",
+          onClick: () => composePostFrom(node),
+        }, "📕 组成笔记"));
+      }
+    } else if (node.type === "post") {
+      body.append(...renderPostNodeBody(node));
+    }
+    if (node.type === "output" && node.runId && !postNodeFor(node) && state.graph.nodes.some((n) => n.type === "copy" && n.result)) {
+      body.appendChild(el("button", {
+        type: "button",
+        class: "btn btn-sm pc-post-compose",
+        title: "把这组图和文案组成一篇可预览、导出的笔记",
+        onClick: () => composePostFrom(node),
+      }, "📕 组成笔记"));
     }
 
     card.append(head, body);
     return card;
   }
+
+  // ==================== Post (笔记) Node (#165) ====================
+  // A post node never calls a model: it gathers the done images of upstream
+  // output nodes (in wire order) plus one copy result and upserts a draft in
+  // Works → 笔记. The node only keeps postId + a signature of its inputs.
+  function postNodeFor(node) {
+    return state.graph.nodes.find((n) => n.type === "post"
+      && state.graph.edges.some((e) => e.from === node.id && e.to === n.id)) || null;
+  }
+
+  function postUpstream(post) {
+    const ups = state.graph.edges
+      .filter((e) => e.to === post.id)
+      .map((e) => state.graph.nodes.find((n) => n.id === e.from))
+      .filter(Boolean);
+    return {
+      outputs: ups.filter((n) => n.type === "output"),
+      copyNode: ups.find((n) => n.type === "copy") || null,
+    };
+  }
+
+  function wirePostNode(post, preferCopy = null) {
+    const outs = state.graph.nodes.filter((n) => n.type === "output");
+    const copyNode = preferCopy
+      || state.graph.nodes.find((n) => n.type === "copy" && n.result)
+      || state.graph.nodes.find((n) => n.type === "copy");
+    [...outs, copyNode].filter(Boolean).forEach((src) => {
+      if (!canConnect(src.id, post.id)) state.graph.edges.push({ id: uid("edge"), from: src.id, to: post.id });
+    });
+  }
+
+  function composePostFrom(node) {
+    addNodeOfType("post");
+    const post = state.graph.nodes.find((n) => n.id === state.selectedId && n.type === "post");
+    if (!post) return;
+    if (node.type === "copy") {
+      state.graph.edges = state.graph.edges.filter((e) => !(e.to === post.id && state.graph.nodes.find((n) => n.id === e.from)?.type === "copy"));
+      state.graph.edges.push({ id: uid("edge"), from: node.id, to: post.id });
+      recordEdit(true);
+    }
+    syncPostNodes({ force: true, onlyId: post.id });
+  }
+
+  async function ensureRunLoaded(runId) {
+    if (!runId) return null;
+    const cached = state.runsById.get(runId);
+    if (cached && Array.isArray(cached.images)) return cached;
+    try {
+      const detail = await api("GET", `/api/works/${encodeURIComponent(runId)}`);
+      if (detail?.run) {
+        const runObj = { ...detail.run, images: detail.run.images || detail.images || [] };
+        state.runsById.set(runObj.id, runObj);
+        return runObj;
+      }
+    } catch {}
+    return null;
+  }
+
+  async function collectPostInputs(post) {
+    const { outputs, copyNode } = postUpstream(post);
+    const images = [];
+    let active = 0;
+    for (const o of outputs) {
+      const run = await ensureRunLoaded(o.runId);
+      if (!run) continue;
+      const imgs = [...(run.images || [])].sort((a, b) => (a.idx || 0) - (b.idx || 0));
+      imgs.forEach((im) => {
+        if (im.status === "queued" || im.status === "running") active++;
+        if (im.status === "done" && im.path) images.push({ runId: run.id, imageId: im.id });
+      });
+    }
+    const r = copyNode?.result;
+    const copy = r ? {
+      titles: Array.isArray(r.titles) ? r.titles : [],
+      activeTitle: String(r.activeTitle || ""),
+      content: String(r.content || ""),
+      tags: Array.isArray(r.tags) ? r.tags : [],
+    } : null;
+    return { outputs, copyNode, images, copy, active };
+  }
+
+  let postSyncTimer = null;
+  function schedulePostSync() {
+    clearTimeout(postSyncTimer);
+    postSyncTimer = setTimeout(() => syncPostNodes(), 500);
+  }
+
+  const postSyncing = new Set();
+  async function syncPostNodes({ force = false, onlyId = "", overwriteText = false } = {}) {
+    const posts = state.graph.nodes.filter((n) => n.type === "post" && (!onlyId || n.id === onlyId));
+    let changed = false;
+    for (const post of posts) {
+      if (postSyncing.has(post.id)) continue;
+      const inp = await collectPostInputs(post);
+      if (!inp.images.length && !inp.copy) {
+        if (force) toast("笔记节点还没有可用的出图结果或文案，请先运行上游节点");
+        continue;
+      }
+      if (inp.active > 0 && !force) continue; // wait until the batch finishes
+      const sig = JSON.stringify({ i: inp.images.map((x) => x.imageId), c: inp.copy });
+      if (!force && !overwriteText && post.postId && sig === post.postSig) continue;
+      postSyncing.add(post.id);
+      try {
+        const res = await api("POST", "/api/posts/assemble", {
+          postId: post.postId || "",
+          canvasId: state.docId || "",
+          nodeId: post.id,
+          platform: inp.copyNode?.platform || post.platform || "xiaohongshu",
+          images: inp.images,
+          copy: inp.copy,
+          overwriteText,
+        });
+        const p = res.post || {};
+        const resolved = p.resolvedImages || [];
+        const coverIm = resolved.find((im) => im.imageId === p.images?.[p.coverIndex]?.imageId) || resolved[0];
+        post.postId = p.id || post.postId;
+        post.postSig = sig;
+        post.textConflict = Boolean(res.textConflict);
+        post.preview = {
+          title: p.title || "",
+          cover: coverIm ? (coverIm.thumb || coverIm.path) : "",
+          count: resolved.length,
+          tags: (p.tags || []).slice(0, 3),
+        };
+        changed = true;
+        if (force || overwriteText) toast(overwriteText ? "已用画布最新文案覆盖笔记" : "笔记草稿已更新，可在 作品 → 笔记 中预览");
+      } catch (e) {
+        if (force) toast(e.message || "组成笔记失败");
+      } finally {
+        postSyncing.delete(post.id);
+      }
+    }
+    if (changed) {
+      // Bookkeeping only: keep it out of undo history but mark the canvas dirty.
+      state.dirty = true;
+      lastSnapshot = JSON.stringify({ name: state.name, graph: state.graph });
+      renderWorkspace();
+    }
+  }
+
+  async function openPostFromNode(post) {
+    if (!post.postId) {
+      await syncPostNodes({ force: true, onlyId: post.id });
+      if (!post.postId) return;
+    }
+    if (state.dirty) await saveCanvas();
+    ctx.go("works", { tab: "posts", openPost: post.postId });
+  }
+
+  function renderPostNodeBody(node) {
+    const { outputs, copyNode } = postUpstream(node);
+    const parts = [];
+    const pv = node.preview;
+    if (pv && (pv.cover || pv.title)) {
+      parts.push(el("button", {
+        type: "button",
+        class: "pc-post-preview",
+        title: "打开笔记预览",
+        onClick: () => openPostFromNode(node),
+      },
+        pv.cover
+          ? el("img", { src: localImg(pv.cover), alt: pv.title || "笔记封面", loading: "lazy" })
+          : el("div", { class: "pc-post-preview-empty" }, "暂无图片"),
+        el("div", { class: "pc-post-preview-meta" },
+          el("strong", null, pv.title || "（还没有标题）"),
+          el("span", { class: "muted" }, `共 ${pv.count || 0} 图`),
+          pv.tags?.length ? el("span", { class: "pc-post-preview-tags" }, pv.tags.map((t) => "#" + t).join(" ")) : null
+        )
+      ));
+    } else {
+      parts.push(el("div", { class: "pc-post-empty muted" }, "上游出图与文案完成后，会自动组成一篇笔记草稿"));
+    }
+    parts.push(el("div", {
+      class: "badge" + (outputs.length && copyNode ? " badge-accent" : " badge-warn"),
+    }, `已接入 ${outputs.length} 组出图 · ${copyNode ? "文案 ✓" : "未连接文案"}`));
+    if (node.textConflict) {
+      parts.push(el("div", { class: "pc-post-conflict" },
+        el("span", null, "笔记里的文字已手动修改，画布的新文案没有覆盖它。"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => syncPostNodes({ onlyId: node.id, overwriteText: true }),
+        }, "用新文案覆盖")
+      ));
+    }
+    parts.push(el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap" } },
+      el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        onClick: () => openPostFromNode(node),
+      }, "📱 打开预览"),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        disabled: postSyncing.has(node.id),
+        onClick: () => syncPostNodes({ force: true, onlyId: node.id }),
+      }, "↻ 更新笔记")
+    ));
+    return parts;
+  }
+
 
   // ==================== Guided View ====================
   function renderGuidedView() {
@@ -2449,7 +2725,7 @@ export async function renderCanvas(host, ctx, params = {}) {
               toast("助手未能解析出节点图，请换个描述重试");
               return;
             }
-            state.graph = normalizeGraphData({ nodes, edges }, catalog, recipes);
+            state.graph = ensurePostNode(normalizeGraphData({ nodes, edges }, catalog, recipes));
             state.activePanel = "";
             recordEdit(true);
             setTimeout(fitView, 25);
@@ -2755,10 +3031,26 @@ export async function renderCanvas(host, ctx, params = {}) {
         x: customPos ? customPos.x : (outNode ? Math.round(outNode.x || 500) : x),
         y: customPos ? customPos.y : (outNode ? Math.round((outNode.y || 120) + 310) : y),
       };
+    } else if (type === "post") {
+      const outs = existing.filter((n) => n.type === "output" || n.type === "copy");
+      const rightMost = outs.reduce((mx, n) => Math.max(mx, (n.x || 0) + (n.type === "copy" ? 380 : 340)), 0);
+      node = {
+        id,
+        type: "post",
+        title: "小红书笔记",
+        platform: "xiaohongshu",
+        postId: "",
+        postSig: "",
+        textConflict: false,
+        preview: null,
+        x: customPos ? customPos.x : (outs.length ? Math.round(rightMost + 60) : x),
+        y: customPos ? customPos.y : (outs.length ? Math.round(Math.min(...outs.map((n) => n.y || 0)) + 120) : y),
+      };
     } else {
       node = { id, type: "output", mode: "cartesian", repeat: 1, resolution: "2k", x, y };
     }
     state.graph.nodes.push(node);
+    if (type === "post" && !customPos) wirePostNode(node);
     if (type === "copy" && !customPos) {
       const src = existing.find((n) => n.type === "combine") || existing.find((n) => n.type === "parameters");
       if (src && !canConnect(src.id, id)) {
@@ -2903,6 +3195,7 @@ export async function renderCanvas(host, ctx, params = {}) {
       };
       recordEdit(true);
       toast(`「${copyNode.title || "文案生成"}」已生成 ${titles.length} 个备选标题与正文`);
+      schedulePostSync();
     } catch (e) {
       toast(e.message || "文案生成失败");
     } finally {
@@ -3005,7 +3298,7 @@ export async function renderCanvas(host, ctx, params = {}) {
           style: { flexShrink: "0" },
           onClick: () => {
             state.name = tpl.name;
-            state.graph = normalizeGraphData(data, catalog, recipes);
+            state.graph = ensurePostNode(normalizeGraphData(data, catalog, recipes));
             if (state.activePanel === "assistant") state.activePanel = "";
             closeModal();
             recordEdit(true);
@@ -3038,6 +3331,7 @@ export async function renderCanvas(host, ctx, params = {}) {
         if (detail?.run) {
           upsertRun(detail.run);
           renderWorkspace();
+          schedulePostSync();
         }
       } catch {}
     }
