@@ -47,13 +47,10 @@ macOS 验证完成后，手动运行 Release，`tag` 填同一个版本、`platf
 
 客户端默认按顺序尝试 3 个更新源：Gitee Releases（默认主源）→ `https://handraw-style.com/static/client/latest.json`（官网镜像）→ GitHub Releases。
 
-- **官网镜像（已自动生效）**：生产服务器上的 `handraw-sync-client.timer` 每 30 分钟自动从 GitHub Releases 同步最新签名版本到 `https://handraw-style.com/static/client/latest.json`（校验 SHA256 后原子切换）。
+- **官网镜像 & Gitee Releases 安装包自动同步（已全部自动生效）**：
+  - 国内生产服务器上的 `handraw-sync-client.timer` 每 **5 分钟**自动检测 GitHub 最新签名版本，校验 SHA256 后原子发布到 `https://handraw-style.com/static/client/latest.json`，并同时通过国内高速链路把全部签名安装包与 `SHA256SUMS` / `SHA256SUMS.sig` 自动同步到 `yang02010/handraw-client` 的 Gitee Releases（避免 GitHub Actions 美国节点跨境直传 Gitee 被限速）。
 - **Gitee 代码仓库自动同步（与 `handraw-style` 一致，已配置 `GITEE_RSA_PRIVATE_KEY`）**：
   - 每次推送到 GitHub `main` 分支或 `v*` 标签，`.github/workflows/mirror-gitee.yml` 会通过 SSH 自动同步代码与标签到 `yang02010/handraw-client`。
-- **Gitee Releases 安装包自动同步（配置 `GITEE_TOKEN` 后自动生效）**：
-  1. 在 Gitee「设置 → 私人令牌」创建含 `projects` 权限的令牌；
-  2. 写入 GitHub 仓库 Secret：`gh secret set GITEE_TOKEN --repo yang0/handraw-client`；
-  3. 之后每次发版或重跑 `release.yml` 时，会自动把全部签名安装包与 `SHA256SUMS` / `SHA256SUMS.sig` 同步到 Gitee Releases（失败不影响 GitHub 发布）。也可以手动运行 `Sync to Gitee` 并填入 `release_tag` 补同步历史版本。
 
 ## 已知限制
 

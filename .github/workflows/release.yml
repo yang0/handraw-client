@@ -130,7 +130,7 @@ jobs:
           git log -1 --format=%B "$TAG" > release-notes.txt
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "手绘风 $TAG" --notes-file release-notes.txt --verify-tag
           gh release upload "$TAG" artifacts/* --clobber
-      - name: Mirror tag and release to Gitee
+      - name: Mirror tag to Gitee
         continue-on-error: true
         env:
           GITEE_RSA_PRIVATE_KEY: ${{ secrets.GITEE_RSA_PRIVATE_KEY }}
@@ -147,8 +147,8 @@ jobs:
           elif [ -n "$GITEE_TOKEN" ]; then
             git push --force "https://${GITEE_OWNER}:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git" "refs/tags/${TAG}:refs/tags/${TAG}"
           fi
-          if [ -z "$GITEE_TOKEN" ]; then
-            echo "GITEE_TOKEN secret is not set; skipping Gitee release asset mirror."
-            exit 0
+          # Release binaries are mirrored from mainland China by handraw-sync-client.timer
+          # (avoids cross-Pacific GitHub Actions -> Gitee upload throttling).
+          if [ "${{ vars.GITEE_UPLOAD_FROM_ACTIONS }}" = "true" ] && [ -n "$GITEE_TOKEN" ]; then
+            python3 tools/mirror-gitee.py "$TAG" artifacts release-notes.txt
           fi
-          python3 tools/mirror-gitee.py "$TAG" artifacts release-notes.txt
