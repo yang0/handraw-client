@@ -130,6 +130,9 @@ func TestUpgradeV060ToV061WithFallbackFeed(t *testing.T) {
 	})
 
 	curAsset := assetName()
+	if curAsset == "" {
+		t.Skip("self-update binary assets are only published for windows/darwin (#180)")
+	}
 	otherAsset := "handraw-darwin-arm64.zip"
 	if curAsset == otherAsset {
 		otherAsset = "handraw-windows-amd64.exe"
