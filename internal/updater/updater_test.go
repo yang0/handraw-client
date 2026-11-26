@@ -73,16 +73,17 @@ func TestVerifySums(t *testing.T) {
 	}
 }
 
-// Default update feeds must prefer Gitee first, then official mirror, then GitHub (#173).
+// Default metadata feeds prefer Cloudflare-cached latest.json first (for ETag/304
+// zero-load checks), then Gitee, then GitHub; ResourceFeed keeps Gitee first (#182).
 func TestDefaultFeedsPreferGitee(t *testing.T) {
 	if len(Feeds) < 3 {
 		t.Fatalf("expected at least 3 update feeds, got %v", Feeds)
 	}
-	if !strings.Contains(Feeds[0], "gitee.com/") {
-		t.Fatalf("expected Gitee as default primary feed, got %q", Feeds[0])
+	if !strings.Contains(Feeds[0], "handraw-style.com/static/client/latest.json") {
+		t.Fatalf("expected Cloudflare-cached official latest.json as primary metadata feed, got %q", Feeds[0])
 	}
-	if !strings.Contains(Feeds[1], "handraw-style.com/static/client/latest.json") {
-		t.Fatalf("expected official mirror as second feed, got %q", Feeds[1])
+	if !strings.Contains(Feeds[1], "gitee.com/") {
+		t.Fatalf("expected Gitee as second fallback feed, got %q", Feeds[1])
 	}
 	if !strings.Contains(Feeds[2], "api.github.com/") {
 		t.Fatalf("expected GitHub as third fallback feed, got %q", Feeds[2])

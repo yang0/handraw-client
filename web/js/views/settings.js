@@ -1149,7 +1149,17 @@ export async function renderSettings(root, ctx, params = {}) {
   });
   const quickChk = el("input", { id: "pref-quick-enabled", name: "quickShotEnabled", type: "checkbox", checked: Boolean(settings.quickShotEnabled) });
   const trayChk = el("input", { id: "pref-tray", name: "minimizeToTray", type: "checkbox", checked: Boolean(settings.minimizeToTray) });
-  const autoUpdChk = el("input", { id: "pref-auto-update", name: "autoCheckUpdate", type: "checkbox", checked: Boolean(settings.autoCheckUpdate) });
+  const curAutoUpdateMode = settings.autoUpdateMode || (settings.autoCheckUpdate === false ? "off" : "auto");
+  const autoUpdModeSel = el("select", {
+    id: "pref-auto-update-mode",
+    name: "autoUpdateMode",
+    class: "select",
+    style: { minWidth: "240px" },
+  },
+    el("option", { value: "auto", selected: curAutoUpdateMode === "auto" }, "自动更新（推荐 · 后台静默下载，退出生效）"),
+    el("option", { value: "notify", selected: curAutoUpdateMode === "notify" }, "仅检查提醒（发现新版后手动下载）"),
+    el("option", { value: "off", selected: curAutoUpdateMode === "off" }, "关闭自动检查")
+  );
   const autoSyncChk = el("input", { id: "pref-auto-sync", name: "autoSyncResources", type: "checkbox", checked: Boolean(settings.autoSyncResources) });
   const publicChk = el("input", { id: "pref-public-gen", name: "publicSiteGenerations", type: "checkbox", checked: !settings.keepSiteGenerationsPrivate });
   const telemetryChk = el("input", { id: "pref-telemetry", name: "telemetryEnabled", type: "checkbox", checked: !settings.telemetryDisabled });
@@ -1174,7 +1184,8 @@ export async function renderSettings(root, ctx, params = {}) {
           quickShotHotkey: hotkeyIn.value.trim(),
           quickShotEnabled: quickChk.checked,
           minimizeToTray: trayChk.checked,
-          autoCheckUpdate: autoUpdChk.checked,
+          autoUpdateMode: autoUpdModeSel.value,
+          autoCheckUpdate: autoUpdModeSel.value !== "off",
           autoSyncResources: autoSyncChk.checked,
           keepSiteGenerationsPrivate: !publicChk.checked,
           telemetryDisabled: !telemetryChk.checked,
@@ -1220,13 +1231,19 @@ export async function renderSettings(root, ctx, params = {}) {
           el("label", { for: "pref-quick-enabled", class: "row muted", style: { cursor: "pointer" } }, quickChk, "启用全局快门悬浮窗")
         ),
         hotkeyIn
+      ),
+      el("div", { class: "settings-row" },
+        el("div", { class: "settings-row-meta" },
+          el("label", { for: "pref-auto-update-mode", class: "settings-row-label" }, "客户端自动更新策略"),
+          el("span", { class: "muted" }, "推荐开启无感自动更新：空闲时按分批窗口后台静默下载并校验签名，退出软件时自动升级")
+        ),
+        autoUpdModeSel
       )
     ),
     el("fieldset", { class: "settings-fieldset" },
-      el("legend", null, "窗口、更新与云同步"),
+      el("legend", null, "窗口与云同步"),
       el("div", { class: "settings-checks" },
         el("label", { for: "pref-tray", class: "settings-check" }, trayChk, el("span", null, "关闭主窗口时最小化到系统托盘")),
-        el("label", { for: "pref-auto-update", class: "settings-check" }, autoUpdChk, el("span", null, "自动检查软件更新")),
         el("label", { for: "pref-auto-sync", class: "settings-check" }, autoSyncChk, el("span", null, "登录后自动同步自定义画风")),
         el("label", { for: "pref-public-gen", class: "settings-check" }, publicChk, el("span", null, "网站模型生成的图片自动公开到社区（用了自己参考图的除外）")),
         el("label", { for: "pref-telemetry", class: "settings-check" }, telemetryChk, el("span", null, "发送匿名使用统计（仅含版本号、系统与功能使用频次，不含提示词、图片与个人数据）"))
@@ -1536,7 +1553,41 @@ export async function renderSettings(root, ctx, params = {}) {
       applyUpdBtn,
       resUpdBtn,
       skillUpdBtn
-    )
+    ),
+    (() => {
+      const effectiveMode = updRes.autoMode || curAutoUpdateMode;
+      if (updRes.ready) {
+        const readyVer = updRes.latest ? `v${String(updRes.latest).replace(/^v/i, "")}` : "新版本";
+        const msg = updRes.applyFailed
+          ? `新版本 ${readyVer} 已下载并校验通过，但上次退出自动替换失败，请点击「重启完成升级」或手动重装。`
+          : (updRes.autoApplyOnQuit
+            ? `新版本 ${readyVer} 已在后台完成下载与签名校验：可点击「重启完成升级」，或直接继续使用并在关闭软件时自动生效。`
+            : `新版本 ${readyVer} 已下载并校验通过，点击「重启完成升级」即可生效。`);
+        return el("div", { class: "update-auto-banner is-ready" }, el("span", null, msg));
+      }
+      if (effectiveMode === "auto") {
+        const extra = updRes.autoDeferredUntil ? "（已检测到新版，正在按平滑削峰窗口排队后台下载；也可直接点击上方按钮立即下载）" : "";
+        return el("div", { class: "update-auto-banner" },
+          el("span", { class: "muted" }, `已开启无感自动更新：新版会在空闲时后台静默下载并校验 ed25519 签名，退出软件时自动完成升级。${extra}`)
+        );
+      }
+      return el("div", { class: "update-auto-banner row", style: { justifyContent: "space-between", alignItems: "center" } },
+        el("span", { class: "muted" }, "开启无感自动更新后，无需每次手动点击下载，新版本会在后台静默准备并在关闭软件时自动生效。"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: async () => {
+            try {
+              await api("PATCH", "/api/settings", { autoUpdateMode: "auto", autoCheckUpdate: true });
+              toast("已开启无感自动更新");
+              renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
+            } catch (e) {
+              toast(e?.message || "切换失败");
+            }
+          },
+        }, "开启自动更新（推荐）")
+      );
+    })()
   );
 
   // Two-column settings shell: left tab list + single active panel on the right

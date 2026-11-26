@@ -399,15 +399,77 @@ async function start() {
     if (updBtn && !updatingNow && !updateFeedbackHold) {
       const hasUpd = Boolean(upd.available || upd.ready || upd.resourceNew || upd.downloading);
       updBtn.classList.toggle("hidden", !hasUpd);
+      updBtn.classList.toggle("btn-update-ready", Boolean(upd.ready));
       if (upd.downloading) {
         const pct = Math.max(0, Math.min(100, Number(upd.progress || 0)));
-        setTopbarUpdateBtn("busy", pct > 0 ? `下载中 ${pct}%` : "下载更新中…", pct);
+        const label = upd.autoMode === "auto"
+          ? (pct > 0 ? `后台下载 ${pct}%` : "后台下载更新…")
+          : (pct > 0 ? `下载中 ${pct}%` : "下载更新中…");
+        setTopbarUpdateBtn("busy", label, pct, `正在后台下载并校验新版 ${upd.latest || ""}`.trim());
       } else if (upd.ready) {
-        setTopbarUpdateBtn("idle", "重启升级", 0, "新版本已下载完成，点击重启并升级");
+        const verTag = upd.latest ? `v${String(upd.latest).replace(/^v/i, "")}` : "新版";
+        const tip = upd.applyFailed
+          ? "上次退出自动替换未成功，点击立即重启升级或手动重装"
+          : (upd.autoApplyOnQuit
+            ? `${verTag} 已在后台校验就绪：点击立即重启升级，或在关闭软件时自动生效`
+            : `${verTag} 已下载完成，点击重启并升级`);
+        setTopbarUpdateBtn("idle", `${verTag} 已就绪 · 重启升级`, 100, tip);
+        maybeShowUpdateReadyToast(upd);
       } else {
-        setTopbarUpdateBtn("idle", "更新", 0, "点击立即更新");
+        const tip = upd.autoMode === "auto"
+          ? "已开启自动更新，空闲时会自动后台下载；也可点击立即更新"
+          : "点击立即更新";
+        setTopbarUpdateBtn("idle", upd.latest ? `发现新版 v${String(upd.latest).replace(/^v/i, "")}` : "更新", 0, tip);
       }
     }
+  }
+
+  let updateReadyToastShownVer = "";
+  function maybeShowUpdateReadyToast(upd) {
+    if (!upd?.ready) return;
+    const ver = String(upd.latest || upd.stagedVersion || "").replace(/^v/i, "").trim();
+    if (!ver) return;
+    const storeKey = `handraw_upd_toast_v:${ver}`;
+    if (updateReadyToastShownVer === ver) return;
+    try {
+      if (localStorage.getItem(storeKey) === "1") return;
+    } catch {}
+    updateReadyToastShownVer = ver;
+    const region = document.getElementById("toast-region");
+    if (!region) return;
+    const existing = region.querySelector(".toast-update-ready");
+    if (existing) existing.remove();
+    const markDismissed = () => {
+      try { localStorage.setItem(storeKey, "1"); } catch {}
+      node.remove();
+    };
+    const subText = upd.applyFailed
+      ? "上次退出自动安装被拦截，请点击立即重启或手动覆盖安装"
+      : (upd.autoApplyOnQuit
+        ? "不点也会在关闭软件后自动完成升级"
+        : "点击立即重启即可切换到最新版本");
+    const node = el("div", { class: "toast toast-update-ready", role: "status", "aria-live": "polite" },
+      el("div", { class: "toast-update-body" },
+        el("strong", null, `手绘风 v${ver} 已准备就绪`),
+        el("span", { class: "toast-update-sub" }, subText)
+      ),
+      el("div", { class: "toast-update-actions" },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: () => {
+            markDismissed();
+            runImmediateUpdate();
+          },
+        }, "立即重启"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: markDismissed,
+        }, upd.autoApplyOnQuit ? "退出时自动升级" : "稍后")
+      )
+    );
+    region.appendChild(node);
   }
 
   let updateFeedbackHold = false;

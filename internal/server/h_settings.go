@@ -53,6 +53,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		TelemetryDisabled          *bool   `json:"telemetryDisabled"`
 		TelemetryEnabled           *bool   `json:"telemetryEnabled"`
 		AutoCheckUpdate            *bool   `json:"autoCheckUpdate"`
+		AutoUpdateMode             *string `json:"autoUpdateMode"`
 		CostLimitCents             *int    `json:"costLimitCents"`
 		DefaultModel               *string           `json:"defaultModel"`
 		DefaultTextModel           *string           `json:"defaultTextModel"`
@@ -105,8 +106,17 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		if body.TelemetryEnabled != nil {
 			st.TelemetryDisabled = !*body.TelemetryEnabled
 		}
-		if body.AutoCheckUpdate != nil {
+		if body.AutoUpdateMode != nil {
+			mode := settings.NormalizeAutoUpdateMode(*body.AutoUpdateMode, true)
+			st.AutoUpdateMode = mode
+			st.AutoCheckUpdate = mode != "off"
+		} else if body.AutoCheckUpdate != nil {
 			st.AutoCheckUpdate = *body.AutoCheckUpdate
+			if !*body.AutoCheckUpdate {
+				st.AutoUpdateMode = "off"
+			} else if st.AutoUpdateMode == "" || st.AutoUpdateMode == "off" {
+				st.AutoUpdateMode = "auto"
+			}
 		}
 		if body.CostLimitCents != nil && *body.CostLimitCents >= 0 {
 			st.CostLimitCents = *body.CostLimitCents
@@ -174,6 +184,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 	}
 	if hotkeyChanged {
 		_ = s.Host.SetHotkey(nextHotkey)
+	}
+	if s.Updater != nil && (body.AutoUpdateMode != nil || body.AutoCheckUpdate != nil) {
+		s.Updater.SyncMode()
+		if updated.EffectiveAutoUpdateMode() == "auto" {
+			s.Updater.NudgeAuto()
+		}
 	}
 	s.Emit("settings", updated)
 	return s.getSettings(w, r)

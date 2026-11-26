@@ -168,6 +168,9 @@ type Settings struct {
 	Theme              string               `json:"theme"` // light | dark | system
 	AutoSyncResources  bool                 `json:"autoSyncResources"`
 	AutoCheckUpdate    bool                 `json:"autoCheckUpdate"`
+	// AutoUpdateMode controls desktop auto-updates: "auto" (silent download &
+	// apply on quit, default), "notify" (check & notify only), or "off" (#182).
+	AutoUpdateMode     string               `json:"autoUpdateMode,omitempty"`
 	CostLimitCents     int                  `json:"costLimitCents"`
 	DefaultModel       string               `json:"defaultModel"`       // "site:<id>" or "<providerId>:<modelId>"
 	DefaultTextModel   string               `json:"defaultTextModel"`   // "", "site:auto", "site:<id>", "<providerId>:<modelId>", or "harness:<id>"
@@ -205,6 +208,7 @@ func Defaults() Settings {
 		Theme:             "light",
 		AutoSyncResources: true,
 		AutoCheckUpdate:   true,
+		AutoUpdateMode:    "auto",
 		CostLimitCents:    200,
 		QuickShotHotkey:   "Alt+Space",
 		QuickShotEnabled:  true,
@@ -318,6 +322,29 @@ func EnsureTelemetryID() string {
 	return id
 }
 
+// NormalizeAutoUpdateMode maps raw mode + legacy AutoCheckUpdate boolean into
+// one of "auto", "notify", or "off" (#182).
+func NormalizeAutoUpdateMode(raw string, legacyAutoCheck bool) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "auto":
+		return "auto"
+	case "notify":
+		return "notify"
+	case "off":
+		return "off"
+	default:
+		if !legacyAutoCheck {
+			return "off"
+		}
+		return "auto"
+	}
+}
+
+// EffectiveAutoUpdateMode returns the normalized auto-update mode.
+func (s Settings) EffectiveAutoUpdateMode() string {
+	return NormalizeAutoUpdateMode(s.AutoUpdateMode, s.AutoCheckUpdate)
+}
+
 func clone(s Settings) Settings {
 	b, _ := json.Marshal(s)
 	var out Settings
@@ -334,6 +361,8 @@ func clone(s Settings) Settings {
 	if out.PreferredMarketMirror != "github" {
 		out.PreferredMarketMirror = "gitee"
 	}
+	out.AutoUpdateMode = NormalizeAutoUpdateMode(out.AutoUpdateMode, out.AutoCheckUpdate)
+	out.AutoCheckUpdate = out.AutoUpdateMode != "off"
 	out.PluginMarkets = backfillOfficialMarkets(out.PluginMarkets, DefaultPluginMarkets())
 	out.GalleryMarkets = backfillOfficialMarkets(out.GalleryMarkets, DefaultGalleryMarkets())
 	out.SkillMarkets = backfillOfficialMarkets(out.SkillMarkets, DefaultSkillMarkets())
@@ -347,6 +376,9 @@ func load() Settings {
 	if err != nil {
 		return s
 	}
+	// Clear AutoUpdateMode before unmarshaling so legacy files that only store
+	// autoCheckUpdate=false migrate to "off" instead of keeping Default "auto".
+	s.AutoUpdateMode = ""
 	if err := json.Unmarshal(b, &s); err != nil {
 		// Keep the broken file for the user; start from defaults.
 		_ = os.Rename(appdir.Settings(), appdir.Settings()+".broken")
@@ -361,6 +393,8 @@ func load() Settings {
 	if s.PreferredMarketMirror != "github" {
 		s.PreferredMarketMirror = "gitee"
 	}
+	s.AutoUpdateMode = NormalizeAutoUpdateMode(s.AutoUpdateMode, s.AutoCheckUpdate)
+	s.AutoCheckUpdate = s.AutoUpdateMode != "off"
 	s.PluginMarkets = backfillOfficialMarkets(s.PluginMarkets, DefaultPluginMarkets())
 	s.GalleryMarkets = backfillOfficialMarkets(s.GalleryMarkets, DefaultGalleryMarkets())
 	s.SkillMarkets = backfillOfficialMarkets(s.SkillMarkets, DefaultSkillMarkets())

@@ -45,60 +45,89 @@ const (
 )
 
 // Feeds are tried in order; the first that answers wins.
-// Gitee is preferred by default for faster mainland China access, falling back
-// to the official website mirror and GitHub Releases (#173).
+// Metadata checks (< 2 KB) prefer the Cloudflare-cached static latest.json
+// with ETag/304 so large user bases put near-zero load on origin or Gitee API;
+// 26 MB binary downloads prefer asset.Mirrors (Gitee Releases CDN first) (#182).
 var Feeds = []string{
-	"https://gitee.com/api/v5/repos/yang02010/handraw-client/releases/latest",
 	"https://handraw-style.com/static/client/latest.json",
+	"https://gitee.com/api/v5/repos/yang02010/handraw-client/releases/latest",
 	"https://api.github.com/repos/" + Repo + "/releases/latest",
 }
 
 type Asset struct {
-	Name string `json:"name"`
-	URL  string `json:"browser_download_url"`
-	Size int64  `json:"size"`
+	Name    string   `json:"name"`
+	URL     string   `json:"browser_download_url"`
+	Mirrors []string `json:"mirrors,omitempty"`
+	Size    int64    `json:"size"`
 }
 
 type Release struct {
-	Tag       string  `json:"tag_name"`
-	Name      string  `json:"name"`
-	Body      string  `json:"body"`
-	Published string  `json:"published_at"`
-	Assets    []Asset `json:"assets"`
-	Feed      string  `json:"feed"`
+	Tag            string   `json:"tag_name"`
+	Name           string   `json:"name"`
+	Body           string   `json:"body"`
+	Published      string   `json:"published_at"`
+	Assets         []Asset  `json:"assets"`
+	Feed           string   `json:"feed"`
+	RolloutPercent int      `json:"rolloutPercent,omitempty"`
+	SpreadHours    *float64 `json:"spreadHours,omitempty"`
 }
 
 type Status struct {
-	Current       string `json:"current"`
-	Latest        string `json:"latest"`
-	Notes         string `json:"notes"`
-	Available     bool   `json:"available"`
-	Checking      bool   `json:"checking"`
-	Downloading   bool   `json:"downloading"`
-	Progress      int    `json:"progress"`
-	Ready         bool   `json:"ready"` // downloaded and verified; restart to apply
-	Error         string `json:"error,omitempty"`
-	CheckedAt     string `json:"checkedAt,omitempty"`
-	AssetName     string `json:"assetName,omitempty"`
-	ResourceLocal string `json:"resourceLocal,omitempty"`
-	ResourceNew   string `json:"resourceNew,omitempty"`
-	ResourceFiles int    `json:"resourceFiles,omitempty"`
-	ResourceBytes int64  `json:"resourceBytes,omitempty"`
+	Current           string `json:"current"`
+	Latest            string `json:"latest"`
+	Notes             string `json:"notes"`
+	Available         bool   `json:"available"`
+	Checking          bool   `json:"checking"`
+	Downloading       bool   `json:"downloading"`
+	Progress          int    `json:"progress"`
+	Ready             bool   `json:"ready"` // downloaded and verified; restart or quit to apply
+	Error             string `json:"error,omitempty"`
+	CheckedAt         string `json:"checkedAt,omitempty"`
+	AssetName         string `json:"assetName,omitempty"`
+	AutoMode          string `json:"autoMode,omitempty"`          // auto | notify | off
+	AutoApplyOnQuit   bool   `json:"autoApplyOnQuit,omitempty"`   // will silently replace on normal exit
+	StagedVersion     string `json:"stagedVersion,omitempty"`     // verified version ready on disk
+	AutoDeferredUntil string `json:"autoDeferredUntil,omitempty"` // spread-window scheduled download time
+	ApplyFailed       bool   `json:"applyFailed,omitempty"`       // previous quit-apply failed (stop loop)
+	ResourceLocal     string `json:"resourceLocal,omitempty"`
+	ResourceNew       string `json:"resourceNew,omitempty"`
+	ResourceFiles     int    `json:"resourceFiles,omitempty"`
+	ResourceBytes     int64  `json:"resourceBytes,omitempty"`
 }
 
 type Updater struct {
-	Version  string
-	Dir      string // where downloads are staged
-	HTTP     *http.Client
-	mu       sync.Mutex
-	status   Status
-	release  *Release
-	staged   string
-	OnChange func(Status)
+	Version         string
+	Dir             string // where downloads are staged
+	HTTP            *http.Client
+	CheckCooldown   time.Duration
+	StartupDelayMin time.Duration
+	StartupDelayMax time.Duration
+	Mode            func() string    // returns auto | notify | off
+	IsBusy          func() bool      // true when active generation jobs should defer download/apply
+	BucketKey       func() string    // stable anonymous device ID for rollout bucketing
+	Now             func() time.Time // overridable clock for tests
+	mu              sync.Mutex
+	stateMu         sync.Mutex
+	status          Status
+	release         *Release
+	staged          string
+	stagedVersion   string
+	stagedSHA256    string
+	appliedOnQuit   bool
+	nudgeCh         chan struct{}
+	OnChange        func(Status)
 }
 
 func New(version, dir string) *Updater {
-	return &Updater{Version: version, Dir: dir, HTTP: netutil.NewClient(30 * time.Minute), status: Status{Current: version}}
+	u := &Updater{
+		Version: version,
+		Dir:     dir,
+		HTTP:    netutil.NewClient(30 * time.Minute),
+		status:  Status{Current: version, AutoMode: AutoModeAuto},
+		nudgeCh: make(chan struct{}, 1),
+	}
+	u.LoadStaged()
+	return u
 }
 
 func (u *Updater) Status() Status {
@@ -133,44 +162,96 @@ func (u *Updater) Loop(ctx context.Context, interval time.Duration, enabled func
 	}
 }
 
-// Check reads the latest release from the first reachable feed.
+// Check reads the latest release from the first reachable feed, honoring ETag/304.
 func (u *Updater) Check(ctx context.Context) (Status, error) {
 	u.set(func(s *Status) { s.Checking = true; s.Error = "" })
+	u.stateMu.Lock()
+	ps := u.loadState()
+	u.stateMu.Unlock()
+
 	var lastErr error
 	for _, feed := range Feeds {
-		rel, err := u.fetchRelease(ctx, feed)
+		var ifNoneMatch string
+		var cached *Release
+		if ps.ETagFeed == feed && ps.ETag != "" && ps.CachedRelease != nil {
+			ifNoneMatch = ps.ETag
+			cached = ps.CachedRelease
+		}
+		rel, etag, notModified, err := u.fetchRelease(ctx, feed, ifNoneMatch, cached)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		u.mu.Lock()
-		u.release = rel
-		u.mu.Unlock()
-		latest := strings.TrimPrefix(rel.Tag, "v")
-		asset := assetName()
-		// A release may ship some platforms first (e.g. Windows before macOS),
-		// or the current OS may not publish prebuilt binaries (e.g. Linux nogui).
-		// Only offer it when this platform has an asset and signed checksums (#180).
-		avail := asset != "" && Newer(latest, u.Version) && releaseHas(rel, asset, "SHA256SUMS", "SHA256SUMS.sig")
-		u.set(func(s *Status) {
-			s.Checking = false
-			s.Latest = latest
-			s.Notes = rel.Body
-			s.Available = avail
-			s.CheckedAt = time.Now().Format(time.RFC3339)
-			s.AssetName = asset
+		checkedAt := u.now()
+		u.updateState(func(s *persistedState) {
+			s.LastCheckAt = checkedAt.UTC().Format(time.RFC3339)
+			s.CachedRelease = rel
+			if notModified {
+				return
+			}
+			if etag != "" {
+				s.ETag = etag
+				s.ETagFeed = feed
+			} else if s.ETagFeed == feed {
+				s.ETag = ""
+				s.ETagFeed = ""
+			}
 		})
-		return u.Status(), nil
+		return u.applyReleaseStatus(rel, checkedAt), nil
 	}
 	msg := "检查更新失败"
 	if lastErr != nil {
 		msg += "：" + lastErr.Error()
 	}
-	u.set(func(s *Status) { s.Checking = false; s.Error = msg; s.CheckedAt = time.Now().Format(time.RFC3339) })
+	u.set(func(s *Status) {
+		s.Checking = false
+		s.Error = msg
+		s.CheckedAt = u.now().Format(time.RFC3339)
+		s.AutoMode = u.currentMode()
+	})
 	return u.Status(), lastErr
 }
 
-func (u *Updater) fetchRelease(ctx context.Context, feed string) (*Release, error) {
+func (u *Updater) applyReleaseStatus(rel *Release, checkedAt time.Time) Status {
+	latest := strings.TrimPrefix(rel.Tag, "v")
+	asset := assetName()
+	// A release may ship some platforms first (e.g. Windows before macOS),
+	// or the current OS may not publish prebuilt binaries (e.g. Linux nogui).
+	// Only offer it when this platform has an asset and signed checksums (#180).
+	avail := asset != "" && Newer(latest, u.Version) && releaseHas(rel, asset, "SHA256SUMS", "SHA256SUMS.sig")
+	mode := u.currentMode()
+	u.mu.Lock()
+	u.release = rel
+	sameStaged := u.staged != "" && u.stagedVersion == latest && u.status.Ready
+	u.mu.Unlock()
+	u.set(func(s *Status) {
+		s.Checking = false
+		s.Latest = latest
+		s.Notes = rel.Body
+		s.Available = avail
+		s.CheckedAt = checkedAt.Format(time.RFC3339)
+		s.AssetName = asset
+		s.AutoMode = mode
+		if !avail {
+			s.Ready = false
+			s.AutoApplyOnQuit = false
+			s.AutoDeferredUntil = ""
+		} else if sameStaged {
+			s.Ready = true
+			s.Progress = 100
+			s.StagedVersion = latest
+			s.AutoApplyOnQuit = mode == AutoModeAuto && !s.ApplyFailed
+		} else if s.Ready && s.StagedVersion != latest {
+			// A newer version superseded an older staged build.
+			s.Ready = false
+			s.Progress = 0
+			s.AutoApplyOnQuit = false
+		}
+	})
+	return u.Status()
+}
+
+func (u *Updater) fetchRelease(ctx context.Context, feed, ifNoneMatch string, cached *Release) (*Release, string, bool, error) {
 	c := netutil.NewClient(20 * time.Second)
 	resp, err := netutil.DoWithRetry(ctx, c, func() (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, "GET", feed, nil)
@@ -179,24 +260,32 @@ func (u *Updater) fetchRelease(ctx context.Context, feed string) (*Release, erro
 		}
 		req.Header.Set("Accept", "application/vnd.github+json, application/json;q=0.9")
 		req.Header.Set("User-Agent", "handraw-client/"+u.Version)
+		if ifNoneMatch != "" {
+			req.Header.Set("If-None-Match", ifNoneMatch)
+		}
 		return req, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", false, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotModified && cached != nil {
+		cp := *cached
+		cp.Feed = feed
+		return &cp, ifNoneMatch, true, nil
+	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("%s 返回 %d", hostOf(feed), resp.StatusCode)
+		return nil, "", false, fmt.Errorf("%s 返回 %d", hostOf(feed), resp.StatusCode)
 	}
 	var rel Release
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&rel); err != nil {
-		return nil, err
+		return nil, "", false, err
 	}
 	if rel.Tag == "" {
-		return nil, errors.New("发布信息缺少版本号")
+		return nil, "", false, errors.New("发布信息缺少版本号")
 	}
 	rel.Feed = feed
-	return &rel, nil
+	return &rel, strings.TrimSpace(resp.Header.Get("ETag")), false, nil
 }
 
 func hostOf(u string) string {
@@ -370,34 +459,55 @@ func VerifySums(version string, sums, sigB64 []byte, pubB64 string) (map[string]
 }
 
 // Download fetches, verifies and stages the new program.
+// Prefers asset.Mirrors (e.g. Gitee Releases CDN) before asset.URL (#182).
 func (u *Updater) Download(ctx context.Context) error {
-	st := u.Status()
+	u.mu.Lock()
+	st := u.status
+	if st.Downloading {
+		u.mu.Unlock()
+		return nil
+	}
+	if st.Ready && u.staged != "" && u.stagedVersion == st.Latest && u.stagedSHA256 != "" && fileSHA256Matches(u.staged, u.stagedSHA256) {
+		u.mu.Unlock()
+		return nil
+	}
 	if !st.Available {
+		u.mu.Unlock()
 		return errors.New("没有可用的新版本")
 	}
 	name := assetName()
 	if name == "" {
+		u.mu.Unlock()
 		return errors.New("当前系统平台暂不支持自动更新")
 	}
-	a, ok := u.asset(name)
-	if !ok {
-		return fmt.Errorf("新版本没有 %s 安装包", name)
+	u.status.Downloading = true
+	u.status.Progress = 0
+	u.status.Error = ""
+	onChange := u.OnChange
+	snap := u.status
+	u.mu.Unlock()
+	if onChange != nil {
+		onChange(snap)
 	}
-	sumsA, ok1 := u.asset("SHA256SUMS")
-	sigA, ok2 := u.asset("SHA256SUMS.sig")
-	if !ok1 || !ok2 {
-		return errors.New("新版本缺少签名文件，已拒绝更新")
-	}
-	u.set(func(s *Status) { s.Downloading = true; s.Progress = 0; s.Error = "" })
+
 	fail := func(err error) error {
 		u.set(func(s *Status) { s.Downloading = false; s.Error = err.Error() })
 		return err
 	}
-	sums, err := u.getLimit(ctx, sumsA.URL, maxMetadataBytes, nil)
+	a, ok := u.asset(name)
+	if !ok {
+		return fail(fmt.Errorf("新版本没有 %s 安装包", name))
+	}
+	sumsA, ok1 := u.asset("SHA256SUMS")
+	sigA, ok2 := u.asset("SHA256SUMS.sig")
+	if !ok1 || !ok2 {
+		return fail(errors.New("新版本缺少签名文件，已拒绝更新"))
+	}
+	sums, err := u.getLimitAny(ctx, assetURLs(sumsA), maxMetadataBytes, nil)
 	if err != nil {
 		return fail(err)
 	}
-	sig, err := u.getLimit(ctx, sigA.URL, maxSigBytes, nil)
+	sig, err := u.getLimitAny(ctx, assetURLs(sigA), maxSigBytes, nil)
 	if err != nil {
 		return fail(err)
 	}
@@ -413,9 +523,14 @@ func (u *Updater) Download(ctx context.Context) error {
 		return fail(err)
 	}
 	staged := filepath.Join(u.Dir, name)
+	// Reuse an already verified staged file on disk without hitting the network again.
+	if fileSHA256Matches(staged, want) {
+		u.finishStaged(st.Latest, name, staged, want)
+		return nil
+	}
 	tmpPath := staged + ".part"
 	_ = os.Remove(tmpPath)
-	gotHash, err := u.downloadToFile(ctx, a.URL, tmpPath, maxBinaryBytes, func(n int64) {
+	gotHash, err := u.downloadToFileAny(ctx, assetURLs(a), tmpPath, maxBinaryBytes, func(n int64) {
 		if a.Size > 0 {
 			pct := int(n * 100 / a.Size)
 			if pct > 100 {
@@ -438,11 +553,78 @@ func (u *Updater) Download(ctx context.Context) error {
 		_ = os.Remove(tmpPath)
 		return fail(err)
 	}
+	u.finishStaged(st.Latest, name, staged, want)
+	return nil
+}
+
+func (u *Updater) finishStaged(ver, name, staged, sha string) {
+	mode := u.currentMode()
 	u.mu.Lock()
 	u.staged = staged
+	u.stagedVersion = ver
+	u.stagedSHA256 = sha
+	u.appliedOnQuit = false
 	u.mu.Unlock()
-	u.set(func(s *Status) { s.Downloading = false; s.Progress = 100; s.Ready = true })
-	return nil
+	ps := u.updateState(func(s *persistedState) {
+		s.StagedVersion = ver
+		s.StagedAsset = name
+		s.StagedPath = staged
+		s.StagedSHA256 = sha
+		if s.AutoFailVersion == ver {
+			s.AutoFailVersion = ""
+			s.AutoFailCount = 0
+			s.NextRetryAt = ""
+		}
+	})
+	applyFailed := ps.ApplyFailedVersion == ver
+	u.set(func(s *Status) {
+		s.Downloading = false
+		s.Progress = 100
+		s.Ready = true
+		s.Error = ""
+		s.StagedVersion = ver
+		s.AutoMode = mode
+		s.ApplyFailed = applyFailed
+		s.AutoApplyOnQuit = mode == AutoModeAuto && !applyFailed
+		s.AutoDeferredUntil = ""
+	})
+}
+
+func (u *Updater) getLimitAny(ctx context.Context, urls []string, maxBytes int64, progress func(int64)) ([]byte, error) {
+	var lastErr error
+	for _, target := range urls {
+		b, err := u.getLimit(ctx, target, maxBytes, progress)
+		if err == nil {
+			return b, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("缺少下载地址")
+	}
+	return nil, lastErr
+}
+
+func (u *Updater) downloadToFileAny(ctx context.Context, urls []string, dstPath string, maxBytes int64, progress func(int64)) (string, error) {
+	var lastErr error
+	for _, target := range urls {
+		_ = os.Remove(dstPath)
+		h, err := u.downloadToFile(ctx, target, dstPath, maxBytes, progress)
+		if err == nil {
+			return h, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("缺少安装包下载地址")
+	}
+	return "", lastErr
 }
 
 func (u *Updater) getLimit(ctx context.Context, url string, maxBytes int64, progress func(int64)) ([]byte, error) {

@@ -1629,6 +1629,55 @@ dialog::backdrop {
   font-size: 13px;
   box-shadow: var(--shadow);
 }
+.toast-update-ready {
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-left: 3px solid var(--accent);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(340px, 90vw);
+}
+.toast-update-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.toast-update-sub {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+.toast-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.btn-update-ready {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: #fff !important;
+  font-weight: 600;
+}
+.btn-update-ready:hover {
+  filter: brightness(0.95);
+}
+.update-auto-banner {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.update-auto-banner.is-ready {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  background: color-mix(in srgb, var(--accent) 7%, var(--paper));
+  color: var(--ink);
+}
 
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .col { display: flex; flex-direction: column; gap: 8px; }

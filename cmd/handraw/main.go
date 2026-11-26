@@ -182,15 +182,26 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 	upd.OnChange = func(st updater.Status) {
 		srv.Emit("update", st)
 	}
-	go upd.Loop(ctx, 6*time.Hour, func() bool {
-		return settings.Get().AutoCheckUpdate
-	})
+	upd.Mode = func() string {
+		return settings.Get().EffectiveAutoUpdateMode()
+	}
+	upd.IsBusy = func() bool {
+		return jm.Active() > 0
+	}
+	upd.BucketKey = settings.EnsureTelemetryID
+	upd.LoadStaged()
+	go upd.AutoLoop(ctx, updater.DefaultCheckCooldown)
 	go tel.Start(ctx)
 
 	return srv, func() {
 		fctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		tel.Flush(fctx)
 		cancel()
+		if applied, aErr := upd.ApplyIfReady(); aErr != nil {
+			log.Printf("退出自动应用更新失败：%v", aErr)
+		} else if applied {
+			log.Printf("已在退出时自动应用新版本，下次启动将生效")
+		}
 		if srv.DSH != nil {
 			srv.DSH.Stop()
 		}

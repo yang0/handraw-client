@@ -1,7 +1,10 @@
 package settings
 
 import (
+	"os"
 	"testing"
+
+	"github.com/yang0/handraw-client/internal/appdir"
 )
 
 func TestSettingsPersistenceAndUnifiedMarkets(t *testing.T) {
@@ -56,5 +59,36 @@ func TestSettingsPersistenceAndUnifiedMarkets(t *testing.T) {
 	p := Provider{Purpose: "image", Models: []Model{{ID: "m1"}, {ID: "m2", Kind: "text"}}}
 	if len(p.ImageModels()) != 1 || len(p.TextModels()) != 1 {
 		t.Fatalf("unexpected model split: img=%d txt=%d", len(p.ImageModels()), len(p.TextModels()))
+	}
+}
+
+func TestAutoUpdateModeMigration(t *testing.T) {
+	appdir.SetRoot(t.TempDir())
+	Reset()
+	t.Cleanup(Reset)
+
+	// Fresh defaults -> "auto".
+	if got := Get().EffectiveAutoUpdateMode(); got != "auto" {
+		t.Fatalf("expected default autoUpdateMode=auto, got %q", got)
+	}
+
+	// Legacy settings.json with only autoCheckUpdate=false -> migrates to "off".
+	if err := os.WriteFile(appdir.Settings(), []byte(`{"autoCheckUpdate":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	Reset()
+	st := Get()
+	if st.AutoUpdateMode != "off" || st.AutoCheckUpdate {
+		t.Fatalf("expected legacy autoCheckUpdate=false to migrate to off, got mode=%q check=%v", st.AutoUpdateMode, st.AutoCheckUpdate)
+	}
+
+	// Legacy settings.json with only autoCheckUpdate=true -> migrates to "auto".
+	if err := os.WriteFile(appdir.Settings(), []byte(`{"autoCheckUpdate":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	Reset()
+	st = Get()
+	if st.AutoUpdateMode != "auto" || !st.AutoCheckUpdate {
+		t.Fatalf("expected legacy autoCheckUpdate=true to migrate to auto, got mode=%q check=%v", st.AutoUpdateMode, st.AutoCheckUpdate)
 	}
 }
