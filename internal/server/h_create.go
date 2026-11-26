@@ -64,6 +64,10 @@ func (s *Server) buildPrompt(w http.ResponseWriter, r *http.Request) (any, error
 			}
 		}
 	}
+	// The user's own published resources resolve to their local copy (#170).
+	in.Style = s.resolveOwnCode(r.Context(), "style", in.Style)
+	in.Style2 = s.resolveOwnCode(r.Context(), "style", in.Style2)
+	in.Layout = s.resolveOwnCode(r.Context(), "layout", in.Layout)
 	localIn := in
 	preview := map[string]string{}
 	siteModelOnly := false
@@ -854,12 +858,16 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			Tone: firstStr(it.Tone, galCtx.Tone), Mood: it.Mood, Theme: it.Theme, Ratio: it.Ratio,
 			Text: it.Text, Model: rawModel, Mode: it.Mode, Redraw: it.Redraw, Extra: it.Extra,
 		}
+		// The user's own published resources resolve to their local copy (#170).
+		in.Style = s.resolveOwnCode(r.Context(), "style", in.Style)
+		in.Style2 = s.resolveOwnCode(r.Context(), "style", in.Style2)
+		in.Layout = s.resolveOwnCode(r.Context(), "layout", in.Layout)
 		// Enforce site-model-only generation for community/exclusive protected resources (#162).
 		localBuildIn := in
 		usesProtectedResource := false
 		for _, chk := range []struct {
-			kind string
-			id   string
+			kind  string
+			id    string
 			clear func()
 		}{
 			{"style", localBuildIn.Style, func() { localBuildIn.Style = "" }},

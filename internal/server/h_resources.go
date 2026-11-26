@@ -94,8 +94,14 @@ func (s *Server) resStyles(w http.ResponseWriter, r *http.Request) (any, error) 
 	source := r.URL.Query().Get("source")
 	var out []resources.Style
 	snap := s.communityCatalog(r.Context(), false)
+	own := s.ownCommunityAliases(snap)
 	// An exact id typed into search jumps straight to it.
 	if q != "" {
+		if local, ok := own.lookup("style", q); ok {
+			if st, ok := p.Style(local); ok {
+				return map[string]any{"items": []resources.Style{st}, "total": 1}, nil
+			}
+		}
 		if st, ok := p.Style(q); ok && (strings.ContainsAny(q, "-_") || len(q) <= 4) {
 			return map[string]any{"items": []resources.Style{st}, "total": 1}, nil
 		}
@@ -107,6 +113,12 @@ func (s *Server) resStyles(w http.ResponseWriter, r *http.Request) (any, error) 
 	}
 	seen := map[string]bool{}
 	for _, st := range snap.Styles {
+		// The user's own published style is listed once, as the local copy (#170).
+		if local, ok := own.lookup("style", st.Number); ok {
+			if _, has := p.Style(local); has {
+				continue
+			}
+		}
 		if group != "" && st.GroupCode != group {
 			continue
 		}
@@ -145,7 +157,7 @@ func (s *Server) resStyle(w http.ResponseWriter, r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	id := r.PathValue("id")
+	id := s.resolveOwnCode(r.Context(), "style", r.PathValue("id"))
 	if st, ok := p.Style(id); ok {
 		model := r.URL.Query().Get("model")
 		return map[string]any{"style": st, "decision": promptDecision(s, p, model, st)}, nil
@@ -186,7 +198,14 @@ func (s *Server) resLayouts(w http.ResponseWriter, r *http.Request) (any, error)
 	out := []resources.Layout{}
 	snap := s.communityCatalog(r.Context(), false)
 	seen := map[string]bool{}
+	own := s.ownCommunityAliases(snap)
 	for _, l := range snap.Layouts {
+		// The user's own published layout is listed once, as the local copy (#170).
+		if local, ok := own.lookup("layout", l.ID); ok {
+			if _, has := p.Layout(local); has {
+				continue
+			}
+		}
 		if cat != "" && l.Category != cat {
 			continue
 		}

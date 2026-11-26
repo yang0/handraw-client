@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	communityCatalogCacheKey = "community_resources_v1"
+	communityCatalogCacheKey = "community_resources_v2"
 	communityCatalogTTL      = 2 * time.Minute
 )
 
@@ -33,6 +33,8 @@ type communityRemoteItem struct {
 	IsMine        bool   `json:"isMine"`
 	PromptHidden  bool   `json:"promptHidden"`
 	SiteModelOnly bool   `json:"siteModelOnly"`
+	// Owner-only: the personal resource this item was published from (#170).
+	PersonalResourceID string `json:"personalResourceId"`
 }
 
 type communityCatalogSnapshot struct {
@@ -176,45 +178,47 @@ func (s *Server) communityCatalog(ctx context.Context, force bool) communityCata
 		imgURL := communityThumbProxyURL(it.Image)
 		if it.Kind == "layout" {
 			snap.Layouts = append(snap.Layouts, resources.Layout{
-				ID:             code,
-				Category:       "community",
-				Name:           firstStr(it.Name, code),
-				Image:          imgURL,
-				RemoteImageURL: strings.TrimSpace(it.Image),
-				Description:    strings.TrimSpace(it.Description),
-				PromptZh:       "", // NEVER store or expose community prompts (#162)
-				PromptEn:       "",
-				Author:         strings.TrimSpace(it.Author),
-				AuthorName:     firstStr(strings.TrimSpace(it.AuthorName), strings.TrimSpace(it.Author)),
-				Source:         src,
-				UnlockCost:     cost,
-				Unlocked:       it.Unlocked || it.IsMine,
-				IsMine:         it.IsMine,
-				PromptHidden:   true,
-				SiteModelOnly:  true,
+				ID:                 code,
+				Category:           "community",
+				Name:               firstStr(it.Name, code),
+				Image:              imgURL,
+				RemoteImageURL:     strings.TrimSpace(it.Image),
+				Description:        strings.TrimSpace(it.Description),
+				PromptZh:           "", // NEVER store or expose community prompts (#162)
+				PromptEn:           "",
+				Author:             strings.TrimSpace(it.Author),
+				AuthorName:         firstStr(strings.TrimSpace(it.AuthorName), strings.TrimSpace(it.Author)),
+				Source:             src,
+				UnlockCost:         cost,
+				Unlocked:           it.Unlocked || it.IsMine,
+				IsMine:             it.IsMine,
+				PromptHidden:       true,
+				SiteModelOnly:      true,
+				PersonalResourceID: strings.TrimSpace(it.PersonalResourceID),
 			})
 		} else {
 			snap.Styles = append(snap.Styles, resources.Style{
-				Number:         code,
-				Group:          "USR 社区共享画风 / Community",
-				GroupCode:      "USR",
-				GroupZh:        "社区共享",
-				GroupEn:        "Community",
-				GenerationName: firstStr(it.Name, code),
-				NameZh:         firstStr(it.Name, code),
-				Description:    strings.TrimSpace(it.Description),
-				Traits:         "", // NEVER store or expose community prompts (#162)
-				TraitsEn:       "",
-				Image:          imgURL,
-				RemoteImageURL: strings.TrimSpace(it.Image),
-				Author:         strings.TrimSpace(it.Author),
-				AuthorName:     firstStr(strings.TrimSpace(it.AuthorName), strings.TrimSpace(it.Author)),
-				Source:         src,
-				UnlockCost:     cost,
-				Unlocked:       it.Unlocked || it.IsMine,
-				IsMine:         it.IsMine,
-				PromptHidden:   true,
-				SiteModelOnly:  true,
+				Number:             code,
+				Group:              "USR 社区共享画风 / Community",
+				GroupCode:          "USR",
+				GroupZh:            "社区共享",
+				GroupEn:            "Community",
+				GenerationName:     firstStr(it.Name, code),
+				NameZh:             firstStr(it.Name, code),
+				Description:        strings.TrimSpace(it.Description),
+				Traits:             "", // NEVER store or expose community prompts (#162)
+				TraitsEn:           "",
+				Image:              imgURL,
+				RemoteImageURL:     strings.TrimSpace(it.Image),
+				Author:             strings.TrimSpace(it.Author),
+				AuthorName:         firstStr(strings.TrimSpace(it.AuthorName), strings.TrimSpace(it.Author)),
+				Source:             src,
+				UnlockCost:         cost,
+				Unlocked:           it.Unlocked || it.IsMine,
+				IsMine:             it.IsMine,
+				PromptHidden:       true,
+				SiteModelOnly:      true,
+				PersonalResourceID: strings.TrimSpace(it.PersonalResourceID),
 			})
 		}
 	}

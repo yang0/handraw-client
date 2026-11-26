@@ -51,7 +51,10 @@ type Style struct {
 	Unlocked       bool     `json:"unlocked,omitempty"`
 	IsMine         bool     `json:"isMine,omitempty"`
 	PromptHidden   bool     `json:"promptHidden,omitempty"`
-	SiteModelOnly  bool     `json:"siteModelOnly,omitempty"`
+	// PersonalResourceID links an owner's community item to the personal
+	// resource it was published from (owner-only, #170).
+	PersonalResourceID string `json:"personalResourceId,omitempty"`
+	SiteModelOnly      bool   `json:"siteModelOnly,omitempty"`
 }
 
 type Layout struct {
@@ -75,7 +78,10 @@ type Layout struct {
 	Unlocked       bool     `json:"unlocked,omitempty"`
 	IsMine         bool     `json:"isMine,omitempty"`
 	PromptHidden   bool     `json:"promptHidden,omitempty"`
-	SiteModelOnly  bool     `json:"siteModelOnly,omitempty"`
+	// PersonalResourceID links an owner's community item to the personal
+	// resource it was published from (owner-only, #170).
+	PersonalResourceID string `json:"personalResourceId,omitempty"`
+	SiteModelOnly      bool   `json:"siteModelOnly,omitempty"`
 }
 
 type Color struct {
@@ -116,7 +122,7 @@ type Asset struct {
 }
 
 type Capabilities struct {
-	Default map[string]any                `json:"default"`
+	Default map[string]any               `json:"default"`
 	Models  map[string]CapabilityProfile `json:"models"`
 }
 
