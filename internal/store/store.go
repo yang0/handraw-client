@@ -93,8 +93,15 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS runs_fts USING fts5(run_id UNINDEXED, text, tokenize='trigram');
 `
 
+// sqliteFileDSN encodes URI delimiters (%, ?, #) in path so data directories
+// containing special characters never corrupt the SQLite DSN (#179).
+func sqliteFileDSN(path string) string {
+	esc := strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23").Replace(filepath.ToSlash(path))
+	return "file:" + esc + "?_pragma=busy_timeout(5000)"
+}
+
 func Open(path string) (*DB, error) {
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)"
+	dsn := sqliteFileDSN(path)
 	d, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

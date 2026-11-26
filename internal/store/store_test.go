@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -74,5 +75,27 @@ func TestStoreBatchImagesLikeEscapeAndActiveImages(t *testing.T) {
 	_, totalAfter, err := db.ListRuns(RunQuery{})
 	if err != nil || totalAfter != 2 {
 		t.Fatalf("expected 2 runs after soft delete, got %d (err=%v)", totalAfter, err)
+	}
+}
+
+func TestStoreOpenEscapesSpecialPathCharsInDSN(t *testing.T) {
+	got := sqliteFileDSN(`/tmp/a#b?c%20d/handraw.db`)
+	want := `file:/tmp/a%23b%3Fc%2520d/handraw.db?_pragma=busy_timeout(5000)`
+	if got != want {
+		t.Fatalf("sqliteFileDSN = %q, want %q", got, want)
+	}
+	// Open a real DB inside a directory with '#' and '%' characters.
+	specialDir := filepath.Join(t.TempDir(), "user#1%20data")
+	dbPath := filepath.Join(specialDir, "handraw.db")
+	if err := os.MkdirAll(specialDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(%q) failed: %v", dbPath, err)
+	}
+	defer db.Close()
+	if err := db.SetKV("k", "v"); err != nil {
+		t.Fatalf("SetKV failed on special path DB: %v", err)
 	}
 }

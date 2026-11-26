@@ -14,6 +14,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Run go vet
+        run: go vet ./...
       - name: Run Go tests
         run: go test -v ./...
       - name: Build GUI binary (Windows)
@@ -33,6 +35,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Run go vet
+        run: go vet ./...
       - name: Run Go tests
         run: go test -v ./...
       - name: Build GUI binary (macOS)
@@ -50,6 +54,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Run go vet (nogui)
+        run: go vet -tags nogui ./...
       - name: Run headless tests (nogui)
         run: go test -tags nogui -v ./...
       - name: Build headless binary (nogui)

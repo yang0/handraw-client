@@ -43,24 +43,32 @@ var allowedEvents = map[string]bool{
 	"client_update_applied": true,
 }
 
-var blockedPropKeys = map[string]bool{
-	"password":      true,
-	"token":         true,
-	"secret":        true,
-	"cookie":        true,
-	"authorization": true,
-	"prompt":        true,
-	"rawprompt":     true,
-	"blackbox":      true,
-	"email":         true,
-	"phone":         true,
-	"apikey":        true,
-	"api_key":       true,
-	"path":          true,
-	"filepath":      true,
-	"file_path":     true,
-	"worksdir":      true,
-	"works_dir":     true,
+var blockedPropSubstrings = []string{
+	"password",
+	"passwd",
+	"token",
+	"secret",
+	"cookie",
+	"auth",
+	"prompt",
+	"blackbox",
+	"email",
+	"phone",
+	"apikey",
+	"api_key",
+	"path",
+	"dir",
+	"credential",
+}
+
+func isSensitivePropKey(k string) bool {
+	low := strings.ToLower(strings.TrimSpace(k))
+	for _, sub := range blockedPropSubstrings {
+		if strings.Contains(low, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 type eventPayload struct {
@@ -122,7 +130,7 @@ func (c *Client) sanitizeProps(raw map[string]any) map[string]any {
 	}
 	for k, v := range raw {
 		ck := strings.TrimSpace(k)
-		if ck == "" || len(ck) > 40 || blockedPropKeys[strings.ToLower(ck)] {
+		if ck == "" || len(ck) > 40 || isSensitivePropKey(ck) {
 			continue
 		}
 		switch val := v.(type) {

@@ -65,6 +65,13 @@ func isBareURL(raw string) (string, bool) {
 	return s, true
 }
 
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+}
+
 func isPrivateOrLocalHost(host string) bool {
 	if allowPrivateURLFetchForTest {
 		return false
@@ -74,7 +81,7 @@ func isPrivateOrLocalHost(host string) bool {
 		return true
 	}
 	if ip := net.ParseIP(h); ip != nil {
-		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+		return isBlockedIP(ip)
 	}
 	return false
 }
@@ -89,9 +96,47 @@ func validatePublicHTTPURL(u *url.URL) error {
 	return nil
 }
 
+// safeExtractDialContext resolves DNS upfront, rejects any host resolving to
+// loopback/private/link-local/multicast IPs, and pins the connection to the
+// verified IP to prevent DNS bypass and TOCTOU DNS rebinding (#179).
+func safeExtractDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	if allowPrivateURLFetchForTest {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("目标地址无效：%w", err)
+	}
+	if isPrivateOrLocalHost(host) {
+		return nil, errors.New("出于安全限制，不支持抓取本机或局域网地址")
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return nil, fmt.Errorf("无法解析域名 %s", host)
+	}
+	for _, ip := range ips {
+		if isBlockedIP(ip.IP) {
+			return nil, errors.New("出于安全限制，目标域名解析到本机或局域网地址")
+		}
+	}
+	var lastErr error
+	for _, ip := range ips {
+		conn, derr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		if derr == nil {
+			return conn, nil
+		}
+		lastErr = derr
+	}
+	return nil, lastErr
+}
+
 func newSafeExtractHTTPClient(timeout time.Duration) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = safeExtractDialContext
 	return &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: tr,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 6 {
 				return errors.New("重定向次数过多")

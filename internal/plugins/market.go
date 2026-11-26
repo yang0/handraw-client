@@ -551,37 +551,11 @@ func (r *Runtime) unpackZipFiles(files []*zip.File, subdir, source string) (Comm
 			continue
 		}
 		name := strings.TrimPrefix(f.Name, prefix)
-		if name == "" || strings.Contains(name, "..") || strings.HasPrefix(name, "/") {
-			continue
-		}
-		if f.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		total += int64(f.UncompressedSize64)
-		if total > maxPluginUnpackedBytes {
-			return Community{}, errors.New("插件包解压体积超过 2 GB 上限")
-		}
-		dst := filepath.Join(tmp, filepath.FromSlash(name))
-		if f.FileInfo().IsDir() {
-			_ = os.MkdirAll(dst, 0o755)
-			continue
-		}
-		_ = os.MkdirAll(filepath.Dir(dst), 0o755)
-		rc, err := f.Open()
+		n, err := extractZipEntrySafe(tmp, name, f, maxPluginSingleFileBytes, maxPluginUnpackedBytes-total)
 		if err != nil {
 			return Community{}, err
 		}
-		outF, err := os.Create(dst)
-		if err != nil {
-			rc.Close()
-			return Community{}, err
-		}
-		_, cpErr := io.Copy(outF, io.LimitReader(rc, maxPluginSingleFileBytes))
-		_ = outF.Close()
-		rc.Close()
-		if cpErr != nil {
-			return Community{}, cpErr
-		}
+		total += n
 	}
 	return r.commitUnpackedDir(tmp, source)
 }

@@ -42,11 +42,14 @@ func TestTelemetryFlushAndSanitize(t *testing.T) {
 	// Unknown event must be ignored; sensitive props must be stripped.
 	c.Track("evil_unknown_event", map[string]any{"x": 1})
 	c.Track("client_launch", map[string]any{
-		"loggedIn": true,
-		"prompt":   "must-not-leave-machine",
-		"apiKey":   "sk-12345",
-		"worksDir": "C:\\Users\\secret",
-		"note":     strings.Repeat("手绘风测试", 25), // 125 runes (> 80)
+		"loggedIn":      true,
+		"prompt":        "must-not-leave-machine",
+		"user_prompt":   "must-also-be-blocked",
+		"access_token":  "tok-must-block",
+		"client_secret": "sec-must-block",
+		"apiKey":        "sk-12345",
+		"worksDir":      "C:\\Users\\secret",
+		"note":          strings.Repeat("手绘风测试", 25), // 125 runes (> 80)
 	})
 	c.Track("client_generate_done", map[string]any{
 		"providerMode": "byok",
@@ -77,7 +80,7 @@ func TestTelemetryFlushAndSanitize(t *testing.T) {
 	if ev0.Props["appVersion"] != "0.6.2" || ev0.Props["os"] != runtime.GOOS || ev0.Props["arch"] != runtime.GOARCH {
 		t.Fatalf("missing runtime metadata in props: %+v", ev0.Props)
 	}
-	for _, bad := range []string{"prompt", "apiKey", "worksDir"} {
+	for _, bad := range []string{"prompt", "user_prompt", "access_token", "client_secret", "apiKey", "worksDir"} {
 		if _, exists := ev0.Props[bad]; exists {
 			t.Fatalf("sensitive prop %q leaked into payload", bad)
 		}

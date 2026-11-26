@@ -207,14 +207,31 @@ func (c *Client) Fetch(ctx context.Context, ref string) ([]byte, string, error) 
 		return nil, "", err
 	}
 	req.Header.Set("User-Agent", "handraw-client/"+c.Version)
-	// Only send the token to the site itself, and only where it is needed:
-	// public images must not depend on the token's scopes.
-	if bu, _ := url.Parse(c.base()); bu != nil && strings.EqualFold(pu.Host, bu.Host) && needsToken(pu.Path) {
+	// Only send the token to the exact same scheme + host as siteBase, and only
+	// where it is needed: prevents plaintext http:// downgrade leaks (#179).
+	bu, _ := url.Parse(c.base())
+	sameOrigin := func(target *url.URL) bool {
+		return bu != nil && target != nil &&
+			strings.EqualFold(target.Scheme, bu.Scheme) &&
+			strings.EqualFold(target.Host, bu.Host)
+	}
+	if sameOrigin(pu) && needsToken(pu.Path) {
 		if tok := c.token(); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 		}
 	}
-	hc := &http.Client{Timeout: 5 * time.Minute}
+	hc := &http.Client{
+		Timeout: 5 * time.Minute,
+		CheckRedirect: func(r *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("重定向次数过多")
+			}
+			if !sameOrigin(r.URL) || !needsToken(r.URL.Path) {
+				r.Header.Del("Authorization")
+			}
+			return nil
+		},
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, "", err
