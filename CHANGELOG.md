@@ -2,6 +2,15 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.6 (2026-11-26)
+
+### Network & Connectivity Fixes
+- **System Proxy, IPv4-First Dialing & Transient Reset Retry (#181)**:
+  - Added `internal/netutil` desktop HTTP transport installed as `http.DefaultTransport` on startup: automatically reads OS system proxy settings (Windows Internet Settings registry & macOS `scutil --proxy`) in addition to `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`, supports standard & macOS shorthand CIDRs in bypass rules, and always bypasses loopback addresses.
+  - Preferred IPv4 (`tcp4`) before falling back to IPv6 (`tcp6`), preventing TLS handshake resets on dual-stack ISPs with broken Cloudflare IPv6 routes that previously broke website login, lazy thumbnail loading, and community feeds.
+  - Added automatic single-retry on transient pre-response TCP/TLS resets (`wsarecv` / `connection reset` / `EOF`) with actionable Chinese network diagnostics across `internal/site` (including `Fetch`) and `internal/updater`.
+  - Updated `url_extract` and Obsidian plugin `ProxyHTTPRequest` SSRF-protected transports to work seamlessly when an OS system proxy is active while still blocking direct/redirect SSRF to private or disallowed local addresses and preferring IPv4 for direct dials.
+
 ## v0.6.5 (2026-11-26)
 
 ### Features & Fixes
