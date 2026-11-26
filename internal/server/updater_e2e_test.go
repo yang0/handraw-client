@@ -35,6 +35,9 @@ func TestUpdateAPIV060ToV061WithLocalGuardAndFallback(t *testing.T) {
 		updater.Feeds = origFeeds
 	})
 
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		t.Skip("self-update binary assets are only published for windows/darwin (#180)")
+	}
 	asset := "handraw-" + runtime.GOOS + "-" + runtime.GOARCH
 	if runtime.GOOS == "windows" {
 		asset += ".exe"
