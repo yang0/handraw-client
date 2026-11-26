@@ -103,6 +103,11 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 	if bundledDir != "" {
 		_ = updater.InstallBundled(bundledDir, userPackDir)
 	}
+	if resources.HasBuiltinMarker(userPackDir) {
+		if err := resources.EnsureBuiltin(userPackDir); err != nil {
+			log.Printf("升级内置参考资源包失败：%v", err)
+		}
+	}
 	locateCandidates := []string{
 		os.Getenv("HANDRAW_PACK_DIR"),
 		userPackDir,
@@ -114,6 +119,15 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 			resources.SetCurrent(pack)
 		} else {
 			log.Printf("加载本地资源包 %s 失败：%v", packDir, lErr)
+		}
+	}
+	if resources.Current() == nil {
+		if err := resources.EnsureBuiltin(userPackDir); err != nil {
+			log.Printf("释放内置参考资源包失败：%v", err)
+		} else if pack, lErr := resources.Load(userPackDir); lErr == nil {
+			resources.SetCurrent(pack)
+		} else {
+			log.Printf("加载内置参考资源包失败：%v", lErr)
 		}
 	}
 

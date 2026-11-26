@@ -50,15 +50,34 @@ export async function renderSettings(root, ctx, params = {}) {
   }
 
   const navSeqAtStart = root._navSeq;
+  if (!params?.preserveScroll) {
+    clear(root);
+    root.append(
+      el("div", { class: "page-head" },
+        el("div", { class: "col", style: { gap: "2px" } },
+          el("h1", { class: "page-title" }, "设置与管理"),
+          el("span", { class: "muted" }, "按功能分类管理账号资产、第三方接口、本地偏好与客户端更新")
+        )
+      ),
+      el("div", { class: "card row muted", style: { gap: "8px", alignItems: "center" } },
+        el("span", { class: "login-spinner", "aria-hidden": "true" }),
+        el("span", null, "正在加载设置与本地环境…")
+      )
+    );
+  }
+  const withTimeout = (promise, ms, fallback) => Promise.race([
+    promise.catch(() => fallback),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
   const [accRes, balRes, settRes, updRes, loginRes, skillsRes, harnessRes, modRes] = await Promise.all([
-    api("GET", "/api/account").catch(() => ({ loggedIn: false })),
-    api("GET", "/api/account/balance").catch((e) => ({ loggedIn: false, error: e?.message || "" })),
-    api("GET", "/api/settings").catch(() => ({ settings: {}, providers: [] })),
-    api("GET", "/api/update").catch(() => ({})),
-    api("GET", "/api/account/login").catch(() => null),
-    api("GET", "/api/skills").catch(() => ({ items: [] })),
-    api("GET", params?.rescanHarnesses ? "/api/harnesses?rescan=1" : "/api/harnesses").catch(() => ({ items: [], scenes: [], sceneModels: {} })),
-    api("GET", "/api/models").catch(() => ({ textProviders: [], harnesses: [], loggedIn: false })),
+    withTimeout(api("GET", "/api/account"), 8000, { loggedIn: false }),
+    withTimeout(api("GET", "/api/account/balance").catch((e) => ({ loggedIn: false, error: e?.message || "" })), 8000, { loggedIn: false }),
+    withTimeout(api("GET", "/api/settings"), 6000, { settings: {}, providers: [] }),
+    withTimeout(api("GET", "/api/update"), 6000, {}),
+    withTimeout(api("GET", "/api/account/login"), 6000, null),
+    withTimeout(api("GET", "/api/skills"), 6000, { items: [] }),
+    withTimeout(api("GET", params?.rescanHarnesses ? "/api/harnesses?rescan=1" : "/api/harnesses"), 8000, { items: [], scenes: [], sceneModels: {} }),
+    withTimeout(api("GET", "/api/models"), 6000, { textProviders: [], harnesses: [], loggedIn: false }),
   ]);
   if (!root.isConnected || root._settingsRenderSeq !== seq || root._navSeq !== navSeqAtStart || root.dataset.view !== "settings") return;
 

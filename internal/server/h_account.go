@@ -95,7 +95,9 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request) (any, error) {
 			"siteBase":       s.Site.Base(),
 		}, nil
 	}
-	me, err := s.Site.Me(r.Context())
+	meCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	me, err := s.Site.Me(meCtx)
 	if err != nil {
 		if site.IsAuthError(err) {
 			_ = secrets.Delete(secrets.SiteToken)
@@ -472,7 +474,9 @@ func (s *Server) balance(w http.ResponseWriter, r *http.Request) (any, error) {
 	if !s.Site.LoggedIn() {
 		return map[string]any{"loggedIn": false}, nil
 	}
-	raw, err := s.Site.Economy(r.Context())
+	ecoCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	raw, err := s.Site.Economy(ecoCtx)
 	if err != nil {
 		if site.IsAuthError(err) {
 			_ = secrets.Delete(secrets.SiteToken)

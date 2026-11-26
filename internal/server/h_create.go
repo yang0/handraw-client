@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/yang0/handraw-client/internal/harnesses"
 	"github.com/yang0/handraw-client/internal/jobs"
@@ -247,18 +248,40 @@ func (s *Server) expandTheme(w http.ResponseWriter, r *http.Request) (any, error
 	}
 }
 
+var siteModelsFetchTimeout = 4 * time.Second
+
+func (s *Server) fetchSiteModelsCached(ctx context.Context) json.RawMessage {
+	cacheKey := "site_models:" + s.Site.Base()
+	if raw, ok := s.getMarketCache(cacheKey, 5*time.Minute); ok && len(raw) > 0 {
+		return raw
+	}
+	pubCtx, cancel := context.WithTimeout(ctx, siteModelsFetchTimeout)
+	defer cancel()
+	if raw, err := s.Site.PublicModels(pubCtx); err == nil && len(raw) > 0 {
+		s.setMarketCache(cacheKey, raw)
+		if s.DB != nil {
+			_ = s.DB.SetKV("site_models_cache", raw)
+		}
+		return raw
+	}
+	var cachedData json.RawMessage
+	if s.DB != nil && s.DB.GetKV("site_models_cache", &cachedData) == nil && len(cachedData) > 0 {
+		// Cache offline fallback briefly so rapid tab switches don't re-stall.
+		s.cacheMu.Lock()
+		s.cache[cacheKey] = cached{at: time.Now().Add(-4*time.Minute - 30*time.Second), data: cachedData}
+		s.cacheMu.Unlock()
+		return cachedData
+	}
+	empty := json.RawMessage("[]")
+	s.cacheMu.Lock()
+	s.cache[cacheKey] = cached{at: time.Now().Add(-4*time.Minute - 30*time.Second), data: empty}
+	s.cacheMu.Unlock()
+	return empty
+}
+
 func (s *Server) models(w http.ResponseWriter, r *http.Request) (any, error) {
 	st := settings.Get()
-	var siteModels json.RawMessage = json.RawMessage("[]")
-	if raw, err := s.Site.PublicModels(r.Context()); err == nil && len(raw) > 0 {
-		siteModels = raw
-		_ = s.DB.SetKV("site_models_cache", raw)
-	} else {
-		var cached json.RawMessage
-		if s.DB.GetKV("site_models_cache", &cached) == nil && len(cached) > 0 {
-			siteModels = cached
-		}
-	}
+	siteModels := s.fetchSiteModelsCached(r.Context())
 	var imgProvs []settings.Provider
 	var txtProvs []settings.Provider
 	for _, p := range st.Providers {
@@ -480,9 +503,9 @@ func (s *Server) resolveSiteSpec(ctx context.Context, modelOrID, wantRes, wantQu
 	effRes = firstStr(strings.TrimSpace(wantRes), "1k")
 	effQual = firstStr(strings.TrimSpace(wantQual), "standard")
 
-	var cached json.RawMessage
-	if s.DB != nil && s.DB.GetKV("site_models_cache", &cached) == nil && len(cached) > 0 {
-		if sp, ok := matchSiteSpec(parseSiteSpecs(cached), modelOrID, wantRes, wantQual); ok {
+	var cachedData json.RawMessage
+	if s.DB != nil && s.DB.GetKV("site_models_cache", &cachedData) == nil && len(cachedData) > 0 {
+		if sp, ok := matchSiteSpec(parseSiteSpecs(cachedData), modelOrID, wantRes, wantQual); ok {
 			return sp.ID, firstStr(sp.Resolution, effRes), firstStr(sp.Quality, effQual)
 		}
 	}

@@ -1,11 +1,14 @@
 package server
 
 import (
+	"context"
 	"math/rand"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/yang0/handraw-client/internal/resources"
 )
@@ -314,6 +317,15 @@ func (s *Server) resRandom(w http.ResponseWriter, r *http.Request) (any, error) 
 	return out, nil
 }
 
+func allowedPackImageExt(rel string) bool {
+	switch strings.ToLower(filepath.Ext(rel)) {
+	case ".webp", ".png", ".jpg", ".jpeg", ".gif", ".svg":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) filePack(w http.ResponseWriter, r *http.Request) {
 	p := resources.Current()
 	if p == nil {
@@ -321,13 +333,68 @@ func (s *Server) filePack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel := strings.TrimPrefix(r.URL.Path, "/files/pack/")
-	full, ok := p.ImagePath(rel)
-	if !ok {
+	if full, ok := p.ImagePath(rel); ok {
+		w.Header().Set("Cache-Control", "private, max-age=604800")
+		http.ServeFile(w, r, full)
+		return
+	}
+	// On-demand lazy fetch + local disk cache for single-binary installs whose
+	// embedded reference pack ships metadata without bundling all preview images (#178).
+	cleanRel := strings.TrimPrefix(strings.ReplaceAll(strings.TrimSpace(rel), "\\", "/"), "/")
+	if !strings.HasPrefix(cleanRel, "images/") || strings.Contains(cleanRel, "..") || !allowedPackImageExt(cleanRel) || s.Site == nil {
 		http.NotFound(w, r)
 		return
 	}
+	root := p.ImageRoot
+	if root == "" {
+		root = s.PackDir
+	}
+	if root == "" {
+		http.NotFound(w, r)
+		return
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	dst, err := filepath.Abs(filepath.Join(absRoot, filepath.FromSlash(cleanRel)))
+	if err != nil || !strings.HasPrefix(strings.ToLower(dst), strings.ToLower(absRoot)+string(os.PathSeparator)) {
+		http.NotFound(w, r)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	data, ct, err := s.Site.Fetch(ctx, "/"+cleanRel)
+	if err != nil || len(data) == 0 || len(data) > maxRemoteImgBytes {
+		http.NotFound(w, r)
+		return
+	}
+	detected := detectRemoteImageMIME(data)
+	if ct == "" || !strings.HasPrefix(strings.ToLower(ct), "image/") {
+		ct = detected
+	}
+	if !strings.HasPrefix(strings.ToLower(ct), "image/") {
+		http.NotFound(w, r)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err == nil {
+		if tmpFile, tErr := os.CreateTemp(filepath.Dir(dst), ".pack-*.tmp"); tErr == nil {
+			tmpPath := tmpFile.Name()
+			_, wErr := tmpFile.Write(data)
+			cErr := tmpFile.Close()
+			if wErr == nil && cErr == nil {
+				if rErr := os.Rename(tmpPath, dst); rErr != nil {
+					_ = os.Remove(tmpPath)
+				}
+			} else {
+				_ = os.Remove(tmpPath)
+			}
+		}
+	}
+	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Cache-Control", "private, max-age=604800")
-	http.ServeFile(w, r, full)
+	_, _ = w.Write(data)
 }
 
 func (s *Server) fileLocal(w http.ResponseWriter, r *http.Request) {
