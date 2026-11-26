@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -63,8 +64,9 @@ func InstallDefaultTransport() {
 
 // SystemProxyFunc resolves proxy settings in priority order:
 //  1. Never proxy loopback destinations (127.0.0.1, localhost, ::1).
-//  2. Standard HTTP_PROXY / HTTPS_PROXY / NO_PROXY environment variables.
-//  3. Live OS system proxy (Windows Internet Settings / macOS scutil --proxy).
+//  2. Respect NO_PROXY / no_proxy environment bypasses.
+//  3. Standard HTTP_PROXY / HTTPS_PROXY environment variables.
+//  4. Live OS system proxy (Windows Internet Settings / macOS scutil --proxy).
 func SystemProxyFunc(req *http.Request) (*url.URL, error) {
 	if req == nil || req.URL == nil {
 		return nil, nil
@@ -72,10 +74,102 @@ func SystemProxyFunc(req *http.Request) (*url.URL, error) {
 	if isLoopbackHost(req.URL.Hostname()) {
 		return nil, nil
 	}
+	if envNoProxyMatches(req.URL.Hostname()) {
+		return nil, nil
+	}
 	if envProxy, err := http.ProxyFromEnvironment(req); envProxy != nil || err != nil {
 		return envProxy, err
 	}
 	return osSystemProxy(req.URL)
+}
+
+func envNoProxyMatches(host string) bool {
+	raw := strings.TrimSpace(os.Getenv("NO_PROXY"))
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("no_proxy"))
+	}
+	if raw == "" {
+		return false
+	}
+	return matchProxyOverride(strings.ReplaceAll(raw, ",", ";"), host)
+}
+
+// OrderIPsPreferIPv4 returns a new slice with IPv4 addresses placed before IPv6
+// addresses while preserving relative order within each family.
+func OrderIPsPreferIPv4(ips []net.IPAddr) []net.IPAddr {
+	if len(ips) <= 1 {
+		return ips
+	}
+	out := make([]net.IPAddr, 0, len(ips))
+	for _, ip := range ips {
+		if ip.IP != nil && ip.IP.To4() != nil {
+			out = append(out, ip)
+		}
+	}
+	for _, ip := range ips {
+		if ip.IP == nil || ip.IP.To4() == nil {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// ProxyEndpointAddr returns the canonical host:port dialed by net/http when
+// connecting to proxyURL (supplying the scheme's default port when omitted).
+func ProxyEndpointAddr(proxyURL *url.URL) string {
+	if proxyURL == nil || proxyURL.Host == "" {
+		return ""
+	}
+	host := proxyURL.Hostname()
+	port := proxyURL.Port()
+	if port == "" {
+		switch strings.ToLower(proxyURL.Scheme) {
+		case "https":
+			port = "443"
+		case "socks", "socks5", "socks5h":
+			port = "1080"
+		default:
+			port = "80"
+		}
+	}
+	return strings.ToLower(net.JoinHostPort(host, port))
+}
+
+// DoWithRetry executes an HTTP request created by makeReq, retrying once on a
+// pre-response transient TCP/TLS reset (after closing idle connections).
+func DoWithRetry(ctx context.Context, client *http.Client, makeReq func() (*http.Request, error)) (*http.Response, error) {
+	if client == nil {
+		client = NewClient(60 * time.Second)
+	}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := makeReq()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if attempt == 0 && ctx.Err() == nil && IsTransientReset(err) {
+			if tr, ok := client.Transport.(*http.Transport); ok && tr != nil {
+				tr.CloseIdleConnections()
+			} else if client.Transport == nil {
+				if tr, ok := http.DefaultTransport.(*http.Transport); ok && tr != nil {
+					tr.CloseIdleConnections()
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
+		break
+	}
+	return nil, lastErr
 }
 
 // PreferIPv4DialContext dials IPv4 ("tcp4") first for dual-stack "tcp" requests
@@ -239,16 +333,21 @@ func parseWindowsProxy(proxyServer, proxyOverride string, u *url.URL) (*url.URL,
 }
 
 // matchProxyOverride checks whether host matches a semicolon-separated Windows
-// ProxyOverride list (supporting wildcards like *.local, 127.*, and <local>).
+// ProxyOverride / macOS ExceptionsList / NO_PROXY list (supporting wildcards
+// like *.local, 127.*, <local>, leading-dot domains, and standard or shorthand CIDRs).
 func matchProxyOverride(override, host string) bool {
 	host = strings.ToLower(strings.TrimSpace(strings.Trim(host, "[]")))
 	if host == "" {
 		return false
 	}
+	hostIP := net.ParseIP(host)
 	for _, raw := range strings.Split(override, ";") {
 		pat := strings.ToLower(strings.TrimSpace(raw))
 		if pat == "" {
 			continue
+		}
+		if pat == "*" {
+			return true
 		}
 		if pat == "<local>" {
 			if !strings.Contains(host, ".") {
@@ -260,10 +359,19 @@ func matchProxyOverride(override, host string) bool {
 		if idx := strings.Index(pat, "://"); idx >= 0 {
 			pat = pat[idx+3:]
 		}
-		if colon := strings.LastIndex(pat, ":"); colon > 0 && !strings.Contains(pat, "]") {
+		if colon := strings.LastIndex(pat, ":"); colon > 0 && !strings.Contains(pat, "]") && !strings.Contains(pat, "/") {
 			pat = pat[:colon]
 		}
+		if strings.Contains(pat, "/") && hostIP != nil {
+			if matchCIDROverride(pat, hostIP) {
+				return true
+			}
+			continue
+		}
 		if pat == host {
+			return true
+		}
+		if strings.HasPrefix(pat, ".") && (host == pat[1:] || strings.HasSuffix(host, pat)) {
 			return true
 		}
 		if strings.ContainsAny(pat, "*?") {
@@ -275,6 +383,29 @@ func matchProxyOverride(override, host string) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// matchCIDROverride matches both full CIDRs ("192.168.0.0/16") and macOS
+// scutil shorthand IPv4 CIDRs ("169.254/16", "10/8").
+func matchCIDROverride(pat string, ip net.IP) bool {
+	if _, ipnet, err := net.ParseCIDR(pat); err == nil {
+		return ipnet.Contains(ip)
+	}
+	prefix, mask, ok := strings.Cut(pat, "/")
+	if !ok || strings.Contains(prefix, ":") {
+		return false
+	}
+	octets := strings.Split(prefix, ".")
+	if len(octets) == 0 || len(octets) >= 4 {
+		return false
+	}
+	for len(octets) < 4 {
+		octets = append(octets, "0")
+	}
+	if _, ipnet, err := net.ParseCIDR(strings.Join(octets, ".") + "/" + mask); err == nil {
+		return ipnet.Contains(ip)
 	}
 	return false
 }

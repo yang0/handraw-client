@@ -16,7 +16,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/yang0/handraw-client/internal/netutil"
 )
 
 const (
@@ -90,38 +93,50 @@ func ProxyHTTPRequest(ctx context.Context, req ProxyRequest, allowedLocalPorts [
 		}
 	}
 
-	// Custom DialContext enforces SSRF check after DNS resolution too.
-	dialer := &net.Dialer{Timeout: 12 * time.Second}
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: func(dctx context.Context, network, addr string) (net.Conn, error) {
-			h, pStr, splitErr := net.SplitHostPort(addr)
-			if splitErr != nil {
-				return nil, splitErr
+	// Custom DialContext enforces SSRF check after DNS resolution while still
+	// honoring OS system proxy settings and preferring IPv4 for direct dials (#181).
+	dialer := &net.Dialer{Timeout: 12 * time.Second, KeepAlive: 30 * time.Second}
+	var approvedProxies sync.Map
+	transport := netutil.NewTransport()
+	transport.Proxy = func(r *http.Request) (*url.URL, error) {
+		pURL, err := netutil.SystemProxyFunc(r)
+		if err == nil && pURL != nil {
+			if ep := netutil.ProxyEndpointAddr(pURL); ep != "" {
+				approvedProxies.Store(ep, struct{}{})
 			}
-			pVal, _ := strconv.Atoi(pStr)
-			ips, lErr := net.DefaultResolver.LookupIPAddr(dctx, h)
-			if lErr != nil || len(ips) == 0 {
-				return dialer.DialContext(dctx, network, addr)
-			}
-			var chosen net.IP
-			for _, ipAddr := range ips {
-				if isPrivateOrLoopbackIP(ipAddr.IP) {
-					if ipAddr.IP.IsLoopback() && isAllowedLocalPort(pVal, allowedLocalPorts) {
-						chosen = ipAddr.IP
-						break
-					}
-					return nil, fmt.Errorf("安全策略已拦截对内网地址 %s 的请求", ipAddr.IP.String())
-				}
-				if chosen == nil {
+		}
+		return pURL, err
+	}
+	transport.DialContext = func(dctx context.Context, network, addr string) (net.Conn, error) {
+		if _, ok := approvedProxies.Load(strings.ToLower(strings.TrimSpace(addr))); ok {
+			return dialer.DialContext(dctx, network, addr)
+		}
+		h, pStr, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			return nil, splitErr
+		}
+		pVal, _ := strconv.Atoi(pStr)
+		ips, lErr := net.DefaultResolver.LookupIPAddr(dctx, h)
+		if lErr != nil || len(ips) == 0 {
+			return dialer.DialContext(dctx, network, addr)
+		}
+		var chosen net.IP
+		for _, ipAddr := range netutil.OrderIPsPreferIPv4(ips) {
+			if isPrivateOrLoopbackIP(ipAddr.IP) {
+				if ipAddr.IP.IsLoopback() && isAllowedLocalPort(pVal, allowedLocalPorts) {
 					chosen = ipAddr.IP
+					break
 				}
+				return nil, fmt.Errorf("安全策略已拦截对内网地址 %s 的请求", ipAddr.IP.String())
 			}
 			if chosen == nil {
-				return nil, errors.New("无法解析目标地址")
+				chosen = ipAddr.IP
 			}
-			return dialer.DialContext(dctx, network, net.JoinHostPort(chosen.String(), pStr))
-		},
+		}
+		if chosen == nil {
+			return nil, errors.New("无法解析目标地址")
+		}
+		return dialer.DialContext(dctx, network, net.JoinHostPort(chosen.String(), pStr))
 	}
 
 	method := strings.ToUpper(strings.TrimSpace(req.Method))
@@ -183,7 +198,33 @@ func ProxyHTTPRequest(ctx context.Context, req ProxyRequest, allowedLocalPorts [
 		httpReq.Header.Set("User-Agent", "Mozilla/5.0 (compatible; HandrawObsidianCompat/1.0)")
 	}
 
-	client := &http.Client{Transport: transport, Timeout: timeout}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(r *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("重定向次数过多")
+			}
+			rh := strings.ToLower(r.URL.Hostname())
+			if rh == "localhost" || rh == "127.0.0.1" || rh == "::1" {
+				rp := 80
+				if r.URL.Scheme == "https" {
+					rp = 443
+				}
+				if ps := r.URL.Port(); ps != "" {
+					if v, perr := strconv.Atoi(ps); perr == nil {
+						rp = v
+					}
+				}
+				if !isAllowedLocalPort(rp, allowedLocalPorts) {
+					return fmt.Errorf("安全策略已拦截重定向至本机端口 %d", rp)
+				}
+			} else if ip := net.ParseIP(rh); ip != nil && isPrivateOrLoopbackIP(ip) {
+				return fmt.Errorf("安全策略已拦截重定向至内网地址 %s", ip.String())
+			}
+			return nil
+		},
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return ProxyResponse{}, err

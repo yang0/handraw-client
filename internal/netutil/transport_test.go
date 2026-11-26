@@ -3,9 +3,13 @@ package netutil
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -108,5 +112,77 @@ func TestPreferIPv4DialAndClient(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestProxyOverrideCIDRAndNoProxy(t *testing.T) {
+	if !matchProxyOverride("192.168.0.0/16;169.254/16;.internal.corp", "192.168.1.55") {
+		t.Fatalf("expected standard CIDR 192.168.0.0/16 match")
+	}
+	if !matchProxyOverride("192.168.0.0/16;169.254/16;.internal.corp", "169.254.10.20") {
+		t.Fatalf("expected macOS shorthand CIDR 169.254/16 match")
+	}
+	if !matchProxyOverride("192.168.0.0/16;169.254/16;.internal.corp", "api.internal.corp") {
+		t.Fatalf("expected leading-dot domain match")
+	}
+	if matchProxyOverride("192.168.0.0/16;169.254/16", "104.21.15.102") {
+		t.Fatalf("public IP must not match private CIDR overrides")
+	}
+
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:19999")
+	t.Setenv("NO_PROXY", "handraw-style.com,.example.org")
+	req, _ := http.NewRequest("GET", "https://handraw-style.com/api/boot", nil)
+	if got, err := SystemProxyFunc(req); err != nil || got != nil {
+		t.Fatalf("expected NO_PROXY to bypass env/OS proxy, got %v err=%v", got, err)
+	}
+}
+
+func TestOrderIPsPreferIPv4AndProxyEndpointAddr(t *testing.T) {
+	ips := []net.IPAddr{
+		{IP: net.ParseIP("2606:4700:3036::6815:f66")},
+		{IP: net.ParseIP("104.21.15.102")},
+		{IP: net.ParseIP("2606:4700:3036::ac43:d2d4")},
+		{IP: net.ParseIP("172.67.210.212")},
+	}
+	ordered := OrderIPsPreferIPv4(ips)
+	if ordered[0].IP.String() != "104.21.15.102" || ordered[1].IP.String() != "172.67.210.212" || ordered[2].IP.To4() != nil {
+		t.Fatalf("expected IPv4 addresses first, got %+v", ordered)
+	}
+	pu, _ := url.Parse("http://127.0.0.1:7897")
+	if got := ProxyEndpointAddr(pu); got != "127.0.0.1:7897" {
+		t.Fatalf("unexpected ProxyEndpointAddr: %q", got)
+	}
+	puDefault, _ := url.Parse("socks5://127.0.0.1")
+	if got := ProxyEndpointAddr(puDefault); got != "127.0.0.1:1080" {
+		t.Fatalf("unexpected default socks5 port: %q", got)
+	}
+}
+
+type rtFunc func(*http.Request) (*http.Response, error)
+
+func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestDoWithRetry(t *testing.T) {
+	var attempts atomic.Int32
+	c := &http.Client{
+		Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+			if attempts.Add(1) == 1 {
+				return nil, errors.New("wsarecv: An existing connection was forcibly closed by the remote host.")
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+			}, nil
+		}),
+	}
+	resp, err := DoWithRetry(context.Background(), c, func() (*http.Request, error) {
+		return http.NewRequestWithContext(context.Background(), "GET", "https://handraw-style.example/test", nil)
+	})
+	if err != nil {
+		t.Fatalf("DoWithRetry failed: %v", err)
+	}
+	resp.Body.Close()
+	if attempts.Load() != 2 || resp.StatusCode != 200 {
+		t.Fatalf("expected 2 attempts and 200, got attempts=%d status=%d", attempts.Load(), resp.StatusCode)
 	}
 }

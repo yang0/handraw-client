@@ -12,7 +12,10 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/yang0/handraw-client/internal/netutil"
 )
 
 // ExtractedInspiration is the standard output contract shared by all built-in
@@ -121,7 +124,7 @@ func safeExtractDialContext(ctx context.Context, network, addr string) (net.Conn
 		}
 	}
 	var lastErr error
-	for _, ip := range ips {
+	for _, ip := range netutil.OrderIPsPreferIPv4(ips) {
 		conn, derr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
 		if derr == nil {
 			return conn, nil
@@ -132,8 +135,29 @@ func safeExtractDialContext(ctx context.Context, network, addr string) (net.Conn
 }
 
 func newSafeExtractHTTPClient(timeout time.Duration) *http.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.DialContext = safeExtractDialContext
+	tr := netutil.NewTransport()
+	var approvedProxies sync.Map
+	tr.Proxy = func(req *http.Request) (*url.URL, error) {
+		if !allowPrivateURLFetchForTest {
+			if err := validatePublicHTTPURL(req.URL); err != nil {
+				return nil, err
+			}
+		}
+		pURL, err := netutil.SystemProxyFunc(req)
+		if err == nil && pURL != nil {
+			if ep := netutil.ProxyEndpointAddr(pURL); ep != "" {
+				approvedProxies.Store(ep, struct{}{})
+			}
+		}
+		return pURL, err
+	}
+	proxyDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if _, ok := approvedProxies.Load(strings.ToLower(strings.TrimSpace(addr))); ok {
+			return proxyDialer.DialContext(ctx, network, addr)
+		}
+		return safeExtractDialContext(ctx, network, addr)
+	}
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: tr,
@@ -282,14 +306,16 @@ type fxTweetNode struct {
 
 func fetchViaFxTwitter(ctx context.Context, userSeg, statusID string) (*ExtractedInspiration, error) {
 	ep := fmt.Sprintf("%s/%s/status/%s", strings.TrimRight(fxTwitterAPIBase, "/"), url.PathEscape(userSeg), url.PathEscape(statusID))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "HandrawClient/1.0 (+https://handraw-style.com)")
-	req.Header.Set("Accept", "application/json")
-	hc := &http.Client{Timeout: 15 * time.Second}
-	resp, err := hc.Do(req)
+	hc := netutil.NewClient(15 * time.Second)
+	resp, err := netutil.DoWithRetry(ctx, hc, func() (*http.Request, error) {
+		r, rerr := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
+		if rerr != nil {
+			return nil, rerr
+		}
+		r.Header.Set("User-Agent", "HandrawClient/1.0 (+https://handraw-style.com)")
+		r.Header.Set("Accept", "application/json")
+		return r, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -396,14 +422,16 @@ func fetchViaFxTwitter(ctx context.Context, userSeg, statusID string) (*Extracte
 
 func fetchViaVxTwitter(ctx context.Context, userSeg, statusID string) (*ExtractedInspiration, error) {
 	ep := fmt.Sprintf("%s/%s/status/%s", strings.TrimRight(vxTwitterAPIBase, "/"), url.PathEscape(userSeg), url.PathEscape(statusID))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "HandrawClient/1.0")
-	req.Header.Set("Accept", "application/json")
-	hc := &http.Client{Timeout: 12 * time.Second}
-	resp, err := hc.Do(req)
+	hc := netutil.NewClient(12 * time.Second)
+	resp, err := netutil.DoWithRetry(ctx, hc, func() (*http.Request, error) {
+		r, rerr := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
+		if rerr != nil {
+			return nil, rerr
+		}
+		r.Header.Set("User-Agent", "HandrawClient/1.0")
+		r.Header.Set("Accept", "application/json")
+		return r, nil
+	})
 	if err != nil {
 		return nil, err
 	}

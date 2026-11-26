@@ -172,13 +172,15 @@ func (u *Updater) Check(ctx context.Context) (Status, error) {
 
 func (u *Updater) fetchRelease(ctx context.Context, feed string) (*Release, error) {
 	c := netutil.NewClient(20 * time.Second)
-	req, err := http.NewRequestWithContext(ctx, "GET", feed, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json, application/json;q=0.9")
-	req.Header.Set("User-Agent", "handraw-client/"+u.Version)
-	resp, err := c.Do(req)
+	resp, err := netutil.DoWithRetry(ctx, c, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", feed, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/vnd.github+json, application/json;q=0.9")
+		req.Header.Set("User-Agent", "handraw-client/"+u.Version)
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -444,12 +446,14 @@ func (u *Updater) Download(ctx context.Context) error {
 }
 
 func (u *Updater) getLimit(ctx context.Context, url string, maxBytes int64, progress func(int64)) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "handraw-client/"+u.Version)
-	resp, err := u.HTTP.Do(req)
+	resp, err := netutil.DoWithRetry(ctx, u.HTTP, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "handraw-client/"+u.Version)
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -488,12 +492,14 @@ func (u *Updater) getLimit(ctx context.Context, url string, maxBytes int64, prog
 // downloadToFile streams url directly to dstPath while computing SHA-256 and
 // enforcing maxBytes, avoiding holding large installers in memory (#176).
 func (u *Updater) downloadToFile(ctx context.Context, url, dstPath string, maxBytes int64, progress func(int64)) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "handraw-client/"+u.Version)
-	resp, err := u.HTTP.Do(req)
+	resp, err := netutil.DoWithRetry(ctx, u.HTTP, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "handraw-client/"+u.Version)
+		return req, nil
+	})
 	if err != nil {
 		return "", err
 	}

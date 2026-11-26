@@ -435,9 +435,8 @@ type GenerateResult struct {
 // client always sends requestId (idempotency) and creationSource.
 func (c *Client) Generate(ctx context.Context, body map[string]any) (GenerateResult, error) {
 	var out GenerateResult
-	hc := c.HTTP
 	c2 := *c
-	c2.HTTP = &http.Client{Timeout: 6 * time.Minute, Transport: hc.Transport}
+	c2.HTTP = &http.Client{Timeout: 6 * time.Minute, Transport: c.transport()}
 	err := c2.Do(ctx, "POST", "/api/studio/generate", body, &out)
 	return out, err
 }
@@ -461,7 +460,7 @@ func (c *Client) Task(ctx context.Context, taskID, requestID string) (GenerateRe
 func (c *Client) ArticlePlan(ctx context.Context, body map[string]any) (json.RawMessage, error) {
 	var out json.RawMessage
 	c2 := *c
-	c2.HTTP = &http.Client{Timeout: 4 * time.Minute, Transport: c.HTTP.Transport}
+	c2.HTTP = &http.Client{Timeout: 4 * time.Minute, Transport: c.transport()}
 	err := c2.Do(ctx, "POST", "/api/studio/article-plan", body, &out)
 	return out, err
 }
@@ -469,7 +468,7 @@ func (c *Client) ArticlePlan(ctx context.Context, body map[string]any) (json.Raw
 func (c *Client) BatchPlan(ctx context.Context, body map[string]any) (json.RawMessage, error) {
 	var out json.RawMessage
 	c2 := *c
-	c2.HTTP = &http.Client{Timeout: 4 * time.Minute, Transport: c.HTTP.Transport}
+	c2.HTTP = &http.Client{Timeout: 4 * time.Minute, Transport: c.transport()}
 	err := c2.Do(ctx, "POST", "/api/studio/batch-plan", body, &out)
 	return out, err
 }
@@ -477,7 +476,7 @@ func (c *Client) BatchPlan(ctx context.Context, body map[string]any) (json.RawMe
 func (c *Client) ChatPlan(ctx context.Context, body map[string]any) (json.RawMessage, error) {
 	var out json.RawMessage
 	c2 := *c
-	c2.HTTP = &http.Client{Timeout: 4 * time.Minute, Transport: c.HTTP.Transport}
+	c2.HTTP = &http.Client{Timeout: 4 * time.Minute, Transport: c.transport()}
 	err := c2.Do(ctx, "POST", "/api/studio/chat-plan", body, &out)
 	return out, err
 }
@@ -499,7 +498,7 @@ func (c *Client) AnalyzeStyle(ctx context.Context, images []string, purpose stri
 func (c *Client) CanvasAssistant(ctx context.Context, body map[string]any) (json.RawMessage, error) {
 	var out json.RawMessage
 	c2 := *c
-	c2.HTTP = &http.Client{Timeout: 3 * time.Minute, Transport: c.HTTP.Transport}
+	c2.HTTP = &http.Client{Timeout: 3 * time.Minute, Transport: c.transport()}
 	err := c2.Do(ctx, "POST", "/api/studio/canvas-assistant", body, &out)
 	return out, err
 }
@@ -544,7 +543,7 @@ type AIChatResult struct {
 func (c *Client) AIChat(ctx context.Context, req AIChatRequest) (AIChatResult, error) {
 	var out AIChatResult
 	c2 := *c
-	c2.HTTP = &http.Client{Timeout: 3 * time.Minute, Transport: c.HTTP.Transport}
+	c2.HTTP = &http.Client{Timeout: 3 * time.Minute, Transport: c.transport()}
 	err := c2.Do(ctx, "POST", "/api/ai/chat", req, &out)
 	return out, err
 }
