@@ -51,12 +51,22 @@ def _api(method: str, path: str, token: str, payload: dict[str, Any] | None = No
 def _upload_attachment(owner: str, repo: str, release_id: int, token: str, file_path: Path) -> None:
     url = f"{API_BASE}/repos/{owner}/{repo}/releases/{release_id}/attach_files"
     for attempt in range(1, 4):
+        t0 = time.monotonic()
         proc = subprocess.run(
             [
                 "curl",
                 "-fsS",
+                "--http1.1",
+                "-H",
+                "Expect:",
+                "--connect-timeout",
+                "30",
+                "--speed-limit",
+                "10240",
+                "--speed-time",
+                "45",
                 "--max-time",
-                "600",
+                "300",
                 "-X",
                 "POST",
                 url,
@@ -68,11 +78,13 @@ def _upload_attachment(owner: str, repo: str, release_id: int, token: str, file_
             capture_output=True,
             text=True,
         )
+        elapsed = time.monotonic() - t0
         if proc.returncode == 0:
+            print(f"  -> uploaded {file_path.name} in {elapsed:.1f}s", flush=True)
             return
+        err_msg = (proc.stderr or proc.stdout or "").replace(token, "***").strip()
+        print(f"  -> attempt {attempt}/3 failed for {file_path.name} after {elapsed:.1f}s (rc={proc.returncode}): {err_msg[:300]}", flush=True)
         if attempt == 3:
-            # Never print token in error output.
-            err_msg = (proc.stderr or proc.stdout or "").replace(token, "***")
             raise RuntimeError(f"upload {file_path.name} failed (rc={proc.returncode}): {err_msg[:400]}")
         time.sleep(3 * attempt)
 
@@ -99,7 +111,7 @@ def main() -> int:
 
     files = sorted(
         (p for p in art_dir.iterdir() if p.is_file()),
-        key=lambda p: (1 if p.name.startswith("SHA256SUMS") else 0, p.name),
+        key=lambda p: (p.stat().st_size, p.name),
     )
     if not files:
         raise RuntimeError(f"no artifacts found in {art_dir}")
@@ -109,7 +121,7 @@ def main() -> int:
     release_id: int | None = None
     if status == 200 and isinstance(existing, dict) and existing.get("id"):
         release_id = int(existing["id"])
-        print(f"Updating existing Gitee release id={release_id} for {tag}")
+        print(f"Updating existing Gitee release id={release_id} for {tag}", flush=True)
         # Update release title/body
         _api(
             "PATCH",
@@ -140,13 +152,13 @@ def main() -> int:
         if c_status not in (200, 201) or not isinstance(created, dict) or not created.get("id"):
             raise RuntimeError(f"create Gitee release failed ({c_status}): {created}")
         release_id = int(created["id"])
-        print(f"Created Gitee release id={release_id} for {tag}")
+        print(f"Created Gitee release id={release_id} for {tag}", flush=True)
 
     for fp in files:
-        print(f"Uploading {fp.name} ({fp.stat().st_size} bytes) to Gitee release {release_id}...")
+        print(f"Uploading {fp.name} ({fp.stat().st_size} bytes) to Gitee release {release_id}...", flush=True)
         _upload_attachment(owner, repo, release_id, token, fp)
 
-    print(f"Gitee release mirror complete: https://gitee.com/{owner}/{repo}/releases/tag/{tag}")
+    print(f"Gitee release mirror complete: https://gitee.com/{owner}/{repo}/releases/tag/{tag}", flush=True)
     return 0
 
 
