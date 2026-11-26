@@ -2,6 +2,28 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.5 (2026-11-26)
+
+### Features & Fixes
+- **Embedded Resource Pack & Settings Stability (#178)**:
+  - Embedded the official `handraw-style` v1.9.13 reference snapshot (styles, layouts, colors, tones, model capabilities, aliases, and layout prompts) directly into the client binary so single-file installs work out of the box without hitting `503 资源包未加载`.
+  - Added on-demand lazy fetching and local disk caching for preview thumbnails under `/files/pack/images/...`.
+  - Cached `/api/models` responses (5-minute TTL) with a 4-second upstream timeout and immediate loading state in `#settings`, preventing blank or hung settings pages when upstream is slow or offline.
+
+### Security & Hardening
+- **Network, Storage & Telemetry Hardening (#179)**:
+  - Added DNS-pinned `DialContext` SSRF protection to `url_extract` to block private/loopback/link-local resolutions and DNS rebinding.
+  - Escaped SQLite `file:` URI paths (`sqliteFileDSN`) so data directories containing `?`, `#`, or `%` cannot corrupt DSN parameters.
+  - Hardened `site.Fetch` to require matching `Scheme` + `Host` before sending `Authorization: Bearer` headers and strip auth headers on cross-origin redirects.
+  - Upgraded telemetry property filtering to case-insensitive sensitive substring matching (`token`, `secret`, `prompt`, `password`, etc.) and added `go vet` checks to CI.
+
+### Architecture, Docs & Tests
+- **Unified Market Sources, Shared Safe Zip Installer & Core Tests (#180)**:
+  - Consolidated the 4 duplicated market source configurations (plugins, skills, galleries, Obsidian) onto a shared `MarketSource` type and unified all 4 zip installers onto `internal/ziputil` (symlink rejection, zip-slip protection, entry count and total size caps).
+  - Tightened `internal/providers` in-memory response caps to 64 MiB and added streaming `DownloadToFile` helper.
+  - Prevented unsupported `linux` (`nogui`) builds from advertising nonexistent release assets in the updater.
+  - Expanded `README.md` with installation instructions, OS signing caveats, and attribution notice, and added unit test coverage for `internal/settings` and `internal/secrets`.
+
 ## v0.6.4 (2026-11-26)
 
 ### Security & Reliability
