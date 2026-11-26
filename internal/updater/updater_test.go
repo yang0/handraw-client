@@ -487,3 +487,15 @@ func TestDownloadLimitAndUnzipBundleSecurity(t *testing.T) {
 		t.Fatalf("expected zip exceeding total byte limit to be rejected")
 	}
 }
+
+func TestAssetNameUnsupportedOS(t *testing.T) {
+	if got := assetNameFor("windows", "amd64"); got != "handraw-windows-amd64.exe" {
+		t.Fatalf("windows asset = %q", got)
+	}
+	if got := assetNameFor("darwin", "arm64"); got != "handraw-darwin-arm64.zip" {
+		t.Fatalf("darwin asset = %q", got)
+	}
+	if got := assetNameFor("linux", "amd64"); got != "" {
+		t.Fatalf("linux nogui should not claim a non-existent release asset, got %q", got)
+	}
+}

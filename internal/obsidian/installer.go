@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/yang0/handraw-client/internal/ziputil"
 )
 
 type MarketPricing struct {
@@ -503,53 +505,13 @@ func (m *Manager) InstallFromZip(zipBytes []byte, source string) (InstalledPlugi
 	}
 	defer os.RemoveAll(tmpDir)
 
-	var total int64
-	for _, f := range zr.File {
-		name := strings.TrimPrefix(path.Clean("/"+strings.ReplaceAll(f.Name, "\\", "/")), "/")
-		if strings.HasPrefix(name, "__MACOSX/") {
-			continue
-		}
-		if prefix != "" && !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		rel := strings.TrimPrefix(name, prefix)
-		rel = strings.TrimLeft(rel, "/")
-		if rel == "" || rel == "." || strings.Contains(rel, "..") {
-			continue
-		}
-		dst := filepath.Join(tmpDir, filepath.FromSlash(rel))
-		relCheck, rErr := filepath.Rel(tmpDir, dst)
-		if rErr != nil || strings.HasPrefix(relCheck, "..") {
-			return InstalledPlugin{}, errors.New("ZIP 内包含非法路径")
-		}
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(dst, 0o755); err != nil {
-				return InstalledPlugin{}, err
-			}
-			continue
-		}
-		rc, oErr := f.Open()
-		if oErr != nil {
-			return InstalledPlugin{}, oErr
-		}
-		data, rErr := io.ReadAll(io.LimitReader(rc, maxPluginFileBytes+1))
-		rc.Close()
-		if rErr != nil {
-			return InstalledPlugin{}, rErr
-		}
-		if int64(len(data)) > maxPluginFileBytes {
-			return InstalledPlugin{}, errors.New("ZIP 内单文件超过 32MB 限制")
-		}
-		total += int64(len(data))
-		if total > maxTotalPluginBytes {
-			return InstalledPlugin{}, errors.New("插件解压后体积超过 64MB 限制")
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return InstalledPlugin{}, err
-		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return InstalledPlugin{}, err
-		}
+	if _, err := ziputil.ExtractFiles(zr.File, tmpDir, ziputil.Options{
+		Prefix:        prefix,
+		MaxFileBytes:  maxPluginFileBytes,
+		MaxTotalBytes: maxTotalPluginBytes,
+		SkipMacOSX:    true,
+	}); err != nil {
+		return InstalledPlugin{}, err
 	}
 
 	mf, err := ReadManifest(tmpDir)

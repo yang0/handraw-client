@@ -17,13 +17,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/yang0/handraw-client/internal/ziputil"
 )
 
 const APIVersion = "1.0"
@@ -629,14 +630,13 @@ func (r *Runtime) InstallZip(data []byte, source string) (Community, error) {
 			}
 		}
 	}
-	var total int64
-	for _, f := range zr.File {
-		name := strings.TrimPrefix(f.Name, prefix)
-		n, err := extractZipEntrySafe(tmp, name, f, 50<<20, (100<<20)-total)
-		if err != nil {
-			return Community{}, err
-		}
-		total += n
+	if _, err := ziputil.ExtractFiles(zr.File, tmp, ziputil.Options{
+		Prefix:        prefix,
+		MaxFileBytes:  50 << 20,
+		MaxTotalBytes: 100 << 20,
+		SkipMacOSX:    true,
+	}); err != nil {
+		return Community{}, err
 	}
 	c, err := ReadCommunity(tmp)
 	if err != nil {
@@ -658,76 +658,6 @@ func (r *Runtime) InstallZip(data []byte, source string) (Community, error) {
 	c.Dir = final
 	c.Source = source
 	return c, nil
-}
-
-// extractZipEntrySafe safely extracts one zip entry into tmpRoot, rejecting path
-// traversal (including backslashes & symlinked parents) and enforcing actual
-// written byte caps instead of trusting zip header sizes (#179).
-func extractZipEntrySafe(tmpRoot, relName string, f *zip.File, maxFileBytes, remainingTotal int64) (int64, error) {
-	if f.Mode()&os.ModeSymlink != 0 {
-		return 0, nil
-	}
-	norm := strings.ReplaceAll(relName, `\`, "/")
-	norm = strings.TrimPrefix(norm, "./")
-	if norm == "" || strings.HasPrefix(norm, "/") {
-		return 0, nil
-	}
-	for _, seg := range strings.Split(norm, "/") {
-		if seg == ".." {
-			return 0, nil
-		}
-	}
-	cleanRoot := filepath.Clean(tmpRoot)
-	dst := filepath.Join(cleanRoot, filepath.FromSlash(norm))
-	if dst == cleanRoot || !strings.HasPrefix(dst, cleanRoot+string(os.PathSeparator)) {
-		return 0, errors.New("插件包内含非法越界路径")
-	}
-	if f.FileInfo().IsDir() {
-		if err := os.MkdirAll(dst, 0o755); err != nil {
-			return 0, err
-		}
-		return 0, nil
-	}
-	parent := filepath.Dir(dst)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return 0, err
-	}
-	if resolvedRoot, err1 := filepath.EvalSymlinks(cleanRoot); err1 == nil {
-		if resolvedParent, err2 := filepath.EvalSymlinks(parent); err2 == nil {
-			if resolvedParent != resolvedRoot && !strings.HasPrefix(resolvedParent, resolvedRoot+string(os.PathSeparator)) {
-				return 0, errors.New("插件包解压路径发生符号链接越界")
-			}
-		}
-	}
-	limit := maxFileBytes
-	if remainingTotal < limit {
-		limit = remainingTotal
-	}
-	if limit < 0 {
-		return 0, errors.New("插件包解压体积超过上限")
-	}
-	rc, err := f.Open()
-	if err != nil {
-		return 0, err
-	}
-	defer rc.Close()
-	outF, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return 0, err
-	}
-	n, cpErr := io.Copy(outF, io.LimitReader(rc, limit+1))
-	closeErr := outF.Close()
-	if cpErr != nil {
-		return 0, cpErr
-	}
-	if closeErr != nil {
-		return 0, closeErr
-	}
-	if n > limit {
-		_ = os.Remove(dst)
-		return 0, errors.New("插件包解压体积超过上限")
-	}
-	return n, nil
 }
 
 func (r *Runtime) Remove(id string) error {

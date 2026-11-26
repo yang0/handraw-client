@@ -15,6 +15,19 @@ Windows / macOS 桌面客户端，连接 [手绘风 Skill](https://github.com/ya
 - 变更日志：[CHANGELOG.md](CHANGELOG.md)
 - 竞品调研：[docs/research.md](docs/research.md)
 
+## 下载与安装
+
+支持以下任意镜像下载（所有正式包均附带 ed25519 签名 `SHA256SUMS.sig`，内置自动更新优先使用国内 Gitee 源并自动回退官网镜像 / GitHub）：
+
+- **Gitee Releases（国内推荐）**：https://gitee.com/yang02010/handraw-client/releases
+- **官网镜像直链**：https://handraw-style.com/static/client/latest.json
+- **GitHub Releases**：https://github.com/yang0/handraw-client/releases
+
+### 系统要求与首次打开说明
+- **Windows**：Windows 10 / 11（`amd64` 或 `arm64`，系统内置 WebView2）。下载单文件 `handraw-windows-<arch>.exe` 双击即可运行。因暂未购买商业代码签名证书，首次启动如遇 SmartScreen 提示，点「更多信息 → 仍要运行」即可。
+- **macOS**：macOS 12+（Apple Silicon `arm64` 或 Intel `amd64`）。解压 `handraw-darwin-<arch>.zip` 并将「手绘风.app」拖入「应用程序」。因暂未做 Apple 开发者公证，首次打开请右键「打开」，或在「系统设置 → 隐私与安全性」中点击「仍要打开」。
+- **Linux（仅源码 `nogui` 模式）**：暂不发布预编译安装包，不支持自动更新；如需使用可执行 `go build -tags nogui ./cmd/handraw` 后以 `handraw web` 模式运行。
+
 ## 隐私与匿名使用统计
 
 桌面端遵循本地优先原则，作品、提示词与 API Key 均保存在本机。为帮助改进版本质量与了解更新进度，客户端默认开启**匿名使用统计**（发送至第一方接口 `https://handraw-style.com/api/analytics/events`）：

@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yang0/handraw-client/internal/ziputil"
 )
 
 const (
@@ -548,42 +550,21 @@ func (m *Manager) installZipBytes(raw []byte, fallbackName, source string) (Skil
 		return Skill{}, err
 	}
 
-	copied := 0
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() || copied >= maxFilesPerSkill {
-			continue
-		}
-		clean := path.Clean(strings.ReplaceAll(f.Name, "\\", "/"))
-		if rootPrefix != "" {
-			if !strings.HasPrefix(clean, rootPrefix) {
-				continue
+	if _, err := ziputil.ExtractFiles(zr.File, dest, ziputil.Options{
+		Prefix:        rootPrefix,
+		MaxFiles:      maxFilesPerSkill,
+		MaxFileBytes:  maxSkillFileBytes,
+		MaxTotalBytes: maxZipBytes * 2,
+		SkipMacOSX:    true,
+		TransformRel: func(rel string) string {
+			if strings.EqualFold(rel, "skill.md") {
+				return "SKILL.md"
 			}
-			clean = strings.TrimPrefix(clean, rootPrefix)
-		}
-		if clean == "" || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
-			continue
-		}
-		outPath := filepath.Join(dest, filepath.FromSlash(clean))
-		rel, err := filepath.Rel(dest, outPath)
-		if err != nil || strings.HasPrefix(rel, "..") {
-			continue
-		}
-		if strings.EqualFold(rel, "skill.md") {
-			outPath = filepath.Join(dest, "SKILL.md")
-		}
-		r, err := f.Open()
-		if err != nil {
-			continue
-		}
-		b, err := io.ReadAll(io.LimitReader(r, maxSkillFileBytes))
-		r.Close()
-		if err != nil {
-			continue
-		}
-		_ = os.MkdirAll(filepath.Dir(outPath), 0o755)
-		if err := os.WriteFile(outPath, b, 0o644); err == nil {
-			copied++
-		}
+			return rel
+		},
+	}); err != nil {
+		_ = os.RemoveAll(dest)
+		return Skill{}, err
 	}
 	if err := writeMeta(dest, metaFile{
 		ID:          id,

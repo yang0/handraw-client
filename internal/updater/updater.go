@@ -146,10 +146,10 @@ func (u *Updater) Check(ctx context.Context) (Status, error) {
 		u.mu.Unlock()
 		latest := strings.TrimPrefix(rel.Tag, "v")
 		asset := assetName()
-		// A release may ship some platforms first (e.g. Windows before macOS).
-		// Only offer it when it carries this platform's program and the signed
-		// checksums, otherwise the user would be told to update and then fail.
-		avail := Newer(latest, u.Version) && releaseHas(rel, asset, "SHA256SUMS", "SHA256SUMS.sig")
+		// A release may ship some platforms first (e.g. Windows before macOS),
+		// or the current OS may not publish prebuilt binaries (e.g. Linux nogui).
+		// Only offer it when this platform has an asset and signed checksums (#180).
+		avail := asset != "" && Newer(latest, u.Version) && releaseHas(rel, asset, "SHA256SUMS", "SHA256SUMS.sig")
 		u.set(func(s *Status) {
 			s.Checking = false
 			s.Latest = latest
@@ -218,14 +218,18 @@ func releaseHas(rel *Release, names ...string) bool {
 }
 
 // assetName is the program file for this platform, e.g. handraw-windows-amd64.exe.
-func assetName() string {
-	switch runtime.GOOS {
+// Returns "" on platforms that do not ship prebuilt release binaries (e.g. Linux nogui) (#180).
+func assetName() string { return assetNameFor(runtime.GOOS, runtime.GOARCH) }
+
+func assetNameFor(goos, goarch string) string {
+	switch goos {
 	case "windows":
-		return "handraw-windows-" + runtime.GOARCH + ".exe"
+		return "handraw-windows-" + goarch + ".exe"
 	case "darwin":
-		return "handraw-darwin-" + runtime.GOARCH + ".zip"
+		return "handraw-darwin-" + goarch + ".zip"
+	default:
+		return ""
 	}
-	return "handraw-" + runtime.GOOS + "-" + runtime.GOARCH
 }
 
 // Newer reports whether SemVer a is newer than b ("dev" is treated as oldest).
@@ -368,6 +372,9 @@ func (u *Updater) Download(ctx context.Context) error {
 		return errors.New("没有可用的新版本")
 	}
 	name := assetName()
+	if name == "" {
+		return errors.New("当前系统平台暂不支持自动更新")
+	}
 	a, ok := u.asset(name)
 	if !ok {
 		return fmt.Errorf("新版本没有 %s 安装包", name)

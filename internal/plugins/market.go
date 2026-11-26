@@ -19,6 +19,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/yang0/handraw-client/internal/ziputil"
 )
 
 // Max unpacked size per plugin (2 GiB) so asset-heavy galleries (poses, outfits, styles) install cleanly.
@@ -545,17 +547,13 @@ func (r *Runtime) unpackZipFiles(files []*zip.File, subdir, source string) (Comm
 		prefix += cleanSub + "/"
 	}
 
-	var total int64
-	for _, f := range files {
-		if !strings.HasPrefix(f.Name, prefix) {
-			continue
-		}
-		name := strings.TrimPrefix(f.Name, prefix)
-		n, err := extractZipEntrySafe(tmp, name, f, maxPluginSingleFileBytes, maxPluginUnpackedBytes-total)
-		if err != nil {
-			return Community{}, err
-		}
-		total += n
+	if _, err := ziputil.ExtractFiles(files, tmp, ziputil.Options{
+		Prefix:        prefix,
+		MaxFileBytes:  maxPluginSingleFileBytes,
+		MaxTotalBytes: maxPluginUnpackedBytes,
+		SkipMacOSX:    true,
+	}); err != nil {
+		return Community{}, err
 	}
 	return r.commitUnpackedDir(tmp, source)
 }

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yang0/handraw-client/internal/ziputil"
 )
 
 const (
@@ -956,58 +958,15 @@ func installZipBytes(galleriesDir string, data []byte, sourceURL string, pack Ma
 		return MarketPackStatus{}, err
 	}
 
-	var totalUnpacked int64
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		clean := path.Clean(strings.ReplaceAll(f.Name, "\\", "/"))
-		if strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
-			_ = os.RemoveAll(destDir)
-			return MarketPackStatus{}, errors.New("ZIP 包含不安全路径")
-		}
-		rel := clean
-		if stripPrefix != "" {
-			if !strings.HasPrefix(clean, stripPrefix) {
-				continue
-			}
-			rel = strings.TrimPrefix(clean, stripPrefix)
-		}
-		if rel == "" || rel == "." || strings.Contains(rel, "..") {
-			continue
-		}
-		targetPath := filepath.Join(destDir, filepath.FromSlash(rel))
-		if !isWithin(destDir, targetPath) {
-			_ = os.RemoveAll(destDir)
-			return MarketPackStatus{}, errors.New("ZIP 包含越界路径")
-		}
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-			_ = os.RemoveAll(destDir)
-			return MarketPackStatus{}, err
-		}
-		in, err := f.Open()
-		if err != nil {
-			_ = os.RemoveAll(destDir)
-			return MarketPackStatus{}, err
-		}
-		outF, err := os.Create(targetPath)
-		if err != nil {
-			_ = in.Close()
-			_ = os.RemoveAll(destDir)
-			return MarketPackStatus{}, err
-		}
-		n, err := io.Copy(outF, io.LimitReader(in, maxGalleryImgBytes+1))
-		_ = outF.Close()
-		_ = in.Close()
-		if err != nil || n > maxGalleryImgBytes {
-			_ = os.RemoveAll(destDir)
-			return MarketPackStatus{}, errors.New("ZIP 内单文件过大或写入失败")
-		}
-		totalUnpacked += n
-		if totalUnpacked > maxGalleryZipBytes*2 {
-			_ = os.RemoveAll(destDir)
-			return MarketPackStatus{}, errors.New("ZIP 解压总大小超过安全上限")
-		}
+	if _, err := ziputil.ExtractFiles(zr.File, destDir, ziputil.Options{
+		Prefix:           stripPrefix,
+		MaxFileBytes:     maxGalleryImgBytes,
+		MaxTotalBytes:    maxGalleryZipBytes * 2,
+		SkipMacOSX:       true,
+		RejectUnsafePath: true,
+	}); err != nil {
+		_ = os.RemoveAll(destDir)
+		return MarketPackStatus{}, err
 	}
 
 	prefixRel := func(rel string) string {

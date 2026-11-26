@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -461,9 +462,20 @@ func GenerateImage(ctx context.Context, p Provider, r ImageRequest) ([]Image, er
 		return nil, fmt.Errorf("请求接口失败：%w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+	const (
+		maxGenErrorBytes = 2 << 20
+		maxGenRespBytes  = 64 << 20
+	)
 	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxGenErrorBytes))
 		return nil, apiErr(resp.StatusCode, body)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGenRespBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("读取生图响应失败：%w", err)
+	}
+	if int64(len(body)) > maxGenRespBytes {
+		return nil, errors.New("接口返回体积超过 64MB 上限")
 	}
 	var out struct {
 		Data []struct {
@@ -559,7 +571,9 @@ func mimeOf(name string) string {
 	return "image/png"
 }
 
-// Download fetches an image URL returned by a provider.
+const maxDownloadedImageBytes int64 = 64 << 20
+
+// Download fetches an image URL returned by a provider with a strict 64MB cap.
 func Download(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -573,7 +587,56 @@ func Download(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("下载图片失败：%d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 80<<20))
+	if resp.ContentLength > maxDownloadedImageBytes {
+		return nil, errors.New("下载图片体积超过 64MB 上限")
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadedImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > maxDownloadedImageBytes {
+		return nil, errors.New("下载图片体积超过 64MB 上限")
+	}
+	return b, nil
+}
+
+// DownloadToFile streams a provider image URL directly to dstPath without
+// buffering the full image in memory (#180).
+func DownloadToFile(ctx context.Context, url, dstPath string) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return 0, fmt.Errorf("下载图片失败：%d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxDownloadedImageBytes {
+		return 0, errors.New("下载图片体积超过 64MB 上限")
+	}
+	out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	n, cpErr := io.Copy(out, io.LimitReader(resp.Body, maxDownloadedImageBytes+1))
+	closeErr := out.Close()
+	if cpErr != nil {
+		_ = os.Remove(dstPath)
+		return 0, cpErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(dstPath)
+		return 0, closeErr
+	}
+	if n > maxDownloadedImageBytes {
+		_ = os.Remove(dstPath)
+		return 0, errors.New("下载图片体积超过 64MB 上限")
+	}
+	return n, nil
 }
 
 // ChatMessage is an OpenAI chat message; content may include image parts.
