@@ -50,6 +50,8 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		Theme                      *string `json:"theme"`
 		AutoSyncResources          *bool   `json:"autoSyncResources"`
 		KeepSiteGenerationsPrivate *bool   `json:"keepSiteGenerationsPrivate"`
+		TelemetryDisabled          *bool   `json:"telemetryDisabled"`
+		TelemetryEnabled           *bool   `json:"telemetryEnabled"`
 		AutoCheckUpdate            *bool   `json:"autoCheckUpdate"`
 		CostLimitCents             *int    `json:"costLimitCents"`
 		DefaultModel               *string           `json:"defaultModel"`
@@ -96,6 +98,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		}
 		if body.KeepSiteGenerationsPrivate != nil {
 			st.KeepSiteGenerationsPrivate = *body.KeepSiteGenerationsPrivate
+		}
+		if body.TelemetryDisabled != nil {
+			st.TelemetryDisabled = *body.TelemetryDisabled
+		}
+		if body.TelemetryEnabled != nil {
+			st.TelemetryDisabled = !*body.TelemetryEnabled
 		}
 		if body.AutoCheckUpdate != nil {
 			st.AutoCheckUpdate = *body.AutoCheckUpdate
@@ -827,6 +835,9 @@ func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) (any, error
 	if err != nil && st.ResourceNew == "" {
 		out["error"] = err.Error()
 	}
+	if s.Telemetry != nil {
+		s.Telemetry.Track("client_update_checked", map[string]any{"available": st.Available})
+	}
 	return out, nil
 }
 
@@ -840,13 +851,41 @@ func (s *Server) updateDownload(w http.ResponseWriter, r *http.Request) (any, er
 }
 
 func (s *Server) updateApply(w http.ResponseWriter, r *http.Request) (any, error) {
+	st := s.Updater.Status()
 	if _, err := s.Updater.Apply(); err != nil {
 		return nil, bad(err.Error())
+	}
+	if s.Telemetry != nil {
+		s.Telemetry.Track("client_update_applied", map[string]any{"targetVersion": st.Latest})
+		go func() {
+			fctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
+			defer cancel()
+			s.Telemetry.Flush(fctx)
+		}()
 	}
 	go func() {
 		time.Sleep(400 * time.Millisecond)
 		s.Host.Restart()
 	}()
+	return okv, nil
+}
+
+// telemetryEvent accepts a narrow allowlist of anonymous UI navigation/feature
+// events from the local frontend (#174).
+func (s *Server) telemetryEvent(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		Event string         `json:"event"`
+		Props map[string]any `json:"props"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	switch strings.TrimSpace(body.Event) {
+	case "client_tab_view", "client_feature_used":
+		if s.Telemetry != nil {
+			s.Telemetry.Track(body.Event, body.Props)
+		}
+	}
 	return okv, nil
 }
 

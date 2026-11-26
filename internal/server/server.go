@@ -36,6 +36,7 @@ import (
 	"github.com/yang0/handraw-client/internal/site"
 	"github.com/yang0/handraw-client/internal/skills"
 	"github.com/yang0/handraw-client/internal/store"
+	"github.com/yang0/handraw-client/internal/telemetry"
 	"github.com/yang0/handraw-client/internal/updater"
 )
 
@@ -67,8 +68,9 @@ type Server struct {
 	Token    string
 	DB       *store.DB
 	Site     *site.Client
-	Jobs     *jobs.Manager
+	Jobs      *jobs.Manager
 	Updater   *updater.Updater
+	Telemetry *telemetry.Client
 	Plugins   *plugins.Runtime
 	Obsidian  *obsidian.Manager
 	Skills    *skills.Manager

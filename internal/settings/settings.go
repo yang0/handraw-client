@@ -296,6 +296,10 @@ type Settings struct {
 	KeepSiteGenerationsPrivate bool `json:"keepSiteGenerationsPrivate"`
 	// ClipToken authenticates the local Chrome Inspiration Clipper extension (#73).
 	ClipToken string `json:"clipToken,omitempty"`
+	// TelemetryDisabled opts out of anonymous desktop usage telemetry (#174).
+	TelemetryDisabled bool `json:"telemetryDisabled,omitempty"`
+	// TelemetryID is a locally generated random anonymous identifier (dc_...).
+	TelemetryID string `json:"telemetryId,omitempty"`
 }
 
 func Defaults() Settings {
@@ -391,6 +395,31 @@ func RotateClipToken() (string, error) {
 		return nil
 	})
 	return tok, err
+}
+
+func newTelemetryID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return "dc_" + hex.EncodeToString(b)
+}
+
+// EnsureTelemetryID returns a persisted random anonymous device ID for opt-in
+// desktop usage statistics, creating one on first use (#174).
+func EnsureTelemetryID() string {
+	st := Get()
+	if id := strings.TrimSpace(st.TelemetryID); id != "" {
+		return id
+	}
+	id := newTelemetryID()
+	_, _ = Update(func(s *Settings) error {
+		if strings.TrimSpace(s.TelemetryID) == "" {
+			s.TelemetryID = id
+		} else {
+			id = strings.TrimSpace(s.TelemetryID)
+		}
+		return nil
+	})
+	return id
 }
 
 func clone(s Settings) Settings {

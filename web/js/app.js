@@ -245,6 +245,10 @@ async function start() {
     window.__handrawGo = go;
     updateActiveNav();
     const viewKind = currentView.startsWith("dsh:") ? "dsh" : (currentView.startsWith("plugin:") ? "plugin" : currentView);
+    if (window.__handrawLastTrackedView !== viewKind) {
+      window.__handrawLastTrackedView = viewKind;
+      api("POST", "/api/telemetry/event", { event: "client_tab_view", props: { tab: viewKind } }).catch(() => {});
+    }
     main.dataset.view = viewKind;
     main.classList.toggle("is-padded-view", PADDED_VIEWS.has(viewKind));
     clear(main);

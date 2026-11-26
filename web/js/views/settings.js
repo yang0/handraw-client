@@ -1133,6 +1133,7 @@ export async function renderSettings(root, ctx, params = {}) {
   const autoUpdChk = el("input", { id: "pref-auto-update", name: "autoCheckUpdate", type: "checkbox", checked: Boolean(settings.autoCheckUpdate) });
   const autoSyncChk = el("input", { id: "pref-auto-sync", name: "autoSyncResources", type: "checkbox", checked: Boolean(settings.autoSyncResources) });
   const publicChk = el("input", { id: "pref-public-gen", name: "publicSiteGenerations", type: "checkbox", checked: !settings.keepSiteGenerationsPrivate });
+  const telemetryChk = el("input", { id: "pref-telemetry", name: "telemetryEnabled", type: "checkbox", checked: !settings.telemetryDisabled });
   const prefStatus = el("span", { class: "muted", role: "status", "aria-live": "polite" });
 
   const prefForm = el("form", {
@@ -1157,6 +1158,7 @@ export async function renderSettings(root, ctx, params = {}) {
           autoCheckUpdate: autoUpdChk.checked,
           autoSyncResources: autoSyncChk.checked,
           keepSiteGenerationsPrivate: !publicChk.checked,
+          telemetryDisabled: !telemetryChk.checked,
         };
         if (!dirHandled && nextWorksDir) payload.worksDir = nextWorksDir;
         await api("PATCH", "/api/settings", payload);
@@ -1207,7 +1209,8 @@ export async function renderSettings(root, ctx, params = {}) {
         el("label", { for: "pref-tray", class: "settings-check" }, trayChk, el("span", null, "关闭主窗口时最小化到系统托盘")),
         el("label", { for: "pref-auto-update", class: "settings-check" }, autoUpdChk, el("span", null, "自动检查软件更新")),
         el("label", { for: "pref-auto-sync", class: "settings-check" }, autoSyncChk, el("span", null, "登录后自动同步自定义画风")),
-        el("label", { for: "pref-public-gen", class: "settings-check" }, publicChk, el("span", null, "网站模型生成的图片自动公开到社区（用了自己参考图的除外）"))
+        el("label", { for: "pref-public-gen", class: "settings-check" }, publicChk, el("span", null, "网站模型生成的图片自动公开到社区（用了自己参考图的除外）")),
+        el("label", { for: "pref-telemetry", class: "settings-check" }, telemetryChk, el("span", null, "发送匿名使用统计（仅含版本号、系统与功能使用频次，不含提示词、图片与个人数据）"))
       )
     ),
     el("div", { class: "row", style: { justifyContent: "space-between" } },

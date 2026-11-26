@@ -16,10 +16,12 @@ import (
 	"github.com/yang0/handraw-client/internal/desktop"
 	"github.com/yang0/handraw-client/internal/jobs"
 	"github.com/yang0/handraw-client/internal/resources"
+	"github.com/yang0/handraw-client/internal/secrets"
 	"github.com/yang0/handraw-client/internal/server"
 	"github.com/yang0/handraw-client/internal/settings"
 	"github.com/yang0/handraw-client/internal/site"
 	"github.com/yang0/handraw-client/internal/store"
+	"github.com/yang0/handraw-client/internal/telemetry"
 	"github.com/yang0/handraw-client/internal/updater"
 	"github.com/yang0/handraw-client/web"
 )
@@ -117,13 +119,44 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 
 	sc := site.New(Version)
 	upd := updater.New(Version, appdir.Updates())
+	tel := telemetry.New(Version)
+	tel.Enabled = func() bool { return !settings.Get().TelemetryDisabled }
+	tel.SiteBase = func() string { return settings.Get().SiteBase }
+	tel.AnonID = settings.EnsureTelemetryID
+	tel.Token = func() string {
+		tok, _ := secrets.Get(secrets.SiteToken)
+		return tok
+	}
 	srv := newServer(db, sc, upd, userPackDir, bundledDir)
+	srv.Telemetry = tel
 
 	var jm *jobs.Manager
 	jm = jobs.New(db, sc, func(ev jobs.Event) {
 		srv.Emit("job", ev)
 		if ev.Type == "run" {
 			srv.Emit("run", ev)
+			if ev.Status == "done" || ev.Status == "partial" || ev.Status == "failed" {
+				go func(runID, st string) {
+					run, err := db.GetRun(runID)
+					if err != nil {
+						return
+					}
+					mode := "byok"
+					if strings.HasPrefix(strings.ToLower(strings.TrimSpace(run.Model)), "site:") || strings.EqualFold(strings.TrimSpace(run.Source), "site") {
+						mode = "site"
+					}
+					imgs, _ := db.Images(runID)
+					cnt := len(imgs)
+					if cnt <= 0 {
+						cnt = 1
+					}
+					tel.Track("client_generate_done", map[string]any{
+						"providerMode": mode,
+						"ok":           st == "done" || st == "partial",
+						"count":        cnt,
+					})
+				}(ev.RunID, ev.Status)
+			}
 		}
 	})
 	jm.PluginProviders = srv.CommunityProviders
@@ -136,8 +169,12 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 	go upd.Loop(ctx, 6*time.Hour, func() bool {
 		return settings.Get().AutoCheckUpdate
 	})
+	go tel.Start(ctx)
 
 	return srv, func() {
+		fctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		tel.Flush(fctx)
+		cancel()
 		if srv.DSH != nil {
 			srv.DSH.Stop()
 		}
