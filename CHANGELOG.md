@@ -2,7 +2,7 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
-## Unreleased
+## v0.6.4 (2026-11-26)
 
 ### Security & Reliability
 - **Updater (#176)**:
@@ -15,7 +15,7 @@ All notable changes to `handraw-client` are documented in this file.
   - Fixed potential goroutine leak in `internal/jobs` overflow enqueue path by honoring shutdown context cancellation and tracking overflow enqueues in `Wait()`.
   - Eliminated N+1 queries in `store.ListRuns` and `store.ActiveImages`, checked all `rows.Scan` / `rows.Err()` errors, escaped `%`/`_`/`\` wildcards in short `LIKE` searches, and added unit tests (`internal/store/store_test.go`).
   - Fixed UTF-8 multi-byte string truncation in `internal/telemetry` (rune-aware slicing) and removed token exposure from URL/argv in `tools/mirror-gitee.py`.
-  - Documented opt-out anonymous telemetry clearly in `README.md` and `docs/product.md`.
+  - Documented opt-out anonymous telemetry clearly in `README.md` and `docs/product.md`, and added `LICENSE` (MIT License with Attribution Requirement) & `CHANGELOG.md`.
 
 ## v0.6.3 (2026-11-26)
 - Synced Home Discover feed with Web (`#175`): added Inspiration Vault cards with in-app remix modal, deduplicated inspiration forum topics, adopted server-side `resourceRanking` order, and aligned 20-card mixed cadence.

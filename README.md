@@ -23,6 +23,13 @@ Windows / macOS 桌面客户端，连接 [手绘风 Skill](https://github.com/ya
 - **绝不上报**：提示词原文、生成图片、参考图、本地文件路径、工作目录、API Key、邮箱或任何个人敏感内容（前后端双重白名单与敏感键过滤）。
 - **随时关闭**：可在客户端「设置 → 偏好设置」取消勾选 **「发送匿名使用统计」**，关闭后客户端不再发送任何统计请求。
 
+## 开源协议
+
+本项目基于 **MIT License (with Attribution Requirement)** 开源，详见 [LICENSE](LICENSE)。
+
+- 允许自由使用、修改、分发与商用。
+- **署名要求**：基于本项目进行分发、修改或二次开发时，需保留版权声明，并在界面、文档、仓库或产品介绍的明显位置保留 **「手绘风 Handraw」图标、名称、原作者署名（yang0）及原仓库地址链接**（`https://github.com/yang0/handraw-client`）。
+
 ## 开发流程
 
 先建 Issue，再开发。详见 [AGENTS.md](AGENTS.md)。
