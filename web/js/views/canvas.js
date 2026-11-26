@@ -1648,7 +1648,7 @@ export async function renderCanvas(host, ctx, params = {}) {
                 pair[subKey] = picked;
                 values[idx] = !pair.style1 ? "" : (pair.style2 ? pair : pair.style1);
                 recordEdit(true);
-              }, { empty: subKey === "style2" ? "不融合第二画风" : "" });
+              }, { empty: subKey === "style2" ? "不融合第二画风" : "", kind: "style" });
             },
           },
           el("div", { class: "make-image-picker-thumb", style: { width: "34px", height: "38px", flexBasis: "34px" } },
@@ -1672,7 +1672,7 @@ export async function renderCanvas(host, ctx, params = {}) {
             openResourceDialog("图型", catalog.layouts, code, (picked) => {
               values[idx] = picked;
               recordEdit(true);
-            }, { empty: "自由构图" });
+            }, { empty: "自由构图", kind: "layout" });
           },
         },
         el("div", { class: "make-image-picker-thumb", style: { width: "34px", height: "38px", flexBasis: "34px" } },

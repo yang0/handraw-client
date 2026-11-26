@@ -12,6 +12,7 @@ import {
   saveAssetCategory,
 } from "./ref-picker.js";
 import { masonry } from "../masonry.js";
+import { loadResourceRanking, rankResourceItems } from "./studio-controls.js";
 
 const BUILTIN_GALLERY_IDS = new Set(["styles", "layouts", "colors", "tones", "assets", "characters", "props", "scenes"]);
 
@@ -196,10 +197,11 @@ export async function renderAtlas(root, ctx, params = {}) {
 
 async function drawStyles(stage, groups, ctx) {
   const mineOnly = state.group === MINE;
-  const [res, mineRes] = await Promise.all([
+  const [res, mineRes, styleRanking] = await Promise.all([
     mineOnly ? Promise.resolve({ items: [] })
       : api("GET", `/api/resources/styles?q=${encodeURIComponent(state.q)}&group=${encodeURIComponent(state.group)}`),
     api("GET", "/api/mine/styles").catch(() => ({ items: [] })),
+    mineOnly ? Promise.resolve(null) : loadResourceRanking("style").catch(() => null),
   ]);
   const query = state.q.trim().toLowerCase();
   const mineAll = mineRes.items || [];
@@ -207,12 +209,13 @@ async function drawStyles(stage, groups, ctx) {
   const minePublishedCodes = new Set(
     mineAll.map((m) => String(m?.published?.code || "").toUpperCase()).filter(Boolean)
   );
-  const official = (res.items || []).filter((x) => {
+  const officialRaw = (res.items || []).filter((x) => {
     if (x.source === "mine") return false;
     // Avoid showing duplicate cards in "全部流派" when user's own style is also published to community (#162).
     if (state.group === "" && minePublishedCodes.has(String(x.number || "").toUpperCase())) return false;
     return true;
   });
+  const official = styleRanking?.order?.length ? rankResourceItems(officialRaw, styleRanking) : officialRaw;
   // My styles lead "全部流派" and own the "我的画风" group.
   const items = [...(state.group === "" || mineOnly ? mine.map((m) => ({ ...m, _mine: true })) : []), ...official];
 
@@ -421,13 +424,15 @@ async function openStyleDetail(id, ctx, onRefresh) {
 
 async function drawLayouts(stage, ctx) {
   const reload = () => { clear(stage); drawLayouts(stage, ctx); };
-  const [res, mineRes] = await Promise.all([
+  const [res, mineRes, layoutRanking] = await Promise.all([
     api("GET", "/api/resources/layouts"),
     api("GET", "/api/mine/layouts").catch(() => ({ items: [] })),
+    loadResourceRanking("layout").catch(() => null),
   ]);
   const mine = (mineRes.items || []).map((l) => ({ ...l, category: "mine", _mine: true }));
   const minePubCodes = new Set(mine.map((m) => String(m?.published?.code || "").toUpperCase()).filter(Boolean));
-  const others = (res.items || []).filter((l) => l.source !== "mine" && !minePubCodes.has(String(l.id || "").toUpperCase()));
+  const othersRaw = (res.items || []).filter((l) => l.source !== "mine" && !minePubCodes.has(String(l.id || "").toUpperCase()));
+  const others = layoutRanking?.order?.length ? rankResourceItems(othersRaw, layoutRanking) : othersRaw;
   const items = [...mine, ...others];
   drawCatalog(stage, {
     kind: "layouts", title: "图型", allLabel: "全部图型", items,

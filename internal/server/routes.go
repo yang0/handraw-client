@@ -25,6 +25,7 @@ func (s *Server) routes() {
 	// resources (local pack + my own + website community protected catalog #162)
 	m.HandleFunc("GET /api/resources/summary", s.h(s.resSummary))
 	m.HandleFunc("GET /api/resources/community", s.h(s.resCommunity))
+	m.HandleFunc("GET /api/resources/ranking", s.h(s.resRanking))
 	m.HandleFunc("POST /api/resources/community/{code}/unlock", s.h(s.resCommunityUnlock))
 	m.HandleFunc("GET /api/resources/styles", s.h(s.resStyles))
 	m.HandleFunc("GET /api/resources/styles/{id}", s.h(s.resStyle))

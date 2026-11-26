@@ -103,7 +103,7 @@ export async function renderSeries(host, ctx, params = {}) {
     state.layout = v;
     renderStage();
     session.persist();
-  }, "自由构图", { allowClear: true });
+  }, "自由构图", { allowClear: true, kind: "layout" });
 
   const requirement = el("input", { class: "input", value: state.layoutRequirement, placeholder: "例如：前两张分镜，后面图鉴，不要封面图" });
   requirement.addEventListener("input", () => { state.layoutRequirement = requirement.value; });
@@ -354,7 +354,7 @@ export async function renderSeries(host, ctx, params = {}) {
     const cardLayoutPicker = resourcePicker("本图图型", layouts, cur.layout || "", (v) => {
       cur.layout = v;
       renderStage(false);
-    }, state.layoutMode === "fixed" ? "沿用整套图型" : "由 AI 推荐", { allowClear: true });
+    }, state.layoutMode === "fixed" ? "沿用整套图型" : "由 AI 推荐", { allowClear: true, kind: "layout" });
 
     cardInspector.append(
       el("strong", { style: { fontSize: "13px" } }, `图 ${state.selected + 1} · 单张属性`),

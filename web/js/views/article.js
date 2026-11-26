@@ -2490,7 +2490,7 @@ export async function renderArticle(root, ctx, params = {}) {
       syncBottomBar();
       renderRecommendedStyles();
       session.persist();
-    }, { empty: "" }),
+    }, { empty: "", kind: "style" }),
   },
     styleBadgeImg,
     el("div", { class: "ic-wechat-style-meta" }, styleBadgeId, styleBadgeName),
@@ -4166,7 +4166,7 @@ export async function renderArticle(root, ctx, params = {}) {
       ratioCtrl.sync(tempRatio);
     }, { inline: true });
 
-    const layoutPick = resourcePicker("本图图型", layouts, tempLayout, (v) => { tempLayout = v; }, "沿用文章图型", { allowClear: true });
+    const layoutPick = resourcePicker("本图图型", layouts, tempLayout, (v) => { tempLayout = v; }, "沿用文章图型", { allowClear: true, kind: "layout" });
     const ratioCtrl = ratioControl("本图比例", tempRatio, (v) => { tempRatio = v; }, { compact: true });
 
     const anchorIn = el("input", { class: "input", value: tempAnchor, placeholder: "插在这段原文之后…" });

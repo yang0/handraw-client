@@ -525,7 +525,7 @@ export async function renderCreate(root, ctx, params = {}) {
           session.persist();
         },
         "跟随全局",
-        { allowClear: true }
+        { allowClear: true, kind: "layout" }
       );
       selectedSlotBox.appendChild(itemLayoutPicker);
     }
