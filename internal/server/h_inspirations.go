@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/yang0/handraw-client/extensions"
 	"github.com/yang0/handraw-client/internal/appdir"
 	"github.com/yang0/handraw-client/internal/jobs"
 	"github.com/yang0/handraw-client/internal/providers"
@@ -621,7 +622,7 @@ func (s *Server) inspirationsList(w http.ResponseWriter, r *http.Request) (any, 
 	})
 
 	clipEp := strings.TrimRight(s.Addr(), "/")
-	clipExtDir, clipExtExists := resolveClipperExtensionDir()
+	clipExtDir, clipExtExists := s.EnsureClipperExtension()
 	return map[string]any{
 		"ok":                  true,
 		"items":               items,
@@ -885,6 +886,33 @@ func resolveClipperExtensionDir() (string, bool) {
 	exe, _ := os.Executable()
 	wd, _ := os.Getwd()
 	return resolveClipperExtensionDirFrom(exe, wd, appdir.Root())
+}
+
+func (s *Server) clipBaseURL() string {
+	ep := strings.TrimRight(strings.TrimSpace(s.Addr()), "/")
+	if ep == "" {
+		return fmt.Sprintf("http://127.0.0.1:%d", DefaultPort)
+	}
+	return ep
+}
+
+// EnsureClipperExtension materializes the embedded handraw-clipper Chrome/Edge
+// extension into the user's data directory and writes pre-paired defaults.json
+// so single-binary users never have to find files or paste tokens manually (#185).
+func (s *Server) EnsureClipperExtension() (string, bool) {
+	dst := filepath.Join(appdir.Root(), "extensions", "handraw-clipper")
+	if abs, err := filepath.Abs(dst); err == nil {
+		dst = abs
+	}
+	defs := extensions.ClipperDefaults{
+		ClientURL: s.clipBaseURL(),
+		ClipToken: settings.EnsureClipToken(),
+		SiteBase:  settings.Get().SiteBase,
+	}
+	if err := extensions.EnsureClipper(dst, defs); err == nil {
+		return dst, true
+	}
+	return resolveClipperExtensionDir()
 }
 
 func (s *Server) inspirationsFetchURL(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -1610,7 +1638,39 @@ func (s *Server) clipTokenRotate(w http.ResponseWriter, r *http.Request) (any, e
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "clipToken": tok}, nil
+	dir, exists := s.EnsureClipperExtension()
+	return map[string]any{
+		"ok":                  true,
+		"clipToken":           tok,
+		"clipExtensionDir":    dir,
+		"clipExtensionExists": exists,
+	}, nil
+}
+
+func (s *Server) clipperPrepare(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		OpenFolder bool `json:"openFolder"`
+	}
+	_ = decode(r, &body)
+	dir, exists := s.EnsureClipperExtension()
+	if !exists {
+		return nil, bad("无法释放内置浏览器扩展目录")
+	}
+	opened := false
+	if body.OpenFolder && s.Host != nil {
+		if err := s.Host.OpenPath(dir); err == nil {
+			opened = true
+		}
+	}
+	return map[string]any{
+		"ok":                  true,
+		"clipExtensionDir":    dir,
+		"clipExtensionExists": exists,
+		"clipToken":           settings.EnsureClipToken(),
+		"clipEndpoint":        s.clipBaseURL(),
+		"prePaired":           true,
+		"opened":              opened,
+	}, nil
 }
 
 func (s *Server) siteGetOptionalAuth(ctx context.Context, path string) (json.RawMessage, error) {

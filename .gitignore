@@ -1,6 +1,7 @@
 # Local notes that may contain credentials
 需求.md
 .local/
+extensions/handraw-clipper/defaults.json
 
 # Build output
 build/bin/

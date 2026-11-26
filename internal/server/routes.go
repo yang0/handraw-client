@@ -199,6 +199,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/inspirations/{id}/publish", s.h(s.inspirationsPublish))
 	m.HandleFunc("POST /api/inspirations/materialize-refs", s.h(s.inspirationsMaterializeRefs))
 	m.HandleFunc("POST /api/settings/clip-token/rotate", s.h(s.clipTokenRotate))
+	m.HandleFunc("POST /api/settings/clipper/prepare", s.h(s.clipperPrepare))
 
 	// account + site
 	m.HandleFunc("GET /api/account", s.h(s.account))

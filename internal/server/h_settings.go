@@ -31,7 +31,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) (any, error
 		provs = append(provs, provView{Provider: p, HasKey: secrets.Has(secrets.ProviderKey(p.ID))})
 	}
 	clipEp := strings.TrimRight(s.Addr(), "/")
-	clipExtDir, clipExtExists := resolveClipperExtensionDir()
+	clipExtDir, clipExtExists := s.EnsureClipperExtension()
 	return map[string]any{
 		"settings":            st,
 		"providers":           provs,

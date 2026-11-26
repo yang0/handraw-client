@@ -105,6 +105,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("启动本地服务失败：%v", err)
 	}
+	go func() {
+		_, _ = srv.EnsureClipperExtension()
+	}()
 	showMain := !autoStart || !st.MinimizeToTray
 	if err := desktop.Run(Version, srv, addr, showMain, deepLink); err != nil {
 		log.Fatalf("桌面界面异常：%v", err)

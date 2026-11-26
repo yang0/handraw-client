@@ -105,22 +105,34 @@ export function openClipperSetupModal(meta = {}) {
 
   const openExtDirBtn = el("button", {
     type: "button",
-    class: "btn btn-sm" + (!curExtDir || !curExtExists ? " hidden" : ""),
+    class: "btn btn-sm btn-primary",
     dataset: { role: "clip-ext-open" },
     onClick: async () => {
-      if (!curExtDir) return;
       try {
-        await api("POST", "/api/open", { path: curExtDir });
+        const r = await api("POST", "/api/settings/clipper/prepare", { openFolder: true });
+        if (r?.clipExtensionDir) {
+          curExtDir = r.clipExtensionDir;
+          curExtExists = r.clipExtensionExists !== false;
+          if (r.clipToken) {
+            curToken = r.clipToken;
+            tokenCode.textContent = curToken;
+          }
+          syncExtDirUI();
+          await copyText(curExtDir);
+        }
+        toast(r?.opened
+          ? "已打开扩展目录并复制路径：直接把文件夹拖进浏览器扩展页即可（已免填 Token）"
+          : "扩展已释放并自动配对，已复制目录路径");
       } catch (e) {
-        toast(e?.message || "无法打开扩展目录");
+        toast(e?.message || "无法准备或打开扩展目录");
       }
     },
-  }, "📂 打开文件夹");
+  }, "📂 一键准备并打开扩展目录");
 
   const syncExtDirUI = () => {
     extDirCode.textContent = curExtDir || "extensions/handraw-clipper";
     copyExtDirBtn.disabled = !curExtDir;
-    openExtDirBtn.classList.toggle("hidden", !curExtDir || !curExtExists);
+    openExtDirBtn.classList.remove("hidden");
   };
 
   if (!curExtDir || !curToken) {
@@ -139,60 +151,61 @@ export function openClipperSetupModal(meta = {}) {
 
   const body = el("div", { class: "col", style: { gap: "12px" } },
     el("p", { class: "muted", style: { margin: 0 } },
-      "安装内置的「手绘风灵感捕手」Chrome / Edge 扩展后，刷 X (Twitter) 或任意网页时，点一下按钮或右键即可把图片和杂乱推文直接收进本机灵感库，并自动用 AI 提炼成可复用提示词。"
+      "内置的「手绘风灵感捕手」扩展已自动释放到本机并预填好配对 Token，装进 Chrome / Edge 后开箱即用，无需手动复制粘贴 Token。"
     ),
-    el("div", { class: "card col", style: { gap: "8px", padding: "12px" } },
-      el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap" } },
-        el("strong", null, isDefaultPort ? "1. 本地桥接地址（与扩展默认一致，无需修改）" : "1. 本地桥接地址（默认端口被占用，已自动切换）"),
-        el("button", {
-          type: "button",
-          class: "btn btn-sm",
-          onClick: async () => toast((await copyText(ep)) ? "已复制本地桥接地址" : "复制失败"),
-        }, "复制地址")
-      ),
-      el("code", { class: "mono muted", style: { wordBreak: "break-all" } }, ep),
-      el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", marginTop: "4px" } },
-        el("strong", null, "2. 本机配对 Token（仅限本机扩展通信）"),
-        el("div", { class: "row", style: { gap: "6px" } },
-          el("button", {
-            type: "button",
-            class: "btn btn-sm btn-primary",
-            onClick: async () => toast((await copyText(curToken)) ? "已复制配对 Token" : "复制失败"),
-          }, "📋 复制 Token"),
+    el("div", { class: "card col", style: { gap: "8px", padding: "12px", background: "var(--paper)" } },
+      el("strong", null, "2 步完成加载（已自动预配对，免填 Token）"),
+      el("ol", { style: { margin: "4px 0 0", paddingLeft: "20px", fontSize: "12.5px", lineHeight: "1.75" } },
+        el("li", null,
+          "打开 Chrome（", el("code", { class: "mono" }, "chrome://extensions"), "）或 Edge（", el("code", { class: "mono" }, "edge://extensions"), "），打开右上角「开发者模式」。"
+        ),
+        el("li", null,
+          "点击下方按钮打开扩展文件夹，把该文件夹直接拖进扩展页（或点「加载已解压的扩展程序」粘贴路径）即可立刻使用：",
+          el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center", marginTop: "6px" } },
+            openExtDirBtn,
+            copyExtDirBtn
+          ),
+          el("div", { style: { marginTop: "6px" } }, extDirCode)
+        )
+      )
+    ),
+    el("details", { class: "card col", style: { gap: "8px", padding: "10px 12px" } },
+      el("summary", { style: { cursor: "pointer", fontWeight: 600, fontSize: "12.5px" } }, "高级：手动查看或重置配对 Token"),
+      el("div", { class: "col", style: { gap: "8px", marginTop: "8px" } },
+        el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap" } },
+          el("span", { class: "muted", style: { fontSize: "12px" } }, isDefaultPort ? "本地桥接地址（已预填）" : "本地桥接地址（默认端口被占用，已自动切换并预填）"),
           el("button", {
             type: "button",
             class: "btn btn-sm",
-            onClick: async () => {
-              try {
-                const r = await api("POST", "/api/settings/clip-token/rotate", {});
-                if (r.clipToken) {
-                  curToken = r.clipToken;
-                  tokenCode.textContent = curToken;
-                  toast("已重置配对 Token，请同步更新到浏览器扩展中");
-                }
-              } catch (e) { toast(e.message); }
-            },
-          }, "重置 Token")
-        )
-      ),
-      tokenCode
-    ),
-    el("div", { class: "card col", style: { gap: "6px", padding: "12px", background: "var(--paper)" } },
-      el("strong", null, "3. 如何加载 Chrome / Edge 扩展（30 秒完成）"),
-      el("ol", { style: { margin: "4px 0 0", paddingLeft: "20px", fontSize: "12.5px", lineHeight: "1.7" } },
-        el("li", null, "打开 Chrome / Edge，在地址栏输入 ", el("code", { class: "mono" }, "chrome://extensions"), " 并开启右上角「开发者模式」。"),
-        el("li", null,
-          "点击「加载已解压的扩展程序」，选择扩展文件夹：",
-          el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center", marginTop: "4px" } },
-            extDirCode,
-            copyExtDirBtn,
-            openExtDirBtn
+            onClick: async () => toast((await copyText(ep)) ? "已复制本地桥接地址" : "复制失败"),
+          }, "复制地址")
+        ),
+        el("code", { class: "mono muted", style: { wordBreak: "break-all" } }, ep),
+        el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", marginTop: "4px" } },
+          el("span", { class: "muted", style: { fontSize: "12px" } }, "本机配对 Token（已预填，重置后在浏览器扩展页点刷新即自动同步）"),
+          el("div", { class: "row", style: { gap: "6px" } },
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              onClick: async () => toast((await copyText(curToken)) ? "已复制配对 Token" : "复制失败"),
+            }, "📋 复制 Token"),
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              onClick: async () => {
+                try {
+                  const r = await api("POST", "/api/settings/clip-token/rotate", {});
+                  if (r.clipToken) {
+                    curToken = r.clipToken;
+                    tokenCode.textContent = curToken;
+                    toast("已重置配对 Token 并自动写入扩展配置，在浏览器扩展页点一下刷新即可生效");
+                  }
+                } catch (e) { toast(e.message); }
+              },
+            }, "重置 Token")
           )
         ),
-        el("li", null, isDefaultPort
-          ? ["点击浏览器右上角「手绘风灵感捕手」图标，扩展默认地址已是 ", el("code", { class: "mono" }, ep), "，直接粘贴上方 Token 点击「保存并测试」即可！"]
-          : ["点击浏览器右上角「手绘风灵感捕手」图标，将客户端地址改为 ", el("code", { class: "mono" }, ep), " 并粘贴上方 Token，点击「保存并测试」即可！"]
-        )
+        tokenCode
       )
     )
   );

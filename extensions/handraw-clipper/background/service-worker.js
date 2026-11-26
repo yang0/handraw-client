@@ -7,9 +7,46 @@ const DEFAULT_CONFIG = {
   autoOrganize: true,
 };
 
+async function loadBundledDefaults() {
+  try {
+    const resp = await fetch(chrome.runtime.getURL("defaults.json"), { cache: "no-store" });
+    if (!resp.ok) return {};
+    const data = await resp.json();
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
 async function loadConfig() {
-  const stored = await chrome.storage.local.get("config");
-  return { ...DEFAULT_CONFIG, ...(stored.config || {}) };
+  const [stored, bundled] = await Promise.all([
+    chrome.storage.local.get(["config", "lastBundledToken"]),
+    loadBundledDefaults(),
+  ]);
+  const saved = stored.config || {};
+  const bundledToken = String(bundled.clipToken || "").trim();
+  const bundledUrl = normalizeBase(bundled.clientUrl || "");
+  const bundledSite = normalizeBase(bundled.siteBase || "");
+
+  const merged = {
+    ...DEFAULT_CONFIG,
+    ...(bundledUrl ? { clientUrl: bundledUrl } : {}),
+    ...(bundledSite ? { siteBase: bundledSite } : {}),
+    ...(bundledToken ? { clipToken: bundledToken } : {}),
+    ...saved,
+  };
+
+  // Auto-adopt pre-paired token on fresh install or when rotated by the local
+  // desktop client (without clobbering an explicit manual user override) (#185).
+  const savedToken = String(saved.clipToken || "").trim();
+  const lastBundled = String(stored.lastBundledToken || "").trim();
+  if (bundledToken && (!savedToken || (lastBundled && savedToken === lastBundled && bundledToken !== lastBundled))) {
+    merged.clipToken = bundledToken;
+    if (bundledUrl) merged.clientUrl = bundledUrl;
+    if (bundledSite && !saved.siteBase) merged.siteBase = bundledSite;
+    await chrome.storage.local.set({ config: merged, lastBundledToken: bundledToken });
+  }
+  return merged;
 }
 
 async function saveConfig(next) {

@@ -1283,29 +1283,44 @@ export async function renderSettings(root, ctx, params = {}) {
   const clipperCard = el("div", { class: "card col", style: { gap: "8px", marginTop: "6px", background: "var(--paper)" } },
     el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
       el("div", { class: "col", style: { gap: "2px" } },
-        el("strong", null, "🧩 Chrome 灵感捕手扩展配对"),
-        el("span", { class: "muted" }, "配合浏览器扩展从 X (Twitter) 与任意网页一键收藏图片和提示词到本机灵感库")
-      ),
-      el("button", {
-        type: "button",
-        class: "btn btn-sm",
-        onClick: () => openClipperSetupModal({
-          clipToken: curClipToken,
-          clipEndpoint: curClipEndpoint,
-          clipExtensionDir: curClipExtDir,
-          clipExtensionExists: curClipExtExists,
-        }),
-      }, "查看安装指引")
-    ),
-    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
-      el("div", { class: "col", style: { gap: "2px", minWidth: 0, flex: "1" } },
-        el("span", { class: "muted", style: { fontSize: "11.5px" } }, `桥接地址：${curClipEndpoint}`),
-        clipTokenDisplay
+        el("strong", null, "🧩 Chrome / Edge 灵感捕手扩展（已内置免填 Token）"),
+        el("span", { class: "muted" }, "单文件版已内置扩展并自动预配对，打开目录拖进浏览器扩展页即可一键收藏 X 与网页灵感")
       ),
       el("div", { class: "row", style: { gap: "6px" } },
         el("button", {
           type: "button",
           class: "btn btn-sm btn-primary",
+          onClick: async () => {
+            try {
+              const r = await api("POST", "/api/settings/clipper/prepare", { openFolder: true });
+              if (r?.clipExtensionDir) await copyText(r.clipExtensionDir);
+              toast(r?.opened
+                ? "已打开扩展目录并复制路径：拖进 chrome://extensions 即可（免填 Token）"
+                : "扩展已释放并自动配对，已复制目录路径");
+            } catch (e) { toast(e?.message || "准备扩展失败"); }
+          },
+        }, "📂 一键打开扩展目录"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => openClipperSetupModal({
+            clipToken: curClipToken,
+            clipEndpoint: curClipEndpoint,
+            clipExtensionDir: curClipExtDir,
+            clipExtensionExists: curClipExtExists,
+          }),
+        }, "安装指引")
+      )
+    ),
+    el("div", { class: "row", style: { justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+      el("div", { class: "col", style: { gap: "2px", minWidth: 0, flex: "1" } },
+        el("span", { class: "muted", style: { fontSize: "11.5px" } }, `桥接地址：${curClipEndpoint}（已自动预填）`),
+        clipTokenDisplay
+      ),
+      el("div", { class: "row", style: { gap: "6px" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
           onClick: async () => toast((await copyText(curClipToken)) ? "已复制配对 Token" : "复制失败"),
         }, "复制 Token"),
         el("button", {
@@ -1317,7 +1332,7 @@ export async function renderSettings(root, ctx, params = {}) {
               if (r.clipToken) {
                 curClipToken = r.clipToken;
                 clipTokenDisplay.textContent = curClipToken;
-                toast("已重置配对 Token");
+                toast("已重置配对 Token 并自动同步到扩展配置");
               }
             } catch (e) { toast(e.message); }
           },

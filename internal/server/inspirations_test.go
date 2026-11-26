@@ -415,7 +415,7 @@ func TestResolveClipperExtensionDir(t *testing.T) {
 		t.Fatalf("missing fallback: got (%q, %v), want (%q, false)", got4, ok4, want4)
 	}
 
-	// 5. Verify both API endpoints expose absolute clipExtensionDir
+	// 5. Verify both API endpoints expose absolute clipExtensionDir and pre-paired defaults.json (#185)
 	srv, cancel := setupTestServer(t, "http://127.0.0.1:1")
 	defer cancel()
 	h := srv.Handler()
@@ -427,9 +427,41 @@ func TestResolveClipperExtensionDir(t *testing.T) {
 		var payload map[string]any
 		_ = json.Unmarshal(rec.Body.Bytes(), &payload)
 		dir, _ := payload["clipExtensionDir"].(string)
-		if dir == "" || !filepath.IsAbs(dir) {
-			t.Fatalf("GET %s returned non-absolute clipExtensionDir: %q", ep, dir)
+		exists, _ := payload["clipExtensionExists"].(bool)
+		if dir == "" || !filepath.IsAbs(dir) || !exists {
+			t.Fatalf("GET %s returned invalid clipExtensionDir=(%q, %v)", ep, dir, exists)
 		}
+	}
+
+	// 6. Verify POST /api/settings/clipper/prepare writes pre-paired defaults.json and rotate syncs it.
+	prepRec := doReq(t, h, srv.Token, http.MethodPost, "/api/settings/clipper/prepare", map[string]any{"openFolder": false})
+	if prepRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/settings/clipper/prepare failed: %d %s", prepRec.Code, prepRec.Body.String())
+	}
+	var prep struct {
+		Dir       string `json:"clipExtensionDir"`
+		ClipToken string `json:"clipToken"`
+		PrePaired bool   `json:"prePaired"`
+	}
+	_ = json.Unmarshal(prepRec.Body.Bytes(), &prep)
+	if !prep.PrePaired || prep.Dir == "" || prep.ClipToken == "" {
+		t.Fatalf("unexpected prepare payload: %+v", prep)
+	}
+	defBytes, err := os.ReadFile(filepath.Join(prep.Dir, "defaults.json"))
+	if err != nil || !strings.Contains(string(defBytes), prep.ClipToken) {
+		t.Fatalf("expected pre-paired defaults.json with token %q, err=%v content=%s", prep.ClipToken, err, string(defBytes))
+	}
+	rotRec := doReq(t, h, srv.Token, http.MethodPost, "/api/settings/clip-token/rotate", map[string]any{})
+	if rotRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/settings/clip-token/rotate failed: %d %s", rotRec.Code, rotRec.Body.String())
+	}
+	var rot struct {
+		ClipToken string `json:"clipToken"`
+	}
+	_ = json.Unmarshal(rotRec.Body.Bytes(), &rot)
+	defBytes2, err := os.ReadFile(filepath.Join(prep.Dir, "defaults.json"))
+	if err != nil || rot.ClipToken == "" || !strings.Contains(string(defBytes2), rot.ClipToken) {
+		t.Fatalf("expected rotated token %q synced into defaults.json, err=%v content=%s", rot.ClipToken, err, string(defBytes2))
 	}
 }
 
