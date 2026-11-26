@@ -525,8 +525,9 @@ export async function renderSeries(host, ctx, params = {}) {
     if (!cards.length || cards.some((c) => !c.theme?.trim())) { toast("请为每张图片填写主题"); return; }
     submitting = true; sampleBtn.disabled = true; batchBtn.disabled = true;
     try {
+      const baseTitle = (state.title || state.topic || cards[0]?.theme || cards[0]?.text || "系列图").trim().slice(0, 28);
       const res = await api("POST", "/api/generate", {
-        mode: "series", title: (state.title || state.topic || "系列图") + (sampleOnly ? " · 样张" : ""),
+        mode: "series", title: baseTitle + (sampleOnly ? " · 样张" : ""),
         modelRef: state.modelRef, resolution: state.resolution, confirmed,
         items: cards.map((c) => ({
           theme: c.theme.trim(), style: state.style, style2: state.fusion ? state.style2 : "",

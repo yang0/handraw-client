@@ -1113,7 +1113,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	run := &store.Run{
 		ID:              runID,
 		Mode:            body.Mode,
-		Title:           firstStr(body.Title, firstNRunes(itemThemes[0], 28), defaultRunTitle),
+		Title:           resolveRunTitle(body.Title, body.Items, itemThemes, defaultRunTitle),
 		OriginalRequest: firstStr(itemThemes[0], body.Input.Theme),
 		PromptZh:        firstStr(firstRes.Zh, itemPrompts[0]),
 		PromptEn:        firstRes.En,
@@ -1760,6 +1760,7 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 	}
 	canvasPromptSchema := `根据用户需求「%s」生成手绘风节点画布 v2 工作流 JSON（严格只输出 JSON）：
 {
+  "title": "简短画布主题名（6-18字，不要写未命名画布）",
   "nodes": [
     {"id":"params","type":"parameters","mode":"cartesian","x":36,"y":36,"fieldOrder":["prompt","style1","layout","ratio","mode"],"fields":{"prompt":["封面：主题亮点","1. 核心要点一","2. 核心要点二"],"style1":["FA-001"],"layout":["SC-008"],"ratio":["3:4"],"mode":["graphic-text"]}},
     {"id":"output","type":"output","mode":"cartesian","repeat":1,"resolution":"2k","x":500,"y":36},
@@ -1863,6 +1864,7 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 	if wantsCopy {
 		return map[string]any{
 			"source": "local",
+			"title":  extractCleanTitle(body.Prompt, 20),
 			"nodes": []any{
 				map[string]any{
 					"id": "params", "type": "parameters", "mode": "cartesian", "x": 36, "y": 36,
@@ -1895,6 +1897,7 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 	}
 	return map[string]any{
 		"source": "local",
+		"title":  extractCleanTitle(body.Prompt, 20),
 		"nodes": []any{
 			map[string]any{"id": "n1", "type": "themes", "x": 80, "y": 140, "data": map[string]any{"label": "主题拆解", "items": []string{body.Prompt + " · 场景 1", body.Prompt + " · 场景 2", body.Prompt + " · 场景 3"}}},
 			map[string]any{"id": "n2", "type": "styles", "x": 80, "y": 320, "data": map[string]any{"label": "手绘画风", "items": []string{"FA-013", "FB-001"}}},

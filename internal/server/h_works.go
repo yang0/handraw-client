@@ -45,6 +45,9 @@ func (s *Server) works(w http.ResponseWriter, r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	for i := range list {
+		normalizeRunDisplayTitle(&list[i])
+	}
 	return map[string]any{"items": list, "total": total}, nil
 }
 
@@ -54,6 +57,7 @@ func (s *Server) work(w http.ResponseWriter, r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	normalizeRunDisplayTitle(&run)
 	// Walk parent chain upward and collect direct/descendant edits for version timeline.
 	versions := []store.Run{}
 	seen := map[string]bool{}
@@ -74,6 +78,9 @@ func (s *Server) work(w http.ResponseWriter, r *http.Request) (any, error) {
 			seen[cand.ID] = true
 			versions = append(versions, cand)
 		}
+	}
+	for i := range versions {
+		normalizeRunDisplayTitle(&versions[i])
 	}
 	s.reconcileSitePublishedWork(r.Context(), &run)
 	resolved := s.resolveRunRecipe(run, versions)
@@ -301,6 +308,7 @@ func (s *Server) workPublish(w http.ResponseWriter, r *http.Request) (any, error
 	}
 
 	extUUID := uuid.NewSHA1(uuid.NameSpaceURL, []byte("handraw-run:"+run.ID)).String()
+	normalizeRunDisplayTitle(&run)
 	title := []rune(firstStr(body.Title, run.Title))
 	if len(title) > 60 {
 		title = title[:60]

@@ -30,6 +30,85 @@ const REF_ROLES = [
 
 const RESOLUTIONS = ["1k", "2k", "4k"];
 
+const CANVAS_PLACEHOLDER_TITLES = new Set([
+  "",
+  "未命名画布",
+  "参数组合画布",
+  "画布",
+  "新建画布",
+  "未命名",
+  "未命名作品",
+  "未命名系列图",
+  "画布作品",
+  "画布生成",
+  "画布生成结果",
+  "系列图",
+  "系列创作",
+  "手绘视觉主题展示",
+  "基于所附参考图的手绘创作",
+  "基于参考图的手绘创作",
+]);
+
+const RE_CANVAS_TITLE_LEAD = /^(?:(?:封面|主图|首图|标题|主题|痛点场景|核心干货\s*\d*|收尾总结|配图\s*\d*|分镜\s*\d*)\s*[：:\-—｜|]\s*|第\s*\d+\s*[张页图幅节章]\s*[：:\-—·、\s]\s*|(?:图|页|[Pp]|[Ss]lide)\s*\d+\s*[：:\-—·、.]\s*|\d+\s*[.、)）]\s*)/;
+const RE_CANVAS_TITLE_HELPER = /\s*[（(][^（）()]{0,16}(?:视觉冲击|主图|封面图?|配图|竖版|横版|构图|手绘风)[^（）()]{0,12}[）)]\s*$/;
+
+function stripCanvasComboSuffix(raw) {
+  return String(raw || "").trim().replace(/(?:\s*·\s*组合|\s*-\s*组合)+$/, "").trim();
+}
+
+function isPlaceholderCanvasTitle(raw) {
+  return CANVAS_PLACEHOLDER_TITLES.has(stripCanvasComboSuffix(raw));
+}
+
+function cleanCanvasTitleCandidate(raw, maxLen = 28) {
+  const firstLine = String(raw || "").replace(/\r\n?/g, "\n").split("\n").map((s) => s.trim()).find(Boolean) || "";
+  if (!firstLine) return "";
+  let line = firstLine;
+  for (let i = 0; i < 2; i++) {
+    const next = line.replace(RE_CANVAS_TITLE_LEAD, "").trim();
+    if (!next || next === line) break;
+    line = next;
+  }
+  const stripped = line.replace(RE_CANVAS_TITLE_HELPER, "").trim();
+  if ([...stripped].length >= 4) line = stripped;
+  line = line.replace(/^[「『《“"']+|[」』》”"']+$/g, "").replace(/\s+/g, " ").trim();
+  if (isPlaceholderCanvasTitle(line)) return "";
+  const chars = [...line];
+  if (chars.length > maxLen) {
+    let cut = maxLen;
+    for (let i = 8; i < maxLen && i < chars.length; i++) {
+      if ("。！？；｜|—".includes(chars[i])) {
+        cut = i;
+        break;
+      }
+    }
+    line = chars.slice(0, cut).join("").replace(/[，、：:；;—\-\s]+$/, "");
+  }
+  return isPlaceholderCanvasTitle(line) ? "" : line;
+}
+
+function deriveCanvasRunTitle(stateName, items, copyNodes = [], fallbackPrompt = "") {
+  const explicit = stripCanvasComboSuffix(stateName);
+  if (!isPlaceholderCanvasTitle(explicit)) return [...explicit].slice(0, 40).join("");
+  for (const cn of copyNodes || []) {
+    const t = cleanCanvasTitleCandidate(cn?.result?.activeTitle || cn?.result?.titles?.[0] || "", 28);
+    if (t) return t;
+  }
+  for (const it of items || []) {
+    const t = cleanCanvasTitleCandidate(it?.theme, 28) || cleanCanvasTitleCandidate(it?.text, 28);
+    if (t) return t;
+  }
+  const fromPrompt = cleanCanvasTitleCandidate(fallbackPrompt, 24);
+  if (fromPrompt) return fromPrompt;
+  for (const it of items || []) {
+    for (const rs of it?.refSpecs || []) {
+      const t = cleanCanvasTitleCandidate(rs?.note || rs?.label, 24);
+      if (t) return t;
+    }
+  }
+  return "";
+}
+
 const COPY_PLATFORMS = [
   { id: "xiaohongshu", label: "📕 小红书", defaultTitle: "小红书文案" },
   { id: "wechat", label: "💚 公众号", defaultTitle: "公众号文案" },
@@ -2726,6 +2805,13 @@ export async function renderCanvas(host, ctx, params = {}) {
               return;
             }
             state.graph = ensurePostNode(normalizeGraphData({ nodes, edges }, catalog, recipes));
+            if (isPlaceholderCanvasTitle(state.name)) {
+              const firstOut = state.graph.nodes.find((n) => n.type === "output");
+              const expItems = firstOut ? (expandOutputNode(firstOut).items || []) : [];
+              const autoTitle = cleanCanvasTitleCandidate(res.title || res.raw?.title || "", 24)
+                || deriveCanvasRunTitle("", expItems, [], text);
+              if (autoTitle) state.name = autoTitle;
+            }
             state.activePanel = "";
             recordEdit(true);
             setTimeout(fitView, 25);
@@ -3173,16 +3259,17 @@ export async function renderCanvas(host, ctx, params = {}) {
     state.copyRunningIds.add(copyNode.id);
     renderWorkspace();
     try {
+      const effectiveCopyTitle = deriveCanvasRunTitle(state.name, exp.items, [], state.assistantPrompt);
       const res = await api("POST", "/api/canvas/copy", {
         platform: copyNode.platform || "xiaohongshu",
         tone: copyNode.tone || "干货种草",
-        title: state.name || copyNode.title || "",
+        title: effectiveCopyTitle,
         requirement: copyNode.requirement || "",
         modelRef: copyNode.modelRef || modRes.sceneModels?.canvas || modRes.defaultTextModel || "",
         skillIds: Array.isArray(copyNode.skillIds) ? copyNode.skillIds : [],
         items: exp.items,
       });
-      const titles = Array.isArray(res.titles) && res.titles.length ? res.titles : [state.name || "新图文笔记"];
+      const titles = Array.isArray(res.titles) && res.titles.length ? res.titles : [effectiveCopyTitle || "新图文笔记"];
       copyNode.result = {
         platform: res.platform || copyNode.platform || "xiaohongshu",
         titles,
@@ -3248,9 +3335,15 @@ export async function renderCanvas(host, ctx, params = {}) {
     const effModel = targetOut?.modelRef || state.modelRef;
     const effRes = RESOLUTIONS.includes(targetOut?.resolution) ? targetOut.resolution : "2k";
     try {
+      const copyNodes = state.graph.nodes.filter((n) => n.type === "copy");
+      const runTitle = deriveCanvasRunTitle(state.name, items, copyNodes, state.assistantPrompt);
+      if (runTitle && isPlaceholderCanvasTitle(state.name)) {
+        state.name = runTitle;
+        updateStatusAndSummaries();
+      }
       const res = await api("POST", "/api/generate", {
         mode: "canvas",
-        title: `${state.name || "画布"} · 组合`,
+        title: runTitle,
         modelRef: effModel,
         resolution: effRes,
         confirmed,
