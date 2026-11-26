@@ -1,10 +1,10 @@
 import { api, clear, el, localImg, openURL, remoteThumb, toast } from "../api.js";
 import { mountSlotPanels } from "../plugins-host.js";
 import { createCardSizeSwitcher, masonry } from "../masonry.js";
-import { openWorkRemixModal } from "./work-remix-modal.js";
+import { openInspirationRemixModal, openWorkRemixModal } from "./work-remix-modal.js";
 import { openLayoutEditorModal, openStyleEditorModal } from "./resource-editor.js";
 
-const discoveryLabels = { work: "作品", style: "画风", layout: "图型", topic: "论坛" };
+const discoveryLabels = { work: "作品", inspiration: "灵感", style: "画风", layout: "图型", topic: "论坛" };
 
 function openWebsite(url) {
   void openURL(url).catch((error) => toast(error.message));
@@ -26,7 +26,9 @@ function discoveryCard(item, siteBase, ctx) {
     }
   }
   const resource = item.kind === "style" || item.kind === "layout";
-  const summary = item.summary?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 110);
+  const isInsp = item.kind === "inspiration";
+  const rawSummary = item.summary || (isInsp && Array.isArray(item.tags) && item.tags.length ? item.tags.map((t) => `#${t}`).join(" ") : "");
+  const summary = rawSummary.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 110);
   const openCard = (event) => {
     event.preventDefault();
     if (item.kind === "work" && item.id) {
@@ -39,20 +41,41 @@ function discoveryCard(item, siteBase, ctx) {
       });
       return;
     }
+    if (isInsp && item.id) {
+      openInspirationRemixModal(item.id, ctx, {
+        title: item.title,
+        siteBase,
+      });
+      return;
+    }
     openWebsite(item.href);
   };
+  const badgeText = isInsp
+    ? `${discoveryLabels.inspiration}${item.price > 0 ? ` · ${item.price}积分` : ""}`
+    : (discoveryLabels[item.kind] || item.kind) + (resource ? ` · ${item.id}` : "");
   const primary = el("a", {
     class: "discover-primary", href: item.href,
     onClick: openCard,
   }, image, el("div", { class: "style-body" },
-    el("span", { class: "style-code" }, discoveryLabels[item.kind] + (resource ? ` · ${item.id}` : "")),
+    el("span", { class: "style-code" }, badgeText),
     el("h3", { class: "style-name", title: item.title }, item.title),
     summary ? el("p", { class: "style-traits discover-excerpt" }, summary) : null,
     item.author ? el("div", { class: "muted discover-author" }, item.author) : null
   ));
 
   let footer = null;
-  if (item.kind === "work" && item.id) {
+  if (isInsp && item.id) {
+    footer = el("footer", { class: "discover-footer discover-work-actions" },
+      el("button", {
+        type: "button",
+        class: "btn btn-sm btn-primary",
+        onClick: () => openInspirationRemixModal(item.id, ctx, {
+          title: item.title,
+          siteBase,
+        }),
+      }, "💡 查看灵感 / 做同款")
+    );
+  } else if (item.kind === "work" && item.id) {
     footer = el("footer", { class: "discover-footer discover-work-actions" },
       el("button", {
         type: "button",

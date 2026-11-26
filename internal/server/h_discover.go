@@ -13,9 +13,13 @@ import (
 
 const (
 	discoveryLimit    = 50
-	discoveryCacheKey = "site_discovery_v2"
+	discoveryCacheKey = "site_discovery_v3"
 	discoveryCacheTTL = 5 * time.Minute
 )
+
+type discoveryQuality struct {
+	R float64 `json:"r"`
+}
 
 type discoverySourceItem struct {
 	ID                 string
@@ -29,36 +33,59 @@ type discoverySourceItem struct {
 	ExtraWorkCount     int
 	Category           string
 	WorkID             string
+	TopicID            string
 	ResourceDiscussion struct{ Kind string }
 	Summary            string
 	Image              string
+	ImageURL           string
 	CoverURL           string
 	Images             []json.RawMessage
+	Width              int
+	Height             int
 	AspectRatio        float64
 	PublishedAtMs      int64
+	CreatedAtMs        int64
+	Price              int
+	UnlockCount        int
+	ForkCount          int
+	FavoriteCount      int
+	CommentCount       int
+	Tags               []string
+	Quality            *discoveryQuality
+}
+
+type discoveryResourceRanking struct {
+	Style  []string `json:"style"`
+	Layout []string `json:"layout"`
 }
 
 type discoveryBoot struct {
 	Topics             []discoverySourceItem
+	Inspirations       []discoverySourceItem
 	OfficialOverrides  []discoverySourceItem
 	OfficialResources  []discoverySourceItem
 	CommunityResources []discoverySourceItem
 	ExclusiveResources []discoverySourceItem
+	ResourceRanking    discoveryResourceRanking
 }
 
 type discoveryCard struct {
-	ID             string  `json:"id"`
-	Kind           string  `json:"kind"`
-	Title          string  `json:"title"`
-	Href           string  `json:"href"`
-	Image          string  `json:"image,omitempty"`
-	AspectRatio    float64 `json:"aspectRatio,omitempty"`
-	Author         string  `json:"author,omitempty"`
-	AuthorKey      string  `json:"authorKey,omitempty"`
-	ExtraWorkCount int     `json:"extraWorkCount,omitempty"`
-	MoreHref       string  `json:"moreHref,omitempty"`
-	Summary        string  `json:"summary,omitempty"`
-	PublishedAtMs  int64   `json:"publishedAtMs,omitempty"`
+	ID             string   `json:"id"`
+	Kind           string   `json:"kind"`
+	Title          string   `json:"title"`
+	Href           string   `json:"href"`
+	Image          string   `json:"image,omitempty"`
+	AspectRatio    float64  `json:"aspectRatio,omitempty"`
+	Author         string   `json:"author,omitempty"`
+	AuthorKey      string   `json:"authorKey,omitempty"`
+	ExtraWorkCount int      `json:"extraWorkCount,omitempty"`
+	MoreHref       string   `json:"moreHref,omitempty"`
+	Summary        string   `json:"summary,omitempty"`
+	PublishedAtMs  int64    `json:"publishedAtMs,omitempty"`
+	Price          int      `json:"price,omitempty"`
+	UnlockCount    int      `json:"unlockCount,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	rankScore      float64
 }
 
 type discoveryFeed struct {
@@ -122,21 +149,53 @@ func buildDiscoveryCards(base string, works []discoverySourceItem, boot discover
 			return
 		}
 		seen[key] = true
+		ratio := item.AspectRatio
+		if ratio <= 0 && item.Width > 0 && item.Height > 0 {
+			ratio = float64(item.Width) / float64(item.Height)
+		}
+		pubMs := item.PublishedAtMs
+		if pubMs <= 0 {
+			pubMs = item.CreatedAtMs
+		}
+		var score float64
+		if kind == "inspiration" {
+			// Match Web mixed-feed.js inspiration recommendation score (#556).
+			qScore := 0.0
+			if item.Quality != nil && item.Quality.R > 0 {
+				qScore = item.Quality.R * 100
+			}
+			eng := float64(item.UnlockCount*4 + item.ForkCount*3 + item.FavoriteCount*2 + item.CommentCount*2)
+			score = qScore + eng
+		}
 		buckets[kind] = append(buckets[kind], discoveryCard{
 			ID: item.ID, Kind: kind, Title: firstDiscoveryText(item.Title, item.Name, item.ID),
-			Href: discoveryLink(base, kind, item.ID), Image: image, AspectRatio: item.AspectRatio,
+			Href: discoveryLink(base, kind, item.ID), Image: image, AspectRatio: ratio,
 			Author:    firstDiscoveryText(item.AuthorName, item.Author, item.AuthorUsername),
 			AuthorKey: firstDiscoveryText(item.Author, item.AuthorUsername), ExtraWorkCount: max(0, item.ExtraWorkCount),
-			Summary: item.Summary, PublishedAtMs: item.PublishedAtMs,
+			Summary: item.Summary, PublishedAtMs: pubMs,
+			Price: item.Price, UnlockCount: item.UnlockCount, Tags: item.Tags,
+			rankScore: score,
 		})
 	}
 	for _, item := range works {
 		add("work", item)
 	}
-	for _, item := range boot.Topics {
-		if item.Category != "showcase" && item.WorkID == "" && item.ResourceDiscussion.Kind != "work" {
-			add("topic", item)
+	inspTopicIDs := map[string]bool{}
+	for _, item := range boot.Inspirations {
+		if tid := strings.TrimSpace(item.TopicID); tid != "" {
+			inspTopicIDs[tid] = true
 		}
+		add("inspiration", item)
+	}
+	hasInspirations := len(buckets["inspiration"]) > 0
+	for _, item := range boot.Topics {
+		if item.Category == "showcase" || item.WorkID != "" || item.ResourceDiscussion.Kind == "work" {
+			continue
+		}
+		if hasInspirations && (item.ResourceDiscussion.Kind == "inspiration" || inspTopicIDs[item.ID]) {
+			continue
+		}
+		add("topic", item)
 	}
 	overrides := make(map[string]discoverySourceItem, len(boot.OfficialOverrides))
 	for _, item := range boot.OfficialOverrides {
@@ -160,14 +219,54 @@ func buildDiscoveryCards(base string, works []discoverySourceItem, boot discover
 			add(item.Kind, item)
 		}
 	}
-	for _, bucket := range buckets {
+
+	sortByRecency := func(bucket []discoveryCard) {
 		sort.SliceStable(bucket, func(left, right int) bool {
 			return bucket[left].PublishedAtMs > bucket[right].PublishedAtMs
 		})
 	}
+	sortByServerRank := func(bucket []discoveryCard, order []string) {
+		if len(order) == 0 {
+			sortByRecency(bucket)
+			return
+		}
+		rankIdx := make(map[string]int, len(order))
+		for i, id := range order {
+			if _, exists := rankIdx[id]; !exists {
+				rankIdx[id] = i
+			}
+		}
+		sort.SliceStable(bucket, func(left, right int) bool {
+			li, lok := rankIdx[bucket[left].ID]
+			ri, rok := rankIdx[bucket[right].ID]
+			if lok && rok {
+				return li < ri
+			}
+			if lok != rok {
+				return lok
+			}
+			return bucket[left].PublishedAtMs > bucket[right].PublishedAtMs
+		})
+	}
+
+	sortByRecency(buckets["work"])
+	sortByRecency(buckets["topic"])
+	sort.SliceStable(buckets["inspiration"], func(left, right int) bool {
+		if buckets["inspiration"][left].rankScore != buckets["inspiration"][right].rankScore {
+			return buckets["inspiration"][left].rankScore > buckets["inspiration"][right].rankScore
+		}
+		return buckets["inspiration"][left].PublishedAtMs > buckets["inspiration"][right].PublishedAtMs
+	})
+	sortByServerRank(buckets["style"], boot.ResourceRanking.Style)
+	sortByServerRank(buckets["layout"], boot.ResourceRanking.Layout)
 	buckets["work"] = collapseDiscoveryWorks(base, buckets["work"])
 
-	pattern := []string{"work", "work", "work", "style", "work", "work", "work", "topic", "work", "work", "work", "layout", "work", "work", "work", "topic"}
+	// 20-card mixed cadence aligned with Web mixed-feed.js (#556 / #175).
+	pattern := []string{
+		"work", "inspiration", "style", "work", "work", "inspiration", "layout", "topic",
+		"work", "work", "inspiration", "work", "style", "work", "inspiration", "topic",
+		"work", "work", "layout", "inspiration",
+	}
 	items := make([]discoveryCard, 0, discoveryLimit)
 	for len(items) < discoveryLimit {
 		count := len(items)
@@ -221,7 +320,7 @@ func discoveryAuthorLink(base, author string) string {
 }
 
 func discoveryImage(item discoverySourceItem) string {
-	if cover := firstDiscoveryText(item.CoverURL, item.Image); cover != "" {
+	if cover := firstDiscoveryText(item.CoverURL, item.ImageURL, item.Image); cover != "" {
 		return cover
 	}
 	for _, raw := range item.Images {
@@ -266,10 +365,18 @@ func discoveryLink(base, kind, id string) string {
 		}
 	}
 	root.RawQuery, root.Fragment = "", ""
-	if kind == "topic" {
+	switch kind {
+	case "inspiration":
+		// Main site inspiration vault detail link.
+		if orig, err := url.Parse(base); err == nil {
+			orig.Path, orig.RawPath, orig.Fragment = "/", "", ""
+			orig.RawQuery = url.Values{"view": {"inspirations"}, "id": {id}}.Encode()
+			return orig.String()
+		}
+	case "topic":
 		root.Path, root.RawPath = forumPath, ""
 		root.RawQuery = url.Values{"view": {"topic"}, "id": {id}}.Encode()
-	} else {
+	default:
 		root.Path, root.RawPath = "/t/"+id, "/t/"+url.PathEscape(id)
 	}
 	return root.String()

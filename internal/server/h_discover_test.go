@@ -74,11 +74,11 @@ func TestSiteDiscoverMixAndCache(t *testing.T) {
 			nonWorkIDs = append(nonWorkIDs, item.ID)
 		}
 	}
-	if want := []string{"FA-001", "topic_text", "SC-001", "FA-002"}; !reflect.DeepEqual(nonWorkIDs, want) {
+	if want := []string{"FA-001", "SC-001", "topic_text", "FA-002"}; !reflect.DeepEqual(nonWorkIDs, want) {
 		t.Fatalf("non-work cards = %v, want %v", nonWorkIDs, want)
 	}
-	if feed.Items[3].Title != "Renamed style" || feed.Items[7].Image != "" || feed.Items[7].Href != mock.URL+"/forum/?id=topic_text&view=topic" {
-		t.Fatalf("wrong style override or forum card: %+v / %+v", feed.Items[3], feed.Items[7])
+	if feed.Items[1].Title != "Renamed style" || feed.Items[5].Image != "" || feed.Items[5].Href != mock.URL+"/forum/?id=topic_text&view=topic" {
+		t.Fatalf("wrong style override or forum card: %+v / %+v", feed.Items[1], feed.Items[5])
 	}
 	if cached := getFeed(); !reflect.DeepEqual(feed.Items, cached.Items) || feedHits.Load() != 3 {
 		t.Fatal("second visit did not reuse the locally cached feed")
@@ -230,5 +230,75 @@ func TestDiscoveryReplacesPreviousUnfoldedCache(t *testing.T) {
 	var feed discoveryFeed
 	if resp.Code != 200 || json.Unmarshal(resp.Body.Bytes(), &feed) != nil || len(feed.Items) != 1 || feed.Items[0].ID != "new" || feed.Items[0].ExtraWorkCount != 1 {
 		t.Fatalf("old unfolded cache was not replaced: %d %s", resp.Code, resp.Body.String())
+	}
+}
+
+// Verify #175: Discover includes inspiration vault cards, deduplicates inspiration
+// forum topics, and follows server ResourceRanking order (#556 / #557).
+func TestDiscoveryInspirationsAndServerResourceRanking(t *testing.T) {
+	works := []discoverySourceItem{
+		{ID: "w1", Author: "u1", PublishedAtMs: 500, Image: "/w1.png"},
+		{ID: "w2", Author: "u2", PublishedAtMs: 400, Image: "/w2.png"},
+		{ID: "w3", Author: "u3", PublishedAtMs: 300, Image: "/w3.png"},
+	}
+	boot := discoveryBoot{
+		Inspirations: []discoverySourceItem{
+			{
+				ID: "insp_low", Title: "低热度灵感", ImageURL: "/insp1.webp", Width: 800, Height: 1000,
+				Price: 2, UnlockCount: 0, TopicID: "topic_insp_low", CreatedAtMs: 200,
+				Quality: &discoveryQuality{R: 0.4},
+			},
+			{
+				ID: "insp_hot", Title: "高热度灵感", ImageURL: "/insp2.webp", Width: 1024, Height: 683,
+				Price: 5, UnlockCount: 10, Tags: []string{"时尚插画", "超现实"}, TopicID: "topic_insp_hot", CreatedAtMs: 100,
+				Quality: &discoveryQuality{R: 0.8},
+			},
+		},
+		Topics: []discoverySourceItem{
+			{ID: "topic_insp_hot", Title: "重复灵感讨论帖", PublishedAtMs: 999},
+			{ID: "topic_insp_kind", Title: "按 kind 去重的灵感帖", ResourceDiscussion: struct{ Kind string }{Kind: "inspiration"}, PublishedAtMs: 998},
+			{ID: "topic_keep", Title: "正常讨论帖", PublishedAtMs: 100},
+		},
+		ResourceRanking: discoveryResourceRanking{
+			Style:  []string{"ST-RANK1", "ST-RANK2"},
+			Layout: []string{"LY-RANK1"},
+		},
+	}
+	catalog := []discoverySourceItem{
+		{ID: "ST-RANK2", Kind: "style", Name: "次优画风", Image: "/s2.webp", PublishedAtMs: 999},
+		{ID: "ST-RANK1", Kind: "style", Name: "首选画风", Image: "/s1.webp", PublishedAtMs: 1},
+		{ID: "LY-RANK1", Kind: "layout", Name: "首选图型", Image: "/l1.webp", PublishedAtMs: 1},
+	}
+
+	cards := buildDiscoveryCards("https://handraw-style.com", works, boot, catalog)
+	var kinds []string
+	var styleOrder []string
+	var inspOrder []string
+	for _, c := range cards {
+		kinds = append(kinds, c.Kind)
+		if c.Kind == "style" {
+			styleOrder = append(styleOrder, c.ID)
+		}
+		if c.Kind == "inspiration" {
+			inspOrder = append(inspOrder, c.ID)
+		}
+		if c.ID == "topic_insp_hot" || c.ID == "topic_insp_kind" {
+			t.Fatalf("inspiration discussion topic was not deduplicated: %+v", c)
+		}
+	}
+	if want := []string{"ST-RANK1", "ST-RANK2"}; !reflect.DeepEqual(styleOrder, want) {
+		t.Fatalf("style order = %v, want server ranking %v", styleOrder, want)
+	}
+	if want := []string{"insp_hot", "insp_low"}; !reflect.DeepEqual(inspOrder, want) {
+		t.Fatalf("inspiration order = %v, want %v", inspOrder, want)
+	}
+	if len(cards) < 3 || cards[1].Kind != "inspiration" || cards[1].ID != "insp_hot" {
+		t.Fatalf("expected second card to be top inspiration per web cadence, got %+v", cards[:min(4, len(cards))])
+	}
+	if cards[1].Price != 5 || cards[1].AspectRatio < 1.4 || cards[1].Href != "https://handraw-style.com/?id=insp_hot&view=inspirations" {
+		t.Fatalf("unexpected inspiration card metadata: %+v", cards[1])
+	}
+	if cards[2].Kind != "style" || cards[2].ID != "ST-RANK1" {
+		t.Fatalf("expected third card to be top ranked style, got %+v", cards[2])
 	}
 }
