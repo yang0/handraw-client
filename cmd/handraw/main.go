@@ -51,19 +51,28 @@ func main() {
 
 	mode := "gui"
 	deepLink := ""
-	rest := args
-	if len(args) > 0 {
-		switch {
-		case args[0] == "web":
-			mode = "web"
-			rest = args[1:]
-		case args[0] == "gui":
-			mode = "gui"
-			rest = args[1:]
-		case strings.HasPrefix(strings.ToLower(args[0]), "handraw://"):
-			deepLink = args[0]
-			rest = args[1:]
+	autoStart := false
+	rest := []string{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == desktop.AutoStartArg {
+			autoStart = true
+			continue
 		}
+		if len(rest) == 0 && mode == "gui" && deepLink == "" {
+			switch {
+			case arg == "web":
+				mode = "web"
+				continue
+			case arg == "gui":
+				mode = "gui"
+				continue
+			case strings.HasPrefix(strings.ToLower(arg), "handraw://"):
+				deepLink = arg
+				continue
+			}
+		}
+		rest = append(rest, arg)
 	}
 
 	if mode == "web" {
@@ -85,11 +94,19 @@ func main() {
 		return
 	}
 
+	st := settings.Get()
+	go func(enabled bool) {
+		if err := desktop.SetAutoStart(enabled); err != nil {
+			log.Printf("同步开机自启设置失败：%v", err)
+		}
+	}(st.LaunchAtLogin)
+
 	addr, err := srv.Listen(ctx, server.DefaultPort)
 	if err != nil {
 		log.Fatalf("启动本地服务失败：%v", err)
 	}
-	if err := desktop.Run(Version, srv, addr, true, deepLink); err != nil {
+	showMain := !autoStart || !st.MinimizeToTray
+	if err := desktop.Run(Version, srv, addr, showMain, deepLink); err != nil {
 		log.Fatalf("桌面界面异常：%v", err)
 	}
 }

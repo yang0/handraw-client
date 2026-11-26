@@ -1149,6 +1149,7 @@ export async function renderSettings(root, ctx, params = {}) {
   });
   const quickChk = el("input", { id: "pref-quick-enabled", name: "quickShotEnabled", type: "checkbox", checked: Boolean(settings.quickShotEnabled) });
   const trayChk = el("input", { id: "pref-tray", name: "minimizeToTray", type: "checkbox", checked: Boolean(settings.minimizeToTray) });
+  const launchAtLoginChk = el("input", { id: "pref-launch-at-login", name: "launchAtLogin", type: "checkbox", checked: settings.launchAtLogin !== false });
   const curAutoUpdateMode = settings.autoUpdateMode || (settings.autoCheckUpdate === false ? "off" : "auto");
   const autoUpdModeSel = el("select", {
     id: "pref-auto-update-mode",
@@ -1184,6 +1185,7 @@ export async function renderSettings(root, ctx, params = {}) {
           quickShotHotkey: hotkeyIn.value.trim(),
           quickShotEnabled: quickChk.checked,
           minimizeToTray: trayChk.checked,
+          launchAtLogin: launchAtLoginChk.checked,
           autoUpdateMode: autoUpdModeSel.value,
           autoCheckUpdate: autoUpdModeSel.value !== "off",
           autoSyncResources: autoSyncChk.checked,
@@ -1243,6 +1245,7 @@ export async function renderSettings(root, ctx, params = {}) {
     el("fieldset", { class: "settings-fieldset" },
       el("legend", null, "窗口与云同步"),
       el("div", { class: "settings-checks" },
+        el("label", { for: "pref-launch-at-login", class: "settings-check" }, launchAtLoginChk, el("span", null, "开机自动启动（开启托盘时自动静默驻留后台）")),
         el("label", { for: "pref-tray", class: "settings-check" }, trayChk, el("span", null, "关闭主窗口时最小化到系统托盘")),
         el("label", { for: "pref-auto-sync", class: "settings-check" }, autoSyncChk, el("span", null, "登录后自动同步自定义画风")),
         el("label", { for: "pref-public-gen", class: "settings-check" }, publicChk, el("span", null, "网站模型生成的图片自动公开到社区（用了自己参考图的除外）")),

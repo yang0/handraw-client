@@ -178,6 +178,7 @@ type Settings struct {
 	QuickShotHotkey    string               `json:"quickShotHotkey"`
 	QuickShotEnabled   bool                 `json:"quickShotEnabled"`
 	MinimizeToTray     bool                 `json:"minimizeToTray"`
+	LaunchAtLogin      bool                 `json:"launchAtLogin"`
 	Providers          []Provider           `json:"providers"`
 	Harnesses          []harnesses.Config   `json:"harnesses,omitempty"`   // local CLI AI harness overrides & custom CLIs (#119)
 	SceneModels        map[string]string    `json:"sceneModels,omitempty"` // per-scene text/planning model overrides (#119)
@@ -213,6 +214,7 @@ func Defaults() Settings {
 		QuickShotHotkey:   "Alt+Space",
 		QuickShotEnabled:  true,
 		MinimizeToTray:    true,
+		LaunchAtLogin:     true,
 		SceneModels:           map[string]string{},
 		Plugins:               map[string]bool{},
 		PluginConfig:          map[string]any{},

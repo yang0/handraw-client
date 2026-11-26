@@ -50,18 +50,20 @@ type Host interface {
 	HideQuick()
 	Restart()
 	SetHotkey(spec string) error
+	SetAutoStart(enabled bool) error
 }
 
 type nopHost struct{}
 
-func (nopHost) OpenURL(string) error     { return errors.New("no desktop host") }
-func (nopHost) OpenPath(string) error    { return errors.New("no desktop host") }
-func (nopHost) CopyImage(string) error   { return errors.New("no desktop host") }
-func (nopHost) CopyText(string) error    { return errors.New("no desktop host") }
-func (nopHost) ShowMain()                {}
-func (nopHost) HideQuick()               {}
-func (nopHost) Restart()                 {}
-func (nopHost) SetHotkey(string) error   { return nil }
+func (nopHost) OpenURL(string) error      { return errors.New("no desktop host") }
+func (nopHost) OpenPath(string) error     { return errors.New("no desktop host") }
+func (nopHost) CopyImage(string) error    { return errors.New("no desktop host") }
+func (nopHost) CopyText(string) error     { return errors.New("no desktop host") }
+func (nopHost) ShowMain()                 {}
+func (nopHost) HideQuick()                {}
+func (nopHost) Restart()                  {}
+func (nopHost) SetHotkey(string) error    { return nil }
+func (nopHost) SetAutoStart(bool) error   { return nil }
 
 type Server struct {
 	Version  string

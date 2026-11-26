@@ -127,6 +127,10 @@ func (h *desktopHost) SetHotkey(spec string) error {
 	return h.hotkeys.Set(spec)
 }
 
+func (h *desktopHost) SetAutoStart(enabled bool) error {
+	return SetAutoStart(enabled)
+}
+
 func (h *desktopHost) Restart() {
 	exe, err := os.Executable()
 	if err == nil {
@@ -272,6 +276,9 @@ func Run(version string, srv *server.Server, addr string, showMain bool, deepLin
 	markReady := func() { h.readyOnce.Do(func() { close(h.ready) }) }
 	if runtime.GOOS == "windows" {
 		h.main.OnWindowEvent(events.Windows.WebViewNavigationCompleted, func(*application.WindowEvent) { markReady() })
+		if !showMain {
+			h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { markReady() })
+		}
 	} else {
 		h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { markReady() })
 	}

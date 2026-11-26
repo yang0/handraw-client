@@ -151,3 +151,4 @@ func (webHost) ShowMain()                    {}
 func (webHost) HideQuick()                   {}
 func (webHost) Restart()                     {}
 func (webHost) SetHotkey(string) error       { return nil }
+func (webHost) SetAutoStart(enabled bool) error { return SetAutoStart(enabled) }

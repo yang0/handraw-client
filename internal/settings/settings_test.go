@@ -67,9 +67,9 @@ func TestAutoUpdateModeMigration(t *testing.T) {
 	Reset()
 	t.Cleanup(Reset)
 
-	// Fresh defaults -> "auto".
-	if got := Get().EffectiveAutoUpdateMode(); got != "auto" {
-		t.Fatalf("expected default autoUpdateMode=auto, got %q", got)
+	// Fresh defaults -> "auto" and LaunchAtLogin=true.
+	if st0 := Get(); st0.EffectiveAutoUpdateMode() != "auto" || !st0.LaunchAtLogin {
+		t.Fatalf("expected default autoUpdateMode=auto and launchAtLogin=true, got mode=%q launch=%v", st0.EffectiveAutoUpdateMode(), st0.LaunchAtLogin)
 	}
 
 	// Legacy settings.json with only autoCheckUpdate=false -> migrates to "off".
