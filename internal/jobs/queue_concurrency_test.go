@@ -308,6 +308,10 @@ func TestSite429BusyAutoRequeuesAndCompletes(t *testing.T) {
 	var mu sync.Mutex
 	inFlight := 0
 	var got429 atomic.Int32
+	// The first four requests stay open until the fifth has been turned away,
+	// so the 429 path is exercised regardless of CI machine speed (#167).
+	release := make(chan struct{})
+	var releaseOnce sync.Once
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -324,6 +328,7 @@ func TestSite429BusyAutoRequeuesAndCompletes(t *testing.T) {
 			if inFlight >= 4 {
 				mu.Unlock()
 				got429.Add(1)
+				releaseOnce.Do(func() { close(release) })
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(w).Encode(map[string]any{
@@ -335,7 +340,10 @@ func TestSite429BusyAutoRequeuesAndCompletes(t *testing.T) {
 			inFlight++
 			mu.Unlock()
 
-			time.Sleep(45 * time.Millisecond)
+			select {
+			case <-release:
+			case <-time.After(3 * time.Second):
+			}
 
 			mu.Lock()
 			inFlight--

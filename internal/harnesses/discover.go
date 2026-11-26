@@ -565,9 +565,9 @@ func hasGoMagic(bin string) bool {
 // Code's `Microsoft VS Code\bin\copilot-shim\copilot.EXE`) so they are not
 // mistaken for the standalone GitHub Copilot CLI (Magpie #3269).
 func isEditorCopilotShim(bin string) bool {
-	s := strings.ToLower(filepath.ToSlash(bin))
+	s := normPathLower(bin)
 	if real, err := filepath.EvalSymlinks(bin); err == nil && real != "" {
-		s += "\x00" + strings.ToLower(filepath.ToSlash(real))
+		s += "\x00" + normPathLower(real)
 	}
 	for _, pat := range []string{
 		"/copilot-shim/",
@@ -586,9 +586,9 @@ func isEditorCopilotShim(bin string) bool {
 // isNonGrokBuildBinary rejects Homebrew's classic regex `grok` formula while
 // keeping Grok Build (`~/.grok/bin/grok`, `Caskroom/grok-build`, etc.).
 func isNonGrokBuildBinary(bin string) bool {
-	s := strings.ToLower(filepath.ToSlash(bin))
+	s := normPathLower(bin)
 	if real, err := filepath.EvalSymlinks(bin); err == nil && real != "" {
-		s = strings.ToLower(filepath.ToSlash(real))
+		s = normPathLower(real)
 	}
 	if strings.Contains(s, "/.grok/") || strings.Contains(s, "grok-build") {
 		return false
@@ -606,9 +606,9 @@ func isNonCursorAgentBinary(bin string) bool {
 	if strings.HasPrefix(base, "cursor-agent") {
 		return false
 	}
-	s := strings.ToLower(filepath.ToSlash(bin))
+	s := normPathLower(bin)
 	if real, err := filepath.EvalSymlinks(bin); err == nil && real != "" {
-		s += "\x00" + strings.ToLower(filepath.ToSlash(real))
+		s += "\x00" + normPathLower(real)
 	}
 	return !strings.Contains(s, "cursor")
 }
@@ -768,4 +768,10 @@ func parseMiseWrapperCmd(b []byte, name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// normPathLower lowercases a path and uses forward slashes regardless of the
+// host OS, so Windows-style paths match the same patterns everywhere (#167).
+func normPathLower(p string) string {
+	return strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
 }

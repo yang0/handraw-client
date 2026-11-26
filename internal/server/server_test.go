@@ -118,7 +118,12 @@ func setupTestServer(t *testing.T, mockSiteURL string) (*Server, context.CancelF
 
 	ctx, cancel := context.WithCancel(context.Background())
 	srv.Jobs.Start(ctx, 1)
-	t.Cleanup(cancel)
+	// Stop workers and wait for them before t.TempDir cleanup runs, otherwise
+	// an in-flight job can still write into the temp dir (#167).
+	t.Cleanup(func() {
+		cancel()
+		srv.Jobs.Wait()
+	})
 	return srv, cancel
 }
 

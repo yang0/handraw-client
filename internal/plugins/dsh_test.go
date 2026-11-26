@@ -3,6 +3,7 @@ package plugins
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -40,7 +41,9 @@ func TestDSHManifestInstallLocalAndCompat(t *testing.T) {
 		t.Fatalf("unexpected cordis config: %+v", c.DSH.Config)
 	}
 	// FilePath resolves through .link.
-	if fp, ok := r.FilePath(c.ID, "client.js"); !ok || fp != filepath.Join(srcFull, "client.js") {
+	// Compare canonical paths: CI temp dirs differ in spelling from the real
+	// path (Windows 8.3 short names, macOS /var -> /private/var) (#167).
+	if fp, ok := r.FilePath(c.ID, "client.js"); !ok || !samePath(t, fp, filepath.Join(srcFull, "client.js")) {
 		t.Fatalf("FilePath failed: %q %v", fp, ok)
 	}
 	// Remove deletes link slot, preserves original source directory.
@@ -69,4 +72,14 @@ func TestDSHManifestInstallLocalAndCompat(t *testing.T) {
 	if err != nil || cu.DSH == nil || cu.DSH.Compat != "unsupported" {
 		t.Fatalf("expected unsupported compat, got %+v err=%v", cu.DSH, err)
 	}
+}
+
+func samePath(t *testing.T, a, b string) bool {
+	t.Helper()
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	return strings.EqualFold(filepath.Clean(ra), filepath.Clean(rb))
 }

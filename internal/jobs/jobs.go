@@ -82,6 +82,7 @@ type Manager struct {
 	siteCfgAt       time.Time
 	busyAttempts    map[string]int
 	busyFirstAt     map[string]time.Time
+	canceled        map[string]bool // user-canceled ids; guards against resurrection (#167)
 	slotSignal      chan struct{}
 	wg              sync.WaitGroup
 }
@@ -100,6 +101,7 @@ func New(db *store.DB, sc *site.Client, emit func(Event)) *Manager {
 		waiting:      map[string]context.CancelFunc{},
 		busyAttempts: map[string]int{},
 		busyFirstAt:  map[string]time.Time{},
+		canceled:     map[string]bool{},
 		slotSignal:   make(chan struct{}),
 	}
 }
@@ -126,6 +128,10 @@ func (m *Manager) Start(ctx context.Context, workers int) {
 
 func (m *Manager) Enqueue(imageID string) { m.enqueueAsync(imageID) }
 
+// Wait blocks until all workers have exited after the Start context is
+// canceled, so callers (tests, shutdown) know no job is still writing files.
+func (m *Manager) Wait() { m.wg.Wait() }
+
 func (m *Manager) enqueueAsync(imageID string) {
 	select {
 	case m.queue <- imageID:
@@ -150,6 +156,7 @@ func (m *Manager) Cancel(imageID string) error {
 	if im.Status != "queued" && im.Status != "running" {
 		return nil
 	}
+	accepted := im.Status == "running" && im.RemoteTaskID != ""
 	m.mu.Lock()
 	cancel := m.running[imageID]
 	waitCancel := m.waiting[imageID]
@@ -157,8 +164,13 @@ func (m *Manager) Cancel(imageID string) error {
 	m.removeSitePendingLocked(imageID)
 	delete(m.busyAttempts, imageID)
 	delete(m.busyFirstAt, imageID)
+	if !accepted {
+		// Set under the same lock process() uses to register, so a worker that
+		// already picked the id up cannot start or requeue it afterwards.
+		m.canceled[imageID] = true
+	}
 	m.mu.Unlock()
-	if im.Status == "running" && im.RemoteTaskID != "" {
+	if accepted {
 		return errors.New("网站已受理该任务，无法取消；结果完成后仍会保存")
 	}
 	if waitCancel != nil {
@@ -419,11 +431,17 @@ func (m *Manager) scheduleBusyRetry(parent context.Context, imageID string, atte
 			return
 		}
 		im, err := m.DB.GetImage(imageID)
-		if err != nil || im.Status != "queued" {
+		if err != nil || im.Status != "queued" || m.isCanceled(imageID) {
 			return
 		}
 		m.enqueueAsync(imageID)
 	}()
+}
+
+func (m *Manager) isCanceled(imageID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.canceled[imageID]
 }
 
 func (m *Manager) process(parent context.Context, imageID string) {
@@ -462,7 +480,7 @@ func (m *Manager) process(parent context.Context, imageID string) {
 
 	ctx, cancel := context.WithCancel(parent)
 	m.mu.Lock()
-	if _, dup := m.running[imageID]; dup {
+	if _, dup := m.running[imageID]; dup || m.canceled[imageID] {
 		m.mu.Unlock()
 		cancel()
 		return
@@ -494,7 +512,9 @@ func (m *Manager) process(parent context.Context, imageID string) {
 		data, err = m.runProvider(ctx, spec)
 	}
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil || m.isCanceled(imageID) {
+			// Canceled while the request was in flight: keep the canceled
+			// status instead of requeueing or marking failed (#167).
 			return
 		}
 		if isConcurrencyBusyError(isSite, err) {
@@ -1070,6 +1090,9 @@ func (m *Manager) Retry(imageID string) error {
 	if err := m.DB.UpdateImage(imageID, map[string]any{"status": "queued", "error": "", "remote_task_id": "", "meta": json.RawMessage(meta)}); err != nil {
 		return err
 	}
+	m.mu.Lock()
+	delete(m.canceled, imageID)
+	m.mu.Unlock()
 	m.refreshRun(im.RunID)
 	m.Enqueue(imageID)
 	return nil
@@ -1080,6 +1103,11 @@ func WriteRunJSON(db *store.DB, runID string) error {
 	run, err := db.GetRun(runID)
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(run.Dir) == "" {
+		// No folder of its own (e.g. imported records): never fall back to the
+		// process working directory (#167).
+		return nil
 	}
 	type img struct {
 		File   string `json:"file"`

@@ -183,11 +183,14 @@ export async function openPostEditor(root, ctx, postId, onBack) {
   const imgById = new Map((post.resolvedImages || []).map((im) => [im.imageId, im]));
   const images = () => (post.images || []).map((r) => imgById.get(r.imageId)).filter(Boolean);
 
-  function queueSave(fields) {
+  // Typing is debounced; structural edits (tags, image order, cover) and
+  // leaving a field save at once so switching views never drops changes (#167).
+  function queueSave(fields, immediate = false) {
     Object.assign(pending, fields);
     saveState.textContent = "保存中…";
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(flush, 500);
+    if (immediate) flush();
+    else saveTimer = setTimeout(flush, 500);
   }
   async function flush() {
     clearTimeout(saveTimer);
@@ -346,6 +349,7 @@ export async function openPostEditor(root, ctx, postId, onBack) {
       titleCount.classList.toggle("over", n > TITLE_LIMIT);
     };
     paintTitleCount();
+    titleIn.addEventListener("blur", () => flush());
     titleIn.addEventListener("input", () => {
       post.title = titleIn.value;
       paintTitleCount();
@@ -376,6 +380,7 @@ export async function openPostEditor(root, ctx, postId, onBack) {
     };
     paintBodyCount();
     bodyTa.addEventListener("input", () => { post.body = bodyTa.value; paintBodyCount(); queueSave({ body: post.body }); drawPhone(); });
+    bodyTa.addEventListener("blur", () => flush());
 
     // Tags
     const tagBox = el("div", { class: "post-tags" });
@@ -386,7 +391,7 @@ export async function openPostEditor(root, ctx, postId, onBack) {
         el("button", {
           type: "button",
           "aria-label": `删除话题 ${t}`,
-          onClick: () => { post.tags.splice(i, 1); paintTags(); queueSave({ tags: post.tags }); drawPhone(); },
+          onClick: () => { post.tags.splice(i, 1); paintTags(); queueSave({ tags: post.tags }, true); drawPhone(); },
         }, "×"))));
       tagBox.appendChild(tagIn);
     };
@@ -398,7 +403,7 @@ export async function openPostEditor(root, ctx, postId, onBack) {
       post.tags = [...(post.tags || []).filter((x) => x !== v), v];
       tagIn.value = "";
       paintTags();
-      queueSave({ tags: post.tags });
+      queueSave({ tags: post.tags }, true);
       drawPhone();
       tagIn.focus();
     });
@@ -407,7 +412,7 @@ export async function openPostEditor(root, ctx, postId, onBack) {
     // Images
     const strip = el("div", { class: "post-strip", role: "list", "aria-label": "配图顺序，第一张为封面" });
     const commitImages = () => {
-      queueSave({ images: post.images, coverIndex: 0 });
+      queueSave({ images: post.images, coverIndex: 0 }, true);
       paintStrip();
       drawPhone();
     };

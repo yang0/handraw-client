@@ -8,6 +8,7 @@ import (
 )
 
 func TestSelectWindowsRootPicksLargestFreeDriveAndPinsPointer(t *testing.T) {
+	skipUnlessWindowsPaths(t)
 	var writtenPtrPath, writtenPtrVal string
 	got := selectWindowsRoot(windowsRootConfig{
 		appdataDir:  `C:\Users\alice\AppData\Roaming\handraw-client`,
@@ -37,6 +38,7 @@ func TestSelectWindowsRootPicksLargestFreeDriveAndPinsPointer(t *testing.T) {
 }
 
 func TestSelectWindowsRootHonorsPinnedPointerAcrossFreeSpaceChanges(t *testing.T) {
+	skipUnlessWindowsPaths(t)
 	got := selectWindowsRoot(windowsRootConfig{
 		appdataDir:  `C:\Users\alice\AppData\Roaming\handraw-client`,
 		systemDrive: `C:\`,
@@ -55,6 +57,7 @@ func TestSelectWindowsRootHonorsPinnedPointerAcrossFreeSpaceChanges(t *testing.T
 }
 
 func TestSelectWindowsRootIgnoresOldAppDataAndPicksLargestDrive(t *testing.T) {
+	skipUnlessWindowsPaths(t)
 	legacy := `C:\Users\alice\AppData\Roaming\handraw-client`
 	var savedPtr string
 	got := selectWindowsRoot(windowsRootConfig{
@@ -75,6 +78,7 @@ func TestSelectWindowsRootIgnoresOldAppDataAndPicksLargestDrive(t *testing.T) {
 }
 
 func TestSelectWindowsRootRecoversExistingNonSystemDriveDataWithoutPointer(t *testing.T) {
+	skipUnlessWindowsPaths(t)
 	var savedPtr string
 	got := selectWindowsRoot(windowsRootConfig{
 		appdataDir:  `C:\Users\alice\AppData\Roaming\handraw-client`,
@@ -95,6 +99,7 @@ func TestSelectWindowsRootRecoversExistingNonSystemDriveDataWithoutPointer(t *te
 }
 
 func TestSelectWindowsRootSkipsUnwritableDriveAndFallsBack(t *testing.T) {
+	skipUnlessWindowsPaths(t)
 	got := selectWindowsRoot(windowsRootConfig{
 		appdataDir:  `C:\Users\alice\AppData\Roaming\handraw-client`,
 		systemDrive: `C:\`,
@@ -115,6 +120,7 @@ func TestSelectWindowsRootSkipsUnwritableDriveAndFallsBack(t *testing.T) {
 }
 
 func TestSelectWindowsRootSingleCDriveUsesAppDataAndTiePrefersNonSystem(t *testing.T) {
+	skipUnlessWindowsPaths(t)
 	legacy := `C:\Users\alice\AppData\Roaming\handraw-client`
 	gotSingle := selectWindowsRoot(windowsRootConfig{
 		appdataDir:    legacy,
@@ -165,5 +171,14 @@ func TestWindowsListFixedDrivesLive(t *testing.T) {
 		if d.TotalBytes == 0 {
 			t.Fatalf("drive %s reported 0 total bytes", d.Root)
 		}
+	}
+}
+
+// selectWindowsRoot builds paths with filepath.Join, which only understands
+// drive letters on Windows; on macOS/Linux these cases are meaningless (#167).
+func skipUnlessWindowsPaths(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows drive-letter paths are only meaningful on Windows")
 	}
 }
