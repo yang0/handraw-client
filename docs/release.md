@@ -43,8 +43,19 @@ macOS 验证完成后，手动运行 Release，`tag` 填同一个版本、`platf
 
 客户端只在 Release 里有本平台安装包和签名文件时才提示更新（v0.6.0 起）。v0.5.0 及更早的 macOS 客户端会先看到新版本，点更新时提示“新版本没有 handraw-darwin-… 安装包”，补齐 macOS 安装包后即可正常更新。
 
+## 备用更新源自动同步（Gitee & 官网镜像）
+
+客户端按顺序尝试 3 个更新源：GitHub Releases → Gitee Releases → `https://handraw-style.com/static/client/latest.json`。
+
+- **官网镜像（已自动生效）**：生产服务器上的 `handraw-sync-client.timer` 每 30 分钟自动从 GitHub Releases 同步最新签名版本到 `https://handraw-style.com/static/client/latest.json`（校验 SHA256 后原子切换）。
+- **Gitee 代码仓库自动同步（与 `handraw-style` 一致，已配置 `GITEE_RSA_PRIVATE_KEY`）**：
+  - 每次推送到 GitHub `main` 分支或 `v*` 标签，`.github/workflows/mirror-gitee.yml` 会通过 SSH 自动同步代码与标签到 `yang02010/handraw-client`。
+- **Gitee Releases 安装包自动同步（配置 `GITEE_TOKEN` 后自动生效）**：
+  1. 在 Gitee「设置 → 私人令牌」创建含 `projects` 权限的令牌；
+  2. 写入 GitHub 仓库 Secret：`gh secret set GITEE_TOKEN --repo yang0/handraw-client`；
+  3. 之后每次发版或重跑 `release.yml` 时，会自动把全部签名安装包与 `SHA256SUMS` / `SHA256SUMS.sig` 同步到 Gitee Releases（失败不影响 GitHub 发布）。也可以手动运行 `Sync to Gitee` 并填入 `release_tag` 补同步历史版本。
+
 ## 已知限制
 
 - macOS 包没有 Apple 开发者签名和公证，用户第一次打开需要在「系统设置 → 隐私与安全性」里允许，或右键「打开」。上架前需要 Apple 开发者账号。
 - Windows 包没有代码签名证书，SmartScreen 可能提示“未知发布者”。
-- Gitee 镜像同步还没有接入流水线。

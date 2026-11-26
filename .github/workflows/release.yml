@@ -127,5 +127,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "手绘风 $TAG" --notes-file <(git log -1 --format=%B "$TAG") --verify-tag
+          git log -1 --format=%B "$TAG" > release-notes.txt
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "手绘风 $TAG" --notes-file release-notes.txt --verify-tag
           gh release upload "$TAG" artifacts/* --clobber
+      - name: Mirror tag and release to Gitee
+        continue-on-error: true
+        env:
+          GITEE_RSA_PRIVATE_KEY: ${{ secrets.GITEE_RSA_PRIVATE_KEY }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: ${{ vars.GITEE_OWNER || 'yang02010' }}
+          GITEE_REPO: ${{ vars.GITEE_REPO || 'handraw-client' }}
+        run: |
+          if [ -n "$GITEE_RSA_PRIVATE_KEY" ]; then
+            mkdir -p ~/.ssh
+            printf '%s\n' "$GITEE_RSA_PRIVATE_KEY" > ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
+            ssh-keyscan gitee.com >> ~/.ssh/known_hosts
+            git push --force "git@gitee.com:${GITEE_OWNER}/${GITEE_REPO}.git" "refs/tags/${TAG}:refs/tags/${TAG}"
+          elif [ -n "$GITEE_TOKEN" ]; then
+            git push --force "https://${GITEE_OWNER}:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git" "refs/tags/${TAG}:refs/tags/${TAG}"
+          fi
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "GITEE_TOKEN secret is not set; skipping Gitee release asset mirror."
+            exit 0
+          fi
+          python3 tools/mirror-gitee.py "$TAG" artifacts release-notes.txt

@@ -1,0 +1,73 @@
+name: Sync to Gitee
+
+# Automatically mirror main branch and tags from GitHub to Gitee (#172),
+# matching the SSH deploy-key setup used by yang0/handraw-style.
+# Requires repository secret GITEE_RSA_PRIVATE_KEY (or GITEE_TOKEN).
+# Optional repository secret GITEE_TOKEN also enables mirroring Release assets.
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional tag (e.g. v0.6.0) whose GitHub Release assets should also be mirrored to Gitee (requires GITEE_TOKEN)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-gitee
+  cancel-in-progress: false
+
+jobs:
+  sync-to-gitee:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Push branch and tags to Gitee
+        env:
+          GITEE_RSA_PRIVATE_KEY: ${{ secrets.GITEE_RSA_PRIVATE_KEY }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: ${{ vars.GITEE_OWNER || 'yang02010' }}
+          GITEE_REPO: ${{ vars.GITEE_REPO || 'handraw-client' }}
+        run: |
+          if [ -n "$GITEE_RSA_PRIVATE_KEY" ]; then
+            mkdir -p ~/.ssh
+            printf '%s\n' "$GITEE_RSA_PRIVATE_KEY" > ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
+            ssh-keyscan gitee.com >> ~/.ssh/known_hosts
+            REMOTE="git@gitee.com:${GITEE_OWNER}/${GITEE_REPO}.git"
+          elif [ -n "$GITEE_TOKEN" ]; then
+            REMOTE="https://${GITEE_OWNER}:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git"
+          else
+            echo "Neither GITEE_RSA_PRIVATE_KEY nor GITEE_TOKEN is set; skipping Gitee mirror."
+            exit 0
+          fi
+          git push --force "$REMOTE" "refs/remotes/origin/main:refs/heads/main"
+          git push --tags --force "$REMOTE"
+
+      - name: Mirror specified GitHub Release to Gitee
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: ${{ vars.GITEE_OWNER || 'yang02010' }}
+          GITEE_REPO: ${{ vars.GITEE_REPO || 'handraw-client' }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "GITEE_TOKEN secret is not set; skipping Gitee release asset mirror."
+            exit 0
+          fi
+          mkdir -p artifacts
+          gh release download "$TAG" --dir artifacts --clobber
+          gh release view "$TAG" --json body --jq '.body // ""' > release-notes.txt
+          python3 tools/mirror-gitee.py "$TAG" artifacts release-notes.txt
