@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -234,10 +235,16 @@ func (s *Server) Handler() http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		// DNS rebinding: a page on a foreign name that resolves to 127.0.0.1
+		// must not even receive the UI (which carries the token cookie) (#171).
+		if !isLocalHostHeader(r.Host) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		// Allow paired Chrome extension ("手绘风灵感捕手") to call ONLY the
 		// dedicated local clip endpoints with X-Handraw-Clip-Token (#73).
 		if isClipBridgePath(r.URL.Path) {
-			if o := r.Header.Get("Origin"); strings.HasPrefix(o, "chrome-extension://") || strings.HasPrefix(o, "http://127.0.0.1") || strings.HasPrefix(o, "http://localhost") {
+			if o := r.Header.Get("Origin"); isClipOrigin(o) {
 				w.Header().Set("Access-Control-Allow-Origin", o)
 				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Handraw-Clip-Token, X-Handraw-Token")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -267,6 +274,14 @@ func (s *Server) Handler() http.Handler {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
+			// Writes must carry the token in a custom header. Browsers cannot
+			// attach one cross-site without a CORS preflight, which this server
+			// never approves, so a page that somehow learned the token still
+			// cannot use form/text-plain "simple" requests (#171).
+			if isStateChanging(r.Method) && r.Header.Get("X-Handraw-Token") == "" {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 		}
 		s.mux.ServeHTTP(w, r)
 	})
@@ -274,17 +289,11 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) authorized(r *http.Request) bool {
 	// Refuse requests from other sites (DNS rebinding / CSRF).
-	host := r.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	if host != "127.0.0.1" && host != "localhost" && host != "wails.localhost" && host != "" {
+	if !isLocalHostHeader(r.Host) {
 		return false
 	}
-	if o := r.Header.Get("Origin"); o != "" && o != "null" {
-		if !(strings.HasPrefix(o, "http://127.0.0.1") || strings.HasPrefix(o, "http://localhost") || strings.HasPrefix(o, "wails://") || strings.HasPrefix(o, "http://wails.localhost") || strings.HasPrefix(o, "https://wails.localhost")) {
-			return false
-		}
+	if o := r.Header.Get("Origin"); o != "" && o != "null" && !isLocalOrigin(o) {
+		return false
 	}
 	tok := r.Header.Get("X-Handraw-Token")
 	if tok == "" {
@@ -295,7 +304,7 @@ func (s *Server) authorized(r *http.Request) bool {
 			tok = c.Value
 		}
 	}
-	return tok == s.Token
+	return tok != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) == 1
 }
 
 func isClipBridgePath(p string) bool {
@@ -303,24 +312,18 @@ func isClipBridgePath(p string) bool {
 }
 
 func (s *Server) authorizedClip(r *http.Request) bool {
-	host := r.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	if host != "127.0.0.1" && host != "localhost" && host != "" {
+	if !isLocalHostHeader(r.Host) {
 		return false
 	}
 	if s.authorized(r) {
 		return true
 	}
-	if o := r.Header.Get("Origin"); o != "" && o != "null" {
-		if !strings.HasPrefix(o, "chrome-extension://") && !strings.HasPrefix(o, "http://127.0.0.1") && !strings.HasPrefix(o, "http://localhost") {
-			return false
-		}
+	if o := r.Header.Get("Origin"); o != "" && o != "null" && !isClipOrigin(o) {
+		return false
 	}
 	clipTok := strings.TrimSpace(r.Header.Get("X-Handraw-Clip-Token"))
 	expected := settings.EnsureClipToken()
-	return clipTok != "" && expected != "" && clipTok == expected
+	return clipTok != "" && expected != "" && subtle.ConstantTimeCompare([]byte(clipTok), []byte(expected)) == 1
 }
 
 // ---------- helpers ----------
@@ -463,7 +466,22 @@ func (s *Server) serveLocal(w http.ResponseWriter, r *http.Request, path string)
 		return
 	}
 	w.Header().Set("Cache-Control", "private, max-age=86400")
+	if isActiveDocumentExt(clean) {
+		// Library folders can hold downloaded gallery content; an HTML/SVG file
+		// opened directly must not run as a same-origin page with the token (#171).
+		w.Header().Set("Content-Security-Policy", "sandbox")
+	}
 	http.ServeFile(w, r, clean)
+}
+
+// isActiveDocumentExt reports file types a browser would execute script in
+// when opened directly.
+func isActiveDocumentExt(p string) bool {
+	switch strings.ToLower(filepath.Ext(p)) {
+	case ".html", ".htm", ".xhtml", ".svg", ".svgz", ".xml", ".xsl", ".mht", ".mhtml":
+		return true
+	}
+	return false
 }
 
 // DBPathHint is the data root (library images live there).

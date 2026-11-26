@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -75,40 +76,42 @@ func TestArticleObsidianAPIAndSecurity(t *testing.T) {
 		t.Fatalf("expected 400 for path escape, got %d", rrEsc.Code)
 	}
 
-	// 5. Enabled plugins default to trustedDesktop=true -> desktop FS succeeds out of the box
-	rrAllowDefault := doReq(t, h, srv.Token, "POST", "/api/article/obsidian/desktop/fs", map[string]any{
-		"pluginId": "demo-sync",
-		"req":      map[string]any{"op": "exists", "path": vaultDir},
-	})
-	if rrAllowDefault.Code != 200 {
-		t.Fatalf("expected 200 for default-trusted desktop fs, got %d %s", rrAllowDefault.Code, rrAllowDefault.Body.String())
+	// 5. Importing with enable:true must NOT make the plugin runnable: enabling an
+	//    Obsidian plugin grants full local access and needs explicit consent (#171).
+	fsReq := map[string]any{"pluginId": "demo-sync", "req": map[string]any{"op": "exists", "path": vaultDir}}
+	if rr := doReq(t, h, srv.Token, "POST", "/api/article/obsidian/desktop/fs", fsReq); rr.Code != 403 {
+		t.Fatalf("expected 403 for plugin without consent, got %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doReq(t, h, srv.Token, "GET", "/api/article/obsidian/plugins/demo-sync/bundle", nil); rr.Code != 403 {
+		t.Fatalf("bundle must not be served without consent, got %d", rr.Code)
 	}
 
-	// 6. Explicitly revoking trustedDesktop -> returns 403; re-granting -> succeeds again
-	rrRevoke := doReq(t, h, srv.Token, "PATCH", "/api/article/obsidian/plugins/demo-sync", map[string]any{
-		"trustedDesktop": false,
-	})
-	if rrRevoke.Code != 200 {
-		t.Fatalf("patch revoke trust failed: %d %s", rrRevoke.Code, rrRevoke.Body.String())
+	// 6. Enabling without granting full access is refused with a clear code.
+	rrNoConsent := doReq(t, h, srv.Token, "PATCH", "/api/article/obsidian/plugins/demo-sync", map[string]any{"enabled": true})
+	if rrNoConsent.Code != 409 || !strings.Contains(rrNoConsent.Body.String(), "needs_full_access") {
+		t.Fatalf("expected 409 needs_full_access, got %d %s", rrNoConsent.Code, rrNoConsent.Body.String())
 	}
-	rrDeny := doReq(t, h, srv.Token, "POST", "/api/article/obsidian/desktop/fs", map[string]any{
-		"pluginId": "demo-sync",
-		"req":      map[string]any{"op": "exists", "path": vaultDir},
-	})
-	if rrDeny.Code != 403 {
-		t.Fatalf("expected 403 after explicitly revoking trustedDesktop, got %d %s", rrDeny.Code, rrDeny.Body.String())
+
+	// 7. Enabling together with explicit consent works.
+	rrGrant := doReq(t, h, srv.Token, "PATCH", "/api/article/obsidian/plugins/demo-sync", map[string]any{"enabled": true, "trustedDesktop": true})
+	if rrGrant.Code != 200 {
+		t.Fatalf("enable with consent failed: %d %s", rrGrant.Code, rrGrant.Body.String())
 	}
-	rrTrust := doReq(t, h, srv.Token, "PATCH", "/api/article/obsidian/plugins/demo-sync", map[string]any{
-		"trustedDesktop": true,
-	})
-	if rrTrust.Code != 200 {
-		t.Fatalf("patch trust failed: %d %s", rrTrust.Code, rrTrust.Body.String())
+	if rr := doReq(t, h, srv.Token, "POST", "/api/article/obsidian/desktop/fs", fsReq); rr.Code != 200 {
+		t.Fatalf("expected 200 after consent, got %d %s", rr.Code, rr.Body.String())
 	}
-	rrAllow := doReq(t, h, srv.Token, "POST", "/api/article/obsidian/desktop/fs", map[string]any{
-		"pluginId": "demo-sync",
-		"req":      map[string]any{"op": "exists", "path": vaultDir},
-	})
-	if rrAllow.Code != 200 {
-		t.Fatalf("expected 200 for trusted desktop fs, got %d %s", rrAllow.Code, rrAllow.Body.String())
+	if rr := doReq(t, h, srv.Token, "GET", "/api/article/obsidian/plugins/demo-sync/bundle", nil); rr.Code != 200 {
+		t.Fatalf("bundle should be served after consent, got %d %s", rr.Code, rr.Body.String())
+	}
+
+	// 8. Revoking access also disables the plugin.
+	if rr := doReq(t, h, srv.Token, "PATCH", "/api/article/obsidian/plugins/demo-sync", map[string]any{"trustedDesktop": false}); rr.Code != 200 {
+		t.Fatalf("revoke failed: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doReq(t, h, srv.Token, "POST", "/api/article/obsidian/desktop/fs", fsReq); rr.Code != 403 {
+		t.Fatalf("expected 403 after revoke, got %d", rr.Code)
+	}
+	if rr := doReq(t, h, srv.Token, "GET", "/api/article/obsidian/plugins/demo-sync/bundle", nil); rr.Code != 403 {
+		t.Fatalf("bundle must not be served after revoke, got %d", rr.Code)
 	}
 }

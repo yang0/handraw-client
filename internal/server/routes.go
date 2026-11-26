@@ -286,7 +286,9 @@ func (s *Server) ui(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: "hw", Value: s.Token, Path: "/", HttpOnly: false, SameSite: http.SameSiteStrictMode})
 		w.Header().Set("Cache-Control", "no-store")
 	} else if p == "obsidian-host.html" {
-		// Sandboxed Obsidian plugin host: intentionally does NOT receive the API token cookie.
+		// Obsidian plugin host. It runs same-origin with the workbench (CodeMirror
+		// sharing needs it), so plugins CAN read the token cookie; that is why
+		// enabling a plugin requires explicit full-access consent (#171).
 		w.Header().Set("Cache-Control", "no-store")
 	} else if p == "js/obsidian-shim.js" {
 		// Opaque-origin sandbox iframe loads this ES module via CORS.

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -395,6 +396,9 @@ func (s *Server) articleObsidianPatch(w http.ResponseWriter, r *http.Request) (a
 		return nil, err
 	}
 	inst, err := mgr.SetPluginState(id, body.Enabled, body.TrustedDesktop, body.LocalPorts)
+	if errors.Is(err, obsidian.ErrNeedsFullAccess) {
+		return nil, &apiError{Status: 409, Msg: err.Error(), Code: "needs_full_access"}
+	}
 	if err != nil {
 		return nil, bad(err.Error())
 	}
@@ -413,6 +417,11 @@ func (s *Server) articleObsidianDelete(w http.ResponseWriter, r *http.Request) (
 func (s *Server) articleObsidianBundle(w http.ResponseWriter, r *http.Request) (any, error) {
 	mgr := s.obsidianMgr()
 	id := strings.TrimSpace(r.PathValue("id"))
+	// The bundle is the code the host executes: only hand it out for plugins
+	// the user enabled with explicit full-access consent (#171).
+	if !mgr.IsRunnable(id) {
+		return nil, &apiError{Status: 403, Msg: "插件未启用或尚未确认完全权限", Code: "needs_full_access"}
+	}
 	b, err := mgr.LoadBundle(id)
 	if err != nil {
 		return nil, notFound(err.Error())

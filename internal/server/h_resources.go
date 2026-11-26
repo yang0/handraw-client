@@ -354,7 +354,9 @@ func (s *Server) filePlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Plugin pages run in a sandboxed iframe with no access to the API.
-	w.Header().Set("Content-Security-Policy", "default-src 'self' 'unsafe-inline' data: blob:; connect-src 'none'; frame-ancestors 'self'")
+	// sandbox gives the page an opaque origin even when opened directly, so it
+	// can never read the API token cookie (#171).
+	w.Header().Set("Content-Security-Policy", "default-src 'self' 'unsafe-inline' data: blob:; connect-src 'none'; frame-ancestors 'self'; sandbox allow-scripts")
 	if strings.EqualFold(filepath.Ext(full), ".html") {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	}

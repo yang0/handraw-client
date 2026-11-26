@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, getToken, openURL, showModal, toast } from "../api.js";
+import { api, clear, closeModal, el, getToken, openURL, showModal, showStackedModal, toast } from "../api.js";
 import { CM6_SINGLETON_MODULES } from "./article-live.js";
 import { openArticleContextMenu, sanitizeSvgElement } from "./article-links.js";
 
@@ -564,8 +564,56 @@ export function createArticleObsidianController(opts) {
     if (vaultList) await sendCmd("sync-vault", vaultList).catch(() => {});
   }
 
+  // Obsidian plugins run in the workbench's own origin (needed to share the
+  // CodeMirror editor), so they can reach every local API. Enabling one is
+  // granting full access; the user must confirm that explicitly (#171).
+  function confirmFullAccess(plugin) {
+    const mf = plugin.manifest || {};
+    return new Promise((resolve) => {
+      let decided = false;
+      const finish = (ok) => { if (decided) return; decided = true; resolve(ok); dlg._closeSelf(); };
+      const body = el("div", { class: "col", style: { gap: "10px", maxWidth: "460px" } },
+        el("p", { style: { margin: "0", lineHeight: "1.6" } },
+          `「${mf.name || plugin.id}」${mf.author ? `（作者：${mf.author}）` : ""}将以`,
+          el("strong", null, "完全权限"),
+          "在你的电脑上运行，和在 Obsidian 里一样："),
+        el("ul", { style: { margin: "0", paddingLeft: "18px", lineHeight: "1.7" } },
+          el("li", null, "可以读写本机任意文件"),
+          el("li", null, "可以执行命令行程序"),
+          el("li", null, "可以调用手绘风客户端的全部功能（包括你的账号与生图额度）")),
+        el("p", { class: "muted", style: { margin: "0", lineHeight: "1.6" } }, "只启用你信任来源的插件。可以随时在这里停用或撤销。")
+      );
+      const dlg = showStackedModal("启用前请确认", body, [
+        el("button", { type: "button", class: "btn", onClick: () => finish(false) }, "取消"),
+        el("button", { type: "button", class: "btn btn-primary", onClick: () => finish(true) }, "我信任该插件，启用"),
+      ], { onClose: () => { if (!decided) { decided = true; resolve(false); } } });
+    });
+  }
+
+  // Installing never grants access by itself; when the user asked to enable,
+  // ask for full-access consent first (#171).
+  async function enableAfterInstall(plugin, wanted) {
+    if (!plugin) return;
+    if (plugin.enabled) {
+      await loadPluginIntoHost(plugin.id);
+      return;
+    }
+    if (wanted && plugin.compat?.level !== "unsupported") {
+      try {
+        await togglePluginEnabled(plugin, true);
+      } catch (err) {
+        toast(err.message || "启用失败");
+      }
+    }
+  }
+
   async function togglePluginEnabled(plugin, nextEnabled) {
-    const res = await api("PATCH", `/api/article/obsidian/plugins/${encodeURIComponent(plugin.id)}`, { enabled: nextEnabled });
+    const patch = { enabled: nextEnabled };
+    if (nextEnabled && !plugin.trustedDesktop) {
+      if (!(await confirmFullAccess(plugin))) return plugin;
+      patch.trustedDesktop = true;
+    }
+    const res = await api("PATCH", `/api/article/obsidian/plugins/${encodeURIComponent(plugin.id)}`, patch);
     await refreshPluginsList();
     if (nextEnabled) {
       await loadPluginIntoHost(plugin.id);
@@ -868,23 +916,30 @@ export function createArticleObsidianController(opts) {
           card.appendChild(el("div", { class: "ic-obs-runtime-err" }, `运行异常：${runErr}`));
         }
 
-        // Permissions row: Trusted Desktop (fs/spawn) + Localhost Ports (PicGo etc.)
+        // Permissions row: full-access status (#171) + Localhost Ports (PicGo etc.)
         const permBar = el("div", { class: "ic-obs-perm-bar" });
-        if (p.compat?.needsDesktop || p.trustedDesktop) {
-          const trustCb = el("input", { type: "checkbox" });
-          trustCb.checked = Boolean(p.trustedDesktop);
-          trustCb.addEventListener("change", async () => {
-            try {
-              await api("PATCH", `/api/article/obsidian/plugins/${encodeURIComponent(p.id)}`, { trustedDesktop: trustCb.checked });
-              await refreshPluginsList();
-              toast(trustCb.checked ? `已为「${mf.name}」开启本地桌面权限 (fs/CLI)` : `已撤销「${mf.name}」本地桌面权限`);
-            } catch (err) {
-              toast(err.message);
-            }
-          });
-          permBar.appendChild(el("label", { class: "ic-obs-check-lbl" },
-            trustCb,
-            el("span", null, "信任本地桌面权限（允许该插件读写本地文件 / 调用 CLI）")
+        if (p.needsConsent) {
+          permBar.appendChild(el("div", { class: "ic-obs-runtime-err" },
+            "安全更新：Obsidian 插件以完全权限运行，需要你确认一次后才会继续加载。点上方「启用」进行确认。"));
+        } else if (p.trustedDesktop) {
+          permBar.appendChild(el("div", { class: "row", style: { gap: "8px", alignItems: "center", flexWrap: "wrap" } },
+            el("span", { class: "muted", style: { fontSize: "11.5px" } }, "已授予完全权限（可读写本地文件、执行命令）"),
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              onClick: async () => {
+                try {
+                  await unloadPluginFromHost(p.id);
+                  await api("PATCH", `/api/article/obsidian/plugins/${encodeURIComponent(p.id)}`, { trustedDesktop: false });
+                  await refreshPluginsList();
+                  toast(`已撤销「${mf.name || p.id}」的权限并停用`);
+                  renderTabs();
+                  renderInstalledTab();
+                } catch (err) {
+                  toast(err.message);
+                }
+              },
+            }, "撤销权限并停用")
           ));
         }
 
@@ -1022,7 +1077,7 @@ export function createArticleObsidianController(opts) {
               const res = await api("POST", "/api/article/obsidian/import-batch", { items, enable: importAutoEnable });
               await refreshPluginsList();
               for (const inst of res.installed || []) {
-                if (inst.enabled) await loadPluginIntoHost(inst.id);
+                await enableAfterInstall(inst, importAutoEnable);
               }
               selectedDiscoverDirs.clear();
               toast(`已导入 ${(res.installed || []).length} 个 Obsidian 插件到全局目录`);
@@ -1084,7 +1139,7 @@ export function createArticleObsidianController(opts) {
                     enable: importAutoEnable,
                   });
                   await refreshPluginsList();
-                  if (res.plugin?.enabled) await loadPluginIntoHost(res.plugin.id);
+                  await enableAfterInstall(res.plugin, importAutoEnable);
                   toast(`已导入「${dp.manifest.name || dp.id}」`);
                   await loadDiscover(discoverCustomDir);
                 } catch (err) {
@@ -1199,7 +1254,7 @@ export function createArticleObsidianController(opts) {
                     enable: true,
                   });
                   await refreshPluginsList();
-                  if (res.plugin?.enabled) await loadPluginIntoHost(res.plugin.id);
+                  await enableAfterInstall(res.plugin, true);
                   toast(`已安装「${res.plugin?.manifest?.name || it.name}」`);
                   await loadMarket(false);
                   renderTabs();
@@ -1246,7 +1301,7 @@ export function createArticleObsidianController(opts) {
               enable: true,
             });
             await refreshPluginsList();
-            if (res.plugin?.enabled) await loadPluginIntoHost(res.plugin.id);
+            await enableAfterInstall(res.plugin, true);
             toast(`已安装「${res.plugin?.manifest?.name || val}」`);
             activeTab = "installed";
             renderTabs();
@@ -1270,7 +1325,7 @@ export function createArticleObsidianController(opts) {
         try {
           const res = await api("POST", "/api/article/obsidian/install", fd);
           await refreshPluginsList();
-          if (res.plugin?.enabled) await loadPluginIntoHost(res.plugin.id);
+          await enableAfterInstall(res.plugin, true);
           toast(`已从 ZIP 导入「${res.plugin?.manifest?.name || f.name}」`);
           activeTab = "installed";
           renderTabs();
@@ -1329,7 +1384,7 @@ export function createArticleObsidianController(opts) {
                     enable: true,
                   });
                   await refreshPluginsList();
-                  if (res.plugin?.enabled) await loadPluginIntoHost(res.plugin.id);
+                  await enableAfterInstall(res.plugin, true);
                   toast(`已导入「${res.plugin?.manifest?.name || dir}」`);
                   activeTab = "installed";
                   renderTabs();

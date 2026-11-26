@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -196,5 +197,42 @@ func TestExecDesktopFSRealpathMissingReturnsError(t *testing.T) {
 	missing := filepath.Join(tmp, "does-not-exist.png")
 	if _, err := ExecDesktopFS(DesktopFSRequest{Op: "realpath", Path: missing}); err == nil {
 		t.Fatalf("expected error for missing file realpath, got nil")
+	}
+}
+
+// #171: plugins enabled under the old default-trust rule must not keep running
+// silently; they surface as needing consent until the user confirms once.
+func TestLegacyEnabledPluginNeedsConsent(t *testing.T) {
+	dir := t.TempDir()
+	m := New(dir)
+	pdir := filepath.Join(dir, "legacy-plugin")
+	if err := os.MkdirAll(pdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(pdir, "manifest.json"), []byte(`{"id":"legacy-plugin","name":"Legacy","version":"1.0.0","minAppVersion":"0.15.0"}`), 0o644)
+	_ = os.WriteFile(filepath.Join(pdir, "main.js"), []byte(`module.exports = class extends require("obsidian").Plugin {}`), 0o644)
+	// Old state file: enabled, no trustedDesktop entry (used to mean "trusted").
+	_ = os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"enabled":{"legacy-plugin":true}}`), 0o644)
+
+	if m.IsRunnable("legacy-plugin") {
+		t.Fatalf("legacy plugin without explicit consent must not be runnable")
+	}
+	p, err := m.Get("legacy-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Enabled || !p.NeedsConsent || p.TrustedDesktop {
+		t.Fatalf("expected enabled=false needsConsent=true trusted=false, got %+v", p)
+	}
+
+	on, yes := true, true
+	if _, err := m.SetPluginState("legacy-plugin", &on, nil, nil); !errors.Is(err, ErrNeedsFullAccess) {
+		t.Fatalf("enabling without consent should fail with ErrNeedsFullAccess, got %v", err)
+	}
+	if _, err := m.SetPluginState("legacy-plugin", &on, &yes, nil); err != nil {
+		t.Fatalf("enable with consent: %v", err)
+	}
+	if !m.IsRunnable("legacy-plugin") {
+		t.Fatalf("plugin should run after consent")
 	}
 }

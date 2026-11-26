@@ -64,6 +64,9 @@ type InstalledPlugin struct {
 	Manifest       Manifest     `json:"manifest"`
 	Enabled        bool         `json:"enabled"`
 	TrustedDesktop bool         `json:"trustedDesktop"`
+	// NeedsConsent: the plugin was switched on (e.g. under the old default-trust
+	// rule) but the user never confirmed full local access, so it is not loaded (#171).
+	NeedsConsent bool `json:"needsConsent,omitempty"`
 	LocalPorts     []int        `json:"localPorts,omitempty"`
 	HasStyles      bool         `json:"hasStyles"`
 	HasData        bool         `json:"hasData"`
@@ -372,8 +375,9 @@ func (m *Manager) List() []InstalledPlugin {
 		out = append(out, InstalledPlugin{
 			ID:             mf.ID,
 			Manifest:       mf,
-			Enabled:        st.Enabled[mf.ID],
+			Enabled:        st.Enabled[mf.ID] && isTrustedInState(st, mf.ID),
 			TrustedDesktop: isTrustedInState(st, mf.ID),
+			NeedsConsent:   st.Enabled[mf.ID] && !isTrustedInState(st, mf.ID),
 			LocalPorts:     st.LocalPorts[mf.ID],
 			HasStyles:      sErr == nil,
 			HasData:        dErr == nil,
@@ -415,11 +419,19 @@ func (m *Manager) SetPluginState(id string, enabled *bool, trustedDesktop *bool,
 	}
 	m.mu.Lock()
 	st := m.loadStateLocked()
-	if enabled != nil {
-		st.Enabled[id] = *enabled
-	}
 	if trustedDesktop != nil {
 		st.TrustedDesktop[id] = *trustedDesktop
+		if !*trustedDesktop {
+			// Without full access a plugin cannot run at all (#171).
+			st.Enabled[id] = false
+		}
+	}
+	if enabled != nil {
+		if *enabled && !isTrustedInState(st, id) {
+			m.mu.Unlock()
+			return InstalledPlugin{}, ErrNeedsFullAccess
+		}
+		st.Enabled[id] = *enabled
 	}
 	if localPorts != nil {
 		clean := make([]int, 0, len(*localPorts))
@@ -445,13 +457,16 @@ func (m *Manager) SetPluginState(id string, enabled *bool, trustedDesktop *bool,
 	return m.Get(id)
 }
 
+// ErrNeedsFullAccess is returned when enabling a plugin the user has not
+// granted full local access. Obsidian plugins share the workbench origin and
+// can reach every local API, so enabling one IS granting full access (#171).
+var ErrNeedsFullAccess = errors.New("启用 Obsidian 插件前需要确认：插件将以完全权限在本机运行，可读写本地文件并执行命令")
+
 // isTrustedInState returns whether plugin id has local desktop fs/exec access.
 // All installed plugins default to trusted unless explicitly revoked (false).
 func isTrustedInState(st globalState, id string) bool {
-	if v, ok := st.TrustedDesktop[id]; ok {
-		return v
-	}
-	return true
+	// Default is NOT trusted: the user must explicitly grant access (#171).
+	return st.TrustedDesktop[id]
 }
 
 // IsTrustedDesktop returns whether enabled plugin id is trusted for desktop fs/spawn access.
@@ -464,6 +479,9 @@ func (m *Manager) IsTrustedDesktop(id string) bool {
 	st := m.loadStateLocked()
 	return st.Enabled[id] && isTrustedInState(st, id)
 }
+
+// IsRunnable reports whether a plugin may be loaded and executed.
+func (m *Manager) IsRunnable(id string) bool { return m.IsTrustedDesktop(id) }
 
 // AllowedLocalPorts returns the user-approved localhost ports for a plugin (plus standard PicGo default if allowed).
 func (m *Manager) AllowedLocalPorts(id string) []int {
