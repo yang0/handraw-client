@@ -2,6 +2,19 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.8 (2026-11-26)
+
+### Diagnostics & Reliability
+- **Privacy-Safe Client Error & Crash Reporting (#186)**:
+  - Captured frontend JS runtime/promise/API `>= 500` errors, local Go server panics & `>= 500` responses, quit-update apply failures, and previous-session Go process crashes (`debug.SetCrashOutput` → `<appdir>/crash-last.log`).
+  - Added local path/username, credential/token (`Bearer`/`hwc_`/`sk-`/`ghp_`/JWT), URL query, email, and phone redaction, 10-minute fingerprint deduplication with suppressed count rollups, and a 20/hour sliding rate limit; strictly honors the Settings telemetry opt-out toggle.
+
+### Fixes
+- **Public `/api/boot` Fallback & Optional Endpoint Negative Cache (#187)**:
+  - Switched community catalog fallback `/api/boot?surface=catalog` to unauthenticated `Site.Public` requests so desktop `hwt_` tokens no longer trigger `403 token_scope_denied`.
+  - Added per-session negative caching for optional dedicated endpoints (`/api/studio/canvas-assistant`, `/api/studio/analyze-style`) on `403`/`404` so callers fall back immediately to `/api/ai/chat` without redundant round-trips.
+  - Isolated site keyring tests to `HANDRAW_SECRETS=memory` for headless Linux CI and developer keyring safety.
+
 ## v0.6.7 (2026-11-26)
 
 ### Features & UX
