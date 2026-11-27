@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -351,6 +352,16 @@ func (s *Server) h(fn handler) http.HandlerFunc {
 		defer func() {
 			if rec := recover(); rec != nil {
 				s.Log.Error("panic", "path", r.URL.Path, "err", rec)
+				if s.Telemetry != nil {
+					s.Telemetry.ReportError(telemetry.ErrorReport{
+						Category: "http_panic",
+						Source:   "backend",
+						Route:    telemetry.NormalizeRoute(r.Method, r.URL.Path),
+						Status:   500,
+						Message:  fmt.Sprint(rec),
+						Stack:    string(debug.Stack()),
+					})
+				}
 				writeJSON(w, 500, map[string]any{"error": fmt.Sprint("内部错误：", rec)})
 			}
 		}()
@@ -382,6 +393,15 @@ func (s *Server) h(fn handler) http.HandlerFunc {
 						payload["conflictTarget"] = ct
 					}
 				}
+			}
+			if status >= 500 && s.Telemetry != nil && !strings.HasPrefix(r.URL.Path, "/api/telemetry") {
+				s.Telemetry.ReportError(telemetry.ErrorReport{
+					Category: "http_5xx",
+					Source:   "backend",
+					Route:    telemetry.NormalizeRoute(r.Method, r.URL.Path),
+					Status:   status,
+					Message:  err.Error(),
+				})
 			}
 			writeJSON(w, status, payload)
 			return

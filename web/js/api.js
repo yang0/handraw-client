@@ -14,6 +14,36 @@ export function setToken(t) {
   if (t) token = t;
 }
 
+let feErrorSentCount = 0;
+
+export function reportClientError(payload = {}) {
+  if (feErrorSentCount >= 30) return;
+  feErrorSentCount++;
+  try {
+    const tok = getToken();
+    if (!tok) return;
+    fetch("/api/telemetry/event", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Handraw-Token": tok,
+      },
+      body: JSON.stringify({
+        event: "client_error",
+        props: {
+          category: String(payload.category || "js_error").slice(0, 40),
+          route: String(payload.route || "").slice(0, 120),
+          location: String(payload.location || "").slice(0, 120),
+          status: Number(payload.status || 0) || 0,
+          message: String(payload.message || "").slice(0, 240),
+          stack: String(payload.stack || "").slice(0, 650),
+        },
+      }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch {}
+}
+
 export async function api(method, path, body) {
   const opts = {
     method,
@@ -40,6 +70,14 @@ export async function api(method, path, body) {
     err.status = resp.status;
     err.code = data && data.code;
     err.conflictTarget = data && data.conflictTarget;
+    if (resp.status >= 500 && !String(path || "").startsWith("/api/telemetry")) {
+      reportClientError({
+        category: "api_5xx",
+        route: `${method} ${String(path || "").split("?")[0]}`,
+        status: resp.status,
+        message: err.message,
+      });
+    }
     throw err;
   }
   return data;

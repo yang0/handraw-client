@@ -1,4 +1,4 @@
-import { api, clear, closeModal, connectEvents, el, getToken, installDialogLightDismiss, money, onEvent, openURL, setColorScheme, setToken, showModal, toast } from "./api.js";
+import { api, clear, closeModal, connectEvents, el, getToken, installDialogLightDismiss, money, onEvent, openURL, reportClientError, setColorScheme, setToken, showModal, toast } from "./api.js";
 import { economySyncHint, formatEconomyPillText, formatYuanMicros, parseEconomy } from "./economy.js";
 import { initPalette } from "./palette.js";
 import { fallbackPluginIcon } from "./plugin-icons.js";
@@ -44,7 +44,39 @@ let currentView = "home";
 let currentParams = {};
 let lastFocusRefresh = 0;
 
+function installGlobalErrorHandlers() {
+  if (window.__handrawErrHooked) return;
+  window.__handrawErrHooked = true;
+  const shortLoc = (src, line, col) => {
+    const s = String(src || "").replace(/^https?:\/\/[^/]+/, "").split("?")[0];
+    return line ? `${s}:${line}${col ? ":" + col : ""}` : s;
+  };
+  window.addEventListener("error", (ev) => {
+    if (!ev || ev.target !== window) return;
+    reportClientError({
+      category: "js_error",
+      route: `#${currentView || "home"}`,
+      location: shortLoc(ev.filename, ev.lineno, ev.colno),
+      message: ev.message || ev.error?.message || "Uncaught error",
+      stack: ev.error?.stack || "",
+    });
+  });
+  window.addEventListener("unhandledrejection", (ev) => {
+    const reason = ev?.reason;
+    const msg = typeof reason === "string"
+      ? reason
+      : (reason?.message || String(reason || "Unhandled promise rejection"));
+    reportClientError({
+      category: "unhandled_rejection",
+      route: `#${currentView || "home"}`,
+      message: msg,
+      stack: reason?.stack || "",
+    });
+  });
+}
+
 async function start() {
+  installGlobalErrorHandlers();
   installDialogLightDismiss();
 
   const boot = await api("GET", "/api/boot").catch(() => ({}));

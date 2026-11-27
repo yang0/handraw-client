@@ -41,6 +41,8 @@ var allowedEvents = map[string]bool{
 	"client_feature_used":   true,
 	"client_update_checked": true,
 	"client_update_applied": true,
+	"client_error":          true,
+	"client_crash":          true,
 }
 
 var blockedPropSubstrings = []string{
@@ -95,9 +97,13 @@ type Client struct {
 	AnonID    func() string
 	Token     func() string
 
-	mu     sync.Mutex
-	queue  []eventPayload
-	notify chan struct{}
+	mu       sync.Mutex
+	queue    []eventPayload
+	notify   chan struct{}
+	errMu    sync.Mutex
+	errSeen  map[string]errDedupEntry
+	errTimes []time.Time
+	Now      func() time.Time
 }
 
 // New constructs a telemetry Client with a fresh random session ID.
@@ -122,12 +128,13 @@ func (c *Client) isEnabled() bool {
 	return true
 }
 
-func (c *Client) sanitizeProps(raw map[string]any) map[string]any {
+func (c *Client) sanitizeProps(event string, raw map[string]any) map[string]any {
 	out := map[string]any{
 		"appVersion": c.Version,
 		"os":         runtime.GOOS,
 		"arch":       runtime.GOARCH,
 	}
+	isErrEvent := event == "client_error" || event == "client_crash"
 	for k, v := range raw {
 		ck := strings.TrimSpace(k)
 		if ck == "" || len(ck) > 40 || isSensitivePropKey(ck) {
@@ -138,8 +145,24 @@ func (c *Client) sanitizeProps(raw map[string]any) map[string]any {
 			out[ck] = val
 		case string:
 			s := strings.TrimSpace(val)
-			if utf8.RuneCountInString(s) > 80 {
-				s = string([]rune(s)[:80])
+			limit := 80
+			if isErrEvent {
+				switch ck {
+				case "message":
+					limit = 220
+					s = SanitizeErrorText(s)
+				case "stack":
+					limit = 600
+					s = SanitizeStack(s)
+				case "route", "location":
+					limit = 120
+					s = SanitizeErrorText(s)
+				default:
+					s = SanitizeErrorText(s)
+				}
+			}
+			if utf8.RuneCountInString(s) > limit {
+				s = string([]rune(s)[:limit])
 			}
 			out[ck] = s
 		}
@@ -160,7 +183,7 @@ func (c *Client) Track(event string, props map[string]any) {
 		Event:      ev,
 		Channel:    "desktop_client",
 		DeviceType: "desktop",
-		Props:      c.sanitizeProps(props),
+		Props:      c.sanitizeProps(ev, props),
 	}
 	c.mu.Lock()
 	if len(c.queue) >= maxQueueSize {

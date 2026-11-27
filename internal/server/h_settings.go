@@ -17,6 +17,7 @@ import (
 	"github.com/yang0/handraw-client/internal/secrets"
 	"github.com/yang0/handraw-client/internal/settings"
 	"github.com/yang0/handraw-client/internal/skills"
+	"github.com/yang0/handraw-client/internal/telemetry"
 )
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -907,6 +908,39 @@ func (s *Server) telemetryEvent(w http.ResponseWriter, r *http.Request) (any, er
 	case "client_tab_view", "client_feature_used":
 		if s.Telemetry != nil {
 			s.Telemetry.Track(body.Event, body.Props)
+		}
+	case "client_error":
+		if s.Telemetry != nil {
+			strProp := func(k string) string {
+				if body.Props == nil {
+					return ""
+				}
+				if v, ok := body.Props[k].(string); ok {
+					return v
+				}
+				return ""
+			}
+			intProp := func(k string) int {
+				if body.Props == nil {
+					return 0
+				}
+				switch v := body.Props[k].(type) {
+				case float64:
+					return int(v)
+				case int:
+					return v
+				}
+				return 0
+			}
+			s.Telemetry.ReportError(telemetry.ErrorReport{
+				Category: strProp("category"),
+				Source:   "frontend",
+				Route:    strProp("route"),
+				Location: strProp("location"),
+				Status:   intProp("status"),
+				Message:  strProp("message"),
+				Stack:    strProp("stack"),
+			})
 		}
 	}
 	return okv, nil
