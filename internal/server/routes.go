@@ -191,6 +191,7 @@ func (s *Server) routes() {
 	m.HandleFunc("PATCH /api/inspirations/folders", s.h(s.inspirationsFolderRename))
 	m.HandleFunc("DELETE /api/inspirations/folders", s.h(s.inspirationsFolderDelete))
 	m.HandleFunc("POST /api/inspirations/batch-folder", s.h(s.inspirationsBatchFolder))
+	m.HandleFunc("POST /api/inspirations/batch-delete", s.h(s.inspirationsBatchDelete))
 	m.HandleFunc("PATCH /api/inspirations/{id}", s.h(s.inspirationsPatch))
 	m.HandleFunc("DELETE /api/inspirations/{id}", s.h(s.inspirationsDelete))
 	m.HandleFunc("GET /api/inspirations/clip/ping", s.h(s.inspirationsClipPing))

@@ -1786,6 +1786,51 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
       );
     };
 
+    const openBatchDeleteModal = () => {
+      if (!selectedCount) {
+        toast("请先勾选要删除的灵感");
+        return;
+      }
+      const ids = selectedItems.map((it) => it.id);
+      const confirmBtn = el("button", {
+        type: "button",
+        class: "btn btn-danger",
+        dataset: { role: "batch-delete-confirm" },
+        onClick: async () => {
+          confirmBtn.disabled = true;
+          confirmBtn.textContent = "删除中…";
+          try {
+            const res = await api("POST", "/api/inspirations/batch-delete", { ids });
+            const n = Number(res?.deleted ?? ids.length);
+            closeModal();
+            ids.forEach((id) => viewState.selectedIds.delete(id));
+            if (selectedCount >= currentItems.length) {
+              viewState.batchMode = false;
+            }
+            toast(`已从本地灵感库删除 ${n} 条灵感`);
+            await loadVault();
+          } catch (e) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = `确认删除 (${ids.length})`;
+            toast(e?.message || "批量删除失败");
+          }
+        },
+      }, `确认删除 (${ids.length})`);
+      showModal("批量删除灵感", el("div", { class: "col", style: { gap: "10px" } },
+        el("p", { style: { margin: 0, lineHeight: "1.6" } },
+          `确定要从本地灵感库彻底删除已选中的 `,
+          el("strong", null, `${ids.length}`),
+          ` 条灵感吗？此操作不可撤销。`
+        ),
+        el("p", { class: "muted", style: { margin: 0, fontSize: "12.5px" } },
+          "说明：仅删除本地灵感库记录与缓存图，不会删除作品目录原图，也不影响已分享到社区的灵感。"
+        )
+      ), [
+        el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+        confirmBtn,
+      ]);
+    };
+
     batchBar.appendChild(el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", alignItems: "center" } },
       el("button", {
         type: "button",
@@ -1817,7 +1862,7 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
           viewState.selectedIds.clear();
           syncBatchUI();
         },
-      }, "清空"),
+      }, "取消全选"),
       el("button", {
         type: "button",
         class: "btn btn-sm",
@@ -1825,6 +1870,13 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
         disabled: selectedCount === 0,
         onClick: openBatchMoveModal,
       }, `移入分组 (${selectedCount})`),
+      el("button", {
+        type: "button",
+        class: "btn btn-sm btn-danger",
+        dataset: { role: "batch-delete" },
+        disabled: selectedCount === 0,
+        onClick: openBatchDeleteModal,
+      }, `🗑 批量删除 (${selectedCount})`),
       el("button", {
         type: "button",
         class: "btn btn-sm btn-primary",

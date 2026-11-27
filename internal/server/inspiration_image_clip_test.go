@@ -119,3 +119,92 @@ func TestInspirationClipImageDataURLWarningAndRefetch(t *testing.T) {
 		t.Fatalf("expected remoteThumb in web/js/api.js to guard third-party hosts")
 	}
 }
+
+// #195: POST /api/inspirations/batch-delete removes selected inspirations and
+// cleans up cached files inside library/inspirations/ without touching external
+// user work files.
+func TestInspirationBatchDeleteCleansLocalImagesOnly(t *testing.T) {
+	pngBytes := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0}
+	srv, _ := setupTestServer(t, "")
+	h := srv.Handler()
+
+	// Create 1 clipped inspiration (image saved under library/inspirations/)
+	dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngBytes)
+	rr1 := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/clip", map[string]any{
+		"title":        "待批量删除-1",
+		"imageDataUrl": dataURL,
+		"prompt":       "p1",
+		"autoOrganize": false,
+	})
+	if rr1.Code != 200 {
+		t.Fatalf("clip 1 failed: %d %s", rr1.Code, rr1.Body.String())
+	}
+	var res1 struct{ Item inspirationItem `json:"item"` }
+	_ = json.Unmarshal(rr1.Body.Bytes(), &res1)
+
+	// Create 1 inspiration pointing to an external works image (must NOT be removed from disk)
+	extFile := t.TempDir() + "/keep-original.png"
+	if err := os.WriteFile(extFile, pngBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rr2 := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations", map[string]any{
+		"title":        "待批量删除-2",
+		"imagePath":    extFile,
+		"prompt":       "p2",
+		"autoOrganize": false,
+	})
+	if rr2.Code != 200 {
+		t.Fatalf("create 2 failed: %d %s", rr2.Code, rr2.Body.String())
+	}
+	var res2 struct{ Item inspirationItem `json:"item"` }
+	_ = json.Unmarshal(rr2.Body.Bytes(), &res2)
+
+	// Create 1 survivor inspiration
+	rrKeep := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations", map[string]any{
+		"title":        "保留项",
+		"prompt":       "keep me",
+		"autoOrganize": false,
+	})
+	if rrKeep.Code != 200 {
+		t.Fatalf("create keep failed: %d %s", rrKeep.Code, rrKeep.Body.String())
+	}
+	var resKeep struct{ Item inspirationItem `json:"item"` }
+	_ = json.Unmarshal(rrKeep.Body.Bytes(), &resKeep)
+
+	// Batch delete first two
+	rrDel := doReq(t, h, srv.Token, http.MethodPost, "/api/inspirations/batch-delete", map[string]any{
+		"ids": []string{res1.Item.ID, res2.Item.ID},
+	})
+	if rrDel.Code != 200 {
+		t.Fatalf("batch-delete failed: %d %s", rrDel.Code, rrDel.Body.String())
+	}
+	var delRes struct {
+		OK      bool `json:"ok"`
+		Deleted int  `json:"deleted"`
+	}
+	_ = json.Unmarshal(rrDel.Body.Bytes(), &delRes)
+	if !delRes.OK || delRes.Deleted != 2 {
+		t.Fatalf("expected deleted=2, got %+v", delRes)
+	}
+
+	// Verify cached inspiration file was cleaned up, while external work file remains untouched.
+	if _, err := os.Stat(res1.Item.ImagePath); !os.IsNotExist(err) {
+		t.Fatalf("expected cached inspiration image %s deleted, stat err=%v", res1.Item.ImagePath, err)
+	}
+	if _, err := os.Stat(extFile); err != nil {
+		t.Fatalf("external user work file %s must NOT be deleted: %v", extFile, err)
+	}
+
+	// Verify only the survivor remains in the vault list.
+	rrList := doReq(t, h, srv.Token, http.MethodGet, "/api/inspirations", nil)
+	if rrList.Code != 200 {
+		t.Fatalf("list failed: %d", rrList.Code)
+	}
+	var listRes struct {
+		Items []inspirationItem `json:"items"`
+	}
+	_ = json.Unmarshal(rrList.Body.Bytes(), &listRes)
+	if len(listRes.Items) != 1 || listRes.Items[0].ID != resKeep.Item.ID {
+		t.Fatalf("expected only survivor %s left, got %+v", resKeep.Item.ID, listRes.Items)
+	}
+}

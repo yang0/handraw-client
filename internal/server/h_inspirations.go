@@ -1202,13 +1202,65 @@ func (s *Server) inspirationsPatch(w http.ResponseWriter, r *http.Request) (any,
 	return map[string]any{"ok": true, "item": item}, nil
 }
 
+// cleanupInspirationLocalImage removes a cached inspiration image ONLY when it
+// resides inside <appdir>/library/inspirations/, never touching original files
+// in the user's works directory (#195).
+func cleanupInspirationLocalImage(imgPath string) {
+	p := strings.TrimSpace(imgPath)
+	if p == "" {
+		return
+	}
+	baseDir, err1 := filepath.Abs(inspirationImageDir())
+	absPath, err2 := filepath.Abs(p)
+	if err1 != nil || err2 != nil {
+		return
+	}
+	rel, err := filepath.Rel(baseDir, absPath)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return
+	}
+	_ = os.Remove(absPath)
+}
+
 func (s *Server) inspirationsDelete(w http.ResponseWriter, r *http.Request) (any, error) {
 	id := strings.TrimSpace(r.PathValue("id"))
+	if cur, err := s.readInspiration(id); err == nil {
+		cleanupInspirationLocalImage(cur.ImagePath)
+	}
 	if err := s.DB.DeleteDocHard("inspiration", id); err != nil {
 		return nil, err
 	}
 	s.Emit("inspirations", map[string]any{"updated": true, "deleted": id})
 	return okv, nil
+}
+
+func (s *Server) inspirationsBatchDelete(w http.ResponseWriter, r *http.Request) (any, error) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decode(r, &body); err != nil {
+		return nil, err
+	}
+	if len(body.IDs) == 0 {
+		return nil, bad("请先选择要删除的灵感")
+	}
+	seen := map[string]bool{}
+	deleted := 0
+	for _, rawID := range body.IDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if cur, err := s.readInspiration(id); err == nil {
+			cleanupInspirationLocalImage(cur.ImagePath)
+		}
+		if err := s.DB.DeleteDocHard("inspiration", id); err == nil {
+			deleted++
+		}
+	}
+	s.Emit("inspirations", map[string]any{"updated": true, "batchDeleted": deleted})
+	return map[string]any{"ok": true, "deleted": deleted}, nil
 }
 
 func (s *Server) inspirationsClipPing(w http.ResponseWriter, r *http.Request) (any, error) {
