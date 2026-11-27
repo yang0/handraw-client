@@ -90,6 +90,8 @@ type Server struct {
 	mux      *http.ServeMux
 	events   *hub
 	login    *loginState
+	dlMu     sync.Mutex
+	pendingDL *DeepLinkIntent
 	cacheMu  sync.Mutex
 	cache    map[string]cached
 	packImg  *packImageFetcher

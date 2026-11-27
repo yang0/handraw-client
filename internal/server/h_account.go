@@ -387,16 +387,131 @@ func (s *Server) tryExchangeDevice(ctx context.Context, deviceCode string) (bool
 	return true, 0
 }
 
-// HandleDeepLink handles handraw:// URL callbacks from the browser.
+// DeepLinkIntent represents a sanitized deep-link navigation target delivered
+// from external handraw:// links (Skill galleries, CLI hints, or Web pages).
+type DeepLinkIntent struct {
+	Action string `json:"action"` // "studio" | "asset"
+	Style  string `json:"style,omitempty"`
+	Layout string `json:"layout,omitempty"`
+	Color  string `json:"color,omitempty"`
+	Theme  string `json:"theme,omitempty"`
+	Code   string `json:"code,omitempty"`
+}
+
+func cleanDeepLinkCode(raw string) string {
+	s := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "#"))
+	if s == "" || len(s) > 64 {
+		return ""
+	}
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+			return ""
+		}
+	}
+	// Preserve UUID-like IDs lowercase; normalize short style/layout/color codes uppercase.
+	if len(s) == 36 && strings.Count(s, "-") == 4 {
+		return strings.ToLower(s)
+	}
+	return strings.ToUpper(s)
+}
+
+func cleanDeepLinkTheme(raw string) string {
+	var b strings.Builder
+	count := 0
+	for _, r := range strings.TrimSpace(raw) {
+		if r < 32 || r == 127 {
+			continue
+		}
+		if count >= 500 {
+			break
+		}
+		b.WriteRune(r)
+		count++
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func parseDeepLink(rawURL string) (string, *DeepLinkIntent) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || !strings.EqualFold(u.Scheme, "handraw") {
+		return "", nil
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Host))
+	pathParts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	firstSeg := ""
+	if len(pathParts) > 0 {
+		firstSeg = strings.ToLower(strings.TrimSpace(pathParts[0]))
+	}
+	if host == "auth" || (host == "" && firstSeg == "auth") || strings.HasPrefix(strings.ToLower(u.Path), "/auth") {
+		return "auth", nil
+	}
+	q := u.Query()
+	if host == "studio" || (host == "" && firstSeg == "studio") {
+		theme := cleanDeepLinkTheme(q.Get("theme"))
+		if theme == "" {
+			theme = cleanDeepLinkTheme(q.Get("prompt"))
+		}
+		intent := &DeepLinkIntent{
+			Action: "studio",
+			Style:  cleanDeepLinkCode(q.Get("style")),
+			Layout: cleanDeepLinkCode(q.Get("layout")),
+			Color:  cleanDeepLinkCode(q.Get("color")),
+			Theme:  theme,
+		}
+		return "studio", intent
+	}
+	if host == "asset" || host == "style" || host == "layout" || (host == "" && (firstSeg == "asset" || firstSeg == "style" || firstSeg == "layout")) {
+		rawCode := q.Get("code")
+		if rawCode == "" {
+			rawCode = q.Get("id")
+		}
+		if rawCode == "" {
+			if host != "" && len(pathParts) > 0 && pathParts[0] != "" {
+				rawCode = pathParts[0]
+			} else if host == "" && len(pathParts) > 1 {
+				rawCode = pathParts[1]
+			}
+		}
+		code := cleanDeepLinkCode(rawCode)
+		if code == "" {
+			return "", nil
+		}
+		return "asset", &DeepLinkIntent{
+			Action: "asset",
+			Code:   code,
+		}
+	}
+	return "show", nil
+}
+
+// HandleDeepLink handles handraw:// URL callbacks from the browser or local Skill galleries (#199).
 func (s *Server) HandleDeepLink(rawURL string) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
+	kind, intent := parseDeepLink(rawURL)
+	if kind == "" {
 		return
 	}
-	s.Host.ShowMain()
-	if u.Host == "auth" || strings.HasPrefix(u.Path, "/auth") {
-		s.nudgeLoginPoll()
+	if s.Host != nil {
+		s.Host.ShowMain()
 	}
+	if kind == "auth" {
+		s.nudgeLoginPoll()
+		return
+	}
+	if intent != nil {
+		copyIntent := *intent
+		s.dlMu.Lock()
+		s.pendingDL = &copyIntent
+		s.dlMu.Unlock()
+		s.Emit("deeplink", copyIntent)
+	}
+}
+
+func (s *Server) pendingDeepLinkGet(w http.ResponseWriter, r *http.Request) (any, error) {
+	s.dlMu.Lock()
+	intent := s.pendingDL
+	s.pendingDL = nil
+	s.dlMu.Unlock()
+	return map[string]any{"pending": intent}, nil
 }
 
 func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) (any, error) {

@@ -769,7 +769,38 @@ async function start() {
     refreshTopbar();
   });
 
+  async function applyDeepLinkIntent(intent) {
+    if (!intent || !intent.action) return false;
+    if (intent.action === "studio") {
+      const p = {};
+      if (intent.style) p.style = intent.style;
+      if (intent.layout) p.layout = intent.layout;
+      if (intent.color) p.color = intent.color;
+      if (intent.theme) p.theme = intent.theme;
+      await go("create", p);
+      const tags = [intent.style, intent.layout, intent.color].filter(Boolean);
+      if (tags.length) {
+        toast(`已载入配方：${tags.join(" · ")}`);
+      }
+      return true;
+    }
+    if (intent.action === "asset" && intent.code) {
+      const code = String(intent.code).trim().toUpperCase();
+      let tab = "styles";
+      if (/^(SC|IG|SB|IP|EC)-/.test(code)) tab = "layouts";
+      else if (/^C-\d+/.test(code)) tab = "colors";
+      await go("atlas", { tab, q: code });
+      return true;
+    }
+    return false;
+  }
+
   onEvent((msg) => {
+    if (msg.type === "deeplink" && msg.data) {
+      api("GET", "/api/deeplink/pending").catch(() => {});
+      void applyDeepLinkIntent(msg.data);
+      return;
+    }
     if (msg.type === "resource_update" && updatingNow) {
       const done = Number(msg.data?.done || 0);
       const total = Number(msg.data?.total || 0);
@@ -796,9 +827,12 @@ async function start() {
   await refreshNav();
   await refreshTopbar();
 
+  const pendingDL = await api("GET", "/api/deeplink/pending").catch(() => null);
   const qView = new URLSearchParams(location.search).get("view");
   const rawInitial = (location.hash && location.hash.slice(1)) || qView || "home";
-  if (rawInitial === "settings-plugins") {
+  if (pendingDL?.pending && await applyDeepLinkIntent(pendingDL.pending)) {
+    // Handled cold-start handraw:// deep link (#199)
+  } else if (rawInitial === "settings-plugins") {
     await go("plugins");
   } else if (rawInitial.startsWith("settings-")) {
     await go("settings", { anchor: rawInitial });

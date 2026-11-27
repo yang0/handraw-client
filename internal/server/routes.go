@@ -204,6 +204,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/settings/clipper/prepare", s.h(s.clipperPrepare))
 
 	// account + site
+	m.HandleFunc("GET /api/deeplink/pending", s.h(s.pendingDeepLinkGet))
 	m.HandleFunc("GET /api/account", s.h(s.account))
 	m.HandleFunc("POST /api/account/login", s.h(s.loginStart))
 	m.HandleFunc("GET /api/account/login", s.h(s.loginStatus))
