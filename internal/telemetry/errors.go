@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,9 +15,11 @@ import (
 )
 
 const (
-	errDedupWindow   = 10 * time.Minute
-	maxErrorsPerHour = 20
-	maxCrashReadSize = 16 << 10
+	errDedupWindow           = 10 * time.Minute
+	maxCriticalErrorsPerHour = 20
+	maxErrorErrorsPerHour    = 15
+	maxWarnErrorsPerHour     = 10
+	maxCrashReadSize         = 16 << 10
 )
 
 type errDedupEntry struct {
@@ -24,15 +27,76 @@ type errDedupEntry struct {
 	suppressed int
 }
 
-// ErrorReport carries a structured, pre-sanitization runtime error or crash (#186).
+// ErrorReport carries a structured, pre-sanitization runtime error or crash (#186, #194).
 type ErrorReport struct {
-	Category string // js_error | unhandled_rejection | api_5xx | http_panic | http_5xx | updater_apply | go_crash
-	Source   string // frontend | backend | crash
+	Category string // js_error | unhandled_rejection | api_5xx | api_network | api_protocol_4xx | media_broken | asset_load_fail | media_proxy_err | clip_image_fail | clipper_fail | job_tech_fail | updater_apply | updater_download | autostart_fail | http_panic | http_5xx | go_crash
+	Severity string // critical | error | warn (auto-derived from Category when empty)
+	Source   string // frontend | backend | crash | clipper
 	Route    string // normalized API route or view, e.g. "POST /api/account/login"
-	Location string // script file:line or Go package/file:line
+	Location string // script file:line, #view, or Go package/file:line
+	Domain   string // host-only external domain (never path/query), e.g. "pbs.twimg.com"
 	Status   int    // HTTP status when applicable
 	Message  string
 	Stack    string
+}
+
+// NormalizeSeverity resolves an explicit or category-derived severity tier (#194).
+func NormalizeSeverity(rawSeverity, category string) string {
+	switch strings.ToLower(strings.TrimSpace(rawSeverity)) {
+	case "critical", "error", "warn":
+		return strings.ToLower(strings.TrimSpace(rawSeverity))
+	}
+	switch strings.ToLower(strings.TrimSpace(category)) {
+	case "go_crash", "http_panic":
+		return "critical"
+	case "media_broken", "media_proxy_err", "clip_image_fail", "clipper_fail", "api_protocol_4xx":
+		return "warn"
+	default:
+		return "error"
+	}
+}
+
+func tierHourlyLimit(severity string) int {
+	switch severity {
+	case "critical":
+		return maxCriticalErrorsPerHour
+	case "warn":
+		return maxWarnErrorsPerHour
+	default:
+		return maxErrorErrorsPerHour
+	}
+}
+
+// SanitizeDomain extracts a safe lowercase hostname (or short logical tag like
+// "local"/"pack") without scheme, userinfo, port, path, or query (#194).
+func SanitizeDomain(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "://") {
+		if u, err := url.Parse(s); err == nil && u.Hostname() != "" {
+			s = u.Hostname()
+		}
+	} else {
+		if i := strings.IndexAny(s, "/?#"); i >= 0 {
+			s = s[:i]
+		}
+		if i := strings.LastIndexByte(s, '@'); i >= 0 {
+			s = s[i+1:]
+		}
+		if i := strings.IndexByte(s, ':'); i >= 0 {
+			s = s[:i]
+		}
+	}
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "127.0.0.1" || s == "::1" || s == "[::1]" {
+		return "localhost"
+	}
+	if len(s) > 80 {
+		s = s[:80]
+	}
+	return s
 }
 
 var (
@@ -161,6 +225,7 @@ func errorFingerprint(r ErrorReport) string {
 		strings.ToLower(strings.TrimSpace(r.Source)),
 		strings.TrimSpace(r.Route),
 		strings.TrimSpace(r.Location),
+		SanitizeDomain(r.Domain),
 		normMsg,
 	}, "|")
 	sum := sha256.Sum256([]byte(key))
@@ -174,8 +239,8 @@ func (c *Client) now() time.Time {
 	return time.Now()
 }
 
-// ReportError enqueues a deduplicated, rate-limited, privacy-sanitized
-// client_error event. Respects TelemetryDisabled and never blocks (#186).
+// ReportError enqueues a deduplicated, severity-rate-limited, privacy-sanitized
+// client_error event. Respects TelemetryDisabled and never blocks (#186, #194).
 func (c *Client) ReportError(r ErrorReport) bool {
 	if !c.isEnabled() {
 		return false
@@ -186,6 +251,10 @@ func (c *Client) ReportError(r ErrorReport) bool {
 	if strings.TrimSpace(r.Source) == "" {
 		r.Source = "backend"
 	}
+	sev := NormalizeSeverity(r.Severity, r.Category)
+	dom := SanitizeDomain(r.Domain)
+	r.Severity = sev
+	r.Domain = dom
 	fp := errorFingerprint(r)
 	now := c.now()
 
@@ -193,15 +262,19 @@ func (c *Client) ReportError(r ErrorReport) bool {
 	if c.errSeen == nil {
 		c.errSeen = map[string]errDedupEntry{}
 	}
-	// Prune hourly sliding window timestamps.
+	if c.errTierTimes == nil {
+		c.errTierTimes = map[string][]time.Time{}
+	}
+	// Prune hourly sliding window timestamps for this severity tier.
 	cutoff := now.Add(-1 * time.Hour)
-	kept := c.errTimes[:0]
-	for _, ts := range c.errTimes {
+	tierTimes := c.errTierTimes[sev]
+	kept := tierTimes[:0]
+	for _, ts := range tierTimes {
 		if ts.After(cutoff) {
 			kept = append(kept, ts)
 		}
 	}
-	c.errTimes = kept
+	c.errTierTimes[sev] = kept
 
 	count := 1
 	if ent, ok := c.errSeen[fp]; ok && now.Sub(ent.lastSent) < errDedupWindow {
@@ -212,17 +285,18 @@ func (c *Client) ReportError(r ErrorReport) bool {
 	} else if ok && ent.suppressed > 0 {
 		count += ent.suppressed
 	}
-	if len(c.errTimes) >= maxErrorsPerHour {
+	if len(c.errTierTimes[sev]) >= tierHourlyLimit(sev) {
 		c.errMu.Unlock()
 		return false
 	}
 	c.errSeen[fp] = errDedupEntry{lastSent: now, suppressed: 0}
-	c.errTimes = append(c.errTimes, now)
+	c.errTierTimes[sev] = append(c.errTierTimes[sev], now)
 	c.errMu.Unlock()
 
 	props := map[string]any{
 		"fingerprint": fp,
 		"category":    r.Category,
+		"severity":    sev,
 		"source":      r.Source,
 		"count":       count,
 		"message":     r.Message,
@@ -232,6 +306,9 @@ func (c *Client) ReportError(r ErrorReport) bool {
 	}
 	if r.Location != "" {
 		props["location"] = r.Location
+	}
+	if dom != "" {
+		props["domain"] = dom
 	}
 	if r.Status > 0 {
 		props["status"] = r.Status
@@ -284,6 +361,7 @@ func (c *Client) ReportPreviousCrash(crashPath string) bool {
 	c.Track("client_crash", map[string]any{
 		"fingerprint": fp,
 		"category":    "go_crash",
+		"severity":    "critical",
 		"source":      "crash",
 		"count":       1,
 		"message":     rep.Message,

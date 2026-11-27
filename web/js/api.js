@@ -17,7 +17,7 @@ export function setToken(t) {
 let feErrorSentCount = 0;
 
 export function reportClientError(payload = {}) {
-  if (feErrorSentCount >= 30) return;
+  if (feErrorSentCount >= 60) return;
   feErrorSentCount++;
   try {
     const tok = getToken();
@@ -32,8 +32,10 @@ export function reportClientError(payload = {}) {
         event: "client_error",
         props: {
           category: String(payload.category || "js_error").slice(0, 40),
+          severity: String(payload.severity || "").slice(0, 16),
           route: String(payload.route || "").slice(0, 120),
           location: String(payload.location || "").slice(0, 120),
+          domain: String(payload.domain || "").slice(0, 80),
           status: Number(payload.status || 0) || 0,
           message: String(payload.message || "").slice(0, 240),
           stack: String(payload.stack || "").slice(0, 650),
@@ -43,6 +45,18 @@ export function reportClientError(payload = {}) {
     }).catch(() => {});
   } catch {}
 }
+
+const EXPECTED_4XX_CODES = new Set([
+  "login_required",
+  "token_scope_denied",
+  "feature_not_enabled",
+  "insufficient_cash",
+  "quote_expired",
+  "quote_required",
+  "endpoint_unavailable",
+  "conflict",
+  "not_found",
+]);
 
 export async function api(method, path, body) {
   const opts = {
@@ -57,7 +71,21 @@ export async function api(method, path, body) {
       opts.body = JSON.stringify(body);
     }
   }
-  const resp = await fetch(path, opts);
+  const cleanPath = String(path || "").split("?")[0];
+  let resp;
+  try {
+    resp = await fetch(path, opts);
+  } catch (netErr) {
+    if (netErr?.name !== "AbortError" && !cleanPath.startsWith("/api/telemetry")) {
+      reportClientError({
+        category: "api_network",
+        severity: "error",
+        route: `${method} ${cleanPath}`,
+        message: netErr?.message || "Network request failed",
+      });
+    }
+    throw netErr;
+  }
   const txt = await resp.text();
   let data = null;
   try {
@@ -71,13 +99,27 @@ export async function api(method, path, body) {
     err.code = data && data.code;
     err.data = data;
     err.conflictTarget = data && data.conflictTarget;
-    if (resp.status >= 500 && !String(path || "").startsWith("/api/telemetry")) {
-      reportClientError({
-        category: "api_5xx",
-        route: `${method} ${String(path || "").split("?")[0]}`,
-        status: resp.status,
-        message: err.message,
-      });
+    if (!cleanPath.startsWith("/api/telemetry")) {
+      if (resp.status >= 500) {
+        reportClientError({
+          category: "api_5xx",
+          severity: "error",
+          route: `${method} ${cleanPath}`,
+          status: resp.status,
+          message: err.message,
+        });
+      } else if (
+        (resp.status === 403 || (resp.status === 404 && method !== "GET")) &&
+        !EXPECTED_4XX_CODES.has(String(err.code || ""))
+      ) {
+        reportClientError({
+          category: "api_protocol_4xx",
+          severity: "warn",
+          route: `${method} ${cleanPath}`,
+          status: resp.status,
+          message: err.message,
+        });
+      }
     }
     throw err;
   }

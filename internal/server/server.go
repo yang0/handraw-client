@@ -360,6 +360,7 @@ func (s *Server) h(fn handler) http.HandlerFunc {
 				if s.Telemetry != nil {
 					s.Telemetry.ReportError(telemetry.ErrorReport{
 						Category: "http_panic",
+						Severity: "critical",
 						Source:   "backend",
 						Route:    telemetry.NormalizeRoute(r.Method, r.URL.Path),
 						Status:   500,
@@ -407,6 +408,7 @@ func (s *Server) h(fn handler) http.HandlerFunc {
 			if status >= 500 && s.Telemetry != nil && !strings.HasPrefix(r.URL.Path, "/api/telemetry") {
 				s.Telemetry.ReportError(telemetry.ErrorReport{
 					Category: "http_5xx",
+					Severity: "error",
 					Source:   "backend",
 					Route:    telemetry.NormalizeRoute(r.Method, r.URL.Path),
 					Status:   status,
@@ -420,6 +422,83 @@ func (s *Server) h(fn handler) http.HandlerFunc {
 			return // handler wrote the response itself
 		}
 		writeJSON(w, 200, out)
+	}
+}
+
+type statusCaptureWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusCaptureWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusCaptureWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+// observeMedia wraps non-JSON file/media proxy routes so panics, 5xx, 429, and
+// internal /files/remote 403 host rejections are captured without leaking local
+// file paths or query strings (#194).
+func (s *Server) observeMedia(routeName string, fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cw := &statusCaptureWriter{ResponseWriter: w}
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.Log.Error("media panic", "route", routeName, "err", rec)
+				if s.Telemetry != nil {
+					s.Telemetry.ReportError(telemetry.ErrorReport{
+						Category: "http_panic",
+						Severity: "critical",
+						Source:   "backend",
+						Route:    routeName,
+						Status:   500,
+						Message:  fmt.Sprint(rec),
+						Stack:    string(debug.Stack()),
+					})
+				}
+				if cw.status == 0 {
+					http.Error(w, "internal error", http.StatusInternalServerError)
+				}
+			}
+		}()
+		fn(cw, r)
+		if s.Telemetry == nil {
+			return
+		}
+		st := cw.status
+		if st == 0 {
+			st = http.StatusOK
+		}
+		isRemoteHost403 := routeName == "GET /files/remote" && st == http.StatusForbidden
+		if st >= 500 || st == http.StatusTooManyRequests || isRemoteHost403 {
+			dom := ""
+			if routeName == "GET /files/remote" {
+				dom = telemetry.SanitizeDomain(r.URL.Query().Get("url"))
+			} else if routeName == "GET /files/pack" {
+				dom = "pack"
+			} else if routeName == "GET /files/local" {
+				dom = "local"
+			}
+			sev := "warn"
+			if st >= 500 {
+				sev = "error"
+			}
+			s.Telemetry.ReportError(telemetry.ErrorReport{
+				Category: "media_proxy_err",
+				Severity: sev,
+				Source:   "backend",
+				Route:    routeName,
+				Domain:   dom,
+				Status:   st,
+				Message:  fmt.Sprintf("%s returned HTTP %d", routeName, st),
+			})
+		}
 	}
 }
 

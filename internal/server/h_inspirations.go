@@ -27,6 +27,7 @@ import (
 	"github.com/yang0/handraw-client/internal/settings"
 	"github.com/yang0/handraw-client/internal/site"
 	"github.com/yang0/handraw-client/internal/store"
+	"github.com/yang0/handraw-client/internal/telemetry"
 )
 
 type inspirationSlot struct {
@@ -424,6 +425,15 @@ func (s *Server) pullCloudClipsBestEffort(ctx context.Context) int {
 				if p, _, sErr := saveInspirationImageBytes(cl.ID, rawImg); sErr == nil {
 					imgPath = p
 				}
+			} else if dErr != nil && s.Telemetry != nil {
+				s.Telemetry.ReportError(telemetry.ErrorReport{
+					Category: "clip_image_fail",
+					Severity: "warn",
+					Source:   "backend",
+					Route:    "cloud_clip_sync",
+					Domain:   telemetry.SanitizeDomain(imgURL),
+					Message:  dErr.Error(),
+				})
 			}
 		}
 		data := inspirationData{
@@ -1043,6 +1053,16 @@ func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any
 			}
 		} else if err != nil {
 			imageWarning = "远端图片下载到本地失败，已保留原图链接（可在详情页点击重新拉取）"
+			if s.Telemetry != nil {
+				s.Telemetry.ReportError(telemetry.ErrorReport{
+					Category: "clip_image_fail",
+					Severity: "warn",
+					Source:   "backend",
+					Route:    "POST /api/inspirations",
+					Domain:   telemetry.SanitizeDomain(body.ImageURL),
+					Message:  err.Error(),
+				})
+			}
 		}
 	}
 
@@ -1215,9 +1235,22 @@ func (s *Server) inspirationsClip(w http.ResponseWriter, r *http.Request) (any, 
 		Tags          []string `json:"tags"`
 		AutoOrganize  *bool    `json:"autoOrganize"`
 		Truncated     bool     `json:"truncated"`
+		LastClipError *struct {
+			Channel string `json:"channel"`
+			Reason  string `json:"reason"`
+		} `json:"lastClipError,omitempty"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
+	}
+	if body.LastClipError != nil && strings.TrimSpace(body.LastClipError.Reason) != "" && s.Telemetry != nil {
+		s.Telemetry.ReportError(telemetry.ErrorReport{
+			Category: "clipper_fail",
+			Severity: "warn",
+			Source:   "clipper",
+			Route:    strings.ToLower(strings.TrimSpace(firstStr(body.LastClipError.Channel, "chrome"))),
+			Message:  strings.TrimSpace(body.LastClipError.Reason),
+		})
 	}
 	rawTxt := strings.TrimSpace(firstStr(body.RawText, body.Text))
 	prm := strings.TrimSpace(firstStr(body.Prompt, rawTxt))
@@ -1291,6 +1324,16 @@ func (s *Server) inspirationsClip(w http.ResponseWriter, r *http.Request) (any, 
 			}
 		} else if err != nil {
 			imageWarning = "远端图片暂未拉到本地，已保留原图链接（可在灵感详情页重试）"
+			if s.Telemetry != nil {
+				s.Telemetry.ReportError(telemetry.ErrorReport{
+					Category: "clip_image_fail",
+					Severity: "warn",
+					Source:   "backend",
+					Route:    "POST /api/inspirations/clip",
+					Domain:   telemetry.SanitizeDomain(body.ImageURL),
+					Message:  err.Error(),
+				})
+			}
 		}
 	}
 

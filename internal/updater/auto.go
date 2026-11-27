@@ -358,6 +358,9 @@ func (u *Updater) AutoStep(ctx context.Context) (nextWake time.Duration) {
 	defer cancel()
 	if dlErr := u.Download(dlCtx); dlErr != nil {
 		u.recordAutoDownloadFailure(st.Latest)
+		if u.OnDownloadError != nil {
+			u.OnDownloadError(st.Latest, dlErr)
+		}
 		return 0
 	}
 	return 0

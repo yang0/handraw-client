@@ -196,6 +196,21 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 						"ok":           st == "done" || st == "partial",
 						"count":        cnt,
 					})
+					if st == "failed" {
+						for _, im := range imgs {
+							msg := strings.TrimSpace(im.Error)
+							if msg != "" && !isExpectedJobBusinessError(msg) {
+								tel.ReportError(telemetry.ErrorReport{
+									Category: "job_tech_fail",
+									Severity: "error",
+									Source:   "backend",
+									Route:    "generate:" + mode,
+									Message:  msg,
+								})
+								break
+							}
+						}
+					}
 				}(ev.RunID, ev.Status)
 			}
 		}
@@ -206,6 +221,18 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 
 	upd.OnChange = func(st updater.Status) {
 		srv.Emit("update", st)
+	}
+	upd.OnDownloadError = func(ver string, err error) {
+		if err == nil {
+			return
+		}
+		tel.ReportError(telemetry.ErrorReport{
+			Category: "updater_download",
+			Severity: "error",
+			Source:   "backend",
+			Route:    "updater:" + strings.TrimPrefix(strings.TrimSpace(ver), "v"),
+			Message:  err.Error(),
+		})
 	}
 	upd.Mode = func() string {
 		st := settings.Get()
@@ -256,6 +283,19 @@ func newServer(db *store.DB, sc *site.Client, upd *updater.Updater, packDir, bun
 	srv.Bundled = bundledDir
 	srv.RegisterBuiltins()
 	return srv
+}
+
+func isExpectedJobBusinessError(msg string) bool {
+	low := strings.ToLower(strings.TrimSpace(msg))
+	for _, kw := range []string{
+		"余额不足", "insufficient_cash", "充值", "额度", "登录", "login_required",
+		"安全过滤", "敏感", "违规", "已取消", "canceled", "cancelled", "context canceled",
+	} {
+		if strings.Contains(low, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 func findBundledPack(userPackDir string) string {

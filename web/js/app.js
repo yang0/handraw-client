@@ -57,12 +57,65 @@ function installGlobalErrorHandlers() {
     if (!ev || ev.target !== window) return;
     reportClientError({
       category: "js_error",
+      severity: "error",
       route: `#${currentView || "home"}`,
       location: shortLoc(ev.filename, ev.lineno, ev.colno),
       message: ev.message || ev.error?.message || "Uncaught error",
       stack: ev.error?.stack || "",
     });
   });
+  // Capture-phase resource error listener for broken <img>/<video>/<script>/<link>.
+  // Resource error events do not bubble, so capture=true is required; only safe
+  // route prefixes and host-only domains are ever reported (zero local paths/queries) (#194).
+  window.addEventListener("error", (ev) => {
+    const tgt = ev?.target;
+    if (!tgt || tgt === window || !(tgt instanceof Element)) return;
+    const tag = (tgt.tagName || "").toUpperCase();
+    if (tag !== "IMG" && tag !== "VIDEO" && tag !== "SCRIPT" && tag !== "LINK") return;
+    if (navigator.onLine === false) return;
+    const rawSrc = String(tgt.currentSrc || tgt.getAttribute("src") || tgt.getAttribute("href") || "").trim();
+    if (!rawSrc || rawSrc.startsWith("data:") || rawSrc.startsWith("blob:") || rawSrc.endsWith("/img/logo.svg")) return;
+
+    let route = "external_media";
+    let domain = "";
+    try {
+      const u = new URL(rawSrc, location.origin);
+      if (u.origin === location.origin) {
+        if (u.pathname === "/files/remote") {
+          route = "/files/remote";
+          const inner = u.searchParams.get("url") || "";
+          try { domain = new URL(inner, location.origin).hostname.toLowerCase(); } catch { domain = "remote"; }
+        } else if (u.pathname.startsWith("/files/pack/")) {
+          route = "/files/pack";
+          domain = "pack";
+        } else if (u.pathname === "/files/local") {
+          route = "/files/local";
+          domain = "local";
+        } else if (u.pathname.startsWith("/api/galleries/")) {
+          route = "/api/galleries/image";
+          domain = "gallery";
+        } else {
+          route = u.pathname.split("/").slice(0, 3).join("/") || "/";
+          domain = "localhost";
+        }
+      } else {
+        route = tag === "SCRIPT" || tag === "LINK" ? "external_asset" : "external_media";
+        domain = (u.hostname || "").toLowerCase();
+      }
+    } catch {
+      return;
+    }
+
+    const isAsset = tag === "SCRIPT" || tag === "LINK";
+    reportClientError({
+      category: isAsset ? "asset_load_fail" : "media_broken",
+      severity: isAsset ? "error" : "warn",
+      route,
+      location: `#${currentView || "home"}`,
+      domain,
+      message: `${tag.toLowerCase()} load failed (${route}${domain ? " · " + domain : ""})`,
+    });
+  }, true);
   window.addEventListener("unhandledrejection", (ev) => {
     const reason = ev?.reason;
     const msg = typeof reason === "string"
@@ -70,6 +123,7 @@ function installGlobalErrorHandlers() {
       : (reason?.message || String(reason || "Unhandled promise rejection"));
     reportClientError({
       category: "unhandled_rejection",
+      severity: "error",
       route: `#${currentView || "home"}`,
       message: msg,
       stack: reason?.stack || "",

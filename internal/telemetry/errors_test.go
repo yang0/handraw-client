@@ -126,3 +126,50 @@ func TestSanitizeNonUsersPathsAndGroupIdenticalUpdaterErrors(t *testing.T) {
 		t.Fatalf("expected identical fingerprint across different install paths, got %q vs %q", fpA, fpB)
 	}
 }
+
+func TestTieredErrorRateLimitsAndDomainSanitization(t *testing.T) {
+	c := New("0.6.12")
+	c.Enabled = func() bool { return true }
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	c.Now = func() time.Time { return now }
+
+	// SanitizeDomain strips scheme, userinfo, port, path, query.
+	if got := SanitizeDomain("https://user:pass@PBS.TWIMG.COM:443/media/abc.jpg?name=large"); got != "pbs.twimg.com" {
+		t.Fatalf("SanitizeDomain got %q, want pbs.twimg.com", got)
+	}
+	if got := SanitizeDomain("http://127.0.0.1:18520/files/local?p=C:/secret"); got != "localhost" {
+		t.Fatalf("SanitizeDomain loopback got %q, want localhost", got)
+	}
+
+	// Saturate the warn tier (10/hour) with 12 distinct media_broken reports.
+	warnAccepted := 0
+	for i := 0; i < 12; i++ {
+		if c.ReportError(ErrorReport{
+			Category: "media_broken",
+			Source:   "frontend",
+			Route:    "external_media",
+			Domain:   "cdn.example.com",
+			Message:  "img load failed #" + string(rune('a'+i)),
+		}) {
+			warnAccepted++
+		}
+	}
+	if warnAccepted != maxWarnErrorsPerHour {
+		t.Fatalf("expected warn tier capped at %d, got %d", maxWarnErrorsPerHour, warnAccepted)
+	}
+
+	// Warn saturation MUST NOT block error or critical tier reports (#194).
+	if !c.ReportError(ErrorReport{Category: "api_5xx", Source: "frontend", Route: "POST /api/generate", Status: 500, Message: "boom"}) {
+		t.Fatalf("error tier was starved by warn tier")
+	}
+	if !c.ReportError(ErrorReport{Category: "http_panic", Source: "backend", Route: "GET /api/works", Status: 500, Message: "nil pointer"}) {
+		t.Fatalf("critical tier was starved by warn tier")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	last := c.queue[len(c.queue)-1]
+	if last.Props["severity"] != "critical" {
+		t.Fatalf("expected critical severity on http_panic, got %+v", last.Props)
+	}
+}

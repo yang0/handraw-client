@@ -432,7 +432,25 @@ async function deliverClip(payload, tabId = null) {
   }
 
   const cfg = await loadConfig();
+  const { pendingClipError = null } = await chrome.storage.local.get("pendingClipError");
+  if (pendingClipError && pendingClipError.reason) {
+    nextPayload.lastClipError = {
+      channel: String(pendingClipError.channel || "chrome").slice(0, 24),
+      reason: String(pendingClipError.reason || "").slice(0, 120),
+    };
+  }
   let res = await sendToLocalClient(cfg, nextPayload);
+  if (res.ok && pendingClipError) {
+    await chrome.storage.local.remove("pendingClipError").catch(() => {});
+  } else if (!res.ok) {
+    const reason = String(res.error || "clip_failed").replace(/https?:\/\/\S+/gi, "<URL>").slice(0, 120);
+    await chrome.storage.local.set({
+      pendingClipError: {
+        channel: String(nextPayload.sourceChannel || "chrome").slice(0, 24),
+        reason,
+      },
+    }).catch(() => {});
+  }
   if (!res.ok && cfg.siteToken) {
     const cloudPayload = { ...nextPayload };
     if (cloudPayload.imageDataUrl && cloudPayload.imageDataUrl.length > 4 * 1024 * 1024) {

@@ -119,6 +119,7 @@ type Updater struct {
 	executableFn    func() (string, error) // overridable in tests
 	nudgeCh         chan struct{}
 	OnChange        func(Status)
+	OnDownloadError func(version string, err error)
 }
 
 func New(version, dir string) *Updater {

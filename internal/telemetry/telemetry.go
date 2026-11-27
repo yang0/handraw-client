@@ -121,10 +121,10 @@ type Client struct {
 	queue    []eventPayload
 	recent   []SentBatch
 	notify   chan struct{}
-	errMu    sync.Mutex
-	errSeen  map[string]errDedupEntry
-	errTimes []time.Time
-	Now      func() time.Time
+	errMu        sync.Mutex
+	errSeen      map[string]errDedupEntry
+	errTierTimes map[string][]time.Time
+	Now          func() time.Time
 }
 
 // New constructs a telemetry Client with a fresh random session ID.

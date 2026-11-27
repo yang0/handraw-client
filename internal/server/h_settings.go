@@ -168,6 +168,15 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		}
 		if body.LaunchAtLogin != nil {
 			if err := s.Host.SetAutoStart(*body.LaunchAtLogin); err != nil {
+				if s.Telemetry != nil {
+					s.Telemetry.ReportError(telemetry.ErrorReport{
+						Category: "autostart_fail",
+						Severity: "error",
+						Source:   "backend",
+						Route:    "PATCH /api/settings",
+						Message:  err.Error(),
+					})
+				}
 				return err
 			}
 			st.LaunchAtLogin = *body.LaunchAtLogin
@@ -939,9 +948,11 @@ func (s *Server) telemetryEvent(w http.ResponseWriter, r *http.Request) (any, er
 			}
 			s.Telemetry.ReportError(telemetry.ErrorReport{
 				Category: strProp("category"),
+				Severity: strProp("severity"),
 				Source:   "frontend",
 				Route:    strProp("route"),
 				Location: strProp("location"),
+				Domain:   strProp("domain"),
 				Status:   intProp("status"),
 				Message:  strProp("message"),
 				Stack:    strProp("stack"),
