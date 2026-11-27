@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -302,8 +301,10 @@ func TestApplyPreventsDoubleApplyOnQuitAndFallbackOldName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Apply failed: %v", err)
 	}
-	if !strings.EqualFold(filepath.Clean(gotExe), filepath.Clean(exe)) {
-		t.Fatalf("Apply returned %q, want %q", gotExe, exe)
+	fiGot, err1 := os.Stat(gotExe)
+	fiWant, err2 := os.Stat(exe)
+	if err1 != nil || err2 != nil || !os.SameFile(fiGot, fiWant) {
+		t.Fatalf("Apply returned %q, want same file as %q (errs: %v, %v)", gotExe, exe, err1, err2)
 	}
 	diskBytes, err := os.ReadFile(exe)
 	if err != nil || string(diskBytes) != string(newBytes) {
