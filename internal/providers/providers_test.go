@@ -89,3 +89,26 @@ func TestModelCapabilityHeuristicsAndMetadata(t *testing.T) {
 		t.Fatalf("expected deepseek-flash-4.1 vision from heuristic, got %+v", m)
 	}
 }
+
+func TestNormalizeBaseURLStripsEndpointSuffixes(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"https://maas-api.cn-huabei-1.xf-yun.com/v2/chat/completions", "https://maas-api.cn-huabei-1.xf-yun.com/v2"},
+		{"https://maas-api.cn-huabei-1.xf-yun.com/v2/chat/completions/", "https://maas-api.cn-huabei-1.xf-yun.com/v2"},
+		{"https://api.example.com/v1/images/generations", "https://api.example.com/v1"},
+		{"https://api.example.com/v1/models", "https://api.example.com/v1"},
+		{"https://api.example.com/v1/", "https://api.example.com/v1"},
+		{"https://api.example.com", "https://api.example.com"},
+	}
+	for _, tc := range cases {
+		if got := NormalizeBaseURL(tc.in); got != tc.want {
+			t.Errorf("NormalizeBaseURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	gotEp := endpoint(settings.Provider{BaseURL: "https://maas-api.cn-huabei-1.xf-yun.com/v2/chat/completions"}, "/models")
+	if gotEp != "https://maas-api.cn-huabei-1.xf-yun.com/v2/models" {
+		t.Fatalf("unexpected endpoint: %q", gotEp)
+	}
+}

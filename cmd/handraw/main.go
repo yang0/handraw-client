@@ -290,7 +290,9 @@ func isExpectedJobBusinessError(msg string) bool {
 	low := strings.ToLower(strings.TrimSpace(msg))
 	for _, kw := range []string{
 		"余额不足", "insufficient_cash", "充值", "额度", "登录", "login_required",
-		"安全过滤", "敏感", "违规", "已取消", "canceled", "cancelled", "context canceled",
+		"安全过滤", "安全策略", "防护限制", "违反了", "内容审核", "敏感", "违规", "不合规",
+		"content policy", "policy violation", "safety", "prohibited", "moderation",
+		"已取消", "canceled", "cancelled", "context canceled",
 	} {
 		if strings.Contains(low, kw) {
 			return true

@@ -30,8 +30,30 @@ func key(p Provider) string {
 	return k
 }
 
+// NormalizeBaseURL trims whitespace/trailing slashes and strips accidental
+// full-endpoint suffixes (such as /chat/completions or /images/generations)
+// that users often paste from provider API documentation (#202).
+func NormalizeBaseURL(raw string) string {
+	base := strings.TrimRight(strings.TrimSpace(raw), "/")
+	low := strings.ToLower(base)
+	for _, suffix := range []string{
+		"/chat/completions",
+		"/images/generations",
+		"/images/edits",
+		"/completions",
+		"/models",
+	} {
+		if strings.HasSuffix(low, suffix) {
+			base = strings.TrimRight(base[:len(base)-len(suffix)], "/")
+			low = strings.ToLower(base)
+			break
+		}
+	}
+	return base
+}
+
 func endpoint(p Provider, path string) string {
-	base := strings.TrimRight(p.BaseURL, "/")
+	base := NormalizeBaseURL(p.BaseURL)
 	if !strings.HasSuffix(base, "/v1") && !strings.Contains(base, "/v1/") && !strings.HasSuffix(base, "/openai") {
 		// Most relays expose /v1; accept a bare host too.
 		if !strings.Contains(strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"), "/") {

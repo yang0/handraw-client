@@ -73,6 +73,8 @@ function installGlobalErrorHandlers() {
     const tag = (tgt.tagName || "").toUpperCase();
     if (tag !== "IMG" && tag !== "VIDEO" && tag !== "SCRIPT" && tag !== "LINK") return;
     if (navigator.onLine === false) return;
+    // Ignore media elements already detached by rapid view switching (#202).
+    if (tag === "IMG" && !tgt.isConnected) return;
     const rawSrc = String(tgt.currentSrc || tgt.getAttribute("src") || tgt.getAttribute("href") || "").trim();
     if (!rawSrc || rawSrc.startsWith("data:") || rawSrc.startsWith("blob:") || rawSrc.endsWith("/img/logo.svg")) return;
 
@@ -86,7 +88,9 @@ function installGlobalErrorHandlers() {
           const inner = u.searchParams.get("url") || "";
           try { domain = new URL(inner, location.origin).hostname.toLowerCase(); } catch { domain = "remote"; }
         } else if (u.pathname.startsWith("/files/pack/")) {
-          route = "/files/pack";
+          // Pack paths are public official catalog paths (no PII); preserve the
+          // relative asset path so broken pack thumbnails can be pinpointed (#202).
+          route = u.pathname.slice(0, 96);
           domain = "pack";
         } else if (u.pathname === "/files/local") {
           route = "/files/local";

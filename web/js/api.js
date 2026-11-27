@@ -54,9 +54,16 @@ const EXPECTED_4XX_CODES = new Set([
   "quote_expired",
   "quote_required",
   "endpoint_unavailable",
+  "provider_unreachable",
   "conflict",
   "not_found",
 ]);
+
+let isPageUnloading = false;
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => { isPageUnloading = true; });
+  window.addEventListener("pagehide", () => { isPageUnloading = true; });
+}
 
 export async function api(method, path, body) {
   const opts = {
@@ -76,13 +83,19 @@ export async function api(method, path, body) {
   try {
     resp = await fetch(path, opts);
   } catch (netErr) {
-    if (netErr?.name !== "AbortError" && !cleanPath.startsWith("/api/telemetry")) {
-      reportClientError({
-        category: "api_network",
-        severity: "error",
-        route: `${method} ${cleanPath}`,
-        message: netErr?.message || "Network request failed",
-      });
+    if (!isPageUnloading && netErr?.name !== "AbortError" && !cleanPath.startsWith("/api/telemetry")) {
+      // Delay briefly so window quit / restart / OS sleep bursts do not emit
+      // spurious loopback "Failed to fetch" error floods (#202).
+      const msg = netErr?.message || "Network request failed";
+      setTimeout(() => {
+        if (isPageUnloading || document.visibilityState === "hidden" || navigator.onLine === false) return;
+        reportClientError({
+          category: "api_network",
+          severity: "warn",
+          route: `${method} ${cleanPath}`,
+          message: msg,
+        });
+      }, 300);
     }
     throw netErr;
   }

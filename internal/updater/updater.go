@@ -809,18 +809,38 @@ func (u *Updater) Apply() (string, error) {
 
 // applyWindowsOrDirect moves the running binary aside and copies the staged
 // binary into place. If the default ".old" backup path is locked by a previous
-// process or antivirus scanner, it falls back to a PID-qualified backup name
-// so the swap can still succeed (#192).
+// process or antivirus scanner, it retries briefly and falls back to a
+// PID-qualified backup name so the swap can still succeed (#192, #202).
 func applyWindowsOrDirect(exe, staged string) (string, error) {
 	old := exe + ".old"
-	_ = os.Remove(old)
-	if err := os.Rename(exe, old); err != nil {
-		fallbackOld := fmt.Sprintf("%s.old.%d", exe, os.Getpid())
-		_ = os.Remove(fallbackOld)
-		if err2 := os.Rename(exe, fallbackOld); err2 != nil {
-			return "", fmt.Errorf("替换程序失败：%w", err)
+	var lastErr error
+	renamed := false
+	backoffs := []time.Duration{0, 200 * time.Millisecond, 500 * time.Millisecond, 1 * time.Second}
+	for i, wait := range backoffs {
+		if wait > 0 {
+			time.Sleep(wait)
 		}
-		old = fallbackOld
+		_ = os.Remove(old)
+		if err := os.Rename(exe, old); err == nil {
+			renamed = true
+			break
+		} else {
+			fallbackOld := fmt.Sprintf("%s.old.%d", exe, os.Getpid())
+			if i > 0 {
+				fallbackOld = fmt.Sprintf("%s.old.%d.%d", exe, os.Getpid(), i)
+			}
+			_ = os.Remove(fallbackOld)
+			if err2 := os.Rename(exe, fallbackOld); err2 == nil {
+				old = fallbackOld
+				renamed = true
+				break
+			} else {
+				lastErr = err2
+			}
+		}
+	}
+	if !renamed {
+		return "", fmt.Errorf("替换程序失败：%w", lastErr)
 	}
 	if err := copyFile(staged, exe, 0o755); err != nil {
 		_ = os.Rename(old, exe)

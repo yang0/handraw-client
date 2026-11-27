@@ -228,6 +228,7 @@ func (s *Server) providerPut(w http.ResponseWriter, r *http.Request) (any, error
 	if strings.TrimSpace(body.Name) == "" || strings.TrimSpace(body.BaseURL) == "" {
 		return nil, bad("接口名称和地址不能为空")
 	}
+	body.BaseURL = providers.NormalizeBaseURL(body.BaseURL)
 	if body.ID == "" {
 		body.ID = jobs.NewID("prov")
 	}
@@ -341,13 +342,16 @@ func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) (any, er
 	} else if strings.TrimSpace(body.BaseURL) != "" {
 		p.BaseURL = strings.TrimSpace(body.BaseURL)
 	}
+	p.BaseURL = providers.NormalizeBaseURL(p.BaseURL)
 	apiKey := strings.TrimSpace(body.APIKey)
 	if apiKey == "" && ok {
 		apiKey, _ = secrets.Get(secrets.ProviderKey(p.ID))
 	}
 	models, err := providers.ListModelsWithKey(r.Context(), p, apiKey)
 	if err != nil {
-		return nil, err
+		// User-configured third-party provider connection errors are expected
+		// configuration issues, not local 5xx server failures (#202).
+		return nil, &apiError{Status: http.StatusBadRequest, Code: "provider_unreachable", Msg: err.Error()}
 	}
 	return map[string]any{"models": models}, nil
 }
