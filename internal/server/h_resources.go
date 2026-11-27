@@ -2,16 +2,114 @@ package server
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yang0/handraw-client/internal/resources"
+	"github.com/yang0/handraw-client/internal/site"
 )
+
+var packFetchRetryBaseDelay = 350 * time.Millisecond
+
+type packFetchResult struct {
+	data []byte
+	ct   string
+	err  error
+}
+
+type packFetchCall struct {
+	done chan struct{}
+	res  packFetchResult
+}
+
+// packImageFetcher bounds concurrent upstream lazy fetches for embedded pack
+// thumbnails and deduplicates concurrent requests for the same path (#192).
+type packImageFetcher struct {
+	mu       sync.Mutex
+	inflight map[string]*packFetchCall
+	sem      chan struct{}
+}
+
+func newPackImageFetcher(maxConcurrent int) *packImageFetcher {
+	if maxConcurrent < 1 {
+		maxConcurrent = 4
+	}
+	return &packImageFetcher{
+		inflight: map[string]*packFetchCall{},
+		sem:      make(chan struct{}, maxConcurrent),
+	}
+}
+
+func (f *packImageFetcher) fetch(ctx context.Context, key string, fn func(context.Context) ([]byte, string, error)) ([]byte, string, error) {
+	f.mu.Lock()
+	if call, ok := f.inflight[key]; ok {
+		f.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.res.data, call.res.ct, call.res.err
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+	}
+	call := &packFetchCall{done: make(chan struct{})}
+	f.inflight[key] = call
+	f.mu.Unlock()
+
+	go func() {
+		defer func() {
+			f.mu.Lock()
+			delete(f.inflight, key)
+			f.mu.Unlock()
+			close(call.done)
+		}()
+		// Acquire bounded concurrency slot using an independent bounded context so
+		// one cancelled browser tab does not starve coalesced waiters.
+		fctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
+		defer cancel()
+		select {
+		case f.sem <- struct{}{}:
+			defer func() { <-f.sem }()
+		case <-fctx.Done():
+			call.res = packFetchResult{err: fctx.Err()}
+			return
+		}
+		var data []byte
+		var ct string
+		var err error
+		for attempt := 0; attempt < 3; attempt++ {
+			data, ct, err = fn(fctx)
+			if err == nil {
+				break
+			}
+			var ae *site.APIError
+			if !errors.As(err, &ae) || (ae.Status != http.StatusTooManyRequests && ae.Status != http.StatusServiceUnavailable) {
+				break
+			}
+			delay := packFetchRetryBaseDelay * time.Duration(1<<attempt)
+			select {
+			case <-fctx.Done():
+				err = fctx.Err()
+				attempt = 3
+			case <-time.After(delay):
+			}
+		}
+		call.res = packFetchResult{data: data, ct: ct, err: err}
+	}()
+
+	select {
+	case <-call.done:
+		return call.res.data, call.res.ct, call.res.err
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
+	}
+}
 
 func (s *Server) pack() (*resources.Pack, error) {
 	p := s.Pack()
@@ -363,10 +461,15 @@ func (s *Server) filePack(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
-	defer cancel()
-	data, ct, err := s.Site.Fetch(ctx, "/"+cleanRel)
+	fetcher := s.packImg
+	if fetcher == nil {
+		fetcher = newPackImageFetcher(4)
+	}
+	data, ct, err := fetcher.fetch(r.Context(), cleanRel, func(fctx context.Context) ([]byte, string, error) {
+		return s.Site.Fetch(fctx, "/"+cleanRel)
+	})
 	if err != nil || len(data) == 0 || len(data) > maxRemoteImgBytes {
+		w.Header().Set("Cache-Control", "no-store")
 		http.NotFound(w, r)
 		return
 	}

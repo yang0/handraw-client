@@ -102,3 +102,27 @@ func TestReportErrorDedupRateLimitAndCrashReplay(t *testing.T) {
 		t.Fatalf("disabled telemetry must drop errors")
 	}
 }
+
+func TestSanitizeNonUsersPathsAndGroupIdenticalUpdaterErrors(t *testing.T) {
+	msgA := `替换程序失败：rename D:\download\handraw-windows-amd64.exe D:\download\handraw-windows-amd64.exe.old: Access is denied.`
+	msgB := `替换程序失败：rename C:\Users\Alice\Downloads\handraw-windows-amd64 (1).exe C:\Users\Alice\Downloads\handraw-windows-amd64 (1).exe.old: Access is denied.`
+
+	sanA := SanitizeErrorText(msgA)
+	if strings.Contains(sanA, `D:\download\`) {
+		t.Fatalf("expected non-Users drive folder redacted, got %q", sanA)
+	}
+	if !strings.Contains(sanA, `<WIN_PATH>\handraw-windows-amd64.exe`) {
+		t.Fatalf("expected filename preserved with <WIN_PATH>, got %q", sanA)
+	}
+
+	sanB := SanitizeErrorText(msgB)
+	if strings.Contains(sanB, "Alice") {
+		t.Fatalf("expected Windows username redacted, got %q", sanB)
+	}
+
+	fpA := errorFingerprint(ErrorReport{Category: "updater_apply", Source: "backend", Message: msgA})
+	fpB := errorFingerprint(ErrorReport{Category: "updater_apply", Source: "backend", Message: msgB})
+	if fpA != fpB {
+		t.Fatalf("expected identical fingerprint across different install paths, got %q vs %q", fpA, fpB)
+	}
+}

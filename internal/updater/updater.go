@@ -107,13 +107,16 @@ type Updater struct {
 	BucketKey       func() string    // stable anonymous device ID for rollout bucketing
 	Now             func() time.Time // overridable clock for tests
 	mu              sync.Mutex
+	applyMu         sync.Mutex
 	stateMu         sync.Mutex
 	status          Status
 	release         *Release
 	staged          string
 	stagedVersion   string
 	stagedSHA256    string
-	appliedOnQuit   bool
+	applied         bool
+	appliedExe      string
+	executableFn    func() (string, error) // overridable in tests
 	nudgeCh         chan struct{}
 	OnChange        func(Status)
 }
@@ -563,7 +566,6 @@ func (u *Updater) finishStaged(ver, name, staged, sha string) {
 	u.staged = staged
 	u.stagedVersion = ver
 	u.stagedSHA256 = sha
-	u.appliedOnQuit = false
 	u.mu.Unlock()
 	ps := u.updateState(func(s *persistedState) {
 		s.StagedVersion = ver
@@ -731,26 +733,90 @@ func (u *Updater) downloadToFile(ctx context.Context, url, dstPath string, maxBy
 }
 
 // Apply swaps the running program for the staged one. The caller restarts.
+// Safe to call from both manual "重启升级" and graceful-exit ApplyIfReady: once
+// a swap succeeds, subsequent calls in the same process return immediately so
+// the exiting process never re-renames the already-replaced binary (#192).
 func (u *Updater) Apply() (string, error) {
+	u.applyMu.Lock()
+	defer u.applyMu.Unlock()
+
 	u.mu.Lock()
+	if u.applied {
+		exe := u.appliedExe
+		u.mu.Unlock()
+		return exe, nil
+	}
 	staged := u.staged
+	ver := u.stagedVersion
+	execFn := u.executableFn
 	u.mu.Unlock()
+
 	if staged == "" {
 		return "", errors.New("没有已下载的更新")
 	}
-	exe, err := os.Executable()
+	if execFn == nil {
+		execFn = os.Executable
+	}
+	exe, err := execFn()
 	if err != nil {
 		return "", err
 	}
-	exe, _ = filepath.EvalSymlinks(exe)
-	if runtime.GOOS == "darwin" {
-		return applyMac(exe, staged)
+	if resolved, rErr := filepath.EvalSymlinks(exe); rErr == nil && resolved != "" {
+		exe = resolved
 	}
-	// Windows can't overwrite a running exe but can rename it.
+	var targetExe string
+	if runtime.GOOS == "darwin" {
+		targetExe, err = applyMac(exe, staged)
+	} else {
+		targetExe, err = applyWindowsOrDirect(exe, staged)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	u.mu.Lock()
+	u.applied = true
+	u.appliedExe = targetExe
+	u.staged = ""
+	u.stagedVersion = ""
+	u.stagedSHA256 = ""
+	u.status.Ready = false
+	u.status.AutoApplyOnQuit = false
+	u.status.ApplyFailed = false
+	u.status.StagedVersion = ""
+	st := u.status
+	onChange := u.OnChange
+	u.mu.Unlock()
+
+	u.updateState(func(s *persistedState) {
+		s.StagedVersion = ""
+		s.StagedAsset = ""
+		s.StagedPath = ""
+		s.StagedSHA256 = ""
+		if ver != "" && s.ApplyFailedVersion == ver {
+			s.ApplyFailedVersion = ""
+		}
+	})
+	if onChange != nil {
+		onChange(st)
+	}
+	return targetExe, nil
+}
+
+// applyWindowsOrDirect moves the running binary aside and copies the staged
+// binary into place. If the default ".old" backup path is locked by a previous
+// process or antivirus scanner, it falls back to a PID-qualified backup name
+// so the swap can still succeed (#192).
+func applyWindowsOrDirect(exe, staged string) (string, error) {
 	old := exe + ".old"
 	_ = os.Remove(old)
 	if err := os.Rename(exe, old); err != nil {
-		return "", fmt.Errorf("替换程序失败：%w", err)
+		fallbackOld := fmt.Sprintf("%s.old.%d", exe, os.Getpid())
+		_ = os.Remove(fallbackOld)
+		if err2 := os.Rename(exe, fallbackOld); err2 != nil {
+			return "", fmt.Errorf("替换程序失败：%w", err)
+		}
+		old = fallbackOld
 	}
 	if err := copyFile(staged, exe, 0o755); err != nil {
 		_ = os.Rename(old, exe)
@@ -953,9 +1019,30 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	return out.Close()
 }
 
-// CleanupOld removes the previous program left by Apply on Windows.
+// CleanupOld removes previous program backups (.old and .old.<pid>) left by
+// Apply on Windows (#192).
 func CleanupOld() {
-	if exe, err := os.Executable(); err == nil {
-		_ = os.Remove(exe + ".old")
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cleanupOldFor(exe)
+}
+
+func cleanupOldFor(exe string) {
+	_ = os.Remove(exe + ".old")
+	dir := filepath.Dir(exe)
+	prefix := filepath.Base(exe) + ".old."
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), prefix) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
 	}
 }

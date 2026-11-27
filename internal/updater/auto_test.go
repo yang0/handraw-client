@@ -13,6 +13,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -247,5 +249,88 @@ func TestAutoDownloadFailureBackoffCap(t *testing.T) {
 	ps = u.loadState()
 	if ps.AutoFailCount != 3 || ps.NextRetryAt != base.Add(6*time.Hour).Format(time.RFC3339) {
 		t.Fatalf("unexpected 3rd backoff state: %+v", ps)
+	}
+}
+
+func TestApplyPreventsDoubleApplyOnQuitAndFallbackOldName(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("direct exe swap test targets windows/linux binary replacement")
+	}
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "handraw-windows-amd64.exe")
+	stagedDir := filepath.Join(dir, "updates")
+	if err := os.MkdirAll(stagedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(stagedDir, "handraw-windows-amd64.exe")
+	oldBytes := []byte("old-v0.6.9-binary")
+	newBytes := []byte("new-v0.6.10-binary")
+	if err := os.WriteFile(exe, oldBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staged, newBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(newBytes)
+
+	// Block the default ".old" path with a non-empty directory so os.Remove(old)
+	// fails and applyWindowsOrDirect must fall back to ".old.<pid>" (#192).
+	blocker := exe + ".old"
+	if err := os.MkdirAll(filepath.Join(blocker, "locked"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	u := New("v0.6.9", stagedDir)
+	u.Mode = func() string { return AutoModeAuto }
+	u.executableFn = func() (string, error) { return exe, nil }
+	u.mu.Lock()
+	u.staged = staged
+	u.stagedVersion = "0.6.10"
+	u.stagedSHA256 = hex.EncodeToString(sum[:])
+	u.status.Ready = true
+	u.status.StagedVersion = "0.6.10"
+	u.status.AutoApplyOnQuit = true
+	u.mu.Unlock()
+	u.updateState(func(s *persistedState) {
+		s.StagedVersion = "0.6.10"
+		s.StagedPath = staged
+		s.StagedSHA256 = hex.EncodeToString(sum[:])
+	})
+
+	// 1. Manual Apply ("重启升级") succeeds even with .old blocked.
+	gotExe, err := u.Apply()
+	if err != nil {
+		t.Fatalf("first Apply failed: %v", err)
+	}
+	if !strings.EqualFold(filepath.Clean(gotExe), filepath.Clean(exe)) {
+		t.Fatalf("Apply returned %q, want %q", gotExe, exe)
+	}
+	diskBytes, err := os.ReadFile(exe)
+	if err != nil || string(diskBytes) != string(newBytes) {
+		t.Fatalf("expected replaced binary %q, got %q (err=%v)", newBytes, diskBytes, err)
+	}
+
+	// 2. Subsequent ApplyIfReady during graceful shutdown must be a clean no-op
+	// (never re-renaming the newly replaced binary or setting ApplyFailedVersion).
+	appliedOnQuit, err := u.ApplyIfReady()
+	if err != nil {
+		t.Fatalf("ApplyIfReady after manual Apply returned unexpected error: %v", err)
+	}
+	if appliedOnQuit {
+		t.Fatalf("ApplyIfReady after manual Apply should return applied=false")
+	}
+	ps := u.loadState()
+	if ps.ApplyFailedVersion != "" || ps.StagedVersion != "" || ps.StagedPath != "" {
+		t.Fatalf("expected clean state after manual Apply, got %+v", ps)
+	}
+
+	// 3. CleanupOld removes PID-qualified backup files.
+	pidBackup := fmt.Sprintf("%s.old.%d", exe, os.Getpid())
+	if _, err := os.Stat(pidBackup); err != nil {
+		t.Fatalf("expected PID-qualified backup %s to exist: %v", pidBackup, err)
+	}
+	cleanupOldFor(exe)
+	if _, err := os.Stat(pidBackup); !os.IsNotExist(err) {
+		t.Fatalf("expected cleanupOldFor to remove %s, stat err=%v", pidBackup, err)
 	}
 }

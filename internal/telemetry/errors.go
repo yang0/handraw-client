@@ -37,7 +37,10 @@ type ErrorReport struct {
 
 var (
 	reWinUserPath  = regexp.MustCompile(`(?i)([a-z]:\\users\\)([^\\/\s"']+)`)
-	reUnixUserPath = regexp.MustCompile(`(/(?:Users|home)/)([^/\s"']+)`)
+	reWinDriveDir  = regexp.MustCompile(`(?i)\b[a-z]:\\(?:[^\\/:*"?|\r\n\s]+\\)+`)
+	reUnixUserPath = regexp.MustCompile(`(/(?:Users|home|Volumes)/)([^/\s"']+)`)
+	reWinFullPath  = regexp.MustCompile(`(?i)(?:<WIN_PATH>|[a-z]:)\\(?:[^\s:,"']|\s+\(\d+\))+`)
+	reUnixFullPath = regexp.MustCompile(`/(?:Users|home|Volumes|var|tmp|opt|Applications)/(?:[^\s:,"']|\s+\(\d+\))+`)
 	reBearerSecret = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}`)
 	reKnownToken   = regexp.MustCompile(`\b(?:hwc_[0-9a-fA-F]{8,}|sk-[A-Za-z0-9_-]{8,}|gh[pou]_[A-Za-z0-9]{12,}|eyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{6,})\b`)
 	reQuerySecret  = regexp.MustCompile(`(\?[^\s"']+)`)
@@ -50,7 +53,7 @@ var (
 )
 
 // SanitizeErrorText strips personal paths, tokens, query parameters, emails,
-// and phone numbers so error diagnostics never leak user PII or secrets (#186).
+// and phone numbers so error diagnostics never leak user PII or secrets (#186, #192).
 func SanitizeErrorText(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -61,6 +64,14 @@ func SanitizeErrorText(raw string) string {
 	s = reKnownToken.ReplaceAllString(s, `<REDACTED>`)
 	s = reQuerySecret.ReplaceAllString(s, `?<REDACTED>`)
 	s = reWinUserPath.ReplaceAllString(s, `${1}<USER>`)
+	// Redact non-Users Windows drive directory prefixes (e.g. D:\download\foo.exe
+	// -> <WIN_PATH>\foo.exe) so custom folder names never leak (#192).
+	s = reWinDriveDir.ReplaceAllStringFunc(s, func(match string) string {
+		if strings.Contains(strings.ToLower(match), `\users\<user>\`) {
+			return match
+		}
+		return `<WIN_PATH>\`
+	})
 	s = reUnixUserPath.ReplaceAllString(s, `${1}<USER>`)
 	s = reEmail.ReplaceAllString(s, `<EMAIL>`)
 	s = reCNPhone.ReplaceAllString(s, `<PHONE>`)
@@ -135,6 +146,10 @@ func NormalizeRoute(method, rawPath string) string {
 
 func errorFingerprint(r ErrorReport) string {
 	normMsg := SanitizeErrorText(r.Message)
+	// Collapse local filesystem paths (including duplicate download suffixes like
+	// " (1).exe") so identical errors across install folders share one fingerprint (#192).
+	normMsg = reWinFullPath.ReplaceAllString(normMsg, "<path>")
+	normMsg = reUnixFullPath.ReplaceAllString(normMsg, "<path>")
 	normMsg = reHexNum.ReplaceAllString(normMsg, "0x*")
 	normMsg = reUUID.ReplaceAllString(normMsg, ":uuid")
 	normMsg = reLongDigits.ReplaceAllString(normMsg, ":num")

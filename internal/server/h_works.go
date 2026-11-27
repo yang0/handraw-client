@@ -115,8 +115,14 @@ func collectRunSiteRefs(run store.Run) []string {
 
 // reconcileSitePublishedWork checks whether a site-generated run already has an
 // auto-published work on the website and backfills local published_work_id (#86).
+// Skips failed/unsubmitted images that have no RemoteTaskID and negative-caches
+// terminal misses so repeated views never spam GET /api/studio/tasks 404s (#192).
 func (s *Server) reconcileSitePublishedWork(ctx context.Context, run *store.Run) {
 	if run == nil || run.PublishedWorkID != "" || run.Source != "site" || s.Site == nil || !s.Site.LoggedIn() {
+		return
+	}
+	missKey := "reconcile_miss:" + run.ID
+	if _, ok := s.getMarketCache(missKey, 10*time.Minute); ok {
 		return
 	}
 	type probe struct{ taskID, reqID string }
@@ -135,6 +141,12 @@ func (s *Server) reconcileSitePublishedWork(ctx context.Context, run *store.Run)
 		probes = append(probes, probe{tid, rid})
 	}
 	for _, im := range run.Images {
+		// Only images that completed or actually received a remote task ID can
+		// have an auto-published work on the site. Failed/queued images without a
+		// RemoteTaskID (e.g. synchronous 400 insufficient_cash) never created one.
+		if im.RemoteTaskID == "" && im.Status != "done" {
+			continue
+		}
 		var spec jobs.Spec
 		if len(im.Meta) > 0 {
 			_ = json.Unmarshal(im.Meta, &spec)
@@ -171,6 +183,9 @@ func (s *Server) reconcileSitePublishedWork(ctx context.Context, run *store.Run)
 			s.Emit("work_published", map[string]any{"runId": run.ID, "workId": res.WorkID, "url": workURL, "auto": true})
 			return
 		}
+	}
+	if run.Status == "done" || run.Status == "partial" || run.Status == "failed" {
+		s.setMarketCache(missKey, json.RawMessage(`1`))
 	}
 }
 

@@ -1,10 +1,12 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -118,5 +120,106 @@ func TestModelsEndpointCachesAndTimesOutFast(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Fatalf("slow /api/models took too long (%v); expected prompt timeout fallback", elapsed)
+	}
+}
+
+func TestFilePackLazyFetchDedupsCapsConcurrencyAndRetries429(t *testing.T) {
+	origDelay := packFetchRetryBaseDelay
+	packFetchRetryBaseDelay = 10 * time.Millisecond
+	t.Cleanup(func() { packFetchRetryBaseDelay = origDelay })
+
+	pngBytes := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 1}
+	var curInflight, maxInflight atomic.Int32
+	var retryHits, dedupHits atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := curInflight.Add(1)
+		for {
+			prev := maxInflight.Load()
+			if n <= prev || maxInflight.CompareAndSwap(prev, n) {
+				break
+			}
+		}
+		defer curInflight.Add(-1)
+
+		switch r.URL.Path {
+		case "/images/tones/T-13.webp":
+			if retryHits.Add(1) == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte("Too Many Requests"))
+				return
+			}
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(pngBytes)
+		case "/images/tones/T-14.webp":
+			dedupHits.Add(1)
+			time.Sleep(40 * time.Millisecond)
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(pngBytes)
+		default:
+			time.Sleep(30 * time.Millisecond)
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(pngBytes)
+		}
+	}))
+	defer upstream.Close()
+
+	srv, _ := setupTestServer(t, upstream.URL)
+	packDir := filepath.Join(t.TempDir(), "embedded-pack")
+	if err := resources.EnsureBuiltin(packDir); err != nil {
+		t.Fatalf("EnsureBuiltin: %v", err)
+	}
+	p, err := resources.Load(packDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	prev := resources.Current()
+	resources.SetCurrent(p)
+	t.Cleanup(func() { resources.SetCurrent(prev) })
+	srv.PackDir = packDir
+	h := srv.Handler()
+
+	// 1. Upstream 429 on first attempt retries and returns 200.
+	rrRetry := doReq(t, h, srv.Token, http.MethodGet, "/files/pack/images/tones/T-13.webp", nil)
+	if rrRetry.Code != 200 {
+		t.Fatalf("expected 429 retry to succeed with 200, got %d", rrRetry.Code)
+	}
+	if retryHits.Load() != 2 {
+		t.Fatalf("expected 2 upstream attempts (429 then 200), got %d", retryHits.Load())
+	}
+
+	// 2. Concurrent requests for the same path coalesce into 1 upstream fetch.
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rr := doReq(t, h, srv.Token, http.MethodGet, "/files/pack/images/tones/T-14.webp", nil)
+			if rr.Code != 200 {
+				t.Errorf("coalesced fetch failed with %d", rr.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	if dedupHits.Load() != 1 {
+		t.Fatalf("expected 1 coalesced upstream hit for T-14.webp, got %d", dedupHits.Load())
+	}
+
+	// 3. Burst of 12 distinct images respects max concurrency cap of 4.
+	maxInflight.Store(0)
+	for i := 1; i <= 12; i++ {
+		wg.Add(1)
+		path := fmt.Sprintf("/files/pack/images/tones/burst-%02d.webp", i)
+		go func(u string) {
+			defer wg.Done()
+			rr := doReq(t, h, srv.Token, http.MethodGet, u, nil)
+			if rr.Code != 200 {
+				t.Errorf("burst fetch %s failed with %d", u, rr.Code)
+			}
+		}(path)
+	}
+	wg.Wait()
+	if peak := maxInflight.Load(); peak > 4 {
+		t.Fatalf("expected peak upstream concurrency <= 4, got %d", peak)
 	}
 }

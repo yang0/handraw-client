@@ -92,6 +92,7 @@ type Server struct {
 	login    *loginState
 	cacheMu  sync.Mutex
 	cache    map[string]cached
+	packImg  *packImageFetcher
 	addr     string
 }
 
@@ -113,6 +114,7 @@ func New(version string) *Server {
 		events:    newHub(),
 		login:     &loginState{},
 		cache:     map[string]cached{},
+		packImg:   newPackImageFetcher(4),
 		Host:      nopHost{},
 		Log:       slog.Default(),
 	}

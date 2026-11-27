@@ -458,7 +458,7 @@ func (u *Updater) ApplyIfReady() (bool, error) {
 	ver := u.stagedVersion
 	wantHash := u.stagedSHA256
 	ready := u.status.Ready
-	applied := u.appliedOnQuit
+	applied := u.applied
 	u.mu.Unlock()
 
 	if !ready || staged == "" || ver == "" || applied {
@@ -484,18 +484,6 @@ func (u *Updater) ApplyIfReady() (bool, error) {
 		})
 		return false, err
 	}
-	u.mu.Lock()
-	u.appliedOnQuit = true
-	u.mu.Unlock()
-	u.updateState(func(s *persistedState) {
-		s.StagedVersion = ""
-		s.StagedAsset = ""
-		s.StagedPath = ""
-		s.StagedSHA256 = ""
-		if s.ApplyFailedVersion == ver {
-			s.ApplyFailedVersion = ""
-		}
-	})
 	return true, nil
 }
 
