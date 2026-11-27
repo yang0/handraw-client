@@ -95,11 +95,13 @@ func main() {
 	}
 
 	st := settings.Get()
-	go func(enabled bool) {
-		if err := desktop.SetAutoStart(enabled); err != nil {
-			log.Printf("同步开机自启设置失败：%v", err)
-		}
-	}(st.LaunchAtLogin)
+	if st.HasPrivacyConsent() {
+		go func(enabled bool) {
+			if err := desktop.SetAutoStart(enabled); err != nil {
+				log.Printf("同步开机自启设置失败：%v", err)
+			}
+		}(st.LaunchAtLogin)
+	}
 
 	addr, err := srv.Listen(ctx, server.DefaultPort)
 	if err != nil {
@@ -156,7 +158,10 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 	sc := site.New(Version)
 	upd := updater.New(Version, appdir.Updates())
 	tel := telemetry.New(Version)
-	tel.Enabled = func() bool { return !settings.Get().TelemetryDisabled }
+	tel.Enabled = func() bool {
+		st := settings.Get()
+		return st.HasPrivacyConsent() && !st.TelemetryDisabled
+	}
 	tel.SiteBase = func() string { return settings.Get().SiteBase }
 	tel.AnonID = settings.EnsureTelemetryID
 	tel.Token = func() string {
@@ -203,7 +208,11 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 		srv.Emit("update", st)
 	}
 	upd.Mode = func() string {
-		return settings.Get().EffectiveAutoUpdateMode()
+		st := settings.Get()
+		if !st.HasPrivacyConsent() {
+			return updater.AutoModeOff
+		}
+		return st.EffectiveAutoUpdateMode()
 	}
 	upd.IsBusy = func() bool {
 		return jm.Active() > 0

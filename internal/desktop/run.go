@@ -137,6 +137,10 @@ func (h *desktopHost) Restart() {
 		cmd := exec.Command(exe)
 		_ = cmd.Start()
 	}
+	h.Quit()
+}
+
+func (h *desktopHost) Quit() {
 	h.quitting.Store(true)
 	if h.app != nil {
 		h.app.Quit()

@@ -150,5 +150,6 @@ func (webHost) PickDirectory() (string, error) { return PickDirectoryOS() }
 func (webHost) ShowMain()                    {}
 func (webHost) HideQuick()                   {}
 func (webHost) Restart()                     {}
+func (webHost) Quit()                        {}
 func (webHost) SetHotkey(string) error       { return nil }
 func (webHost) SetAutoStart(enabled bool) error { return SetAutoStart(enabled) }

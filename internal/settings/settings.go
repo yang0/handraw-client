@@ -197,9 +197,22 @@ type Settings struct {
 	// ClipToken authenticates the local Chrome Inspiration Clipper extension (#73).
 	ClipToken string `json:"clipToken,omitempty"`
 	// TelemetryDisabled opts out of anonymous desktop usage telemetry (#174).
-	TelemetryDisabled bool `json:"telemetryDisabled,omitempty"`
+	// Default is true (opt-in only after explicit first-run consent, #191).
+	TelemetryDisabled bool `json:"telemetryDisabled"`
 	// TelemetryID is a locally generated random anonymous identifier (dc_...).
 	TelemetryID string `json:"telemetryId,omitempty"`
+	// PrivacyConsentVersion records which privacy/usage notice the user accepted (#191).
+	PrivacyConsentVersion string `json:"privacyConsentVersion,omitempty"`
+	// PrivacyConsentAt records the RFC3339 timestamp of the user's consent decision.
+	PrivacyConsentAt string `json:"privacyConsentAt,omitempty"`
+}
+
+// CurrentPrivacyConsentVersion identifies the active first-run privacy & usage notice (#191).
+const CurrentPrivacyConsentVersion = "2026-11"
+
+// HasPrivacyConsent reports whether the user has explicitly accepted the first-run notice.
+func (s Settings) HasPrivacyConsent() bool {
+	return strings.TrimSpace(s.PrivacyConsentVersion) != ""
 }
 
 func Defaults() Settings {
@@ -214,7 +227,8 @@ func Defaults() Settings {
 		QuickShotHotkey:   "Alt+Space",
 		QuickShotEnabled:  true,
 		MinimizeToTray:    true,
-		LaunchAtLogin:     true,
+		LaunchAtLogin:     false,
+		TelemetryDisabled: true,
 		SceneModels:           map[string]string{},
 		Plugins:               map[string]bool{},
 		PluginConfig:          map[string]any{},

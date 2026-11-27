@@ -1,5 +1,6 @@
 import { api, clear, closeModal, copyText, el, money, onEvent, openURL, setColorScheme, showModal, toast } from "../api.js";
 import { economySyncHint, formatQuotaSummary, formatYuanMicros, parseEconomy } from "../economy.js";
+import { openPrivacyConsentDialog } from "../consent.js";
 import { createTextModelPicker } from "../skills-ui.js";
 import { openClipperSetupModal } from "./inspirations.js";
 
@@ -1149,7 +1150,7 @@ export async function renderSettings(root, ctx, params = {}) {
   });
   const quickChk = el("input", { id: "pref-quick-enabled", name: "quickShotEnabled", type: "checkbox", checked: Boolean(settings.quickShotEnabled) });
   const trayChk = el("input", { id: "pref-tray", name: "minimizeToTray", type: "checkbox", checked: Boolean(settings.minimizeToTray) });
-  const launchAtLoginChk = el("input", { id: "pref-launch-at-login", name: "launchAtLogin", type: "checkbox", checked: settings.launchAtLogin !== false });
+  const launchAtLoginChk = el("input", { id: "pref-launch-at-login", name: "launchAtLogin", type: "checkbox", checked: Boolean(settings.launchAtLogin) });
   const curAutoUpdateMode = settings.autoUpdateMode || (settings.autoCheckUpdate === false ? "off" : "auto");
   const autoUpdModeSel = el("select", {
     id: "pref-auto-update-mode",
@@ -1165,6 +1166,61 @@ export async function renderSettings(root, ctx, params = {}) {
   const publicChk = el("input", { id: "pref-public-gen", name: "publicSiteGenerations", type: "checkbox", checked: !settings.keepSiteGenerationsPrivate });
   const telemetryChk = el("input", { id: "pref-telemetry", name: "telemetryEnabled", type: "checkbox", checked: !settings.telemetryDisabled });
   const prefStatus = el("span", { class: "muted", role: "status", "aria-live": "polite" });
+
+  const telemetryInspectBody = el("div", { class: "privacy-inspect-body muted" }, "展开后读取当前上报白名单与本次会话实际发送记录…");
+  let telemetryInspectLoaded = false;
+  async function loadTelemetryInspect() {
+    clear(telemetryInspectBody);
+    telemetryInspectBody.appendChild(el("span", { class: "muted" }, "正在读取…"));
+    try {
+      const info = await api("GET", "/api/telemetry/inspect");
+      clear(telemetryInspectBody);
+      const statusBadge = info.enabled
+        ? el("span", { class: "badge badge-ok" }, "已开启 · 匿名脱敏模式")
+        : el("span", { class: "badge" }, "已关闭 · 零网络上报");
+      const consentMeta = info.privacyConsentVersion
+        ? `已确认使用须知（版本 ${info.privacyConsentVersion}${info.privacyConsentAt ? " · " + new Date(info.privacyConsentAt).toLocaleString() : ""}）`
+        : "尚未完成首次使用许可确认（当前严格阻断所有上报）";
+      telemetryInspectBody.append(
+        el("div", { class: "row", style: { gap: "8px", alignItems: "center", flexWrap: "wrap" } },
+          statusBadge,
+          el("span", { class: "muted", style: { fontSize: "12px" } }, consentMeta)
+        ),
+        el("div", { class: "privacy-inspect-group" },
+          el("strong", null, "仅允许上报的事件白名单："),
+          el("div", { class: "privacy-inspect-chips" },
+            ...(info.allowedEvents || []).map((ev) => el("code", { class: "privacy-chip" }, ev))
+          )
+        ),
+        el("div", { class: "privacy-inspect-group" },
+          el("strong", null, "强制剔除的敏感字段关键词："),
+          el("span", { class: "muted", style: { fontSize: "12px" } }, (info.blockedKeywords || []).join(" / "))
+        ),
+        el("div", { class: "privacy-inspect-group" },
+          el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center" } },
+            el("strong", null, `本次会话实际发送记录（最近 ${(info.recentBatches || []).length} 批）：`),
+            el("button", { type: "button", class: "btn btn-sm", onClick: () => loadTelemetryInspect() }, "↻ 刷新")
+          ),
+          (info.recentBatches || []).length
+            ? el("pre", { class: "privacy-inspect-pre mono" }, JSON.stringify(info.recentBatches, null, 2))
+            : el("div", { class: "muted", style: { fontSize: "12px" } }, "本次会话尚未发送过任何统计或异常报告。")
+        )
+      );
+      telemetryInspectLoaded = true;
+    } catch (err) {
+      clear(telemetryInspectBody);
+      telemetryInspectBody.appendChild(el("span", { class: "muted" }, "读取失败：" + (err?.message || "未知错误")));
+    }
+  }
+  const telemetryInspectDetails = el("details", { class: "privacy-inspect-box" },
+    el("summary", null, "🔍 查看数据采集白名单与本次会话实际发送记录"),
+    telemetryInspectBody
+  );
+  telemetryInspectDetails.addEventListener("toggle", () => {
+    if (telemetryInspectDetails.open && !telemetryInspectLoaded) {
+      loadTelemetryInspect();
+    }
+  });
 
   const prefForm = el("form", {
     id: "settings-pref-form",
@@ -1243,13 +1299,37 @@ export async function renderSettings(root, ctx, params = {}) {
       )
     ),
     el("fieldset", { class: "settings-fieldset" },
-      el("legend", null, "窗口与云同步"),
+      el("legend", null, "窗口与同步"),
       el("div", { class: "settings-checks" },
         el("label", { for: "pref-launch-at-login", class: "settings-check" }, launchAtLoginChk, el("span", null, "开机自动启动（开启托盘时自动静默驻留后台）")),
         el("label", { for: "pref-tray", class: "settings-check" }, trayChk, el("span", null, "关闭主窗口时最小化到系统托盘")),
-        el("label", { for: "pref-auto-sync", class: "settings-check" }, autoSyncChk, el("span", null, "登录后自动同步自定义画风")),
-        el("label", { for: "pref-public-gen", class: "settings-check" }, publicChk, el("span", null, "网站模型生成的图片自动公开到社区（用了自己参考图的除外）")),
-        el("label", { for: "pref-telemetry", class: "settings-check" }, telemetryChk, el("span", null, "发送匿名使用统计与脱敏异常报告（仅含版本号、系统、功能频次与脱敏错误/崩溃堆栈，不含提示词、图片与个人数据）"))
+        el("label", { for: "pref-auto-sync", class: "settings-check" }, autoSyncChk, el("span", null, "登录后自动同步自定义画风"))
+      )
+    ),
+    el("fieldset", { class: "settings-fieldset settings-privacy-fieldset" },
+      el("legend", null, "隐私、数据与协议"),
+      el("div", { class: "settings-checks" },
+        el("label", { for: "pref-telemetry", class: "settings-check" }, telemetryChk, el("span", null, "发送匿名使用统计与脱敏异常报告（默认关闭 · 仅含版本号、系统、功能频次与脱敏错误/崩溃堆栈，不含提示词、图片、本地路径与密钥）")),
+        el("label", { for: "pref-public-gen", class: "settings-check" }, publicChk, el("span", null, "网站模型生成的图片自动公开到社区（用了自己参考图的除外；第三方自带接口生图始终仅本地保存）"))
+      ),
+      telemetryInspectDetails,
+      el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", alignItems: "center", marginTop: "4px" } },
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => openPrivacyConsentDialog(settings, {
+            initialGate: false,
+            onAccepted: () => renderSettings(root, ctx, { tab: "settings-preferences", preserveScroll: true }),
+          }),
+        }, "📜 查看使用须知与隐私偏好"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm",
+          onClick: () => openURL("https://github.com/yang0/handraw-client"),
+        }, "开源代码可审计 ↗"),
+        settings.privacyConsentVersion
+          ? el("span", { class: "muted", style: { fontSize: "12px" } }, `已确认须知版本 ${settings.privacyConsentVersion}`)
+          : null
       )
     ),
     el("div", { class: "row", style: { justifyContent: "space-between" } },

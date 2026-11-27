@@ -67,6 +67,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		PreferredMarketMirror      *string `json:"preferredMarketMirror"`
 		LastRecipeID               *string `json:"lastRecipeId"`
 		Onboarded                  *bool   `json:"onboarded"`
+		AcceptPrivacyConsent       *bool   `json:"acceptPrivacyConsent"`
 	}
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -185,6 +186,10 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 		if body.Onboarded != nil {
 			st.Onboarded = *body.Onboarded
 		}
+		if body.AcceptPrivacyConsent != nil && *body.AcceptPrivacyConsent {
+			st.PrivacyConsentVersion = settings.CurrentPrivacyConsentVersion
+			st.PrivacyConsentAt = time.Now().UTC().Format(time.RFC3339)
+		}
 		return nil
 	})
 	if err != nil {
@@ -193,9 +198,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 	if hotkeyChanged {
 		_ = s.Host.SetHotkey(nextHotkey)
 	}
-	if s.Updater != nil && (body.AutoUpdateMode != nil || body.AutoCheckUpdate != nil) {
+	if s.Updater != nil && (body.AutoUpdateMode != nil || body.AutoCheckUpdate != nil || (body.AcceptPrivacyConsent != nil && *body.AcceptPrivacyConsent)) {
 		s.Updater.SyncMode()
-		if updated.EffectiveAutoUpdateMode() == "auto" {
+		if updated.HasPrivacyConsent() && updated.EffectiveAutoUpdateMode() == "auto" {
 			s.Updater.NudgeAuto()
 		}
 	}
@@ -943,6 +948,46 @@ func (s *Server) telemetryEvent(w http.ResponseWriter, r *http.Request) (any, er
 			})
 		}
 	}
+	return okv, nil
+}
+
+func (s *Server) telemetryInspect(w http.ResponseWriter, r *http.Request) (any, error) {
+	st := settings.Get()
+	snap := telemetry.InspectSnapshot{
+		Enabled:       false,
+		RecentBatches: []telemetry.SentBatch{},
+	}
+	if s.Telemetry != nil {
+		snap = s.Telemetry.Snapshot()
+	} else {
+		var empty *telemetry.Client
+		snap = empty.Snapshot()
+	}
+	anonID := ""
+	if st.HasPrivacyConsent() && !st.TelemetryDisabled {
+		anonID = strings.TrimSpace(st.TelemetryID)
+	}
+	return map[string]any{
+		"ok":                    true,
+		"enabled":               snap.Enabled,
+		"hasConsent":            st.HasPrivacyConsent(),
+		"privacyConsentVersion": st.PrivacyConsentVersion,
+		"privacyConsentAt":      st.PrivacyConsentAt,
+		"currentConsentVersion": settings.CurrentPrivacyConsentVersion,
+		"telemetryDisabled":     st.TelemetryDisabled,
+		"anonymousId":           anonID,
+		"sessionId":             snap.SessionID,
+		"allowedEvents":         snap.AllowedEvents,
+		"blockedKeywords":       snap.BlockedKeywords,
+		"recentBatches":         snap.RecentBatches,
+	}, nil
+}
+
+func (s *Server) appQuit(w http.ResponseWriter, r *http.Request) (any, error) {
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		s.Host.Quit()
+	}()
 	return okv, nil
 }
 

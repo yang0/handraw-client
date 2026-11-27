@@ -50,6 +50,7 @@ type Host interface {
 	ShowMain()
 	HideQuick()
 	Restart()
+	Quit()
 	SetHotkey(spec string) error
 	SetAutoStart(enabled bool) error
 }
@@ -63,6 +64,7 @@ func (nopHost) CopyText(string) error     { return errors.New("no desktop host")
 func (nopHost) ShowMain()                 {}
 func (nopHost) HideQuick()                {}
 func (nopHost) Restart()                  {}
+func (nopHost) Quit()                     {}
 func (nopHost) SetHotkey(string) error    { return nil }
 func (nopHost) SetAutoStart(bool) error   { return nil }
 

@@ -15,6 +15,7 @@ import { renderPlugins } from "./views/plugins.js";
 import { renderSettings } from "./views/settings.js";
 import { openLayoutEditorModal, openStyleEditorModal } from "./views/resource-editor.js";
 import { openExtensionSubmitModal } from "./views/plugins-channels.js";
+import { openPrivacyConsentDialog } from "./consent.js";
 
 const VIEWS = {
   home: renderHome,
@@ -748,6 +749,16 @@ async function start() {
     await go("settings", { anchor: rawInitial });
   } else {
     await go(rawInitial);
+  }
+
+  if (!settRes.settings?.privacyConsentVersion) {
+    await openPrivacyConsentDialog(settRes.settings || {}, {
+      initialGate: true,
+      onAccepted: () => {
+        refreshTopbar();
+        if (currentView === "settings") go("settings", currentParams);
+      },
+    });
   }
 }
 

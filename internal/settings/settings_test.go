@@ -67,9 +67,10 @@ func TestAutoUpdateModeMigration(t *testing.T) {
 	Reset()
 	t.Cleanup(Reset)
 
-	// Fresh defaults -> "auto" and LaunchAtLogin=true.
-	if st0 := Get(); st0.EffectiveAutoUpdateMode() != "auto" || !st0.LaunchAtLogin {
-		t.Fatalf("expected default autoUpdateMode=auto and launchAtLogin=true, got mode=%q launch=%v", st0.EffectiveAutoUpdateMode(), st0.LaunchAtLogin)
+	// Fresh defaults -> "auto", LaunchAtLogin=false, TelemetryDisabled=true, no consent yet (#191).
+	if st0 := Get(); st0.EffectiveAutoUpdateMode() != "auto" || st0.LaunchAtLogin || !st0.TelemetryDisabled || st0.HasPrivacyConsent() {
+		t.Fatalf("expected privacy-first defaults (auto update, launch=false, telemetryDisabled=true, consent=false), got mode=%q launch=%v telDis=%v consent=%v",
+			st0.EffectiveAutoUpdateMode(), st0.LaunchAtLogin, st0.TelemetryDisabled, st0.HasPrivacyConsent())
 	}
 
 	// Legacy settings.json with only autoCheckUpdate=false -> migrates to "off".

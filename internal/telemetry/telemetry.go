@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -27,10 +28,11 @@ import (
 )
 
 const (
-	maxQueueSize  = 64
-	maxBatchSize  = 20
-	flushInterval = 30 * time.Second
-	heartbeatGap  = 6 * time.Hour
+	maxQueueSize     = 64
+	maxBatchSize     = 20
+	maxRecentBatches = 5
+	flushInterval    = 30 * time.Second
+	heartbeatGap     = 6 * time.Hour
 )
 
 var allowedEvents = map[string]bool{
@@ -87,6 +89,24 @@ type batchPayload struct {
 	Events      []eventPayload `json:"events"`
 }
 
+// SentBatch is a sanitized record of a telemetry batch actually transmitted in
+// this session, surfaced in Settings so users can inspect what was sent (#191).
+type SentBatch struct {
+	SentAt     string         `json:"sentAt"`
+	EventCount int            `json:"eventCount"`
+	Events     []eventPayload `json:"events"`
+}
+
+// InspectSnapshot describes the current telemetry state, allowlist, sensitive
+// key filters, and recent batches sent in this session (#191).
+type InspectSnapshot struct {
+	Enabled         bool        `json:"enabled"`
+	SessionID       string      `json:"sessionId,omitempty"`
+	AllowedEvents   []string    `json:"allowedEvents"`
+	BlockedKeywords []string    `json:"blockedKeywords"`
+	RecentBatches   []SentBatch `json:"recentBatches"`
+}
+
 // Client buffers and flushes anonymous desktop usage events.
 type Client struct {
 	Version   string
@@ -99,6 +119,7 @@ type Client struct {
 
 	mu       sync.Mutex
 	queue    []eventPayload
+	recent   []SentBatch
 	notify   chan struct{}
 	errMu    sync.Mutex
 	errSeen  map[string]errDedupEntry
@@ -307,5 +328,56 @@ func (c *Client) Flush(ctx context.Context) {
 			return
 		}
 		_ = resp.Body.Close()
+		now := time.Now
+		if c.Now != nil {
+			now = c.Now
+		}
+		c.mu.Lock()
+		c.recent = append(c.recent, SentBatch{
+			SentAt:     now().UTC().Format(time.RFC3339),
+			EventCount: len(batch),
+			Events:     batch,
+		})
+		if len(c.recent) > maxRecentBatches {
+			c.recent = c.recent[len(c.recent)-maxRecentBatches:]
+		}
+		c.mu.Unlock()
+	}
+}
+
+// Snapshot returns an auditable overview of telemetry state, allowlisted event
+// names, sensitive-field filters, and recent batches transmitted this session (#191).
+func (c *Client) Snapshot() InspectSnapshot {
+	evList := make([]string, 0, len(allowedEvents))
+	for k := range allowedEvents {
+		evList = append(evList, k)
+	}
+	sort.Strings(evList)
+	blocked := append([]string(nil), blockedPropSubstrings...)
+	if c == nil {
+		return InspectSnapshot{
+			Enabled:         false,
+			AllowedEvents:   evList,
+			BlockedKeywords: blocked,
+			RecentBatches:   []SentBatch{},
+		}
+	}
+	en := c.isEnabled()
+	c.mu.Lock()
+	rec := append([]SentBatch(nil), c.recent...)
+	c.mu.Unlock()
+	if rec == nil {
+		rec = []SentBatch{}
+	}
+	sid := ""
+	if en {
+		sid = c.SessionID
+	}
+	return InspectSnapshot{
+		Enabled:         en,
+		SessionID:       sid,
+		AllowedEvents:   evList,
+		BlockedKeywords: blocked,
+		RecentBatches:   rec,
 	}
 }

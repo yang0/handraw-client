@@ -263,7 +263,9 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/update/download", s.h(s.updateDownload))
 	m.HandleFunc("POST /api/update/apply", s.h(s.updateApply))
 	m.HandleFunc("POST /api/update/resources", s.h(s.updateResources))
+	m.HandleFunc("GET /api/telemetry/inspect", s.h(s.telemetryInspect))
 	m.HandleFunc("POST /api/telemetry/event", s.h(s.telemetryEvent))
+	m.HandleFunc("POST /api/app/quit", s.h(s.appQuit))
 	m.HandleFunc("POST /api/quick/hide", s.h(func(w http.ResponseWriter, r *http.Request) (any, error) { s.Host.HideQuick(); return okv, nil }))
 	m.HandleFunc("POST /api/window/main", s.h(func(w http.ResponseWriter, r *http.Request) (any, error) { s.Host.ShowMain(); return okv, nil }))
 
