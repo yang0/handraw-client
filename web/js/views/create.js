@@ -2172,6 +2172,7 @@ export async function renderCreate(root, ctx, params = {}) {
       const res = await api("POST", "/api/generate", {
         mode: isSeriesBatch ? "series" : "single",
         title: (targetItems.length === 1 ? (targetItems[0].title || targetItems[0].subject) : (turn.userMessage || (isDirect ? "直出创作" : "系列创作"))).slice(0, 28),
+        originalRequest: turn.userMessage || "",
         modelRef: state.modelRef,
         resolution: state.resolution,
         quality: state.quality,

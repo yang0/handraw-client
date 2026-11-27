@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/yang0/handraw-client/internal/harnesses"
+	"github.com/yang0/handraw-client/internal/jobs"
 	"github.com/yang0/handraw-client/internal/resources"
 	"github.com/yang0/handraw-client/internal/secrets"
 	"github.com/yang0/handraw-client/internal/settings"
@@ -215,5 +216,91 @@ func TestMineAnalyzeLayoutAndHarnessImageArgs(t *testing.T) {
 	_ = json.Unmarshal(rrDistill.Body.Bytes(), &distRes)
 	if distRes.Mode != "prompt" || distRes.Kind != "layout" || !strings.Contains(distRes.Description, "顶部通栏") {
 		t.Fatalf("unexpected distill response: %+v", distRes)
+	}
+}
+
+func TestCustomStyleSiteGenerateSetsPromptFromSkillAndRawUserPrompt(t *testing.T) {
+	mockSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/studio/quote":
+			_, _ = w.Write([]byte(`{"quoteId":"q-custom-1","totalCents":0,"freeCount":1,"balanceCents":0,"affordable":true}`))
+		case r.URL.Path == "/api/studio/models":
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case strings.HasPrefix(r.URL.Path, "/api/v1/community/resources"):
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer mockSite.Close()
+
+	srv, _ := setupTestServer(t, mockSite.URL)
+	_ = secrets.Set(secrets.SiteToken, "hwt_test_token")
+	_, _ = settings.Update(func(s *settings.Settings) error {
+		s.AutoSyncResources = false
+		return nil
+	})
+	h := srv.Handler()
+
+	rrPut := doReq(t, h, srv.Token, http.MethodPost, "/api/mine/styles", map[string]any{
+		"name":        "宋韵摄影风格",
+		"description": "孙郡古风摄影作品，工笔画、宋画美学、东方古典、诗意，大量留白",
+	})
+	if rrPut.Code != 200 {
+		t.Fatalf("put custom style failed: %d %s", rrPut.Code, rrPut.Body.String())
+	}
+	var putOut struct {
+		Style resources.Style `json:"style"`
+	}
+	if err := json.Unmarshal(rrPut.Body.Bytes(), &putOut); err != nil || putOut.Style.Number == "" {
+		t.Fatalf("unexpected put style response: %s", rrPut.Body.String())
+	}
+
+	rrGen := doReq(t, h, srv.Token, http.MethodPost, "/api/generate", map[string]any{
+		"mode":            "single",
+		"title":           "踏青的女孩",
+		"originalRequest": "踏青的女孩",
+		"modelRef":        "site:gpt-image-2",
+		"confirmed":       true,
+		"items": []map[string]any{{
+			"theme":  "春日草地上撑伞漫步的女孩，远山淡雾",
+			"style":  putOut.Style.Number,
+			"layout": "SC-001",
+			"mode":   "graphic-text",
+			"ratio":  "3:4",
+		}},
+	})
+	if rrGen.Code != 200 {
+		t.Fatalf("generate failed: %d %s", rrGen.Code, rrGen.Body.String())
+	}
+	var genOut struct {
+		Run struct {
+			ID              string `json:"id"`
+			OriginalRequest string `json:"originalRequest"`
+		} `json:"run"`
+		Images []struct {
+			Meta json.RawMessage `json:"meta"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(rrGen.Body.Bytes(), &genOut); err != nil || len(genOut.Images) != 1 {
+		t.Fatalf("unexpected generate output: %s", rrGen.Body.String())
+	}
+	if genOut.Run.OriginalRequest != "踏青的女孩" {
+		t.Fatalf("expected run.OriginalRequest=踏青的女孩, got %q", genOut.Run.OriginalRequest)
+	}
+	var spec jobs.Spec
+	if err := json.Unmarshal(genOut.Images[0].Meta, &spec); err != nil {
+		t.Fatalf("unmarshal spec: %v", err)
+	}
+	if spec.SiteBody["promptFromSkill"] != true {
+		t.Fatalf("expected SiteBody.promptFromSkill=true so website does not strip custom style, got %#v", spec.SiteBody["promptFromSkill"])
+	}
+	if gotRaw, _ := spec.SiteBody["rawUserPrompt"].(string); gotRaw != "踏青的女孩" {
+		t.Fatalf("expected SiteBody.rawUserPrompt=踏青的女孩, got %q", gotRaw)
+	}
+	gotPrompt, _ := spec.SiteBody["prompt"].(string)
+	if !strings.Contains(gotPrompt, "宋韵摄影风格") || !strings.Contains(gotPrompt, "孙郡古风摄影作品") {
+		t.Fatalf("expected SiteBody.prompt to include custom style name and traits, got %q", gotPrompt)
 	}
 }

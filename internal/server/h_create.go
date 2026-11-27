@@ -777,6 +777,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	var body struct {
 		Mode                  string           `json:"mode"` // quick | single | series | article | canvas | edit | compare
 		Title                 string           `json:"title"`
+		OriginalRequest       string           `json:"originalRequest"`
 		ModelRef              string           `json:"modelRef"` // site:<id> | <providerId>:<modelId>
 		Resolution            string           `json:"resolution"`
 		Quality               string           `json:"quality"`
@@ -849,6 +850,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	_, rawModel, _ := strings.Cut(body.ModelRef, ":")
 	var built []prompt.Result
 	var itemPrompts []string
+	var itemBuiltLocally []bool
 	var itemRatios []string
 	var itemThemes []string
 	var itemRefsList [][]string
@@ -871,6 +873,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			pr := prompt.Result{Primary: rawPrompt, Zh: rawPrompt}
 			built = append(built, pr)
 			itemPrompts = append(itemPrompts, rawPrompt)
+			itemBuiltLocally = append(itemBuiltLocally, false)
 			itemRatios = append(itemRatios, firstStr(it.Ratio, body.Input.Ratio, "3:4"))
 			itemThemes = append(itemThemes, firstStr(strings.TrimSpace(it.Theme), rawPrompt))
 			continue
@@ -928,6 +931,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			}
 		}
 		var pr prompt.Result
+		builtLocally := false
 		if it.Prompt != "" {
 			pr.Primary, pr.Zh = it.Prompt, it.Prompt
 		} else if body.PromptCustomized && strings.TrimSpace(body.CustomPrompt) != "" {
@@ -938,6 +942,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 				return nil, bad(err.Error())
 			}
 			pr = res
+			builtLocally = true
 		} else {
 			pr.Primary, pr.Zh = it.Theme, it.Theme
 		}
@@ -984,6 +989,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		}
 		built = append(built, pr)
 		itemPrompts = append(itemPrompts, finalPrompt)
+		itemBuiltLocally = append(itemBuiltLocally, builtLocally)
 		itemRatios = append(itemRatios, firstStr(it.Ratio, "3:4"))
 		itemThemes = append(itemThemes, firstStr(it.Theme, body.Input.Theme))
 	}
@@ -1135,7 +1141,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		ID:              runID,
 		Mode:            body.Mode,
 		Title:           resolveRunTitle(body.Title, body.Items, itemThemes, defaultRunTitle),
-		OriginalRequest: firstStr(itemThemes[0], body.Input.Theme),
+		OriginalRequest: firstStr(strings.TrimSpace(body.OriginalRequest), itemThemes[0], body.Input.Theme),
 		PromptZh:        firstStr(firstRes.Zh, itemPrompts[0]),
 		PromptEn:        firstRes.En,
 		Recipe:          persistedRecipe,
@@ -1192,6 +1198,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 					siteCreationSource = "single"
 				}
 			}
+			rawUserPrompt := firstStr(strings.TrimSpace(body.OriginalRequest), strings.TrimSpace(it.Theme), strings.TrimSpace(body.Input.Theme))
 			var sb map[string]any
 			if body.DirectPrompt {
 				sb = map[string]any{
@@ -1200,6 +1207,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 					"quality":         spec.Quality,
 					"ratio":           spec.Ratio,
 					"prompt":          itemPrompts[i],
+					"rawUserPrompt":   firstStr(rawUserPrompt, itemPrompts[i]),
 					"style1":          "",
 					"style2":          "",
 					"layout":          "",
@@ -1220,6 +1228,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 					"quality":        spec.Quality,
 					"ratio":          spec.Ratio,
 					"prompt":         itemPrompts[i],
+					"rawUserPrompt":  rawUserPrompt,
 					"style1":         it.Style,
 					"style2":         it.Style2,
 					"layout":         it.Layout,
@@ -1232,7 +1241,12 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 					"creationSource": siteCreationSource,
 					"autoPublish":    false,
 				}
-				if body.Mode == "edit" || body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" || itemRefDirectives[i] != "" {
+				// Mark promptFromSkill whenever the client has already composed the
+				// Skill prompt locally (including local custom styles/layouts MY-S-*/MY-L-*),
+				// so the website does not overwrite it with a second server-side compose
+				// that drops unknown local custom style codes (#200, handraw-web#587).
+				// Any protected community resources remain injected server-side via injected_notes.
+				if body.Mode == "edit" || body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" || itemRefDirectives[i] != "" || itemBuiltLocally[i] {
 					sb["promptFromSkill"] = true
 				}
 			}
