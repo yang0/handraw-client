@@ -2311,11 +2311,17 @@ async function renderEarningsTab(stage, ctx, goVault) {
     const data = await api("GET", "/api/site/creator-earnings");
     clear(stage);
 
+    const publishedWorks = Number(data.publishedWorks ?? 0) || 0;
+    const publishedInsps = Number(data.publishedInspirations ?? data.inspirationCount ?? 0) || 0;
+    const publishedTotal = Number(data.publishedCount ?? (publishedWorks + publishedInsps)) || 0;
+    const pendingPoints = Number(data.pendingPoints ?? data.pendingRoyaltyPoints ?? 0) || 0;
+    const totalEarned = Number(data.totalEarned ?? data.totalEarnedPoints ?? data.totalPointsEarned ?? 0) || 0;
+
     const stats = [
-      ["已分享灵感 / 作品", String(data.publishedCount ?? data.inspirationCount ?? 0), "公开或积分解锁"],
-      ["被做同款总次数", String(data.totalForks ?? 0), "每次有效同款 +2 积分"],
-      ["被积分解锁次数", String(data.totalUnlocks ?? 0), "作者享 80% 积分分成"],
-      ["累计赚取积分", String(data.totalEarned ?? data.totalPointsEarned ?? 0), data.pendingPoints > 0 ? `含待结算 +${data.pendingPoints}` : "可用于解锁收费画风与提示词"],
+      ["已分享灵感 / 作品", String(publishedTotal), publishedInsps || publishedWorks ? `灵感 ${publishedInsps} · 作品 ${publishedWorks}` : "公开或积分解锁"],
+      ["被做同款总次数", String(Number(data.totalForks ?? 0) || 0), "每次有效同款 +2 积分"],
+      ["被积分解锁次数", String(Number(data.totalUnlocks ?? 0) || 0), "作者享 80% 积分分成"],
+      ["累计赚取积分", String(totalEarned), pendingPoints > 0 ? `含待结算 +${pendingPoints}` : "可用于解锁收费画风与提示词"],
     ];
 
     stage.appendChild(el("div", { class: "insp-stats-grid" },
