@@ -2,6 +2,17 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.9 (2026-11-26)
+
+### Features & UX
+- **Topbar Recommend/Submit Plugin Entry & Polished Two-Step Modal (#189)**:
+  - Added a warm-paper `🧩 推荐插件` pill button right next to `＋ 新建` in the global topbar (and a `🧩 推荐或提交插件` action in the `⌘K` command palette) so both plugin authors and community members who discover great plugins can submit effortlessly from anywhere.
+  - Upgraded the shared submission modal into a low-friction two-step warm-paper workflow with role radio cards (`发现好物，顺手推荐` vs `我自己开发的`), 4-channel category cards (工作台插件 / 图库插件 / AI Skills / 写作插件), one-click clipboard paste, AI repo auto-inspection, step progress indicator, optional recommendation notes (`[好物推荐]` / `[作者自荐]`), automatic repo-author attribution, and an improved `我的记录` status view.
+
+### Fixes
+- **Creator Earnings Field Alignment in Inspiration Vault (#188)**:
+  - Aligned creator-earnings field mapping in `web/js/views/inspirations.js` with the `handraw-web` API response shape.
+
 ## v0.6.8 (2026-11-26)
 
 ### Diagnostics & Reliability
