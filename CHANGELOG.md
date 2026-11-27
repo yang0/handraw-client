@@ -2,6 +2,21 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.13 (2026-11-27)
+
+### Fixes
+- **Consistent Update Status Across Topbar & Settings (#196)**:
+  - Cleared `Ready`, `AutoApplyOnQuit`, and `StagedVersion` at the start of `Updater.Download()` so `downloading` and `ready` are strictly mutually exclusive when downloading a newer release while a previous update was already staged.
+  - Subscribed the Settings update card (`web/js/views/settings.js`) to live `update` SSE events, made download/apply buttons mutually exclusive, and rendered ready banners/buttons with `stagedVersion || latest` consistently across both topbar and Settings.
+
+### UX & Onboarding
+- **Streamlined First-Run Consent Modal (#197)**:
+  - Redesigned the first-run consent dialog (`web/js/consent.js`, `web/css/app.css`) with a compact 3-column promise strip, unified option list card, and single-row footer so it fits cleanly on desktop without scrollbars.
+  - Pre-checked preferences by default in the first-run modal while keeping the Go backend's pre-consent hard gate intact until the user clicks **「同意并开始使用」**.
+- **Built-in Auto-Update & Clearer Preference Copy (#198)**:
+  - Made automatic check and silent background update a fixed built-in capability after consent (`cmd/handraw/main.go`), removing the auto-update toggle/selector from the first-run modal and Settings UI.
+  - Refined telemetry and launch-at-login copy in both the consent modal and Settings to clarify product improvement without personal privacy data and explain that clipping prompts from X requires the client running in the background tray.
+
 ## v0.6.12 (2026-11-26)
 
 ### Fixes
