@@ -2,6 +2,14 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.11 (2026-11-26)
+
+### Privacy & Trust
+- **First-Run Privacy & Usage Consent Modal, Strict Opt-in Defaults & Telemetry Inspector (#191)**:
+  - Changed default preferences to strict opt-in (`telemetryDisabled: true`, `launchAtLogin: false`) and enforced a pre-consent hard gate on startup: zero telemetry/crash requests, zero system autostart registry/LaunchAgents writes, and zero background auto-update downloads until the user explicitly accepts.
+  - Added a first-run native `<dialog>` privacy & usage notice modal explaining local-first storage, open-source auditability, and generation visibility controls, with explicit per-option checkboxes, **「暂不同意并退出」** (`POST /api/app/quit`), and **「同意并开始使用」**.
+  - Split **「隐私、数据与协议」** into a dedicated Settings section with a live **telemetry transparency inspector** (`GET /api/telemetry/inspect`) displaying the allowed event whitelist, redacted sensitive keywords, consent version/timestamp, and the actual recent JSON batches sent during the session, plus a button to reopen the consent dialog anytime.
+
 ## v0.6.10 (2026-11-26)
 
 ### Fixes & UX
