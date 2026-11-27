@@ -1285,7 +1285,7 @@ export async function renderSettings(root, ctx, params = {}) {
     el("fieldset", { class: "settings-fieldset" },
       el("legend", null, "窗口与同步"),
       el("div", { class: "settings-checks" },
-        el("label", { for: "pref-launch-at-login", class: "settings-check" }, launchAtLoginChk, el("span", null, "开机自动启动（开启托盘时自动静默驻留后台）")),
+        el("label", { for: "pref-launch-at-login", class: "settings-check" }, launchAtLoginChk, el("span", null, "开机自动启动（后台托盘待命、随时唤出，也方便从 X 等平台随时一键收集提示词）")),
         el("label", { for: "pref-tray", class: "settings-check" }, trayChk, el("span", null, "关闭主窗口时最小化到系统托盘")),
         el("label", { for: "pref-auto-sync", class: "settings-check" }, autoSyncChk, el("span", null, "登录后自动同步自定义画风"))
       )
@@ -1293,7 +1293,7 @@ export async function renderSettings(root, ctx, params = {}) {
     el("fieldset", { class: "settings-fieldset settings-privacy-fieldset" },
       el("legend", null, "隐私、数据与协议"),
       el("div", { class: "settings-checks" },
-        el("label", { for: "pref-telemetry", class: "settings-check" }, telemetryChk, el("span", null, "发送匿名使用统计与脱敏异常报告（帮助我们更好地改善产品体验与修复问题；仅含版本号、系统、功能频次与脱敏错误/崩溃堆栈，不含提示词、图片、本地路径与密钥）")),
+        el("label", { for: "pref-telemetry", class: "settings-check" }, telemetryChk, el("span", null, "发送匿名使用统计与脱敏异常报告（帮助我们更好地改善产品体验与修复问题，不含你的个人隐私数据）")),
         el("label", { for: "pref-public-gen", class: "settings-check" }, publicChk, el("span", null, "网站模型生成的图片自动公开到社区（用了自己参考图的除外；第三方自带接口生图始终仅本地保存）"))
       ),
       telemetryInspectDetails,

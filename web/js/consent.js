@@ -151,14 +151,14 @@ export function openPrivacyConsentDialog(settingsObj = {}, { initialGate = false
             telChk,
             el("span", { class: "consent-opt-copy" },
               el("strong", null, "匿名使用统计与脱敏崩溃报告"),
-              el("small", null, "帮助我们更好地改善产品体验与修复问题；仅含版本与脱敏报错，不含提示词、图片与密钥")
+              el("small", null, "帮助我们更好地改善产品体验与修复问题，不含你的个人隐私数据")
             )
           ),
           el("label", { for: "consent-launch", class: "consent-opt" },
             launchChk,
             el("span", { class: "consent-opt-copy" },
               el("strong", null, "开机静默启动"),
-              el("small", null, "后台托盘待命，随时唤出快门窗")
+              el("small", null, "后台托盘待命、随时唤出；从 X 等平台一键收集提示词时，也需客户端处于运行状态")
             )
           )
         )
