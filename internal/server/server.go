@@ -337,6 +337,7 @@ type apiError struct {
 	Status int
 	Msg    string
 	Code   string
+	Extra  map[string]any
 }
 
 func (e *apiError) Error() string { return e.Msg }
@@ -383,6 +384,11 @@ func (s *Server) h(fn handler) http.HandlerFunc {
 				status = 404
 			}
 			payload := map[string]any{"error": err.Error(), "code": code}
+			if ae != nil {
+				for k, v := range ae.Extra {
+					payload[k] = v
+				}
+			}
 			if se != nil && len(se.Raw) > 0 {
 				var rawObj map[string]any
 				if json.Unmarshal(se.Raw, &rawObj) == nil {

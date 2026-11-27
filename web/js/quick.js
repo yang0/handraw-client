@@ -47,7 +47,7 @@ async function startQuick() {
   async function refreshQuote() {
     if (!priceSpan || !modelSelEl) return;
     try {
-      const q = await api("POST", "/api/quote", { modelRef: modelSelEl.value, resolution: "2k", count: 1 });
+      const q = await api("POST", "/api/quote", { modelRef: modelSelEl.value, resolution: "1k", count: 1 });
       priceSpan.textContent = q.source === "provider" ? "自带接口直出" : (q.freeCount > 0 && q.totalCents === 0 ? "免额" : `¥${((q.totalCents || 0) / 100).toFixed(2)}`);
     } catch {
       priceSpan.textContent = "";
@@ -88,7 +88,7 @@ async function startQuick() {
         mode: "quick",
         title: theme.slice(0, 28),
         modelRef: modelSelEl?.value || "",
-        resolution: "2k",
+        resolution: "1k",
         count: 1,
         confirmed,
         input: {

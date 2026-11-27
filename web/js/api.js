@@ -69,6 +69,7 @@ export async function api(method, path, body) {
     const err = new Error((data && data.error) || `请求失败（${resp.status}）`);
     err.status = resp.status;
     err.code = data && data.code;
+    err.data = data;
     err.conflictTarget = data && data.conflictTarget;
     if (resp.status >= 500 && !String(path || "").startsWith("/api/telemetry")) {
       reportClientError({

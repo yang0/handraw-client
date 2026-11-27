@@ -1,4 +1,5 @@
 import { api, clear, closeModal, el, galleryImg, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
+import { maybeHandleInsufficientCashError } from "../economy.js";
 import { openRecipeEditor, openRecipeManagerModal } from "./recipes.js";
 import { mountSlotPanels } from "../plugins-host.js";
 import { createTextModelPicker } from "../skills-ui.js";
@@ -271,7 +272,7 @@ export async function renderCreate(root, ctx, params = {}) {
     audience: "",
     businessScene: "",
     extra: "",
-    resolution: settings.defaultResolution || "2k",
+    resolution: settings.defaultResolution || "1k",
     quality: "standard",
     redraw: false,
     modelRef: modRes.defaultModel || "site:seedream-4.5",
@@ -2231,7 +2232,19 @@ export async function renderCreate(root, ctx, params = {}) {
       renderAll();
       toast(targetItems.length > 1 ? `已提交 ${targetItems.length} 张生成任务` : "已提交生成队列，完成后自动显影");
     } catch (e) {
-      toast(e.message || "提交生成失败");
+      if (!maybeHandleInsufficientCashError(e, {
+        resolution: state.resolution,
+        onSwitchTo1k: () => {
+          state.resolution = "1k";
+          resChoices.sync("1k");
+          refreshQuote();
+          renderSelectedSlot();
+          session.persist();
+          generateTurnItems(turn, targetItems, false);
+        },
+      })) {
+        toast(e.message || "提交生成失败");
+      }
     } finally {
       isSubmitting = false;
       syncComposerState();

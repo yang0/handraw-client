@@ -1,4 +1,5 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, showModal, toast } from "../api.js";
+import { maybeHandleInsufficientCashError } from "../economy.js";
 import { buildGroupedModelSelect } from "./create.js";
 import { createTextModelPicker } from "../skills-ui.js";
 import { choices, extraInstructions, field, ratioToCss, recipeControls, resourceId, resourcePicker, studioMount, studioSession } from "./studio-controls.js";
@@ -20,7 +21,7 @@ export async function renderSeries(host, ctx, params = {}) {
   const session = studioSession(host, "series", {
     docId: "", title: "", topic: "", count: 3, style: styles[0]?.number || "FA-013", style2: "",
     layout: "", layoutMode: "ai", layoutRequirement: "", color: "", tone: "", mood: "",
-    ratio: "3:4", mode: "graphic-text", resolution: "2k", modelRef: modRes.defaultModel || "",
+    ratio: "3:4", mode: "graphic-text", resolution: "1k", modelRef: modRes.defaultModel || "",
     textModelRef: modRes.sceneModels?.studioPlan || modRes.defaultTextModel || "",
     cards: [], selected: 0, composerMode: "series", activeRun: null,
   });
@@ -547,7 +548,20 @@ export async function renderSeries(host, ctx, params = {}) {
       renderStage(false);
       session.persist();
       toast("已加入生成队列，完成后自动在右侧显影");
-    } catch (e) { toast(e.message); } finally { submitting = false; sampleBtn.disabled = false; batchBtn.disabled = false; }
+    } catch (e) {
+      if (!maybeHandleInsufficientCashError(e, {
+        resolution: state.resolution,
+        onSwitchTo1k: () => {
+          state.resolution = "1k";
+          resChoices.sync("1k");
+          refreshQuote();
+          session.persist();
+          generateBatch(sampleOnly, false);
+        },
+      })) {
+        toast(e.message);
+      }
+    } finally { submitting = false; sampleBtn.disabled = false; batchBtn.disabled = false; }
   }
 
   async function exportBatch(format) {

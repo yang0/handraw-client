@@ -1014,12 +1014,33 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			return nil, err
 		}
 		var q struct {
-			QuoteID    string `json:"quoteId"`
-			TotalCents int    `json:"totalCents"`
-			FreeCount  int    `json:"freeCount"`
+			QuoteID             string `json:"quoteId"`
+			TotalCents          int    `json:"totalCents"`
+			FreeCount           int    `json:"freeCount"`
+			BalanceCents        int    `json:"balanceCents"`
+			Affordable          *bool  `json:"affordable"`
+			FreeDailyCapReached bool   `json:"freeDailyCapReached"`
 		}
 		_ = json.Unmarshal(rawQ, &q)
 		quoteID, estCents, freeCnt = q.QuoteID, q.TotalCents, q.FreeCount
+		if estCents > 0 && q.Affordable != nil && !*q.Affordable {
+			free1k, hasBonus, known := jobs.ProbeSiteEconomy1k(r.Context(), s.Site)
+			msg := jobs.FormatInsufficientCashError(effResolution, estCents, q.BalanceCents, free1k, known, hasBonus, q.FreeDailyCapReached)
+			return nil, &apiError{
+				Status: 402,
+				Code:   "insufficient_cash",
+				Msg:    msg,
+				Extra: map[string]any{
+					"resolution":      effResolution,
+					"free1kRemaining": free1k,
+					"free1kKnown":     known,
+					"totalCents":      estCents,
+					"balanceCents":    q.BalanceCents,
+					"hasAiBonus":      hasBonus,
+					"siteBase":        s.Site.Base(),
+				},
+			}
+		}
 		limit := settings.Get().CostLimitCents
 		if !body.Confirmed && limit > 0 && estCents > limit {
 			return map[string]any{
@@ -1763,7 +1784,7 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
   "title": "简短画布主题名（6-18字，不要写未命名画布）",
   "nodes": [
     {"id":"params","type":"parameters","mode":"cartesian","x":36,"y":36,"fieldOrder":["prompt","style1","layout","ratio","mode"],"fields":{"prompt":["封面：主题亮点","1. 核心要点一","2. 核心要点二"],"style1":["FA-001"],"layout":["SC-008"],"ratio":["3:4"],"mode":["graphic-text"]}},
-    {"id":"output","type":"output","mode":"cartesian","repeat":1,"resolution":"2k","x":500,"y":36},
+    {"id":"output","type":"output","mode":"cartesian","repeat":1,"resolution":"1k","x":500,"y":36},
     {"id":"copy1","type":"copy","title":"小红书文案","platform":"xiaohongshu","tone":"干货种草","requirement":"","x":500,"y":380},
     {"id":"post1","type":"post","title":"小红书笔记","platform":"xiaohongshu","x":920,"y":200}
   ],
@@ -1883,7 +1904,7 @@ func (s *Server) canvasAssistant(w http.ResponseWriter, r *http.Request) (any, e
 						"mode":   []string{"graphic-text"},
 					},
 				},
-				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 500, "y": 36},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "1k", "x": 500, "y": 36},
 				map[string]any{"id": "copy1", "type": "copy", "title": "小红书文案", "platform": "xiaohongshu", "tone": "干货种草", "x": 500, "y": 330},
 				map[string]any{"id": "post1", "type": "post", "title": "小红书笔记", "platform": "xiaohongshu", "x": 920, "y": 180},
 			},

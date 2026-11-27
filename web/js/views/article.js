@@ -1,4 +1,5 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
+import { maybeHandleInsufficientCashError } from "../economy.js";
 import { createTextModelPicker, openSharedSkillPickerModal } from "../skills-ui.js";
 import { computeParagraphDiff, mergeAcceptedHunks, renderCopilotMarkdown, renderInlineWordDiff } from "./article-diff.js";
 import { createArticleBoardController } from "./article-board.js";
@@ -76,7 +77,7 @@ export async function renderArticle(root, ctx, params = {}) {
     coverRatio: "2.35:1",
     inlineRatio: "4:3",
     includeCover: true,
-    resolution: "2k",
+    resolution: "1k",
     modelRef: modRes.defaultModel || "site:seedream-4.5",
     textModelRef: modRes.sceneModels?.articleEdit || modRes.defaultTextModel || "",
     aiSkillIds: [],
@@ -4752,7 +4753,17 @@ export async function renderArticle(root, ctx, params = {}) {
         : `已提交 ${slots.length} 张配图，完成后自动插入正文。`;
       session.persist();
     } catch (e) {
-      toast(e.message);
+      if (!maybeHandleInsufficientCashError(e, {
+        resolution: state.resolution,
+        onSwitchTo1k: () => {
+          state.resolution = "1k";
+          syncBottomBar();
+          session.persist();
+          runGenerate(target, false);
+        },
+      })) {
+        toast(e.message);
+      }
     } finally {
       slots.forEach((sl) => submittingSlotIds.delete(sl.id));
       renderBatchSummary();

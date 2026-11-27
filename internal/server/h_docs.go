@@ -43,7 +43,7 @@ func builtinTemplates() []workflowTemplate {
 						"mode":   []string{"graphic-text"},
 					},
 				},
-				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 500, "y": 36},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "1k", "x": 500, "y": 36},
 				map[string]any{"id": "copy1", "type": "copy", "title": "小红书文案", "platform": "xiaohongshu", "tone": "干货种草", "requirement": "结合 6 页分镜写出新手秒懂的避坑正文，结尾加一句互动提问", "x": 500, "y": 360},
 				map[string]any{"id": "post1", "type": "post", "title": "小红书笔记", "platform": "xiaohongshu", "x": 920, "y": 200},
 			},
@@ -80,7 +80,7 @@ func builtinTemplates() []workflowTemplate {
 						"ratio":  []string{"3:4"},
 					},
 				},
-				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 492, "y": 170},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "1k", "x": 492, "y": 170},
 			},
 			Edges: []any{
 				map[string]any{"id": "e1", "from": "ref_char", "to": "output"},
@@ -110,7 +110,7 @@ func builtinTemplates() []workflowTemplate {
 					},
 				},
 				map[string]any{"id": "comb", "type": "combine", "mode": "cartesian", "x": 460, "y": 240},
-				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 800, "y": 240},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "1k", "x": 800, "y": 240},
 			},
 			Edges: []any{
 				map[string]any{"id": "e1", "from": "ref_a", "to": "comb"},
@@ -162,7 +162,7 @@ func builtinTemplates() []workflowTemplate {
 						"mode":   []string{"graphic-text"},
 					},
 				},
-				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "2k", "x": 492, "y": 140},
+				map[string]any{"id": "output", "type": "output", "mode": "cartesian", "repeat": 1, "resolution": "1k", "x": 492, "y": 140},
 			},
 			Edges: []any{
 				map[string]any{"id": "e1", "from": "params", "to": "output"},

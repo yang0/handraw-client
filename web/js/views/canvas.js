@@ -1,4 +1,5 @@
 import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
+import { maybeHandleInsufficientCashError } from "../economy.js";
 import { createTextModelPicker, openSharedSkillPickerModal } from "../skills-ui.js";
 import { buildGroupedModelSelect } from "./create.js";
 import {
@@ -265,7 +266,7 @@ function blankGraph(catalog) {
         type: "output",
         mode: "cartesian",
         repeat: 1,
-        resolution: "2k",
+        resolution: "1k",
         x: 500,
         y: 120,
       },
@@ -295,7 +296,7 @@ function normalizeGraphData(raw, catalog, recipes) {
         return {
           ...n,
           repeat: Math.max(1, Math.min(200, Number(n.repeat ?? 1))),
-          resolution: RESOLUTIONS.includes(n.resolution) ? n.resolution : "2k",
+          resolution: RESOLUTIONS.includes(n.resolution) ? n.resolution : "1k",
         };
       }
       if (n.type === "copy") {
@@ -361,7 +362,7 @@ function normalizeGraphData(raw, catalog, recipes) {
         type: "output",
         mode: "cartesian",
         repeat: 1,
-        resolution: "2k",
+        resolution: "1k",
         x: n.x ?? 440,
         y: n.y ?? 160,
         runId: n.data?.runId || "",
@@ -2188,7 +2189,7 @@ export async function renderCanvas(host, ctx, params = {}) {
       mSel.addEventListener("change", () => { node.modelRef = mSel.value; state.modelRef = mSel.value; recordEdit(true); });
       const repIn = el("input", { class: "input", type: "number", min: "1", max: "200", value: String(node.repeat ?? 1), style: { width: "70px" } });
       repIn.addEventListener("input", () => { node.repeat = Math.max(1, Math.min(200, Number(repIn.value) || 1)); updateStatusAndSummaries(); recordEdit(false); });
-      const curRes = RESOLUTIONS.includes(node.resolution) ? node.resolution : "2k";
+      const curRes = RESOLUTIONS.includes(node.resolution) ? node.resolution : "1k";
       const resPills = el("div", { class: "pc-res-pills", role: "group", "aria-label": "分辨率" },
         ...RESOLUTIONS.map((rv) => el("button", {
           type: "button",
@@ -2687,7 +2688,7 @@ export async function renderCanvas(host, ctx, params = {}) {
     mSel.addEventListener("change", () => { output.modelRef = mSel.value; state.modelRef = mSel.value; recordEdit(false); });
     const repIn = el("input", { class: "input", type: "number", min: "1", max: "200", value: String(output.repeat ?? 1), style: { width: "76px" } });
     repIn.addEventListener("input", () => { output.repeat = Math.max(1, Math.min(200, Number(repIn.value) || 1)); renderGuidedView(); });
-    const curRes = RESOLUTIONS.includes(output.resolution) ? output.resolution : "2k";
+    const curRes = RESOLUTIONS.includes(output.resolution) ? output.resolution : "1k";
     const resPills = el("div", { class: "pc-res-pills" },
       ...RESOLUTIONS.map((rv) => el("button", {
         type: "button",
@@ -2867,7 +2868,7 @@ export async function renderCanvas(host, ctx, params = {}) {
         return;
       }
       const effModel = out?.modelRef || state.modelRef;
-      const effRes = RESOLUTIONS.includes(out?.resolution) ? out.resolution : "2k";
+      const effRes = RESOLUTIONS.includes(out?.resolution) ? out.resolution : "1k";
       if (!state.selectedOrdinals.size || state.selectedOrdinals.size > exp.items.length) {
         state.selectedOrdinals = new Set(exp.items.map((_, i) => i));
       }
@@ -3009,7 +3010,7 @@ export async function renderCanvas(host, ctx, params = {}) {
       const badge = nodesLayer.querySelector(`[data-output-summary="${n.id}"]`);
       if (badge) {
         const exp = expandOutputNode(n);
-        const curRes = RESOLUTIONS.includes(n.resolution) ? n.resolution : "2k";
+        const curRes = RESOLUTIONS.includes(n.resolution) ? n.resolution : "1k";
         badge.className = "badge" + (exp.error ? " badge-warn" : " badge-accent");
         badge.textContent = exp.error || `预计输出 ${exp.count} 张 · ${curRes.toUpperCase()}`;
       }
@@ -3133,7 +3134,7 @@ export async function renderCanvas(host, ctx, params = {}) {
         y: customPos ? customPos.y : (outs.length ? Math.round(Math.min(...outs.map((n) => n.y || 0)) + 120) : y),
       };
     } else {
-      node = { id, type: "output", mode: "cartesian", repeat: 1, resolution: "2k", x, y };
+      node = { id, type: "output", mode: "cartesian", repeat: 1, resolution: "1k", x, y };
     }
     state.graph.nodes.push(node);
     if (type === "post" && !customPos) wirePostNode(node);
@@ -3333,7 +3334,7 @@ export async function renderCanvas(host, ctx, params = {}) {
     if (!items.length) return;
     const targetOut = outNode || primaryOutputNode();
     const effModel = targetOut?.modelRef || state.modelRef;
-    const effRes = RESOLUTIONS.includes(targetOut?.resolution) ? targetOut.resolution : "2k";
+    const effRes = RESOLUTIONS.includes(targetOut?.resolution) ? targetOut.resolution : "1k";
     try {
       const copyNodes = state.graph.nodes.filter((n) => n.type === "copy");
       const runTitle = deriveCanvasRunTitle(state.name, items, copyNodes, state.assistantPrompt);
@@ -3367,7 +3368,18 @@ export async function renderCanvas(host, ctx, params = {}) {
       }
       renderWorkspace();
       toast(`已提交 ${items.length} 张组合生图（${effRes.toUpperCase()}）`);
-    } catch (e) { toast(e.message); }
+    } catch (e) {
+      if (!maybeHandleInsufficientCashError(e, {
+        resolution: effRes,
+        onSwitchTo1k: () => {
+          if (targetOut) targetOut.resolution = "1k";
+          renderWorkspace();
+          runItems(items, false, targetOut);
+        },
+      })) {
+        toast(e.message);
+      }
+    }
   }
 
   function openTemplatesModal() {

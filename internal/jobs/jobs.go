@@ -797,9 +797,95 @@ func isTransientSiteError(err error) bool {
 		strings.Contains(msg, "timeout")
 }
 
-func friendlySiteError(err error) error {
+func isInsufficientCashError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ae *site.APIError
+	if errors.As(err, &ae) && strings.EqualFold(strings.TrimSpace(ae.Code), "insufficient_cash") {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "通用人民币余额不足") || strings.Contains(strings.ToLower(msg), "insufficient_cash")
+}
+
+// ProbeSiteEconomy1k queries /api/economy with a short timeout to read the
+// signed-in user's usable 1K free quota and whether they hold AI bonus credit (#190).
+func ProbeSiteEconomy1k(ctx context.Context, sc *site.Client) (free1k int, hasBonus bool, known bool) {
+	if sc == nil || !sc.LoggedIn() {
+		return 0, false, false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	raw, err := sc.Economy(probeCtx)
+	if err != nil || len(raw) == 0 {
+		return 0, false, false
+	}
+	var eco struct {
+		FreeQuota []struct {
+			Resolution      string `json:"resolution"`
+			Remaining       int    `json:"remaining"`
+			UsableRemaining *int   `json:"usableRemaining"`
+		} `json:"freeQuota"`
+		AIBonus *struct {
+			BalanceMicros   int64 `json:"balanceMicros"`
+			AvailableMicros int64 `json:"availableMicros"`
+		} `json:"aiBonus"`
+	}
+	if json.Unmarshal(raw, &eco) != nil {
+		return 0, false, false
+	}
+	if eco.AIBonus != nil && (eco.AIBonus.AvailableMicros > 0 || eco.AIBonus.BalanceMicros > 0) {
+		hasBonus = true
+	}
+	for _, q := range eco.FreeQuota {
+		if strings.EqualFold(strings.TrimSpace(q.Resolution), "1k") {
+			known = true
+			if q.UsableRemaining != nil {
+				free1k = *q.UsableRemaining
+			} else {
+				free1k = q.Remaining
+			}
+			break
+		}
+	}
+	return free1k, hasBonus, known
+}
+
+// FormatInsufficientCashError builds an actionable Chinese message explaining
+// why generation failed when cash balance is insufficient — especially when
+// the user selected 2K/4K while 1K free quota is still available (#190).
+func FormatInsufficientCashError(resolution string, totalCents, balanceCents int, free1k int, free1kKnown, hasBonus, dailyCapReached bool) string {
+	res := strings.ToLower(strings.TrimSpace(resolution))
+	resUpper := strings.ToUpper(res)
+	amountNote := ""
+	if totalCents > 0 {
+		amountNote = fmt.Sprintf("（本次需 ¥%.2f，当前可用现金 ¥%.2f）", float64(totalCents)/100, float64(balanceCents)/100)
+	}
+	bonusNote := ""
+	if hasBonus {
+		bonusNote = "，账户内赠金仅用于文字/视觉 AI，不可抵扣生图"
+	}
+	if res != "" && res != "1k" {
+		if free1kKnown && free1k > 0 {
+			return fmt.Sprintf("生图现金余额不足%s：因为你选择了 %s 清晰度（付费档位%s）。你当前还有 %d 张 1K 免费生图额度，切回 1K 清晰度即可免费使用，或先充值后再出 %s。", amountNote, resUpper, bonusNote, free1k, resUpper)
+		}
+		return fmt.Sprintf("生图现金余额不足%s：因为你选择了 %s 清晰度（付费档位%s）。如果账号还有 1K 免费生图额度，切回 1K 清晰度仍可免费使用，或先充值后再出 %s。", amountNote, resUpper, bonusNote, resUpper)
+	}
+	if dailyCapReached {
+		return fmt.Sprintf("今日 1K 免费生图额度已达 24 小时上限，继续生图需消耗现金余额%s%s；请等待次日免费额度恢复，或先充值。", amountNote, bonusNote)
+	}
+	return fmt.Sprintf("生图现金余额不足%s%s，请先充值后再试。", amountNote, bonusNote)
+}
+
+func friendlySiteError(ctx context.Context, sc *site.Client, spec Spec, err error) error {
 	if err == nil {
 		return nil
+	}
+	if isInsufficientCashError(err) {
+		res := firstNonEmptyStr(spec.Resolution, strFromMap(spec.SiteBody, "resolution"), "1k")
+		free1k, hasBonus, known := ProbeSiteEconomy1k(ctx, sc)
+		return errors.New(FormatInsufficientCashError(res, 0, 0, free1k, known, hasBonus, false))
 	}
 	msg := err.Error()
 	low := strings.ToLower(msg)
@@ -915,7 +1001,7 @@ func (m *Manager) runSite(ctx context.Context, im store.Image, spec Spec) ([]byt
 			}
 		}
 		if err != nil {
-			return nil, 0, friendlySiteError(err)
+			return nil, 0, friendlySiteError(ctx, m.Site, spec, err)
 		}
 	}
 	if res.TaskID != "" {

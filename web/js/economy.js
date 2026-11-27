@@ -1,3 +1,5 @@
+import { closeModal, el, openURL, showModal } from "./api.js";
+
 /**
  * Formats micro-yuan (1 CNY = 1,000,000 micros) consistently with handraw-web.
  */
@@ -137,4 +139,63 @@ export function economySyncHint(eco) {
     return "暂未获取到余额与积分数据，请点击「刷新额度」重试。";
   }
   return "";
+}
+
+/**
+ * Shows a clear, actionable dialog when site generation fails with insufficient
+ * cash balance — highlighting when 2K/4K was chosen and offering a one-click
+ * switch back to 1K free quota (#190).
+ */
+export function maybeHandleInsufficientCashError(err, { resolution = "", onSwitchTo1k = null } = {}) {
+  const code = String(err?.code || "").toLowerCase();
+  const msg = String(err?.message || "");
+  if (code !== "insufficient_cash" && !msg.includes("生图现金余额不足") && !msg.includes("通用人民币余额不足")) {
+    return false;
+  }
+  const data = err?.data && typeof err.data === "object" ? err.data : {};
+  const effRes = String(data.resolution || resolution || "").toLowerCase();
+  const resUpper = effRes ? effRes.toUpperCase() : "";
+  const free1k = Number(data.free1kRemaining || 0);
+  const free1kKnown = Boolean(data.free1kKnown);
+  const canSwitch1k = Boolean(typeof onSwitchTo1k === "function" && effRes && effRes !== "1k");
+  const siteBase = String(data.siteBase || "https://handraw-style.com").replace(/\/+$/, "");
+
+  const title = effRes && effRes !== "1k"
+    ? `现金余额不足（当前选择了 ${resUpper}）`
+    : "生图现金余额不足";
+
+  const body = el("div", { class: "col", style: { gap: "10px" } },
+    el("p", { style: { margin: 0, lineHeight: "1.6" } }, msg || "生图现金余额不足，请先充值后再试。"),
+    canSwitch1k
+      ? el("div", { class: "card", style: { padding: "10px 12px", background: "var(--paper)", fontSize: "12.5px", lineHeight: "1.55" } },
+          free1kKnown && free1k > 0
+            ? `💡 你的账号还有 ${free1k} 张 1K 免费生图额度，点击下方「切回 1K 免费生成」即可立即免费出图。`
+            : "💡 1K 清晰度支持使用 1K 免费生图额度，点击下方「切回 1K 生成」即可改用 1K 清晰度。"
+        )
+      : null
+  );
+
+  const actions = [
+    el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+    el("button", {
+      type: "button",
+      class: canSwitch1k ? "btn" : "btn btn-primary",
+      onClick: () => {
+        closeModal();
+        openURL(`${siteBase}/?view=wallet`);
+      },
+    }, "前往充值 ↗"),
+  ];
+  if (canSwitch1k) {
+    actions.push(el("button", {
+      type: "button",
+      class: "btn btn-primary",
+      onClick: () => {
+        closeModal();
+        onSwitchTo1k();
+      },
+    }, free1kKnown && free1k > 0 ? "切回 1K 免费生成" : "切回 1K 生成"));
+  }
+  showModal(title, body, actions);
+  return true;
 }
