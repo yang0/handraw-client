@@ -2,6 +2,26 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.14 (2026-11-28)
+
+### Features & UX
+- **Inspiration Vault Multi-Item Batch Collection & AI Auto-Titling (#201)**:
+  - Removed the manual title input box (and redundant per-item source URL input) from the **「收集新灵感」** modal so AI automatically generates clean Chinese titles on save.
+  - Upgraded the modal into a compact multi-item horizontal card queue supporting **「＋ 再加一条」**, **「🖼 批量选图」**, multi-image drag-and-drop auto-splitting, and continuous keyboard-only `Ctrl+V` image pasting (fills the active card if empty or auto-appends a new card and focuses its prompt box).
+  - Added 2-way concurrent batch submission with per-card live status, shared folder & AI-organize options, and partial-failure preservation so failed items can be retried without duplicating succeeded ones.
+- **Studio & Asset Deep Links (#199)**:
+  - Added `handraw://studio` and `handraw://asset` deep-link routing support.
+
+### Fixes & Reliability
+- **Custom Style Prompt Preservation & Accurate `rawUserPrompt` (#200)**:
+  - Set `promptFromSkill: true` on website generation payloads whenever the client has already composed the Skill prompt locally (including local custom styles `MY-S-*` and layouts `MY-L-*`), preventing server-side re-composition from dropping custom style traits.
+  - Forwarded the user's concise original input (`originalRequest` → `rawUserPrompt`) separately from AI-expanded scene prompts so local history and Admin logs keep raw user input and Skill-resolved prompts cleanly separated.
+- **Production Log Audit Fixes & Telemetry Noise Reduction (#202)**:
+  - Auto-stripped accidental endpoint suffixes (`/chat/completions`, `/images/generations`, `/images/edits`, `/models`) from third-party provider `BaseURL`s and returned `400 provider_unreachable` instead of `500` when testing unreachable custom endpoints.
+  - Preserved public catalog-relative paths for `/files/pack/...` `media_broken` diagnostics while filtering out detached DOM image errors caused by rapid view switches.
+  - Suppressed `api_network: Failed to fetch` error floods during window unload, restart, or OS sleep, and filtered third-party content safety/policy 400 rejections out of `job_tech_fail`.
+  - Added short backoff retries (`200ms`/`500ms`/`1s`) around Windows updater binary rename to tolerate transient antivirus or handle locks.
+
 ## v0.6.13 (2026-11-27)
 
 ### Fixes
