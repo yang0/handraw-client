@@ -2,6 +2,13 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.10 (2026-11-26)
+
+### Fixes & UX
+- **Default 1K Resolution & Clear 2K/4K Insufficient-Balance Guidance (#190)**:
+  - Changed the default image resolution across Studio, Article, Series, Canvas, Quick Shot, and built-in canvas templates from `2k` to `1k` so users with 1K free quota generate for free out of the box.
+  - Added clear `insufficient_cash` guidance on both pre-quote (`POST /api/generate` HTTP 402) and async job failures explaining when a paid `2K`/`4K` resolution caused insufficient cash (noting AI bonus credit does not apply to image generation and showing remaining 1K free quota), plus a one-click **「切回 1K 免费生成」** dialog action.
+
 ## v0.6.9 (2026-11-26)
 
 ### Features & UX
