@@ -2,6 +2,24 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.7 (2026-11-26)
+
+### Features & UX
+- **Seamless Auto-Update & Low-Load Distribution (#182)**:
+  - Enabled default background silent download, ed25519/SHA-256 verification, and automatic **Apply-on-Quit** replacement (with a topbar `已就绪 · 重启升级` pill, one-time toast per version, and 3-mode selector in Settings: `auto` / `notify` / `off`).
+  - Separated metadata checks (Cloudflare-cached `handraw-style.com/static/client/latest.json` with `ETag` / `304 Not Modified`, 6-hour persistent cooldown, startup & loop jitter, and deterministic `rolloutPercent` / `spreadHours` smoothing) from binary downloads (`asset.mirrors` preferring Gitee Releases CDN → GitHub → official fallback).
+  - Deferred automatic downloads while image generation jobs are active, added exponential failure backoff (`30m → 2h → 6h`, max 3 auto retries per version), and guarded against quit-apply failure loops.
+- **Launch at Login (#183)**:
+  - Added cross-platform user-scope launch-at-login (Windows `HKCU\...\Run`, macOS `LaunchAgents` plist, Linux XDG autostart), enabled by default with an opt-out toggle in Settings.
+  - Added `--autostart` silent boot into the system tray when `minimizeToTray` is enabled, plus temporary/dev executable protection.
+- **Embedded Pre-Paired Inspiration Clipper Extension (#185)**:
+  - Embedded `extensions/handraw-clipper` (v1.0.4) directly into single-binary builds and auto-extracted it to `<appdir>/extensions/handraw-clipper/` with pre-paired `defaults.json` (`0600`), eliminating manual token copy-pasting.
+  - Added `POST /api/settings/clipper/prepare` and one-click folder open buttons in Settings & Inspiration Vault; token rotation automatically refreshes `defaults.json`.
+
+### Fixes
+- **Meaningful Batch Work Titles (#184)**:
+  - Derived clear titles for series and canvas batch works instead of generic placeholders.
+
 ## v0.6.6 (2026-11-26)
 
 ### Network & Connectivity Fixes
