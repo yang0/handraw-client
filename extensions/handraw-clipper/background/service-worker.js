@@ -122,7 +122,7 @@ async function sendToLocalClient(cfg, payload) {
         error: data?.error || (resp.status === 403 ? "配对 Token 不匹配" : `HTTP ${resp.status}`),
       };
     }
-    return { ok: true, channel: "local", item: data.item || null };
+    return { ok: true, channel: "local", item: data.item || null, imageWarning: data.imageWarning || "" };
   } catch (err) {
     return { ok: false, error: err?.name === "AbortError" ? "本地接口响应超时" : "无法连接本机客户端" };
   } finally {
@@ -207,6 +207,47 @@ async function showPageToast(tabId, message, isError = false) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const MAX_CLIP_IMAGE_BYTES = 8 * 1024 * 1024;
+
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+// Fetch the target image inside Chrome's network context (inheriting browser
+// proxy extensions & session cookies) and pass it as a data URL so the local
+// desktop client never fails downloading pbs.twimg.com directly (#193).
+async function fetchImageAsDataUrl(imageUrl) {
+  const url = String(imageUrl || "").trim();
+  if (!/^https?:\/\//i.test(url)) return "";
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      credentials: "omit",
+      cache: "force-cache",
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) return "";
+    const ct = String(resp.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (ct && !ct.startsWith("image/")) return "";
+    const buf = await resp.arrayBuffer();
+    if (!buf || buf.byteLength < 16 || buf.byteLength > MAX_CLIP_IMAGE_BYTES) return "";
+    const mime = ct && ct.startsWith("image/") ? ct : "image/jpeg";
+    return `data:${mime};base64,${arrayBufferToBase64(buf)}`;
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function mergeMainAndReplies(mainText, replyTexts) {
@@ -381,10 +422,23 @@ async function deliverClip(payload, tabId = null) {
     }
   }
 
+  // Grab image bytes inside Chrome so browser-scoped proxies (e.g. SwitchyOmega
+  // for X/Twitter) work seamlessly without requiring a system-wide proxy (#193).
+  if (!nextPayload.imageDataUrl && nextPayload.imageUrl) {
+    const dataUrl = await fetchImageAsDataUrl(nextPayload.imageUrl);
+    if (dataUrl) {
+      nextPayload.imageDataUrl = dataUrl;
+    }
+  }
+
   const cfg = await loadConfig();
   let res = await sendToLocalClient(cfg, nextPayload);
   if (!res.ok && cfg.siteToken) {
-    const cloud = await sendToCloudFallback(cfg, nextPayload);
+    const cloudPayload = { ...nextPayload };
+    if (cloudPayload.imageDataUrl && cloudPayload.imageDataUrl.length > 4 * 1024 * 1024) {
+      delete cloudPayload.imageDataUrl;
+    }
+    const cloud = await sendToCloudFallback(cfg, cloudPayload);
     if (cloud.ok) {
       res = cloud;
     }
@@ -396,16 +450,17 @@ async function deliverClip(payload, tabId = null) {
     sourceAuthor: nextPayload.sourceAuthor || "",
     imageUrl: nextPayload.imageUrl || "",
     channel: res.ok ? res.channel : "failed",
-    error: res.ok ? "" : res.error,
+    error: res.ok ? (res.imageWarning || "") : res.error,
     ts: Date.now(),
   });
   await flashBadge(res.ok);
   if (tabId) {
     const replyHint = repliesFound > 0 ? "（含作者评论区提示词）" : "";
+    const warnHint = res.ok && res.imageWarning ? `（${res.imageWarning}）` : "";
     await showPageToast(
       tabId,
       res.ok
-        ? (res.channel === "cloud" ? `☁ 已存入云端灵感暂存箱${replyHint}，打开客户端后自动同步` : `✓ 已收进手绘风灵感库${replyHint}，AI 正在整理`)
+        ? (res.channel === "cloud" ? `☁ 已存入云端灵感暂存箱${replyHint}，打开客户端后自动同步` : `✓ 已收进手绘风灵感库${replyHint}${warnHint}`)
         : `收集失败：${res.error}`,
       !res.ok
     );

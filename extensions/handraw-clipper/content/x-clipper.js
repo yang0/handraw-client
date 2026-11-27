@@ -289,10 +289,11 @@
           btn.textContent = "✓ 已收进灵感库";
           const gotReplies = Number(res.repliesFound || 0) > 0 || (payload.replyTexts && payload.replyTexts.length > 0);
           const replyHint = gotReplies ? "（已自动合并作者评论区提示词）" : "";
+          const warnHint = res.imageWarning ? `（${res.imageWarning}）` : "";
           showInlineToast(
             res.channel === "cloud"
               ? `☁ 已存入云端暂存箱${replyHint}，打开手绘风客户端自动同步`
-              : `✓ 已收进手绘风灵感库${replyHint}，AI 正在后台整理提示词`
+              : `✓ 已收进手绘风灵感库${replyHint}${warnHint || "，AI 正在后台整理提示词"}`
           );
         } else {
           btn.disabled = false;

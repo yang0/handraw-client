@@ -22,6 +22,7 @@ import (
 	"github.com/yang0/handraw-client/extensions"
 	"github.com/yang0/handraw-client/internal/appdir"
 	"github.com/yang0/handraw-client/internal/jobs"
+	"github.com/yang0/handraw-client/internal/netutil"
 	"github.com/yang0/handraw-client/internal/providers"
 	"github.com/yang0/handraw-client/internal/settings"
 	"github.com/yang0/handraw-client/internal/site"
@@ -287,18 +288,38 @@ func saveInspirationImageBytes(id string, raw []byte) (string, string, error) {
 	return outPath, hex.EncodeToString(sum[:]), nil
 }
 
-func fetchRemoteImageBytes(ctx context.Context, rawURL string) ([]byte, error) {
+func fetchRemoteImageBytes(ctx context.Context, rawURL string, referer ...string) ([]byte, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
 		return nil, fmt.Errorf("不支持的图片链接")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
+	ref := ""
+	if len(referer) > 0 {
+		ref = strings.TrimSpace(referer[0])
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 HandrawClient/1.0")
-	hc := &http.Client{Timeout: 20 * time.Second}
-	resp, err := hc.Do(req)
+	if ref == "" {
+		if pu, pErr := url.Parse(rawURL); pErr == nil {
+			host := strings.ToLower(pu.Hostname())
+			if strings.HasSuffix(host, "twimg.com") {
+				ref = "https://x.com/"
+			} else if strings.HasSuffix(host, "xhscdn.com") {
+				ref = "https://www.xiaohongshu.com/"
+			}
+		}
+	}
+	hc := netutil.NewClient(20 * time.Second)
+	resp, err := netutil.DoWithRetry(ctx, hc, func() (*http.Request, error) {
+		req, rErr := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if rErr != nil {
+			return nil, rErr
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+		req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+		if ref != "" {
+			req.Header.Set("Referer", ref)
+		}
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +420,7 @@ func (s *Server) pullCloudClipsBestEffort(ctx context.Context) int {
 			imgURL = strings.TrimRight(s.Site.Base(), "/") + imgURL
 		}
 		if imgURL != "" {
-			if rawImg, dErr := fetchRemoteImageBytes(ctx, imgURL); dErr == nil && len(rawImg) > 0 {
+			if rawImg, dErr := fetchRemoteImageBytes(ctx, imgURL, cl.SourceURL); dErr == nil && len(rawImg) > 0 {
 				if p, _, sErr := saveInspirationImageBytes(cl.ID, rawImg); sErr == nil {
 					imgPath = p
 				}
@@ -1014,11 +1035,14 @@ func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any
 		}
 		imgPath = saved
 	}
+	imageWarning := ""
 	if imgPath == "" && strings.HasPrefix(strings.TrimSpace(body.ImageURL), "http") {
-		if raw, err := fetchRemoteImageBytes(r.Context(), body.ImageURL); err == nil && len(raw) > 0 {
+		if raw, err := fetchRemoteImageBytes(r.Context(), body.ImageURL, body.SourceURL); err == nil && len(raw) > 0 {
 			if saved, _, sErr := saveInspirationImageBytes(id, raw); sErr == nil {
 				imgPath = saved
 			}
+		} else if err != nil {
+			imageWarning = "远端图片下载到本地失败，已保留原图链接（可在详情页点击重新拉取）"
 		}
 	}
 
@@ -1079,7 +1103,11 @@ func (s *Server) inspirationsCreate(w http.ResponseWriter, r *http.Request) (any
 		}
 	}
 	s.Emit("inspirations", map[string]any{"updated": true, "id": item.ID})
-	return map[string]any{"ok": true, "item": item}, nil
+	resp := map[string]any{"ok": true, "item": item}
+	if imageWarning != "" {
+		resp["imageWarning"] = imageWarning
+	}
+	return resp, nil
 }
 
 func (s *Server) inspirationsPatch(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -1248,17 +1276,21 @@ func (s *Server) inspirationsClip(w http.ResponseWriter, r *http.Request) (any, 
 
 	id := jobs.NewID("insp")
 	imgPath := ""
+	imageWarning := ""
 	if strings.HasPrefix(strings.TrimSpace(body.ImageDataURL), "data:image/") {
 		if raw, err := decodeDataURL(body.ImageDataURL); err == nil {
 			if p, _, sErr := saveInspirationImageBytes(id, raw); sErr == nil {
 				imgPath = p
 			}
 		}
-	} else if strings.HasPrefix(strings.TrimSpace(body.ImageURL), "http") {
-		if raw, err := fetchRemoteImageBytes(r.Context(), body.ImageURL); err == nil {
+	}
+	if imgPath == "" && strings.HasPrefix(strings.TrimSpace(body.ImageURL), "http") {
+		if raw, err := fetchRemoteImageBytes(r.Context(), body.ImageURL, body.SourceURL); err == nil {
 			if p, _, sErr := saveInspirationImageBytes(id, raw); sErr == nil {
 				imgPath = p
 			}
+		} else if err != nil {
+			imageWarning = "远端图片暂未拉到本地，已保留原图链接（可在灵感详情页重试）"
 		}
 	}
 
@@ -1298,6 +1330,46 @@ func (s *Server) inspirationsClip(w http.ResponseWriter, r *http.Request) (any, 
 			}
 		}(item)
 	}
+	resp := map[string]any{"ok": true, "item": item}
+	if imageWarning != "" {
+		resp["imageWarning"] = imageWarning
+	}
+	return resp, nil
+}
+
+// inspirationsRefetchImage downloads a clipped inspiration's remote image URL
+// (or re-extracts it from SourceURL) and caches it locally on disk (#193).
+func (s *Server) inspirationsRefetchImage(w http.ResponseWriter, r *http.Request) (any, error) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	cur, err := s.readInspiration(id)
+	if err != nil {
+		return nil, err
+	}
+	targetURL := strings.TrimSpace(cur.ImageURL)
+	if targetURL == "" && strings.HasPrefix(strings.TrimSpace(cur.SourceURL), "http") {
+		if ext, eErr := s.extractInspirationFromURL(r.Context(), cur.SourceURL); eErr == nil && len(ext.Images) > 0 {
+			targetURL = strings.TrimSpace(ext.Images[0])
+		}
+	}
+	if targetURL == "" {
+		return nil, bad("该灵感没有可重新拉取的图片地址")
+	}
+	raw, err := fetchRemoteImageBytes(r.Context(), targetURL, cur.SourceURL)
+	if err != nil {
+		return nil, bad("重新拉取图片失败：" + err.Error())
+	}
+	saved, _, err := saveInspirationImageBytes(id, raw)
+	if err != nil {
+		return nil, err
+	}
+	d := cur.inspirationData
+	d.ImagePath = saved
+	d.ImageURL = targetURL
+	item, err := s.saveInspiration(id, d)
+	if err != nil {
+		return nil, err
+	}
+	s.Emit("inspirations", map[string]any{"updated": true, "id": item.ID})
 	return map[string]any{"ok": true, "item": item}, nil
 }
 

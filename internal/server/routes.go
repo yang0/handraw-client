@@ -195,6 +195,7 @@ func (s *Server) routes() {
 	m.HandleFunc("DELETE /api/inspirations/{id}", s.h(s.inspirationsDelete))
 	m.HandleFunc("GET /api/inspirations/clip/ping", s.h(s.inspirationsClipPing))
 	m.HandleFunc("POST /api/inspirations/clip", s.h(s.inspirationsClip))
+	m.HandleFunc("POST /api/inspirations/{id}/refetch-image", s.h(s.inspirationsRefetchImage))
 	m.HandleFunc("POST /api/inspirations/{id}/organize", s.h(s.inspirationsOrganize))
 	m.HandleFunc("POST /api/inspirations/{id}/publish", s.h(s.inspirationsPublish))
 	m.HandleFunc("POST /api/inspirations/materialize-refs", s.h(s.inspirationsMaterializeRefs))

@@ -1282,10 +1282,62 @@ function openLocalInspirationDetail(item, ctx, onChanged, availableFolders = [])
       )
     );
 
+    const canRefetchImg = !cur.imagePath && Boolean(cur.imageUrl || cur.sourceUrl);
+    const makeRefetchBtn = (label = "↻ 重新拉取本地图") => {
+      const btn = el("button", {
+        type: "button",
+        class: "btn btn-sm",
+        onClick: async () => {
+          btn.disabled = true;
+          btn.textContent = "拉取中…";
+          try {
+            const r = await api("POST", `/api/inspirations/${encodeURIComponent(cur.id)}/refetch-image`, {});
+            if (r?.item) {
+              cur = r.item;
+              toast("图片已重新保存到本地灵感库");
+              onChanged?.();
+              renderModal();
+              return;
+            }
+          } catch (e) {
+            toast(e?.message || "重新拉取图片失败（请确认网络/系统代理可访问原图）");
+          }
+          btn.disabled = false;
+          btn.textContent = label;
+        },
+      }, label);
+      return btn;
+    };
+
+    const mediaBox = el("div", { class: "insp-modal-media" });
+    if (imgSrc) {
+      const detailImg = el("img", {
+        src: imgSrc,
+        alt: cur.title || "",
+        class: "insp-modal-img",
+        referrerpolicy: imgSrc.startsWith("http") ? "no-referrer" : undefined,
+      });
+      detailImg.addEventListener("error", () => {
+        clear(mediaBox);
+        mediaBox.appendChild(
+          el("div", { class: "col", style: { alignItems: "center", gap: "8px", padding: "24px 16px", textAlign: "center" } },
+            el("div", { class: "muted", style: { fontSize: "13px" } }, "图片暂无法加载（可能未保存到本地或外链受网络限制）"),
+            cur.imageUrl || cur.sourceUrl ? makeRefetchBtn("↻ 重新拉取并保存到本地") : null
+          )
+        );
+      }, { once: true });
+      mediaBox.appendChild(detailImg);
+      if (canRefetchImg) {
+        mediaBox.appendChild(
+          el("div", { class: "row", style: { justifyContent: "center", marginTop: "8px" } }, makeRefetchBtn("↻ 保存原图到本地"))
+        );
+      }
+    } else {
+      mediaBox.appendChild(el("div", { class: "muted" }, "纯文字提示词灵感"));
+    }
+
     const body = el("div", { class: "insp-modal-layout" },
-      el("div", { class: "insp-modal-media" },
-        imgSrc ? el("img", { src: imgSrc, alt: cur.title || "", class: "insp-modal-img" }) : el("div", { class: "muted" }, "纯文字提示词灵感")
-      ),
+      mediaBox,
       el("div", { class: "insp-modal-info col" },
         el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "flex-start", gap: "8px" } },
           el("div", { class: "col", style: { gap: "4px" } },
@@ -2002,7 +2054,19 @@ async function renderVaultTab(stage, ctx, onMeta, initialRes = null) {
           },
         },
           imgSrc
-            ? el("img", { class: "style-thumb", src: imgSrc, alt: item.title || "", loading: "lazy" })
+            ? (() => {
+                const thumb = el("img", {
+                  class: "style-thumb",
+                  src: imgSrc,
+                  alt: item.title || "",
+                  loading: "lazy",
+                  referrerpolicy: imgSrc.startsWith("http") ? "no-referrer" : undefined,
+                });
+                thumb.addEventListener("error", () => {
+                  thumb.replaceWith(el("div", { class: "insp-text-cover" }, "🖼 图片暂不可用 · 点进详情重试"));
+                }, { once: true });
+                return thumb;
+              })()
             : el("div", { class: "insp-text-cover" }, excerpt || item.title),
           el("div", { class: "style-body" },
             el("div", { class: "row", style: { justifyContent: "space-between", gap: "4px", flexWrap: "wrap" } },

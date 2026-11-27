@@ -144,15 +144,36 @@ export function galleryImg(url) {
   return packImg(url);
 }
 
+function isProxiedSiteImageURL(rawUrl, siteBase = "") {
+  try {
+    const u = new URL(rawUrl);
+    const host = (u.hostname || "").toLowerCase();
+    if (host === "handraw-style.com" || host.endsWith(".handraw-style.com")) return true;
+    if (siteBase) {
+      const bu = new URL(siteBase);
+      if (bu.hostname && host === bu.hostname.toLowerCase()) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function remoteThumb(src, width = 480, siteBase = "") {
   if (!src) return "/img/logo.svg";
   if (src.startsWith("/img/") || src.startsWith("/files/") || src.startsWith("data:")) return src;
   let full = src;
-  if (src.startsWith("/")) {
+  const isRel = src.startsWith("/") && !src.startsWith("//");
+  if (isRel) {
     full = (siteBase ? siteBase.replace(/\/+$/, "") : "") + src;
   }
   if (!full.startsWith("http://") && !full.startsWith("https://") && !full.startsWith("/")) {
     return src;
+  }
+  // Only route site-hosted media through /files/remote; third-party URLs
+  // (e.g. pbs.twimg.com) are rejected with 403 by /files/remote (#193).
+  if (!isRel && !isProxiedSiteImageURL(full, siteBase)) {
+    return full;
   }
   return `/files/remote?url=${encodeURIComponent(full)}&w=${encodeURIComponent(width)}&t=${encodeURIComponent(getToken())}`;
 }

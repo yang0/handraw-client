@@ -755,6 +755,14 @@ func sniffImageExt(b []byte) string {
 		return ".webp"
 	case bytes.HasPrefix(b, []byte("GIF8")):
 		return ".gif"
+	case len(b) >= 12 && string(b[4:8]) == "ftyp":
+		brand := string(b[8:12])
+		if brand == "avif" || brand == "avis" {
+			return ".avif"
+		}
+		if brand == "heic" || brand == "heix" || brand == "mif1" {
+			return ".heic"
+		}
 	}
 	return ".png"
 }
