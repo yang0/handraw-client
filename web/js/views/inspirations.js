@@ -362,367 +362,12 @@ export async function renderInspirations(root, ctx, params = {}) {
 }
 
 function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
-  let imageDataUrl = "";
-  let remoteImageUrl = "";
-  let imageCaption = "";
-  let sourceUrl = "";
-  let extractedAuthor = "";
-  let extractedPlatform = "";
-  let fetchedImages = [];
-  let selectedFetchedIdx = -1;
-
   const isBareHttpUrl = (s) => /^https?:\/\/\S+$/i.test(String(s || "").trim());
   const isDirectImageUrl = (s) => /^https?:\/\/\S+\.(?:png|jpe?g|webp|gif)(?:[?#]\S*)?$/i.test(String(s || "").trim());
   const extractFirstUrl = (s) => {
     const m = String(s || "").match(/https?:\/\/[^\s<>"{}|\\^`[\]]+/i);
     return m ? m[0] : "";
   };
-
-  const fetchStatusEl = el("div", { class: "insp-fetch-status hidden" });
-  const fetchedThumbsEl = el("div", { class: "insp-fetch-thumbs hidden" });
-
-  const fileIn = el("input", { type: "file", accept: "image/*", class: "hidden" });
-  const previewImg = el("img", { class: "insp-drop-preview", alt: "预览图", referrerpolicy: "no-referrer" });
-  const previewCaptionEl = el("span", { class: "muted insp-drop-caption" }, "");
-  const dropEmptyEl = el("div", { class: "insp-drop-empty" },
-    el("span", { class: "muted" }, "点击选图、拖拽图片到这里，或直接按 Ctrl+V 粘贴剪贴板图片")
-  );
-
-  const titleIn = el("input", { class: "input", placeholder: "标题（可选，留空由 AI 自动起名）" });
-
-  const syncThumbActive = () => {
-    fetchedThumbsEl.querySelectorAll(".insp-fetch-thumb").forEach((btn, bi) => {
-      btn.classList.toggle("is-active", bi === selectedFetchedIdx);
-    });
-  };
-
-  const renderImageState = () => {
-    const src = imageDataUrl || remoteImageUrl;
-    const hasImg = Boolean(src);
-    dropZone.classList.toggle("has-image", hasImg);
-    dropEmptyEl.classList.toggle("hidden", hasImg);
-    previewWrap.classList.toggle("hidden", !hasImg);
-    if (hasImg) {
-      previewImg.src = src;
-      previewCaptionEl.textContent = imageCaption || (imageDataUrl ? "本地图片" : "远程图片");
-    } else {
-      previewImg.removeAttribute("src");
-      previewCaptionEl.textContent = "";
-    }
-    syncThumbActive();
-  };
-
-  const clearDirectImgStatus = () => {
-    if (fetchStatusEl.dataset.kind === "direct-image") {
-      delete fetchStatusEl.dataset.kind;
-      clear(fetchStatusEl);
-      fetchStatusEl.className = "insp-fetch-status hidden";
-    }
-  };
-
-  const clearPickedImage = (e) => {
-    e?.stopPropagation?.();
-    imageDataUrl = "";
-    remoteImageUrl = "";
-    imageCaption = "";
-    selectedFetchedIdx = -1;
-    fileIn.value = "";
-    clearDirectImgStatus();
-    renderImageState();
-  };
-
-  const setPickedImage = async (file) => {
-    if (!file || !file.type.startsWith("image/")) return;
-    try {
-      imageDataUrl = await readFileAsDataURL(file);
-      remoteImageUrl = "";
-      selectedFetchedIdx = -1;
-      imageCaption = file.name ? `本地图：${file.name}` : "剪贴板图片";
-      clearDirectImgStatus();
-      renderImageState();
-    } catch (e) { toast(e.message); }
-  };
-
-  const setRemoteImage = (url, caption = "远程图片", fetchedIdx = -1) => {
-    const clean = String(url || "").trim();
-    imageDataUrl = "";
-    fileIn.value = "";
-    remoteImageUrl = clean;
-    selectedFetchedIdx = fetchedIdx;
-    imageCaption = clean ? caption : "";
-    renderImageState();
-  };
-
-  const replaceImgBtn = el("button", {
-    type: "button",
-    class: "btn btn-sm",
-    dataset: { role: "insp-img-replace" },
-    onClick: (e) => {
-      e.stopPropagation();
-      fileIn.click();
-    },
-  }, "更换");
-
-  const removeImgBtn = el("button", {
-    type: "button",
-    class: "btn btn-sm insp-drop-remove-btn",
-    dataset: { role: "insp-img-remove" },
-    title: "删除当前图片",
-    onClick: clearPickedImage,
-  }, "✕ 删除");
-
-  const previewWrap = el("div", { class: "insp-drop-filled hidden" },
-    el("div", { class: "insp-drop-preview-box" }, previewImg),
-    el("div", { class: "row insp-drop-toolbar" },
-      previewCaptionEl,
-      el("div", { class: "row", style: { gap: "6px", flexShrink: "0" } }, replaceImgBtn, removeImgBtn)
-    )
-  );
-
-  fileIn.addEventListener("change", () => {
-    if (fileIn.files?.[0]) setPickedImage(fileIn.files[0]);
-  });
-
-  const dropZone = el("div", {
-    class: "insp-dropzone",
-    tabindex: "0",
-    onClick: () => {
-      if (!dropZone.classList.contains("has-image")) {
-        fileIn.click();
-      }
-    },
-  }, dropEmptyEl, previewWrap, fileIn);
-  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("is-drag"); });
-  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("is-drag"));
-  dropZone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    dropZone.classList.remove("is-drag");
-    const f = e.dataTransfer?.files?.[0];
-    if (f) setPickedImage(f);
-  });
-
-  const rawTextIn = el("textarea", {
-    class: "input",
-    rows: 6,
-    placeholder: "粘贴提示词或推文原文；也可直接粘贴 X / 网页链接自动抓取，或粘贴图片直链载入预览…",
-  });
-  const parseInlineBtn = el("button", {
-    type: "button",
-    class: "btn btn-sm hidden",
-    dataset: { role: "insp-parse-inline" },
-  }, "⚡ 解析链接");
-  const sourceChipEl = el("div", { class: "insp-source-chip hidden" });
-  const autoOrgChk = el("input", { type: "checkbox", checked: true });
-  let sourceUrlIn = null;
-
-  const renderSourceChip = () => {
-    clear(sourceChipEl);
-    if (sourceUrlIn && sourceUrlIn.value.trim() !== sourceUrl) {
-      sourceUrlIn.value = sourceUrl || "";
-    }
-    if (!sourceUrl) {
-      sourceChipEl.classList.add("hidden");
-      return;
-    }
-    sourceChipEl.classList.remove("hidden");
-    const shortUrl = sourceUrl.replace(/^https?:\/\//i, "").slice(0, 46);
-    sourceChipEl.append(
-      el("span", { class: "muted", style: { fontSize: "11.5px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-        `🔗 来源：${shortUrl}${sourceUrl.length > 54 ? "…" : ""}`
-      ),
-      el("button", {
-        type: "button",
-        class: "insp-source-clear",
-        title: "清除来源链接",
-        onClick: () => {
-          sourceUrl = "";
-          extractedPlatform = "";
-          extractedAuthor = "";
-          renderSourceChip();
-        },
-      }, "✕")
-    );
-  };
-
-  const syncInlineParseBtn = () => {
-    const found = extractFirstUrl(rawTextIn.value);
-    if (found && !isFetching) {
-      parseInlineBtn.classList.remove("hidden");
-      parseInlineBtn.textContent = isDirectImageUrl(found) ? "🖼 载入图片链接" : "⚡ 解析链接";
-    } else if (!isFetching) {
-      parseInlineBtn.classList.add("hidden");
-    }
-  };
-
-  const renderFetchedThumbs = () => {
-    clear(fetchedThumbsEl);
-    if (!fetchedImages.length) {
-      fetchedThumbsEl.classList.add("hidden");
-      return;
-    }
-    const applySelectedImage = (idx) => {
-      const u = fetchedImages[idx] || "";
-      if (!u) return;
-      const caption = fetchedImages.length > 1
-        ? `已选第 ${idx + 1}/${fetchedImages.length} 张原图`
-        : "已自动获取原图封面";
-      setRemoteImage(u, caption, idx);
-    };
-    if (fetchedImages.length > 1) {
-      fetchedThumbsEl.classList.remove("hidden");
-      fetchedThumbsEl.appendChild(el("span", { class: "muted", style: { fontSize: "11.5px", width: "100%" } }, `抓取到 ${fetchedImages.length} 张原图（点击切换封面）：`));
-      fetchedImages.forEach((u, idx) => {
-        fetchedThumbsEl.appendChild(el("button", {
-          type: "button",
-          class: "insp-fetch-thumb" + (idx === selectedFetchedIdx ? " is-active" : ""),
-          title: `选用第 ${idx + 1} 张原图`,
-          onClick: () => applySelectedImage(idx),
-        }, el("img", { src: u, alt: `图 ${idx + 1}`, referrerpolicy: "no-referrer" })));
-      });
-    } else {
-      fetchedThumbsEl.classList.add("hidden");
-    }
-    applySelectedImage(0);
-  };
-
-  let isFetching = false;
-  const runFetchUrl = async (explicitUrl, { clearRawIfBare = false } = {}) => {
-    const target = String(explicitUrl ?? extractFirstUrl(rawTextIn.value)).trim();
-    if (!target || !isBareHttpUrl(target)) {
-      toast("未检测到完整的 http:// 或 https:// 链接");
-      return;
-    }
-    if (isDirectImageUrl(target)) {
-      fetchedImages = [];
-      fetchedThumbsEl.classList.add("hidden");
-      clear(fetchStatusEl);
-      fetchStatusEl.dataset.kind = "direct-image";
-      fetchStatusEl.className = "insp-fetch-status is-ok";
-      fetchStatusEl.appendChild(el("span", null, "✓ 已识别图片直链并载入上方预览"));
-      setRemoteImage(target, "远程图片链接", -1);
-      if (clearRawIfBare || rawTextIn.value.trim() === target) {
-        rawTextIn.value = "";
-      }
-      syncInlineParseBtn();
-      return;
-    }
-    if (isFetching) return;
-    isFetching = true;
-    parseInlineBtn.disabled = true;
-    parseInlineBtn.classList.remove("hidden");
-    parseInlineBtn.textContent = "解析中…";
-    clear(fetchStatusEl);
-    fetchStatusEl.className = "insp-fetch-status";
-    fetchStatusEl.appendChild(el("span", { class: "muted" }, "正在抓取原文与高清原图…"));
-
-    try {
-      const res = await api("POST", "/api/inspirations/fetch-url", { url: target });
-      const ext = res.extracted || {};
-      extractedPlatform = ext.platform || "";
-      extractedAuthor = ext.author || "";
-      sourceUrl = ext.sourceUrl || target;
-      renderSourceChip();
-
-      if (ext.text) {
-        rawTextIn.value = ext.text;
-      } else if (clearRawIfBare && rawTextIn.value.trim() === target) {
-        rawTextIn.value = "";
-      }
-      if (ext.title && !titleIn.value.trim()) {
-        titleIn.value = ext.title;
-      }
-
-      fetchedImages = Array.isArray(ext.images) ? ext.images.filter(Boolean) : [];
-      selectedFetchedIdx = fetchedImages.length ? 0 : -1;
-      renderFetchedThumbs();
-
-      clear(fetchStatusEl);
-      if (ext.needClipper) {
-        fetchStatusEl.className = "insp-fetch-status is-warn";
-        fetchStatusEl.append(
-          el("span", null, ext.warning || "该平台受登录态或防爬限制，建议用「Chrome 灵感捕手」一键剪藏。"),
-          el("button", {
-            type: "button",
-            class: "btn btn-sm",
-            style: { alignSelf: "flex-start" },
-            onClick: () => {
-              closeModal();
-              openClipperSetupModal(clipMeta);
-            },
-          }, "🧩 配置 Chrome 灵感捕手")
-        );
-      } else {
-        fetchStatusEl.className = "insp-fetch-status is-ok";
-        const platformName = SOURCE_LABELS[ext.platform] || ext.platform || "网页";
-        const parts = [`✓ 已解析（${ext.adapter || platformName}）`];
-        if (ext.author) parts.push(`作者 ${ext.author}`);
-        if (fetchedImages.length) parts.push(`${fetchedImages.length} 张原图`);
-        fetchStatusEl.appendChild(el("span", null, parts.join(" · ")));
-        if (ext.warning) {
-          fetchStatusEl.appendChild(el("span", { class: "muted", style: { fontSize: "11.5px" } }, ext.warning));
-        }
-      }
-    } catch (e) {
-      sourceUrl = target;
-      renderSourceChip();
-      clear(fetchStatusEl);
-      fetchStatusEl.className = "insp-fetch-status is-warn";
-      fetchStatusEl.appendChild(el("span", null, e?.message || "解析失败，可改用「Chrome 灵感捕手」或直接手动粘贴内容"));
-    } finally {
-      isFetching = false;
-      parseInlineBtn.disabled = false;
-      syncInlineParseBtn();
-    }
-  };
-
-  parseInlineBtn.addEventListener("click", () => runFetchUrl(extractFirstUrl(rawTextIn.value), { clearRawIfBare: true }));
-  rawTextIn.addEventListener("input", syncInlineParseBtn);
-  rawTextIn.addEventListener("paste", (e) => {
-    const pasted = (e.clipboardData?.getData("text") || "").trim();
-    const curVal = rawTextIn.value.trim();
-    const replacingAll = !curVal || (rawTextIn.selectionStart === 0 && rawTextIn.selectionEnd === rawTextIn.value.length);
-    if (isDirectImageUrl(pasted) && replacingAll) {
-      e.preventDefault();
-      runFetchUrl(pasted, { clearRawIfBare: true });
-      return;
-    }
-    if (isBareHttpUrl(pasted) && replacingAll) {
-      e.preventDefault();
-      rawTextIn.value = pasted;
-      runFetchUrl(pasted, { clearRawIfBare: true });
-    }
-  });
-
-  const onPaste = (e) => {
-    const items = e.clipboardData?.items || [];
-    for (const it of items) {
-      if (it.type?.startsWith("image/")) {
-        const f = it.getAsFile();
-        if (f) {
-          e.preventDefault();
-          setPickedImage(f);
-          break;
-        }
-      }
-    }
-  };
-  document.addEventListener("paste", onPaste);
-
-  const cleanup = () => {
-    document.removeEventListener("paste", onPaste);
-  };
-
-  sourceUrlIn = el("input", {
-    class: "input",
-    type: "url",
-    placeholder: "来源链接（选填，粘贴网络链接收录时自动保留，分享解锁后可见）",
-  });
-  sourceUrlIn.addEventListener("input", () => {
-    const v = sourceUrlIn.value.trim();
-    if (/^https?:\/\//i.test(v)) sourceUrl = v;
-    else if (!v) sourceUrl = "";
-  });
-
   const extractFirstHttpUrl = (txt) => {
     const m = String(txt || "").match(/https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/gi) || [];
     for (const raw of m) {
@@ -741,83 +386,777 @@ function openCreateInspirationModal(ctx, onCreated, clipMeta = {}) {
   );
   if (initFolder) folderSel.value = initFolder;
 
-  const titleAndFolderRow = folderOpts.length > 0
-    ? el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
-        el("div", { style: { flex: "1 1 220px", minWidth: 0 } }, titleIn),
-        folderSel
-      )
-    : titleIn;
+  const autoOrgChk = el("input", { type: "checkbox", checked: true });
 
-  const body = el("div", { class: "col insp-create-form", style: { gap: "12px" } },
-    el("div", { class: "col", style: { gap: "8px" } },
-      dropZone,
-      fetchedThumbsEl
-    ),
-    el("div", { class: "field" },
-      el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px" } },
-        el("label", { style: { margin: 0 } }, "提示词 / 原文 / 链接"),
-        parseInlineBtn
-      ),
-      rawTextIn,
-      sourceChipEl,
-      fetchStatusEl
-    ),
-    sourceUrlIn,
-    titleAndFolderRow,
-    el("label", { class: "row", style: { cursor: "pointer", fontSize: "12.5px", alignItems: "center" } },
-      autoOrgChk,
-      el("span", null, "✨ 保存后用 AI 自动整理（去杂讯、中文翻译、提炼变量与标签）")
-    )
+  let nextEntrySeq = 1;
+  let activeEntryId = "";
+  let isSubmitting = false;
+  let entries = [];
+
+  const listEl = el("div", { class: "insp-q-list", role: "list", "aria-label": "待收录灵感列表" });
+  const batchFileIn = el("input", { type: "file", accept: "image/*", multiple: true, class: "hidden" });
+
+  const hasEntryContent = (entry) => Boolean(
+    entry.imageDataUrl
+    || entry.remoteImageUrl
+    || String(entry.rawText || "").trim()
+    || String(entry.sourceUrl || "").trim()
   );
 
-  const saveBtn = el("button", {
+  const countFilled = () => entries.filter(hasEntryContent).length;
+
+  let saveBtn = null;
+  let cancelBtn = null;
+  let addRowBtn = null;
+  let batchPickBtn = null;
+
+  const syncSubmitState = () => {
+    if (!saveBtn) return;
+    const filled = countFilled();
+    if (!isSubmitting) {
+      saveBtn.disabled = false;
+      if (filled > 1) {
+        saveBtn.textContent = `批量收进灵感库 (${filled} 条)`;
+      } else {
+        saveBtn.textContent = "收进灵感库";
+      }
+    }
+    // Update #1/#2 badges & remove buttons cleanly
+    entries.forEach((entry, idx) => {
+      if (entry.els?.idxBadge) entry.els.idxBadge.textContent = `#${idx + 1}`;
+      if (entry.els?.removeCardBtn) {
+        entry.els.removeCardBtn.hidden = entries.length <= 1 && !hasEntryContent(entry);
+        entry.els.removeCardBtn.title = entries.length > 1 ? "移除此条" : "清空此条内容";
+      }
+    });
+  };
+
+  const setActiveEntry = (id) => {
+    activeEntryId = id;
+    entries.forEach((entry) => {
+      entry.els?.card?.classList.toggle("is-active", entry.id === activeEntryId);
+    });
+  };
+
+  const scrollCardIntoView = (entry) => {
+    if (!entry?.els?.card) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    entry.els.card.scrollIntoView({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
+  };
+
+  const createEntry = () => {
+    const entry = {
+      id: `insp-q-${nextEntrySeq++}`,
+      imageDataUrl: "",
+      remoteImageUrl: "",
+      imageCaption: "",
+      sourceUrl: "",
+      extractedAuthor: "",
+      extractedPlatform: "",
+      extractedTitle: "",
+      fetchedImages: [],
+      selectedFetchedIdx: -1,
+      isFetching: false,
+      rawText: "",
+      status: "idle", // idle | saving | done | error
+      statusMsg: "",
+      savedItem: null,
+      els: {},
+    };
+
+    const fileIn = el("input", { type: "file", accept: "image/*", multiple: true, class: "hidden" });
+    const previewImg = el("img", { class: "insp-q-thumb", alt: "预览图", referrerpolicy: "no-referrer" });
+    const dropEmptyEl = el("div", { class: "insp-q-drop-empty" },
+      el("span", { class: "insp-q-drop-ico", "aria-hidden": "true" }, "🖼"),
+      el("span", { class: "insp-q-drop-txt" }, "选图 / 拖拽"),
+      el("span", { class: "insp-q-drop-sub" }, "或 Ctrl+V")
+    );
+
+    const statusBadge = el("span", { class: "insp-q-status hidden" });
+    const idxBadge = el("span", { class: "insp-q-idx" }, "#1");
+    const parseInlineBtn = el("button", {
+      type: "button",
+      class: "btn btn-sm hidden",
+      dataset: { role: "insp-parse-inline" },
+    }, "⚡ 解析链接");
+    const removeCardBtn = el("button", {
+      type: "button",
+      class: "insp-q-remove",
+      title: "移除此条",
+      "aria-label": "移除此条",
+    }, "✕");
+
+    const rawTextIn = el("textarea", {
+      class: "input insp-q-textarea",
+      rows: 4,
+      placeholder: "粘贴提示词、推文原文或链接…（无需填标题，由 AI 自动起名）",
+    });
+
+    const sourceChipEl = el("div", { class: "insp-source-chip hidden" });
+    const fetchStatusEl = el("div", { class: "insp-fetch-status hidden" });
+    const fetchedThumbsEl = el("div", { class: "insp-fetch-thumbs hidden" });
+
+    const renderStatus = () => {
+      statusBadge.className = "insp-q-status";
+      if (entry.status === "idle") {
+        statusBadge.classList.add("hidden");
+        statusBadge.textContent = "";
+      } else if (entry.status === "saving") {
+        statusBadge.classList.add("is-saving");
+        statusBadge.textContent = entry.statusMsg || "保存与 AI 整理中…";
+      } else if (entry.status === "done") {
+        statusBadge.classList.add("is-done");
+        statusBadge.textContent = entry.statusMsg || "✓ 已收录";
+      } else if (entry.status === "error") {
+        statusBadge.classList.add("is-error");
+        statusBadge.textContent = entry.statusMsg || "保存失败";
+      }
+      card.classList.toggle("is-saving", entry.status === "saving");
+      card.classList.toggle("is-done", entry.status === "done");
+      card.classList.toggle("is-error", entry.status === "error");
+    };
+
+    const syncThumbActive = () => {
+      fetchedThumbsEl.querySelectorAll(".insp-fetch-thumb").forEach((btn, bi) => {
+        btn.classList.toggle("is-active", bi === entry.selectedFetchedIdx);
+      });
+    };
+
+    const renderImageState = () => {
+      const src = entry.imageDataUrl || entry.remoteImageUrl;
+      const hasImg = Boolean(src);
+      mediaBox.classList.toggle("has-image", hasImg);
+      dropEmptyEl.classList.toggle("hidden", hasImg);
+      previewWrap.classList.toggle("hidden", !hasImg);
+      if (hasImg) {
+        previewImg.src = src;
+        previewImg.title = entry.imageCaption || (entry.imageDataUrl ? "本地图片" : "远程图片");
+      } else {
+        previewImg.removeAttribute("src");
+        previewImg.removeAttribute("title");
+      }
+      syncThumbActive();
+      syncSubmitState();
+    };
+
+    const clearDirectImgStatus = () => {
+      if (fetchStatusEl.dataset.kind === "direct-image") {
+        delete fetchStatusEl.dataset.kind;
+        clear(fetchStatusEl);
+        fetchStatusEl.className = "insp-fetch-status hidden";
+      }
+    };
+
+    const clearPickedImage = (e) => {
+      e?.stopPropagation?.();
+      if (isSubmitting) return;
+      entry.imageDataUrl = "";
+      entry.remoteImageUrl = "";
+      entry.imageCaption = "";
+      entry.selectedFetchedIdx = -1;
+      fileIn.value = "";
+      clearDirectImgStatus();
+      renderImageState();
+    };
+
+    const setPickedImage = async (file) => {
+      if (!file || !file.type?.startsWith("image/")) return;
+      try {
+        entry.imageDataUrl = await readFileAsDataURL(file);
+        entry.remoteImageUrl = "";
+        entry.selectedFetchedIdx = -1;
+        entry.imageCaption = file.name ? `本地图：${file.name}` : "剪贴板图片";
+        clearDirectImgStatus();
+        renderImageState();
+      } catch (e) { toast(e.message); }
+    };
+
+    const setRemoteImage = (url, caption = "远程图片", fetchedIdx = -1) => {
+      const clean = String(url || "").trim();
+      entry.imageDataUrl = "";
+      fileIn.value = "";
+      entry.remoteImageUrl = clean;
+      entry.selectedFetchedIdx = fetchedIdx;
+      entry.imageCaption = clean ? caption : "";
+      renderImageState();
+    };
+
+    const renderSourceChip = () => {
+      clear(sourceChipEl);
+      if (!entry.sourceUrl) {
+        sourceChipEl.classList.add("hidden");
+        return;
+      }
+      sourceChipEl.classList.remove("hidden");
+      const shortUrl = entry.sourceUrl.replace(/^https?:\/\//i, "").slice(0, 44);
+      sourceChipEl.append(
+        el("span", { class: "muted", style: { fontSize: "11.5px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+          `🔗 来源：${shortUrl}${entry.sourceUrl.length > 52 ? "…" : ""}`
+        ),
+        el("button", {
+          type: "button",
+          class: "insp-source-clear",
+          title: "清除来源链接",
+          onClick: () => {
+            if (isSubmitting) return;
+            entry.sourceUrl = "";
+            entry.extractedPlatform = "";
+            entry.extractedAuthor = "";
+            renderSourceChip();
+            syncSubmitState();
+          },
+        }, "✕")
+      );
+    };
+
+    const syncInlineParseBtn = () => {
+      const found = extractFirstUrl(rawTextIn.value);
+      if (found && !entry.isFetching) {
+        parseInlineBtn.classList.remove("hidden");
+        parseInlineBtn.textContent = isDirectImageUrl(found) ? "🖼 载入图片" : "⚡ 解析链接";
+      } else if (!entry.isFetching) {
+        parseInlineBtn.classList.add("hidden");
+      }
+    };
+
+    const renderFetchedThumbs = () => {
+      clear(fetchedThumbsEl);
+      if (!entry.fetchedImages.length) {
+        fetchedThumbsEl.classList.add("hidden");
+        return;
+      }
+      const applySelectedImage = (idx) => {
+        const u = entry.fetchedImages[idx] || "";
+        if (!u) return;
+        const caption = entry.fetchedImages.length > 1
+          ? `已选第 ${idx + 1}/${entry.fetchedImages.length} 张原图`
+          : "已自动获取原图封面";
+        setRemoteImage(u, caption, idx);
+      };
+      if (entry.fetchedImages.length > 1) {
+        fetchedThumbsEl.classList.remove("hidden");
+        fetchedThumbsEl.appendChild(el("span", { class: "muted", style: { fontSize: "11.5px", width: "100%" } }, `抓取到 ${entry.fetchedImages.length} 张原图（点击切换封面）：`));
+        entry.fetchedImages.forEach((u, idx) => {
+          fetchedThumbsEl.appendChild(el("button", {
+            type: "button",
+            class: "insp-fetch-thumb" + (idx === entry.selectedFetchedIdx ? " is-active" : ""),
+            title: `选用第 ${idx + 1} 张原图`,
+            onClick: () => applySelectedImage(idx),
+          }, el("img", { src: u, alt: `图 ${idx + 1}`, referrerpolicy: "no-referrer" })));
+        });
+      } else {
+        fetchedThumbsEl.classList.add("hidden");
+      }
+      applySelectedImage(0);
+    };
+
+    const runFetchUrl = async (explicitUrl, { clearRawIfBare = false } = {}) => {
+      const target = String(explicitUrl ?? extractFirstUrl(rawTextIn.value)).trim();
+      if (!target || !isBareHttpUrl(target)) {
+        toast("未检测到完整的 http:// 或 https:// 链接");
+        return;
+      }
+      if (isDirectImageUrl(target)) {
+        entry.fetchedImages = [];
+        fetchedThumbsEl.classList.add("hidden");
+        clear(fetchStatusEl);
+        fetchStatusEl.dataset.kind = "direct-image";
+        fetchStatusEl.className = "insp-fetch-status is-ok";
+        fetchStatusEl.appendChild(el("span", null, "✓ 已识别图片直链并载入左侧预览"));
+        setRemoteImage(target, "远程图片链接", -1);
+        if (clearRawIfBare || rawTextIn.value.trim() === target) {
+          rawTextIn.value = "";
+          entry.rawText = "";
+        }
+        syncInlineParseBtn();
+        syncSubmitState();
+        return;
+      }
+      if (entry.isFetching) return;
+      entry.isFetching = true;
+      parseInlineBtn.disabled = true;
+      parseInlineBtn.classList.remove("hidden");
+      parseInlineBtn.textContent = "解析中…";
+      clear(fetchStatusEl);
+      fetchStatusEl.className = "insp-fetch-status";
+      fetchStatusEl.appendChild(el("span", { class: "muted" }, "正在抓取原文与高清原图…"));
+
+      try {
+        const res = await api("POST", "/api/inspirations/fetch-url", { url: target });
+        const ext = res.extracted || {};
+        entry.extractedPlatform = ext.platform || "";
+        entry.extractedAuthor = ext.author || "";
+        entry.extractedTitle = ext.title || "";
+        entry.sourceUrl = ext.sourceUrl || target;
+        renderSourceChip();
+
+        if (ext.text) {
+          rawTextIn.value = ext.text;
+          entry.rawText = ext.text;
+        } else if (clearRawIfBare && rawTextIn.value.trim() === target) {
+          rawTextIn.value = "";
+          entry.rawText = "";
+        }
+
+        entry.fetchedImages = Array.isArray(ext.images) ? ext.images.filter(Boolean) : [];
+        entry.selectedFetchedIdx = entry.fetchedImages.length ? 0 : -1;
+        renderFetchedThumbs();
+
+        clear(fetchStatusEl);
+        if (ext.needClipper) {
+          fetchStatusEl.className = "insp-fetch-status is-warn";
+          fetchStatusEl.append(
+            el("span", null, ext.warning || "该平台受登录态或防爬限制，建议用「Chrome 灵感捕手」一键剪藏。"),
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              style: { alignSelf: "flex-start" },
+              onClick: () => {
+                closeModal();
+                openClipperSetupModal(clipMeta);
+              },
+            }, "🧩 配置 Chrome 灵感捕手")
+          );
+        } else {
+          fetchStatusEl.className = "insp-fetch-status is-ok";
+          const platformName = SOURCE_LABELS[ext.platform] || ext.platform || "网页";
+          const parts = [`✓ 已解析（${ext.adapter || platformName}）`];
+          if (ext.author) parts.push(`作者 ${ext.author}`);
+          if (entry.fetchedImages.length) parts.push(`${entry.fetchedImages.length} 张原图`);
+          fetchStatusEl.appendChild(el("span", null, parts.join(" · ")));
+          if (ext.warning) {
+            fetchStatusEl.appendChild(el("span", { class: "muted", style: { fontSize: "11.5px" } }, ext.warning));
+          }
+        }
+      } catch (e) {
+        entry.sourceUrl = target;
+        renderSourceChip();
+        clear(fetchStatusEl);
+        fetchStatusEl.className = "insp-fetch-status is-warn";
+        fetchStatusEl.appendChild(el("span", null, e?.message || "解析失败，可改用「Chrome 灵感捕手」或直接手动粘贴内容"));
+      } finally {
+        entry.isFetching = false;
+        parseInlineBtn.disabled = false;
+        syncInlineParseBtn();
+        syncSubmitState();
+      }
+    };
+
+    const replaceImgBtn = el("button", {
+      type: "button",
+      class: "insp-q-img-act",
+      dataset: { role: "insp-img-replace" },
+      title: "更换图片",
+      onClick: (e) => {
+        e.stopPropagation();
+        if (!isSubmitting) fileIn.click();
+      },
+    }, "更换");
+
+    const removeImgBtn = el("button", {
+      type: "button",
+      class: "insp-q-img-act is-danger",
+      dataset: { role: "insp-img-remove" },
+      title: "删除图片",
+      onClick: clearPickedImage,
+    }, "✕");
+
+    const previewWrap = el("div", { class: "insp-q-thumb-wrap hidden" },
+      previewImg,
+      el("div", { class: "insp-q-img-acts" }, replaceImgBtn, removeImgBtn)
+    );
+
+    const mediaBox = el("div", {
+      class: "insp-q-media",
+      tabindex: "0",
+      onClick: () => {
+        setActiveEntry(entry.id);
+        if (!isSubmitting && !mediaBox.classList.contains("has-image")) {
+          fileIn.click();
+        }
+      },
+    }, dropEmptyEl, previewWrap, fileIn);
+
+    const handleFilesForCard = async (fileList) => {
+      const imgs = Array.from(fileList || []).filter((f) => f && f.type?.startsWith("image/"));
+      if (!imgs.length) return;
+      await setPickedImage(imgs[0]);
+      if (imgs.length > 1) {
+        await appendImageFiles(imgs.slice(1));
+      } else {
+        rawTextIn.focus();
+      }
+    };
+
+    fileIn.addEventListener("change", async () => {
+      if (fileIn.files?.length) {
+        await handleFilesForCard(fileIn.files);
+        fileIn.value = "";
+      }
+    });
+
+    mediaBox.addEventListener("dragover", (e) => { e.preventDefault(); mediaBox.classList.add("is-drag"); });
+    mediaBox.addEventListener("dragleave", () => mediaBox.classList.remove("is-drag"));
+    mediaBox.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      mediaBox.classList.remove("is-drag");
+      if (isSubmitting) return;
+      setActiveEntry(entry.id);
+      await handleFilesForCard(e.dataTransfer?.files);
+    });
+
+    parseInlineBtn.addEventListener("click", () => runFetchUrl(extractFirstUrl(rawTextIn.value), { clearRawIfBare: true }));
+    rawTextIn.addEventListener("focus", () => setActiveEntry(entry.id));
+    rawTextIn.addEventListener("input", () => {
+      entry.rawText = rawTextIn.value;
+      if (entry.status === "error") {
+        entry.status = "idle";
+        entry.statusMsg = "";
+        renderStatus();
+      }
+      syncInlineParseBtn();
+      syncSubmitState();
+    });
+    rawTextIn.addEventListener("paste", (e) => {
+      if (isSubmitting) return;
+      const pasted = (e.clipboardData?.getData("text") || "").trim();
+      const curVal = rawTextIn.value.trim();
+      const replacingAll = !curVal || (rawTextIn.selectionStart === 0 && rawTextIn.selectionEnd === rawTextIn.value.length);
+      if (isDirectImageUrl(pasted) && replacingAll) {
+        e.preventDefault();
+        runFetchUrl(pasted, { clearRawIfBare: true });
+        return;
+      }
+      if (isBareHttpUrl(pasted) && replacingAll) {
+        e.preventDefault();
+        rawTextIn.value = pasted;
+        entry.rawText = pasted;
+        runFetchUrl(pasted, { clearRawIfBare: true });
+      }
+    });
+
+    removeCardBtn.addEventListener("click", () => {
+      if (isSubmitting) return;
+      if (entries.length <= 1) {
+        // Reset single card instead of leaving empty list
+        clearPickedImage();
+        rawTextIn.value = "";
+        entry.rawText = "";
+        entry.sourceUrl = "";
+        entry.extractedAuthor = "";
+        entry.extractedPlatform = "";
+        entry.extractedTitle = "";
+        entry.fetchedImages = [];
+        entry.status = "idle";
+        entry.statusMsg = "";
+        clear(fetchStatusEl);
+        fetchStatusEl.className = "insp-fetch-status hidden";
+        renderFetchedThumbs();
+        renderSourceChip();
+        renderStatus();
+        syncInlineParseBtn();
+        syncSubmitState();
+        rawTextIn.focus();
+        return;
+      }
+      const idx = entries.findIndex((x) => x.id === entry.id);
+      if (idx >= 0) {
+        entries.splice(idx, 1);
+        card.remove();
+        if (activeEntryId === entry.id) {
+          const next = entries[Math.min(idx, entries.length - 1)];
+          if (next) setActiveEntry(next.id);
+        }
+        syncSubmitState();
+      }
+    });
+
+    const card = el("div", {
+      class: "insp-q-card",
+      role: "listitem",
+      onClick: () => setActiveEntry(entry.id),
+    },
+      mediaBox,
+      el("div", { class: "insp-q-body" },
+        el("div", { class: "insp-q-card-head" },
+          el("div", { class: "row", style: { gap: "6px", alignItems: "center", minWidth: 0 } },
+            idxBadge,
+            statusBadge
+          ),
+          el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexShrink: "0" } },
+            parseInlineBtn,
+            removeCardBtn
+          )
+        ),
+        rawTextIn,
+        sourceChipEl,
+        fetchStatusEl,
+        fetchedThumbsEl
+      )
+    );
+
+    entry.els = { card, rawTextIn, idxBadge, removeCardBtn, renderStatus, setPickedImage };
+    return entry;
+  };
+
+  const appendEntry = ({ focus = true } = {}) => {
+    const entry = createEntry();
+    entries.push(entry);
+    listEl.appendChild(entry.els.card);
+    setActiveEntry(entry.id);
+    syncSubmitState();
+    if (focus) {
+      scrollCardIntoView(entry);
+      requestAnimationFrame(() => entry.els.rawTextIn.focus());
+    }
+    return entry;
+  };
+
+  const appendImageFiles = async (files) => {
+    const imgs = Array.from(files || []).filter((f) => f && f.type?.startsWith("image/"));
+    if (!imgs.length) return;
+    let lastEntry = null;
+    for (const f of imgs) {
+      // Reuse an existing completely empty card (no image & no text) first, otherwise append a new card
+      let target = entries.find((e) => !e.imageDataUrl && !e.remoteImageUrl && !String(e.rawText || "").trim() && !e.sourceUrl);
+      if (!target) {
+        target = appendEntry({ focus: false });
+      }
+      await target.els.setPickedImage(f);
+      lastEntry = target;
+    }
+    if (lastEntry) {
+      setActiveEntry(lastEntry.id);
+      scrollCardIntoView(lastEntry);
+      requestAnimationFrame(() => lastEntry.els.rawTextIn.focus());
+    }
+    syncSubmitState();
+  };
+
+  // Seed initial card
+  appendEntry({ focus: true });
+
+  batchFileIn.addEventListener("change", async () => {
+    if (batchFileIn.files?.length) {
+      await appendImageFiles(batchFileIn.files);
+      batchFileIn.value = "";
+    }
+  });
+
+  // Smart Ctrl+V paste: fills active card if it has no image yet, or auto-appends a new card when active card already has an image!
+  const onPaste = async (e) => {
+    if (isSubmitting) return;
+    const items = Array.from(e.clipboardData?.items || []);
+    const imgFiles = [];
+    for (const it of items) {
+      if (it.type?.startsWith("image/")) {
+        const f = it.getAsFile();
+        if (f) imgFiles.push(f);
+      }
+    }
+    if (!imgFiles.length) return;
+    e.preventDefault();
+
+    const active = entries.find((x) => x.id === activeEntryId) || entries[entries.length - 1];
+    let idx = 0;
+    let focusTarget = active;
+    if (active && !active.imageDataUrl && !active.remoteImageUrl) {
+      await active.els.setPickedImage(imgFiles[0]);
+      idx = 1;
+      focusTarget = active;
+    }
+    for (; idx < imgFiles.length; idx++) {
+      const next = appendEntry({ focus: false });
+      await next.els.setPickedImage(imgFiles[idx]);
+      focusTarget = next;
+    }
+    if (focusTarget) {
+      setActiveEntry(focusTarget.id);
+      scrollCardIntoView(focusTarget);
+      requestAnimationFrame(() => focusTarget.els.rawTextIn.focus());
+    }
+    syncSubmitState();
+  };
+  document.addEventListener("paste", onPaste);
+
+  const cleanup = () => {
+    document.removeEventListener("paste", onPaste);
+  };
+
+  addRowBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    onClick: () => {
+      if (!isSubmitting) appendEntry({ focus: true });
+    },
+  }, "＋ 再加一条");
+
+  batchPickBtn = el("button", {
+    type: "button",
+    class: "btn btn-sm",
+    onClick: () => {
+      if (!isSubmitting) batchFileIn.click();
+    },
+  }, "🖼 批量选图");
+
+  const toolbarRow = el("div", { class: "insp-q-toolbar" },
+    el("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } }, addRowBtn, batchPickBtn, batchFileIn),
+    el("span", { class: "muted insp-q-hint" }, "支持一次拖入多张图片，或连续 Ctrl+V 粘贴多条图文")
+  );
+
+  const optionsRow = el("div", { class: "insp-q-options" },
+    el("label", { class: "row insp-q-ai-opt" },
+      autoOrgChk,
+      el("span", null, "✨ AI 自动起标题并整理（去杂讯、翻译、提炼变量与标签）")
+    ),
+    folderOpts.length > 0
+      ? el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexShrink: "0" } },
+          el("span", { class: "muted", style: { fontSize: "12px" } }, "分组"),
+          folderSel
+        )
+      : null
+  );
+
+  const body = el("div", { class: "col insp-create-form", style: { gap: "10px" } },
+    listEl,
+    toolbarRow,
+    optionsRow
+  );
+
+  const setFormLocked = (locked) => {
+    isSubmitting = locked;
+    addRowBtn.disabled = locked;
+    batchPickBtn.disabled = locked;
+    folderSel.disabled = locked;
+    autoOrgChk.disabled = locked;
+    if (cancelBtn) cancelBtn.disabled = locked;
+    if (saveBtn) saveBtn.disabled = locked;
+    entries.forEach((e) => {
+      if (e.els?.rawTextIn) e.els.rawTextIn.disabled = locked;
+    });
+  };
+
+  cancelBtn = el("button", { type: "button", class: "btn", onClick: closeModal }, "取消");
+
+  saveBtn = el("button", {
     type: "button",
     class: "btn btn-primary",
     onClick: async () => {
-      let rawTxt = rawTextIn.value.trim();
-      if (!imageDataUrl && !remoteImageUrl && isDirectImageUrl(rawTxt)) {
-        remoteImageUrl = rawTxt;
-        rawTxt = "";
-      }
-      const typedSrc = sourceUrlIn.value.trim();
-      const effectiveSrc = (/^https?:\/\//i.test(typedSrc) ? typedSrc : "")
-        || sourceUrl
-        || (isBareHttpUrl(rawTxt) && !isDirectImageUrl(rawTxt) ? rawTxt : "")
-        || extractFirstHttpUrl(rawTxt);
-      if (!imageDataUrl && !remoteImageUrl && !rawTxt && !effectiveSrc) {
-        toast("请粘贴图片、输入提示词，或直接粘贴链接");
+      if (isSubmitting) return;
+      const targets = entries.filter(hasEntryContent);
+      if (!targets.length) {
+        toast("请至少粘贴一张图片、一段提示词或链接");
         return;
       }
-      saveBtn.disabled = true;
-      saveBtn.textContent = autoOrgChk.checked ? "正在保存并 AI 整理…" : "正在保存…";
-      try {
-        const inferredSource = extractedPlatform
-          || (/x\.com|twitter\.com/i.test(effectiveSrc) ? "x" : (/xiaohongshu\.com|xhslink\.com/i.test(effectiveSrc) ? "xiaohongshu" : "import"));
-        const res = await api("POST", "/api/inspirations", {
-          title: titleIn.value.trim(),
-          folder: folderSel.value || "",
-          imageDataUrl,
-          imageUrl: imageDataUrl ? "" : remoteImageUrl,
-          rawText: rawTxt,
-          prompt: rawTxt,
-          source: inferredSource,
-          sourceUrl: effectiveSrc,
-          sourceAuthor: extractedAuthor,
-          autoOrganize: autoOrgChk.checked,
-        });
-        closeModal();
-        toast(res.item?.aiOrganized ? "已保存并完成 AI 整理！" : "已收进灵感库");
-        onCreated?.(res.item);
-      } catch (e) {
-        saveBtn.disabled = false;
-        saveBtn.textContent = "收进灵感库";
-        toast(e?.message || "保存失败");
+
+      setFormLocked(true);
+      const total = targets.length;
+      let finished = 0;
+      let succeeded = 0;
+      let lastSaved = null;
+      const useAI = autoOrgChk.checked;
+      const targetFolder = folderSel.value || "";
+
+      const updateProgressBtn = () => {
+        if (total === 1) {
+          saveBtn.textContent = useAI ? "正在保存并 AI 起标题…" : "正在保存…";
+        } else {
+          saveBtn.textContent = `正在收录 ${finished}/${total}…`;
+        }
+      };
+      updateProgressBtn();
+
+      const submitOne = async (entry) => {
+        entry.status = "saving";
+        entry.statusMsg = useAI ? "保存与 AI 起标题中…" : "正在保存…";
+        entry.els.renderStatus();
+        try {
+          let rawTxt = String(entry.rawText || "").trim();
+          let imgData = entry.imageDataUrl || "";
+          let imgUrl = imgData ? "" : (entry.remoteImageUrl || "");
+          if (!imgData && !imgUrl && isDirectImageUrl(rawTxt)) {
+            imgUrl = rawTxt;
+            rawTxt = "";
+          }
+          const effectiveSrc = entry.sourceUrl
+            || (isBareHttpUrl(rawTxt) && !isDirectImageUrl(rawTxt) ? rawTxt : "")
+            || extractFirstHttpUrl(rawTxt);
+          const inferredSource = entry.extractedPlatform
+            || (/x\.com|twitter\.com/i.test(effectiveSrc) ? "x" : (/xiaohongshu\.com|xhslink\.com/i.test(effectiveSrc) ? "xiaohongshu" : "import"));
+
+          const res = await api("POST", "/api/inspirations", {
+            // Leave title blank when AI organize is enabled so AI names it cleanly (#201).
+            title: useAI ? "" : (entry.extractedTitle || ""),
+            folder: targetFolder,
+            imageDataUrl: imgData,
+            imageUrl: imgUrl,
+            rawText: rawTxt,
+            prompt: rawTxt,
+            source: inferredSource,
+            sourceUrl: effectiveSrc,
+            sourceAuthor: entry.extractedAuthor,
+            autoOrganize: useAI,
+          });
+          entry.status = "done";
+          entry.savedItem = res.item || null;
+          entry.statusMsg = res.item?.title ? `✓ ${res.item.title}` : "✓ 已收录";
+          entry.els.renderStatus();
+          succeeded++;
+          lastSaved = res.item || lastSaved;
+        } catch (err) {
+          entry.status = "error";
+          entry.statusMsg = err?.message || "保存失败";
+          entry.els.renderStatus();
+        } finally {
+          finished++;
+          updateProgressBtn();
+        }
+      };
+
+      // Run with 2-way concurrency so multi-item batches stay fast without flooding AI endpoints
+      const queue = [...targets];
+      const workerCount = Math.min(2, queue.length);
+      await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (queue.length) {
+          const next = queue.shift();
+          if (next) await submitOne(next);
+        }
+      }));
+
+      if (succeeded > 0) {
+        onCreated?.(lastSaved);
       }
+
+      const failed = targets.filter((e) => e.status === "error");
+      if (!failed.length) {
+        closeModal();
+        if (total === 1) {
+          toast(lastSaved?.aiOrganized ? "已保存并由 AI 自动起标题整理！" : "已收进灵感库");
+        } else {
+          toast(useAI ? `已批量收录 ${succeeded} 条灵感，AI 已自动起标题并整理！` : `已批量收录 ${succeeded} 条灵感！`);
+        }
+        return;
+      }
+
+      // Partial failure: remove already-saved cards so retry never duplicates them
+      entries = entries.filter((e) => {
+        if (e.status === "done") {
+          e.els.card.remove();
+          return false;
+        }
+        return true;
+      });
+      if (!entries.length) appendEntry({ focus: false });
+      setActiveEntry(entries[0].id);
+      setFormLocked(false);
+      syncSubmitState();
+      saveBtn.textContent = `重试失败的 ${failed.length} 条`;
+      toast(`已收录 ${succeeded} 条，${failed.length} 条失败，请检查后重试`);
     },
   }, "收进灵感库");
 
   showModal("收集新灵感", body, [
-    el("button", { type: "button", class: "btn", onClick: closeModal }, "取消"),
+    cancelBtn,
     saveBtn,
   ], { className: "modal-create-insp", onClose: cleanup });
 }
