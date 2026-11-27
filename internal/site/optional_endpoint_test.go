@@ -16,7 +16,10 @@ import (
 // to /api/ai/chat without repeatedly hitting the server.
 func TestOptionalEndpointsNegativeCache403And404(t *testing.T) {
 	t.Setenv("HANDRAW_HOME", t.TempDir())
-	_ = secrets.Set(secrets.SiteToken, "hwt_test_token_187")
+	t.Setenv("HANDRAW_SECRETS", "memory")
+	if err := secrets.Set(secrets.SiteToken, "hwt_test_token_187"); err != nil {
+		t.Fatalf("set test site token: %v", err)
+	}
 	t.Cleanup(func() { _ = secrets.Delete(secrets.SiteToken) })
 
 	var assistantHits atomic.Int32

@@ -40,8 +40,13 @@ func TestCommunityCatalogBootFallbackOmitsBearerToken(t *testing.T) {
 	defer mock.Close()
 
 	srv, _ := setupTestServer(t, mock.URL)
-	_ = secrets.Set(secrets.SiteToken, "hwt_logged_in_187")
+	if err := secrets.Set(secrets.SiteToken, "hwt_logged_in_187"); err != nil {
+		t.Fatalf("set test site token: %v", err)
+	}
 	t.Cleanup(func() { _ = secrets.Delete(secrets.SiteToken) })
+	if !srv.Site.LoggedIn() {
+		t.Fatalf("expected test server to be logged in before fallback check")
+	}
 
 	snap := srv.communityCatalog(context.Background(), true)
 	if bootHits.Load() != 1 {
