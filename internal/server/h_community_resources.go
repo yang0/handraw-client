@@ -114,7 +114,9 @@ func (s *Server) communityCatalog(ctx context.Context, force bool) communityCata
 		err = s.Site.Public(fetchCtx, http.MethodGet, "/api/v1/community/resources", nil, &resp)
 	}
 	if err != nil {
-		// Fallback to /api/boot?surface=catalog if site hasn't rolled out /api/v1/community/resources yet.
+		// Fallback to public /api/boot?surface=catalog if /api/v1/community/resources fails.
+		// Never attach a desktop hwt_ token to /api/boot because /api/boot is web-session-only
+		// and rejects hwt_ tokens with 403 token_scope_denied (#187).
 		var boot struct {
 			CommunityResources []communityRemoteItem `json:"communityResources"`
 			ExclusiveResources []communityRemoteItem `json:"exclusiveResources"`
@@ -123,11 +125,7 @@ func (s *Server) communityCatalog(ctx context.Context, force bool) communityCata
 				Username string `json:"username"`
 			} `json:"user"`
 		}
-		if s.Site.LoggedIn() {
-			err = s.Site.Do(fetchCtx, http.MethodGet, "/api/boot?surface=catalog", nil, &boot)
-		} else {
-			err = s.Site.Public(fetchCtx, http.MethodGet, "/api/boot?surface=catalog", nil, &boot)
-		}
+		err = s.Site.Public(fetchCtx, http.MethodGet, "/api/boot?surface=catalog", nil, &boot)
 		if err != nil {
 			if raw, ok := s.getMarketCache(cacheKey, 24*time.Hour); ok {
 				var stale communityCatalogSnapshot

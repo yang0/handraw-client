@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yang0/handraw-client/internal/netutil"
@@ -34,17 +35,46 @@ func ClientName(version string) string {
 // readable by any device token, so no extra scope is needed for balances.
 var Scopes = []string{"publish", "library", "studio"}
 
+type optionalEndpointCache struct {
+	mu     sync.Mutex
+	status map[string]int
+}
+
+func (oc *optionalEndpointCache) get(key string) (int, bool) {
+	if oc == nil {
+		return 0, false
+	}
+	oc.mu.Lock()
+	defer oc.mu.Unlock()
+	st, ok := oc.status[key]
+	return st, ok
+}
+
+func (oc *optionalEndpointCache) remember(key string, status int) {
+	if oc == nil {
+		return
+	}
+	oc.mu.Lock()
+	defer oc.mu.Unlock()
+	if oc.status == nil {
+		oc.status = map[string]int{}
+	}
+	oc.status[key] = status
+}
+
 type Client struct {
-	HTTP    *http.Client
-	Version string
-	base    func() string
+	HTTP     *http.Client
+	Version  string
+	base     func() string
+	optCache *optionalEndpointCache
 }
 
 func New(version string) *Client {
 	return &Client{
-		HTTP:    netutil.NewClient(60 * time.Second),
-		Version: version,
-		base:    func() string { return strings.TrimRight(settings.Get().SiteBase, "/") },
+		HTTP:     netutil.NewClient(60 * time.Second),
+		Version:  version,
+		base:     func() string { return strings.TrimRight(settings.Get().SiteBase, "/") },
+		optCache: &optionalEndpointCache{status: map[string]int{}},
 	}
 }
 
@@ -483,6 +513,11 @@ func (c *Client) ChatPlan(ctx context.Context, body map[string]any) (json.RawMes
 
 // AnalyzeStyle (W8): reference images -> visual-language traits + nearest styles.
 func (c *Client) AnalyzeStyle(ctx context.Context, images []string, purpose string, model ...string) (json.RawMessage, error) {
+	const endpoint = "/api/studio/analyze-style"
+	cacheKey := c.Base() + "|" + endpoint
+	if st, ok := c.optCache.get(cacheKey); ok {
+		return nil, &APIError{Status: st, Code: "endpoint_unavailable", Message: "网站暂未开放该专用端点"}
+	}
 	var out json.RawMessage
 	c2 := *c
 	c2.HTTP = &http.Client{Timeout: 3 * time.Minute, Transport: c.transport()}
@@ -490,16 +525,29 @@ func (c *Client) AnalyzeStyle(ctx context.Context, images []string, purpose stri
 	if len(model) > 0 && strings.TrimSpace(model[0]) != "" {
 		body["model"] = strings.TrimSpace(model[0])
 	}
-	err := c2.Do(ctx, "POST", "/api/studio/analyze-style", body, &out)
+	err := c2.Do(ctx, "POST", endpoint, body, &out)
+	var ae *APIError
+	if errors.As(err, &ae) && (ae.Status == 403 || ae.Status == 404) {
+		c.optCache.remember(cacheKey, ae.Status)
+	}
 	return out, err
 }
 
 // CanvasAssistant (W10): one sentence -> {nodes, edges}.
 func (c *Client) CanvasAssistant(ctx context.Context, body map[string]any) (json.RawMessage, error) {
+	const endpoint = "/api/studio/canvas-assistant"
+	cacheKey := c.Base() + "|" + endpoint
+	if st, ok := c.optCache.get(cacheKey); ok {
+		return nil, &APIError{Status: st, Code: "endpoint_unavailable", Message: "网站暂未开放该专用端点"}
+	}
 	var out json.RawMessage
 	c2 := *c
 	c2.HTTP = &http.Client{Timeout: 3 * time.Minute, Transport: c.transport()}
-	err := c2.Do(ctx, "POST", "/api/studio/canvas-assistant", body, &out)
+	err := c2.Do(ctx, "POST", endpoint, body, &out)
+	var ae *APIError
+	if errors.As(err, &ae) && (ae.Status == 403 || ae.Status == 404) {
+		c.optCache.remember(cacheKey, ae.Status)
+	}
 	return out, err
 }
 
