@@ -77,22 +77,81 @@ export function renderSourceChips(sources, busy, onRemove) {
 // =========================================================================
 
 const CHANNEL_OPTIONS = [
-  { value: "plugin", label: "工作台插件", repoPlaceholder: "https://github.com/owner/repo 或 npm:@scope/pkg" },
-  { value: "gallery", label: "图库插件", repoPlaceholder: "https://github.com/owner/gallery-repo 或 index.json / .zip 地址" },
-  { value: "skill", label: "Skills", repoPlaceholder: "https://github.com/owner/skill-repo 或 SKILL.md 仓库地址" },
-  { value: "obsidian", label: "写作插件", repoPlaceholder: "GitHub 仓库（owner/repo 或 https://github.com/owner/repo）" },
+  {
+    value: "plugin",
+    ico: "🧩",
+    label: "工作台插件",
+    desc: "扩展手绘风功能与新视图",
+    repoPlaceholder: "https://github.com/owner/repo 或 npm:@scope/pkg",
+  },
+  {
+    value: "gallery",
+    ico: "🖼",
+    label: "图库插件",
+    desc: "参考图、姿势、道具素材包",
+    repoPlaceholder: "https://github.com/owner/gallery-repo 或 index.json / .zip 地址",
+  },
+  {
+    value: "skill",
+    ico: "✨",
+    label: "AI Skills",
+    desc: "SKILL.md 写作或生图工作流",
+    repoPlaceholder: "https://github.com/owner/skill-repo 或 SKILL.md 仓库地址",
+  },
+  {
+    value: "obsidian",
+    ico: "📝",
+    label: "写作插件",
+    desc: "Obsidian 兼容 Markdown 扩展",
+    repoPlaceholder: "GitHub 仓库（owner/repo 或 https://github.com/owner/repo）",
+  },
+];
+
+const ROLE_OPTIONS = [
+  {
+    value: "recommend",
+    ico: "🌟",
+    title: "发现好物，顺手推荐",
+    desc: "看到别人做的好用插件或 Skill，推荐收录",
+  },
+  {
+    value: "author",
+    ico: "🛠",
+    title: "我自己开发的",
+    desc: "原创插件申请上架官方市场，展示给更多创作者",
+  },
 ];
 
 const SUBMISSION_STATUS_MAP = {
-  pending: { label: "待审核", cls: "badge badge-warn" },
-  approved: { label: "已通过", cls: "badge badge-ok" },
-  rejected: { label: "已拒绝", cls: "badge badge-err" },
+  pending: { label: "审核中", cls: "badge badge-warn" },
+  approved: { label: "已收录", cls: "badge badge-ok" },
+  rejected: { label: "未通过", cls: "badge badge-err" },
 };
 
-export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = null } = {}) {
+function inferAuthorFromRepoUrl(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  const gh = s.match(/^https?:\/\/(?:www\.)?(?:github\.com|gitee\.com)\/([A-Za-z0-9_.-]+)\/[A-Za-z0-9_.-]+/i);
+  if (gh) return gh[1];
+  const shortRepo = s.match(/^([A-Za-z0-9_.-]+)\/[A-Za-z0-9_.-]+$/);
+  if (shortRepo) return shortRepo[1];
+  return "";
+}
+
+function buildSubmissionNotes(role, rawNote) {
+  const tag = role === "author" ? "[作者自荐]" : "[好物推荐]";
+  const clean = String(rawNote || "").trim();
+  return clean ? `${tag} ${clean}` : tag;
+}
+
+export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = null, role = "" } = {}) {
   let mode = "form"; // "form" | "mine"
-  // 2-step flow (#157): "url" (just paste repo URL) -> "confirm" (AI parsed basic info, confirm & submit)
+  // 2-step flow (#157, #189): "url" (paste repo URL) -> "confirm" (AI parsed basic info, confirm & submit)
   let step = (prefill?.repoUrl && prefill?.name) ? "confirm" : "url";
+  let submitRole = (role === "author" || role === "recommend")
+    ? role
+    : ((prefill?.repoUrl && prefill?.name) ? "author" : "recommend");
+  let selectedChannel = CHANNEL_OPTIONS.some((c) => c.value === channel) ? channel : "plugin";
   let inspecting = false;
   let submitting = false;
   let mineData = null;
@@ -107,51 +166,108 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
     tags: Array.isArray(prefill?.tags) ? prefill.tags : [],
   };
 
-  const chSel = el("select", { class: "select" },
-    ...CHANNEL_OPTIONS.map((c) => el("option", { value: c.value, selected: c.value === channel }, c.label))
-  );
-  const currentMeta = () => CHANNEL_OPTIONS.find((c) => c.value === chSel.value) || CHANNEL_OPTIONS[0];
+  const currentMeta = () => CHANNEL_OPTIONS.find((c) => c.value === selectedChannel) || CHANNEL_OPTIONS[0];
+  const formId = "ext-submit-form";
 
   const repoIn = el("input", {
-    class: "input mono",
+    id: "ext-sub-repo",
+    name: "repoUrl",
+    class: "input mono ext-sub-repo-input",
     type: "text",
     value: prefill?.repoUrl || "",
-    placeholder: "粘贴 GitHub / Gitee 仓库地址（如 https://github.com/owner/repo 或 owner/repo）",
-    "aria-label": "仓库或资源地址",
+    placeholder: currentMeta().repoPlaceholder,
+    autocorrect: "off",
+    autocapitalize: "none",
+    spellcheck: "false",
+    enterkeyhint: "next",
+    "aria-describedby": "ext-sub-repo-help",
   });
   const nameIn = el("input", {
+    id: "ext-sub-name",
+    name: "name",
     class: "input",
     type: "text",
     value: prefill?.name || "",
-    placeholder: "扩展名称（必填）",
+    placeholder: "例如：公众号一键排版助手",
+    required: true,
+    minlength: "2",
+    maxlength: "80",
+    enterkeyhint: "next",
   });
   const descIn = el("textarea", {
+    id: "ext-sub-desc",
+    name: "description",
     class: "textarea",
     rows: "2",
-    placeholder: "一句话说明用途与核心亮点（必填）",
+    required: true,
+    minlength: "4",
+    maxlength: "600",
+    placeholder: "一句话说清它能做什么、最打动你的亮点是什么",
   });
   descIn.value = prefill?.description || "";
 
-  const errBox = el("div", { class: "muted", style: { color: "var(--err, #c62828)", fontSize: "12.5px", display: "none" } });
-  const bodyHost = el("div", { class: "col", style: { gap: "10px" } });
-  const tabHost = el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px" } });
-  const actionBtn = el("button", { type: "button", class: "btn btn-primary" }, "✨ AI 解析仓库");
+  const noteIn = el("textarea", {
+    id: "ext-sub-notes",
+    name: "notes",
+    class: "textarea",
+    rows: "2",
+    maxlength: "800",
+    placeholder: "",
+  });
+  noteIn.value = prefill?.notes || "";
 
-  const setErr = (msg, showLoginLink = false) => {
+  const syncPlaceholders = () => {
+    repoIn.placeholder = currentMeta().repoPlaceholder;
+    noteIn.placeholder = submitRole === "author"
+      ? "选填：适用场景、配置提示或作者联系方式，方便审核与后续对接"
+      : "选填：为什么推荐它？比如「写长文时特别顺手」「开箱即用」，帮助审核更快了解亮点";
+  };
+  syncPlaceholders();
+
+  const errBox = el("div", {
+    id: "ext-sub-error",
+    class: "ext-sub-error",
+    role: "alert",
+    "aria-live": "polite",
+    hidden: true,
+  });
+  const bodyHost = el("div", { class: "col ext-sub-body" });
+  const tabHost = el("div", { class: "row ext-sub-headbar" });
+  const actionBtn = el("button", { type: "submit", form: formId, class: "btn btn-primary" }, "✨ AI 自动识别");
+
+  const clearFieldInvalids = () => {
+    repoIn.removeAttribute("aria-invalid");
+    nameIn.removeAttribute("aria-invalid");
+    descIn.removeAttribute("aria-invalid");
+  };
+
+  const setErr = (msg, { showLoginLink = false, field = null } = {}) => {
     clear(errBox);
+    clearFieldInvalids();
     if (!msg) {
-      errBox.style.display = "none";
+      errBox.hidden = true;
       return;
     }
-    errBox.append(msg);
+    if (field) field.setAttribute("aria-invalid", "true");
+    errBox.append(el("span", { class: "ext-sub-error-ico", "aria-hidden": "true" }, "!"), el("span", null, msg));
     if (showLoginLink) {
       errBox.append(" ", el("a", {
         href: "#settings",
-        onClick: (ev) => { ev.preventDefault(); closeModal(); ctx.go("settings"); },
-      }, "去登录 →"));
+        class: "ext-sub-login-link",
+        onClick: (ev) => { ev.preventDefault(); closeModal(); ctx.go("settings", { anchor: "settings-account" }); },
+      }, "前往登录 →"));
     }
-    errBox.style.display = "block";
+    errBox.hidden = false;
   };
+
+  [repoIn, nameIn, descIn].forEach((inp) => {
+    inp.addEventListener("input", () => {
+      if (inp.getAttribute("aria-invalid") === "true") {
+        inp.removeAttribute("aria-invalid");
+      }
+      if (!errBox.hidden) setErr("");
+    });
+  });
 
   const loadMine = async () => {
     mineLoading = true;
@@ -162,22 +278,29 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
       mineData = { loggedIn: false, items: [], error: e.message };
     } finally {
       mineLoading = false;
-      if (bodyHost.isConnected) paintBody();
+      if (bodyHost.isConnected) {
+        paintTabs();
+        paintBody();
+      }
     }
   };
 
   const syncActionBtn = () => {
     if (mode !== "form") {
+      actionBtn.hidden = true;
       actionBtn.style.display = "none";
       return;
     }
+    actionBtn.hidden = false;
     actionBtn.style.display = "";
     if (step === "url") {
       actionBtn.disabled = inspecting;
-      actionBtn.textContent = inspecting ? "⏳ AI 正在读取解析…" : "✨ AI 解析仓库";
+      actionBtn.textContent = inspecting ? "⏳ AI 正在识别仓库…" : "✨ AI 自动识别";
     } else {
       actionBtn.disabled = submitting || inspecting;
-      actionBtn.textContent = submitting ? "提交中…" : "确认并提交收录";
+      actionBtn.textContent = submitting
+        ? "提交中…"
+        : (submitRole === "author" ? "确认提交上架" : "确认推荐收录");
     }
   };
 
@@ -186,7 +309,7 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
     setErr("");
     const rawUrl = repoIn.value.trim();
     if (!rawUrl) {
-      setErr("请先粘贴仓库地址（支持 GitHub / Gitee 链接或 owner/repo）");
+      setErr("请先粘贴仓库地址（支持 GitHub / Gitee 链接、owner/repo 或 npm 包名）", { field: repoIn });
       repoIn.focus();
       return;
     }
@@ -196,11 +319,11 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
     try {
       const res = await api("POST", "/api/extensions/submissions/inspect", {
         repoUrl: rawUrl,
-        channel: chSel.value,
+        channel: selectedChannel,
       });
       const info = res?.info || {};
       if (info.channel && CHANNEL_OPTIONS.some((c) => c.value === info.channel)) {
-        chSel.value = info.channel;
+        selectedChannel = info.channel;
       }
       if (info.repoUrl) repoIn.value = info.repoUrl;
       nameIn.value = info.name || nameIn.value || "";
@@ -210,14 +333,16 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
         detectedFiles: Array.isArray(res?.detectedFiles) ? res.detectedFiles : [],
         slug: info.slug || "",
         homepageUrl: info.homepageUrl || info.repoUrl || "",
-        authorName: info.authorName || "",
+        authorName: info.authorName || inferAuthorFromRepoUrl(info.repoUrl || rawUrl),
         version: info.version || "",
         tags: Array.isArray(info.tags) ? info.tags : [],
       };
+      syncPlaceholders();
       step = "confirm";
-      toast(parsedMeta.parsedBy === "ai" ? "AI 已解析仓库信息，请核对后提交" : "已从仓库读取基础信息，请核对后提交");
+      toast(parsedMeta.parsedBy === "ai" ? "AI 已自动整理仓库信息，核对无误即可提交" : "已读取仓库基础信息，核对后即可提交");
+      requestAnimationFrame(() => nameIn.focus());
     } catch (e) {
-      setErr(e?.message || "解析仓库失败，可检查地址或点下方手动填写基础信息");
+      setErr(e?.message || "仓库解析失败，可检查链接或点击下方「直接手动填写」", { field: repoIn });
     } finally {
       inspecting = false;
       syncActionBtn();
@@ -232,70 +357,190 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
     const repoUrl = repoIn.value.trim();
     const description = descIn.value.trim();
     if (!repoUrl) {
-      setErr("请填写仓库地址");
+      setErr("请填写仓库或资源地址", { field: repoIn });
+      repoIn.focus();
       return;
     }
     if (name.length < 2) {
-      setErr("请确认扩展名称（至少 2 个字符）");
+      setErr("请填写插件名称（至少 2 个字符）", { field: nameIn });
       nameIn.focus();
       return;
     }
     if (description.length < 4) {
-      setErr("请确认一句话简介（至少 4 个字符）");
+      setErr("请填写一句话亮点或用途（至少 4 个字符）", { field: descIn });
       descIn.focus();
       return;
     }
     submitting = true;
     syncActionBtn();
     try {
+      const inferredAuthor = parsedMeta.authorName || (submitRole === "recommend" ? inferAuthorFromRepoUrl(repoUrl) : "");
       await api("POST", "/api/extensions/submissions", {
-        channel: chSel.value,
+        channel: selectedChannel,
         name,
         slug: parsedMeta.slug || prefill?.slug || "",
         repoUrl,
         homepageUrl: parsedMeta.homepageUrl || repoUrl,
         description,
-        authorName: parsedMeta.authorName || "",
+        authorName: inferredAuthor,
         version: parsedMeta.version || "",
         tags: parsedMeta.tags || [],
+        notes: buildSubmissionNotes(submitRole, noteIn.value),
       });
-      toast("收录申请已提交，审核通过后将上架官方市场");
+      toast(submitRole === "author"
+        ? "提交成功！审核通过后将上架官方市场 🎉"
+        : "感谢推荐！已加入收录队列，审核通过后将分享给更多用户 🎉");
       mode = "mine";
       mineData = null;
       paintTabs();
       await loadMine();
     } catch (e) {
-      const msg = e?.message || "提交失败";
-      setErr(msg, e?.status === 401 || msg.includes("登录"));
+      const msg = e?.message || "提交失败，请稍后重试";
+      setErr(msg, { showLoginLink: e?.status === 401 || msg.includes("登录") });
     } finally {
       submitting = false;
       if (actionBtn.isConnected) syncActionBtn();
     }
   };
 
+  const handlePasteRepo = async () => {
+    try {
+      if (!navigator.clipboard?.readText) {
+        toast("请直接按 Ctrl/⌘+V 粘贴链接");
+        repoIn.focus();
+        return;
+      }
+      const txt = (await navigator.clipboard.readText() || "").trim();
+      if (!txt) {
+        toast("剪贴板里还没有链接");
+        repoIn.focus();
+        return;
+      }
+      repoIn.value = txt;
+      setErr("");
+      repoIn.focus();
+    } catch {
+      toast("请按 Ctrl/⌘+V 粘贴仓库链接");
+      repoIn.focus();
+    }
+  };
+
   repoIn.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && mode === "form" && step === "url") {
+    if (e.key === "Enter" && !e.isComposing && mode === "form" && step === "url") {
       e.preventDefault();
       runInspect();
     }
   });
 
-  actionBtn.addEventListener("click", () => {
-    if (mode !== "form") return;
-    if (step === "url") runInspect();
-    else runSubmit();
-  });
+  const buildRoleFieldset = () => {
+    return el("fieldset", { class: "ext-sub-fieldset" },
+      el("legend", { class: "ext-sub-legend" }, "你是推荐好物，还是提交自研作品？"),
+      el("div", { class: "ext-sub-role-grid" },
+        ...ROLE_OPTIONS.map((opt) => {
+          const rid = `ext-sub-role-${opt.value}`;
+          const radio = el("input", {
+            type: "radio",
+            id: rid,
+            name: "submitRole",
+            value: opt.value,
+            class: "visually-hidden",
+            checked: submitRole === opt.value,
+            onChange: () => {
+              if (!radio.checked) return;
+              submitRole = opt.value;
+              syncPlaceholders();
+              syncActionBtn();
+              paintBody();
+            },
+          });
+          return el("label", {
+            for: rid,
+            class: "ext-sub-role-card" + (submitRole === opt.value ? " is-selected" : ""),
+          },
+            radio,
+            el("span", { class: "ext-sub-role-ico", "aria-hidden": "true" }, opt.ico),
+            el("span", { class: "ext-sub-role-copy" },
+              el("strong", null, opt.title),
+              el("small", null, opt.desc)
+            )
+          );
+        })
+      )
+    );
+  };
+
+  const buildChannelFieldset = (compact = false) => {
+    return el("fieldset", { class: "ext-sub-fieldset" },
+      el("legend", { class: "ext-sub-legend" }, compact ? "所属插件类目" : "选择插件类目（AI 识别时也会自动校正）"),
+      el("div", { class: "ext-sub-ch-grid" + (compact ? " is-compact" : "") },
+        ...CHANNEL_OPTIONS.map((opt) => {
+          const cid = `ext-sub-ch-${compact ? "c-" : ""}${opt.value}`;
+          const radio = el("input", {
+            type: "radio",
+            id: cid,
+            name: "channel",
+            value: opt.value,
+            class: "visually-hidden",
+            checked: selectedChannel === opt.value,
+            onChange: () => {
+              if (!radio.checked) return;
+              selectedChannel = opt.value;
+              syncPlaceholders();
+              paintBody();
+            },
+          });
+          return el("label", {
+            for: cid,
+            class: "ext-sub-ch-card" + (selectedChannel === opt.value ? " is-selected" : ""),
+          },
+            radio,
+            el("span", { class: "ext-sub-ch-ico", "aria-hidden": "true" }, opt.ico),
+            el("span", { class: "ext-sub-ch-copy" },
+              el("strong", null, opt.label),
+              !compact ? el("small", null, opt.desc) : null
+            )
+          );
+        })
+      )
+    );
+  };
+
+  const buildStepProgress = () => {
+    return el("nav", { class: "ext-sub-steps", "aria-label": "提交步骤" },
+      el("ol", { class: "ext-sub-step-list" },
+        el("li", {
+          class: "ext-sub-step" + (step === "url" ? " is-active" : " is-done"),
+          "aria-current": step === "url" ? "step" : null,
+        },
+          el("span", { class: "ext-sub-step-num", "aria-hidden": "true" }, step === "url" ? "1" : "✓"),
+          el("span", null, "贴链接识别")
+        ),
+        el("li", { class: "ext-sub-step-sep", "aria-hidden": "true" }),
+        el("li", {
+          class: "ext-sub-step" + (step === "confirm" ? " is-active" : ""),
+          "aria-current": step === "confirm" ? "step" : null,
+        },
+          el("span", { class: "ext-sub-step-num", "aria-hidden": "true" }, "2"),
+          el("span", null, "核对并提交")
+        )
+      )
+    );
+  };
 
   const paintTabs = () => {
     clear(tabHost);
-    tabHost.appendChild(el("div", { class: "pm-seg-group", role: "tablist" },
+    tabHost.appendChild(el("div", { class: "pm-seg-group", role: "tablist", "aria-label": "插件提交与记录切换" },
       el("button", {
         type: "button",
+        role: "tab",
+        "aria-selected": String(mode === "form"),
         class: "pm-seg-btn" + (mode === "form" ? " is-active" : ""),
         onClick: () => { mode = "form"; paintTabs(); paintBody(); },
-      }, "提交申请"),
+      }, "推荐 / 提交"),
       el("button", {
         type: "button",
+        role: "tab",
+        "aria-selected": String(mode === "mine"),
         class: "pm-seg-btn" + (mode === "mine" ? " is-active" : ""),
         onClick: () => {
           mode = "mine";
@@ -303,9 +548,11 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
           if (!mineData) loadMine();
           else paintBody();
         },
-      }, `我的申请${mineData?.items?.length ? ` (${mineData.items.length})` : ""}`)
+      }, `我的记录${mineData?.items?.length ? ` (${mineData.items.length})` : ""}`)
     ));
-    if (mode === "mine") {
+    if (mode === "form") {
+      tabHost.appendChild(buildStepProgress());
+    } else {
       tabHost.appendChild(el("button", {
         type: "button",
         class: "btn btn-sm",
@@ -318,114 +565,174 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
   const paintBody = () => {
     clear(bodyHost);
     if (mode === "form") {
+      const form = el("form", {
+        id: formId,
+        class: "col ext-sub-form",
+        novalidate: true,
+        onSubmit: (ev) => {
+          ev.preventDefault();
+          if (step === "url") runInspect();
+          else runSubmit();
+        },
+      });
+
       if (step === "url") {
-        bodyHost.append(
-          el("div", { class: "field" },
-            el("label", null, "仓库 / 资源地址"),
-            repoIn
+        form.append(
+          el("div", { class: "ext-sub-hero" },
+            el("div", { class: "ext-sub-hero-copy" },
+              el("strong", null, "好用的扩展，让更多人一起用上"),
+              el("p", null, "不管是你自己开发的，还是看到别人做得超顺手的宝藏插件，贴个链接就能推荐——AI 自动帮你填表，审核通过后上架官方市场。")
+            )
           ),
-          el("p", { class: "muted", style: { margin: "0", fontSize: "12.5px", lineHeight: "1.55" } },
-            "只需粘贴一个 GitHub / Gitee 仓库地址（或 index.json / SKILL.md 链接），AI 会自动读取并整理名称、栏目、简介和作者信息，解析后确认即可提交。"
+          buildRoleFieldset(),
+          buildChannelFieldset(false),
+          el("div", { class: "field ext-sub-field" },
+            el("div", { class: "ext-sub-label-row" },
+              el("label", { for: "ext-sub-repo" }, "仓库或资源链接 ", el("span", { class: "ext-sub-req", "aria-hidden": "true" }, "*")),
+              el("button", {
+                type: "button",
+                class: "ext-sub-paste-btn",
+                onClick: handlePasteRepo,
+              }, "📋 从剪贴板粘贴")
+            ),
+            repoIn,
+            el("span", { id: "ext-sub-repo-help", class: "ext-sub-help" },
+              "支持 GitHub / Gitee 链接、owner/repo、npm:@scope/pkg、SKILL.md 或 index.json 地址"
+            )
           ),
           inspecting
-            ? el("div", { class: "card row", style: { padding: "10px 12px", gap: "8px", alignItems: "center", fontSize: "12.5px" } },
-                el("span", null, "⏳"),
-                el("span", { class: "muted" }, "正在读取仓库清单与 README 并由 AI 自动归纳基础信息…")
+            ? el("div", { class: "ext-sub-loading", role: "status", "aria-live": "polite" },
+                el("span", { class: "ext-sub-spinner", "aria-hidden": "true" }),
+                el("span", null, "AI 正在读取仓库清单与 README，自动提取名称、类目与亮点简介…")
               )
-            : el("div", { class: "row", style: { justifyContent: "flex-end" } },
+            : el("div", { class: "ext-sub-skip-row" },
                 el("button", {
                   type: "button",
-                  class: "btn btn-sm",
+                  class: "ext-sub-link-btn",
                   onClick: () => {
                     setErr("");
                     step = "confirm";
                     parsedMeta.parsedBy = "manual";
-                    syncActionBtn();
+                    if (submitRole === "recommend" && !parsedMeta.authorName) {
+                      parsedMeta.authorName = inferAuthorFromRepoUrl(repoIn.value);
+                    }
+                    paintTabs();
                     paintBody();
+                    requestAnimationFrame(() => (repoIn.value.trim() ? nameIn : repoIn).focus());
                   },
-                }, "跳过解析，直接填基础信息 →")
+                }, "不想等解析？直接手动填写基础信息 →")
               ),
           errBox
         );
+        bodyHost.appendChild(form);
         return;
       }
 
-      // Step 2: Compact Confirmation Card (basic info only — no 10-field wall!)
+      // Step 2: Compact Confirmation Card + optional recommendation reason
       const statusText = parsedMeta.parsedBy === "ai"
-        ? `✨ AI 已自动解析${parsedMeta.detectedFiles.length ? `（读取 ${parsedMeta.detectedFiles.slice(0, 3).join("、")}）` : ""}`
+        ? `✨ AI 已自动识别${parsedMeta.detectedFiles.length ? `（${parsedMeta.detectedFiles.slice(0, 3).join("、")}）` : ""}`
         : parsedMeta.parsedBy === "manifest"
-        ? `✓ 已从仓库清单自动提取${parsedMeta.detectedFiles.length ? `（${parsedMeta.detectedFiles.slice(0, 3).join("、")}）` : ""}`
+        ? `✓ 已提取仓库清单${parsedMeta.detectedFiles.length ? `（${parsedMeta.detectedFiles.slice(0, 3).join("、")}）` : ""}`
         : parsedMeta.parsedBy === "prefill"
-        ? "已带入当前扩展信息，确认后即可提交"
-        : "填写以下基础信息即可提交";
+        ? "已带入当前扩展信息，核对后即可提交"
+        : "填写以下几项基础信息即可提交";
 
       const metaBits = [
+        submitRole === "author" ? "🛠 作者自荐" : "🌟 好物推荐",
         parsedMeta.authorName ? `作者：${parsedMeta.authorName}` : "",
-        parsedMeta.version ? `版本：v${parsedMeta.version.replace(/^v/i, "")}` : "",
-        parsedMeta.tags?.length ? `标签：${parsedMeta.tags.join(" · ")}` : "",
+        parsedMeta.version ? `v${parsedMeta.version.replace(/^v/i, "")}` : "",
       ].filter(Boolean);
 
-      const nodes = [
-        el("div", { class: "card col", style: { gap: "6px", padding: "10px 12px", background: "var(--paper)" } },
-          el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
-            el("span", { class: "badge badge-accent" }, statusText),
-            el("div", { class: "row", style: { gap: "6px" } },
-              el("button", {
-                type: "button",
-                class: "btn btn-sm",
-                disabled: inspecting,
-                onClick: runInspect,
-              }, inspecting ? "解析中…" : "↻ AI 重解析"),
-              el("button", {
-                type: "button",
-                class: "btn btn-sm",
-                onClick: () => { setErr(""); step = "url"; syncActionBtn(); paintBody(); repoIn.focus(); },
-              }, "换个地址")
-            )
-          ),
-          el("div", { class: "mono muted", style: { fontSize: "11.5px", wordBreak: "break-all" } }, repoIn.value.trim() || "（未填仓库地址）"),
-          metaBits.length
-            ? el("div", { class: "muted", style: { fontSize: "11.5px" } }, metaBits.join("  ·  "))
-            : null
+      const summaryCard = el("div", { class: "ext-sub-summary" },
+        el("div", { class: "ext-sub-summary-top" },
+          el("span", { class: "badge badge-accent" }, statusText),
+          el("div", { class: "row", style: { gap: "6px" } },
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              disabled: inspecting,
+              onClick: runInspect,
+            }, inspecting ? "识别中…" : "↻ 重新识别"),
+            el("button", {
+              type: "button",
+              class: "btn btn-sm",
+              onClick: () => {
+                setErr("");
+                step = "url";
+                paintTabs();
+                paintBody();
+                requestAnimationFrame(() => repoIn.focus());
+              },
+            }, "← 换个链接")
+          )
         ),
+        el("div", { class: "mono ext-sub-summary-url" }, repoIn.value.trim() || "（尚未填写仓库链接）"),
+        el("div", { class: "ext-sub-summary-meta" },
+          ...metaBits.map((b) => el("span", { class: "ext-sub-meta-chip" }, b)),
+          ...(parsedMeta.tags || []).slice(0, 4).map((t) => el("span", { class: "ext-sub-meta-chip is-tag" }, `#${t}`))
+        )
+      );
+
+      form.append(...[
+        summaryCard,
         !repoIn.value.trim()
-          ? el("div", { class: "field" }, el("label", null, "仓库地址 *"), repoIn)
+          ? el("div", { class: "field ext-sub-field" },
+              el("label", { for: "ext-sub-repo" }, "仓库或资源链接 ", el("span", { class: "ext-sub-req", "aria-hidden": "true" }, "*")),
+              repoIn
+            )
           : null,
-        el("div", { class: "split" },
-          el("div", { class: "field" }, el("label", null, "所属栏目"), chSel),
-          el("div", { class: "field" }, el("label", null, "名称 *"), nameIn)
+        buildChannelFieldset(true),
+        el("div", { class: "field ext-sub-field" },
+          el("label", { for: "ext-sub-name" }, "插件名称 ", el("span", { class: "ext-sub-req", "aria-hidden": "true" }, "*")),
+          nameIn
         ),
-        el("div", { class: "field" }, el("label", null, "一句话简介 *"), descIn),
+        el("div", { class: "field ext-sub-field" },
+          el("label", { for: "ext-sub-desc" }, "一句话亮点 / 用途 ", el("span", { class: "ext-sub-req", "aria-hidden": "true" }, "*")),
+          descIn
+        ),
+        el("div", { class: "field ext-sub-field" },
+          el("label", { for: "ext-sub-notes" }, submitRole === "author" ? "补充说明 / 联系方式（选填）" : "推荐理由（选填）"),
+          noteIn
+        ),
         errBox,
-      ].filter(Boolean);
-      bodyHost.append(...nodes);
+      ].filter(Boolean));
+      bodyHost.appendChild(form);
       return;
     }
 
     if (mineLoading) {
-      bodyHost.appendChild(el("div", { class: "muted", style: { padding: "18px 0", textAlign: "center" } }, "正在加载申请记录…"));
+      bodyHost.appendChild(el("div", { class: "ext-sub-empty muted", role: "status" }, "正在加载你的推荐与提交记录…"));
       return;
     }
     if (mineData && mineData.loggedIn === false) {
-      bodyHost.appendChild(el("div", { class: "card col", style: { gap: "8px", alignItems: "center", padding: "20px" } },
-        el("span", { class: "muted" }, "登录后可查看你的插件收录申请与审核进度。"),
+      bodyHost.appendChild(el("div", { class: "ext-sub-empty col" },
+        el("strong", null, "登录后同步你的推荐记录"),
+        el("span", { class: "muted" }, "登录手绘风账号即可提交插件收录，并实时查看审核进度。"),
         el("button", {
           type: "button",
           class: "btn btn-sm btn-primary",
-          onClick: () => { closeModal(); ctx.go("settings"); },
+          onClick: () => { closeModal(); ctx.go("settings", { anchor: "settings-account" }); },
         }, "前往登录")
       ));
       return;
     }
     const items = Array.isArray(mineData?.items) ? mineData.items : [];
     if (!items.length) {
-      bodyHost.appendChild(el("div", { class: "card muted", style: { padding: "20px", textAlign: "center" } }, "你还没有提交过插件收录申请。"));
+      bodyHost.appendChild(el("div", { class: "ext-sub-empty col" },
+        el("strong", null, "还没有推荐或提交过插件"),
+        el("span", { class: "muted" }, "发现好用的工作台插件、图库、Skill 或写作插件？点左上角切回「推荐 / 提交」，贴个链接 30 秒就能分享给大家。"),
+        el("button", {
+          type: "button",
+          class: "btn btn-sm btn-primary",
+          onClick: () => { mode = "form"; step = "url"; paintTabs(); paintBody(); requestAnimationFrame(() => repoIn.focus()); },
+        }, "🧩 立即推荐一个")
+      ));
       return;
     }
-    const listWrap = el("div", { class: "col", style: { gap: "8px", maxHeight: "360px", overflowY: "auto" } });
+    const listWrap = el("div", { class: "col ext-sub-mine-list" });
     items.forEach((it) => {
-      const sb = SUBMISSION_STATUS_MAP[it.status] || { label: it.status || "待审核", cls: "badge" };
-      listWrap.appendChild(el("div", { class: "card col", style: { gap: "4px", padding: "10px 12px" } },
+      const sb = SUBMISSION_STATUS_MAP[it.status] || { label: it.status || "审核中", cls: "badge" };
+      listWrap.appendChild(el("div", { class: "ext-sub-mine-card" },
         el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center", gap: "6px", flexWrap: "wrap" } },
           el("div", { class: "row", style: { gap: "6px", alignItems: "center", flexWrap: "wrap" } },
             el("strong", null, it.name),
@@ -436,7 +743,7 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
         ),
         el("div", { class: "mono muted", style: { fontSize: "11.5px", wordBreak: "break-all" } }, it.repoUrl),
         it.adminNote
-          ? el("div", { class: "muted", style: { fontSize: "12px", borderTop: "1px dashed var(--line)", paddingTop: "4px", marginTop: "2px" } }, `审核备注：${it.adminNote}`)
+          ? el("div", { class: "ext-sub-admin-note" }, `审核反馈：${it.adminNote}`)
           : null
       ));
     });
@@ -446,11 +753,11 @@ export function openExtensionSubmitModal(ctx, { channel = "plugin", prefill = nu
   paintTabs();
   paintBody();
 
-  showModal("申请收录到官方市场", el("div", { class: "col", style: { gap: "12px" } }, tabHost, bodyHost), [
+  showModal("推荐 / 提交好用的插件", el("div", { class: "col", style: { gap: "12px" } }, tabHost, bodyHost), [
     el("button", { type: "button", class: "btn", onClick: closeModal }, "关闭"),
     actionBtn,
-  ]);
-  if (step === "url") setTimeout(() => repoIn.focus(), 30);
+  ], { className: "modal-ext-submit" });
+  if (step === "url") requestAnimationFrame(() => repoIn.focus());
 }
 
 // =========================================================================

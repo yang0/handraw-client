@@ -1,5 +1,6 @@
 import { api, clear, el, toast } from "./api.js";
 import { openLayoutEditorModal, openStyleEditorModal } from "./views/resource-editor.js";
+import { openExtensionSubmitModal } from "./views/plugins-channels.js";
 
 let cachedStyles = null;
 let cachedLayouts = null;
@@ -74,6 +75,11 @@ export function initPalette(ctx) {
     { label: "浏览风格画廊", hint: "画廊", run: () => ctx.go("atlas") },
     { label: "画风骰子", hint: "灵感", run: () => ctx.go("atlas", { tab: "dice" }) },
     { label: "本地作品库", hint: "作品", run: () => ctx.go("works") },
+    {
+      label: "🧩 推荐或提交插件",
+      hint: "插件 · 自研/推荐",
+      run: () => openExtensionSubmitModal(ctx, { channel: "plugin", role: "recommend" }),
+    },
     { label: "插件与官方市场", hint: "插件", run: () => ctx.go("plugins") },
     { label: "检查版本更新", hint: "操作", run: () => api("POST", "/api/update/check").then(() => toast("已检查更新")) },
     {

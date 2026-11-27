@@ -14,6 +14,7 @@ import { renderInspirations } from "./views/inspirations.js";
 import { renderPlugins } from "./views/plugins.js";
 import { renderSettings } from "./views/settings.js";
 import { openLayoutEditorModal, openStyleEditorModal } from "./views/resource-editor.js";
+import { openExtensionSubmitModal } from "./views/plugins-channels.js";
 
 const VIEWS = {
   home: renderHome,
@@ -683,6 +684,9 @@ async function start() {
   }
 
   settingsNavBtn?.addEventListener("click", () => go("settings"));
+  document.getElementById("btn-submit-plugin")?.addEventListener("click", () => {
+    openExtensionSubmitModal(ctx, { channel: "plugin", role: "recommend" });
+  });
   document.getElementById("btn-account")?.addEventListener("click", () => go("settings", { anchor: "settings-account" }));
   document.getElementById("btn-update")?.addEventListener("click", () => runImmediateUpdate());
   document.getElementById("btn-queue")?.addEventListener("click", async () => {
