@@ -2,6 +2,26 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.12 (2026-11-26)
+
+### Fixes
+- **Updater Double-Apply Fix, Pack Thumbnail Throttling & Task Reconcile Cleanup (#192)**:
+  - Serialized `Updater.Apply()` and marked the binary as applied immediately on success so graceful shutdown (`ApplyIfReady`) never attempts a second rename during "重启升级", eliminating spurious Windows `Access is denied` errors; added `.old.<pid>` fallback when `.old` is locked and cleaned up `.old*` backups in `CleanupOld()`.
+  - Bounded `/files/pack/images/` lazy thumbnail fetches with a 4-way concurrency cap, per-path singleflight deduplication, and `429`/`503` backoff retries so single-file users browsing the Atlas no longer trigger upstream media rate limits.
+  - Updated `reconcileSitePublishedWork` to skip failed/unsubmitted images without a `RemoteTaskID` and negative-cache terminal 404 misses, eliminating repeated `/api/studio/tasks` 404 storms after synchronous generation failures.
+  - Redacted non-`Users` Windows drive directory paths (`<WIN_PATH>\...`) and normalized full local paths in error fingerprints so identical failures across install folders aggregate under one fingerprint.
+- **X (Twitter) Inspiration Image Clipping & Third-Party Media Rendering (#193)**:
+  - Upgraded embedded `handraw-clipper` to `v1.0.5` with `pbs.twimg.com` host permission so Chrome fetches clipped images directly as `imageDataUrl` (≤ 8 MiB) using the browser's own proxy/session.
+  - Hardened `fetchRemoteImageBytes` with `netutil.DoWithRetry`, `Accept`/`Referer` headers, and `.avif`/`.heic` extension sniffing; returned `imageWarning` on download failure and added `POST /api/inspirations/{id}/refetch-image` with a one-click **「重新拉取本地图」** action in the detail modal.
+  - Updated `remoteThumb()` to proxy only site-hosted/relative media via `/files/remote` and render third-party URLs directly (`referrerpolicy="no-referrer"`), eliminating 100% 403 broken images on X inspirations.
+- **Inspiration Vault Batch Delete & Clear Selection Label (#195)**:
+  - Renamed the ambiguous batch-mode **「清空」** button to **「取消全选」** and added a real **「🗑 批量删除」** action backed by `POST /api/inspirations/batch-delete` with an in-app `showModal` confirmation dialog and safe local cache cleanup (`library/inspirations/` only).
+
+### Diagnostics & Observability
+- **Full-Pipeline Error Capture v2 (#194)**:
+  - Added `severity` (`critical` / `error` / `warn`) and host-only `domain` fields with independent per-tier hourly rate limits so warning bursts never starve crash or panic reports.
+  - Added capture-phase frontend resource error reporting (`media_broken` / `asset_load_fail`), `api_network` & unexpected `api_protocol_4xx` tracking, `observeMedia` proxy monitoring for `/files/*` and gallery image routes, and silent-degradation hooks for inspiration image fetches, clipper failures, technical generation job failures, background update downloads, and launch-at-login errors.
+
 ## v0.6.11 (2026-11-26)
 
 ### Privacy & Trust
