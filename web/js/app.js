@@ -495,7 +495,8 @@ async function start() {
           : (pct > 0 ? `下载中 ${pct}%` : "下载更新中…");
         setTopbarUpdateBtn("busy", label, pct, `正在后台下载并校验新版 ${upd.latest || ""}`.trim());
       } else if (upd.ready) {
-        const verTag = upd.latest ? `v${String(upd.latest).replace(/^v/i, "")}` : "新版";
+        const readyVer = String(upd.stagedVersion || upd.latest || "").replace(/^v/i, "").trim();
+        const verTag = readyVer ? `v${readyVer}` : "新版";
         const tip = upd.applyFailed
           ? "上次退出自动替换未成功，点击立即重启升级或手动重装"
           : (upd.autoApplyOnQuit

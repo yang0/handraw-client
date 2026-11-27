@@ -335,3 +335,76 @@ func TestApplyPreventsDoubleApplyOnQuitAndFallbackOldName(t *testing.T) {
 		t.Fatalf("expected cleanupOldFor to remove %s, stat err=%v", pidBackup, err)
 	}
 }
+
+// #196: Starting Download() for a newer release must immediately clear any
+// previous Ready/AutoApplyOnQuit/StagedVersion flags so Downloading and Ready
+// are strictly mutually exclusive across topbar and Settings UI.
+func TestDownloadClearsPreviousReadyState(t *testing.T) {
+	curAsset := assetName()
+	if curAsset == "" {
+		t.Skip("self-update binary assets are only published for windows/darwin (#180)")
+	}
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origPub := PublicKey
+	PublicKey = base64.StdEncoding.EncodeToString(pub)
+	t.Cleanup(func() { PublicKey = origPub })
+
+	payload := []byte("signed-handraw-v0.6.12-binary-payload")
+	sum := sha256.Sum256(payload)
+	sumsText := fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), curAsset)
+	sig := ed25519.Sign(priv, append([]byte("handraw release 0.6.12\n"), []byte(sumsText)...))
+	sigB64 := base64.StdEncoding.EncodeToString(sig)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + curAsset:
+			_, _ = w.Write(payload)
+		case "/SHA256SUMS":
+			_, _ = w.Write([]byte(sumsText))
+		case "/SHA256SUMS.sig":
+			_, _ = w.Write([]byte(sigB64))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	u := New("v0.6.9", t.TempDir())
+	u.Mode = func() string { return AutoModeAuto }
+	u.mu.Lock()
+	u.release = &Release{
+		Tag: "v0.6.12",
+		Assets: []Asset{
+			{Name: curAsset, URL: srv.URL + "/" + curAsset, Size: int64(len(payload))},
+			{Name: "SHA256SUMS", URL: srv.URL + "/SHA256SUMS"},
+			{Name: "SHA256SUMS.sig", URL: srv.URL + "/SHA256SUMS.sig"},
+		},
+	}
+	u.status.Latest = "0.6.12"
+	u.status.Available = true
+	// Simulate stale Ready state from an older staged build.
+	u.status.Ready = true
+	u.status.AutoApplyOnQuit = true
+	u.status.StagedVersion = "0.6.10"
+	u.mu.Unlock()
+
+	var sawDownloadingWithReady bool
+	u.OnChange = func(st Status) {
+		if st.Downloading && (st.Ready || st.AutoApplyOnQuit || st.StagedVersion != "") {
+			sawDownloadingWithReady = true
+		}
+	}
+	if err := u.Download(context.Background()); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if sawDownloadingWithReady {
+		t.Fatalf("Downloading and Ready/AutoApplyOnQuit/StagedVersion overlapped during Download")
+	}
+	st := u.Status()
+	if st.Downloading || !st.Ready || st.StagedVersion != "0.6.12" {
+		t.Fatalf("expected clean Ready state for 0.6.12 after Download, got %+v", st)
+	}
+}

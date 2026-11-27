@@ -41,6 +41,10 @@ function createAccountAvatar(accRes, displayName) {
 }
 
 export async function renderSettings(root, ctx, params = {}) {
+  if (typeof root._settingsUpdateUnsub === "function") {
+    try { root._settingsUpdateUnsub(); } catch {}
+    root._settingsUpdateUnsub = null;
+  }
   const seq = (root._settingsRenderSeq = (root._settingsRenderSeq || 0) + 1);
   const scrollContainerEl = root.closest(".main") || root;
   const savedScrollTop = params?.preserveScroll ? scrollContainerEl.scrollTop : null;
@@ -1498,7 +1502,127 @@ export async function renderSettings(root, ctx, params = {}) {
     },
   }, "检查版本与资源更新");
 
+  let curUpdState = { ...(updRes || {}) };
   let dlUpdBtn = null;
+  let applyUpdBtn = null;
+  const updActionsRow = el("div", { class: "row" });
+  const updBannerSlot = el("div");
+  const latestVerEl = el("strong", { class: "mono" }, curUpdState.latest || "未检查");
+
+  function buildDownloadBtn() {
+    const btn = el("button", {
+      type: "button",
+      class: "btn btn-sm btn-primary btn-update-inline",
+      onClick: async () => {
+        setInlineActionBtn(btn, "busy", "准备下载…", 8);
+        try {
+          await api("POST", "/api/update/download");
+          startDownloadPoll();
+        } catch (e) {
+          setInlineActionBtn(btn, "error", "下载失败，重试", 0, e?.message || "下载失败");
+        }
+      },
+    }, "下载客户端更新");
+    return btn;
+  }
+
+  function buildApplyBtn() {
+    const btn = el("button", {
+      type: "button",
+      class: "btn btn-sm btn-primary btn-update-inline",
+      onClick: async () => {
+        setInlineActionBtn(btn, "busy", "正在重启升级…", 100);
+        try {
+          await api("POST", "/api/update/apply");
+        } catch (e) {
+          setInlineActionBtn(btn, "error", "升级失败，重试", 0, e?.message || "升级失败");
+        }
+      },
+    }, "重启完成升级");
+    return btn;
+  }
+
+  function renderUpdateDynamic(st) {
+    curUpdState = { ...curUpdState, ...(st || {}) };
+    const isDownloading = Boolean(curUpdState.downloading);
+    const isReady = Boolean(curUpdState.ready) && !isDownloading;
+    const isAvailable = Boolean(curUpdState.available);
+    const pct = Math.max(0, Math.min(100, Number(curUpdState.progress || 0)));
+    const latestTag = curUpdState.latest ? `v${String(curUpdState.latest).replace(/^v/i, "")}` : "新版本";
+    const stagedVerRaw = String(curUpdState.stagedVersion || curUpdState.latest || "").replace(/^v/i, "").trim();
+    const readyVer = stagedVerRaw ? `v${stagedVerRaw}` : "新版本";
+    const effectiveMode = curUpdState.autoMode || curAutoUpdateMode;
+
+    latestVerEl.textContent = curUpdState.latest || "未检查";
+
+    // Mutually exclusive primary CTA: downloading -> busy download button;
+    // ready -> apply button only; available -> download button only (#196).
+    clear(updActionsRow);
+    updActionsRow.appendChild(checkUpdBtn);
+    if (isDownloading) {
+      if (!dlUpdBtn) dlUpdBtn = buildDownloadBtn();
+      const label = effectiveMode === "auto"
+        ? (pct > 0 ? `后台下载 ${pct}%` : "后台下载更新…")
+        : (pct > 0 ? `下载中 ${pct}%` : "下载更新中…");
+      setInlineActionBtn(dlUpdBtn, "busy", label, pct);
+      updActionsRow.appendChild(dlUpdBtn);
+    } else if (isReady) {
+      if (!applyUpdBtn) applyUpdBtn = buildApplyBtn();
+      updActionsRow.appendChild(applyUpdBtn);
+    } else if (isAvailable) {
+      if (!dlUpdBtn) dlUpdBtn = buildDownloadBtn();
+      if (curUpdState.error) {
+        setInlineActionBtn(dlUpdBtn, "error", "下载失败，重试", 0, curUpdState.error);
+      } else {
+        setInlineActionBtn(dlUpdBtn, "idle", "下载客户端更新", 0);
+      }
+      updActionsRow.appendChild(dlUpdBtn);
+    }
+    updActionsRow.append(resUpdBtn, skillUpdBtn);
+
+    clear(updBannerSlot);
+    if (isDownloading) {
+      updBannerSlot.appendChild(
+        el("div", { class: "update-auto-banner" },
+          el("span", null, `正在后台下载并校验新版 ${latestTag}（${pct}%），完成后可一键重启或在关闭软件时自动升级。`)
+        )
+      );
+    } else if (isReady) {
+      const msg = curUpdState.applyFailed
+        ? `新版本 ${readyVer} 已下载并校验通过，但上次退出自动替换失败，请点击「重启完成升级」或手动重装。`
+        : (curUpdState.autoApplyOnQuit
+          ? `新版本 ${readyVer} 已在后台完成下载与签名校验：可点击「重启完成升级」，或直接继续使用并在关闭软件时自动生效。`
+          : `新版本 ${readyVer} 已下载并校验通过，点击「重启完成升级」即可生效。`);
+      updBannerSlot.appendChild(el("div", { class: "update-auto-banner is-ready" }, el("span", null, msg)));
+    } else if (effectiveMode === "auto") {
+      const extra = curUpdState.autoDeferredUntil ? "（已检测到新版，正在按平滑削峰窗口排队后台下载；也可直接点击上方按钮立即下载）" : "";
+      updBannerSlot.appendChild(
+        el("div", { class: "update-auto-banner" },
+          el("span", { class: "muted" }, `已开启无感自动更新：新版会在空闲时后台静默下载并校验 ed25519 签名，退出软件时自动完成升级。${extra}`)
+        )
+      );
+    } else {
+      updBannerSlot.appendChild(
+        el("div", { class: "update-auto-banner row", style: { justifyContent: "space-between", alignItems: "center" } },
+          el("span", { class: "muted" }, "开启无感自动更新后，无需每次手动点击下载，新版本会在后台静默准备并在关闭软件时自动生效。"),
+          el("button", {
+            type: "button",
+            class: "btn btn-sm btn-primary",
+            onClick: async () => {
+              try {
+                await api("PATCH", "/api/settings", { autoUpdateMode: "auto", autoCheckUpdate: true });
+                toast("已开启无感自动更新");
+                renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
+              } catch (e) {
+                toast(e?.message || "切换失败");
+              }
+            },
+          }, "开启自动更新（推荐）")
+        )
+      );
+    }
+  }
+
   function startDownloadPoll() {
     clearInterval(dlPollTimer);
     dlPollTimer = setInterval(async () => {
@@ -1507,61 +1631,13 @@ export async function renderSettings(root, ctx, params = {}) {
         return;
       }
       const cur = await api("GET", "/api/update").catch(() => null);
-      if (!cur || !dlUpdBtn) return;
-      if (cur.ready) {
+      if (!cur) return;
+      renderUpdateDynamic(cur);
+      if (!cur.downloading) {
         clearInterval(dlPollTimer);
-        setInlineActionBtn(dlUpdBtn, "done", "下载完成", 100);
-        setTimeout(() => {
-          if (root.isConnected && root._settingsRenderSeq === seq) {
-            renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
-          }
-        }, 700);
-      } else if (cur.downloading) {
-        const pct = Math.max(0, Math.min(100, Number(cur.progress || 0)));
-        setInlineActionBtn(dlUpdBtn, "busy", pct > 0 ? `下载中 ${pct}%` : "下载更新中…", pct);
-      } else if (cur.error) {
-        clearInterval(dlPollTimer);
-        setInlineActionBtn(dlUpdBtn, "error", "下载失败，重试", 0, cur.error);
-      } else {
-        clearInterval(dlPollTimer);
-        setInlineActionBtn(dlUpdBtn, "idle", "下载客户端更新", 0);
       }
-    }, 600);
+    }, 800);
   }
-
-  if (updRes.available) {
-    dlUpdBtn = el("button", {
-      type: "button",
-      class: "btn btn-sm btn-primary btn-update-inline",
-      onClick: async () => {
-        setInlineActionBtn(dlUpdBtn, "busy", "准备下载…", 8);
-        try {
-          await api("POST", "/api/update/download");
-          startDownloadPoll();
-        } catch (e) {
-          setInlineActionBtn(dlUpdBtn, "error", "下载失败，重试", 0, e?.message || "下载失败");
-        }
-      },
-    }, "下载客户端更新");
-    if (updRes.downloading) {
-      const pct = Math.max(0, Math.min(100, Number(updRes.progress || 0)));
-      setInlineActionBtn(dlUpdBtn, "busy", pct > 0 ? `下载中 ${pct}%` : "下载更新中…", pct);
-      startDownloadPoll();
-    }
-  }
-
-  const applyUpdBtn = updRes.ready ? el("button", {
-    type: "button",
-    class: "btn btn-sm btn-primary btn-update-inline",
-    onClick: async () => {
-      setInlineActionBtn(applyUpdBtn, "busy", "正在重启升级…", 100);
-      try {
-        await api("POST", "/api/update/apply");
-      } catch (e) {
-        setInlineActionBtn(applyUpdBtn, "error", "升级失败，重试", 0, e?.message || "升级失败");
-      }
-    },
-  }, "重启完成升级") : null;
 
   const resUpdBtn = el("button", {
     type: "button",
@@ -1632,7 +1708,7 @@ export async function renderSettings(root, ctx, params = {}) {
       ),
       el("div", { class: "economy-stat" },
         el("span", { class: "muted" }, "远端最新版本"),
-        el("strong", { class: "mono" }, updRes.latest || "未检查")
+        latestVerEl
       ),
       el("div", { class: "economy-stat" },
         el("span", { class: "muted" }, "本地资源包"),
@@ -1645,48 +1721,30 @@ export async function renderSettings(root, ctx, params = {}) {
           : "未加载")
       )
     ),
-    el("div", { class: "row" },
-      checkUpdBtn,
-      dlUpdBtn,
-      applyUpdBtn,
-      resUpdBtn,
-      skillUpdBtn
-    ),
-    (() => {
-      const effectiveMode = updRes.autoMode || curAutoUpdateMode;
-      if (updRes.ready) {
-        const readyVer = updRes.latest ? `v${String(updRes.latest).replace(/^v/i, "")}` : "新版本";
-        const msg = updRes.applyFailed
-          ? `新版本 ${readyVer} 已下载并校验通过，但上次退出自动替换失败，请点击「重启完成升级」或手动重装。`
-          : (updRes.autoApplyOnQuit
-            ? `新版本 ${readyVer} 已在后台完成下载与签名校验：可点击「重启完成升级」，或直接继续使用并在关闭软件时自动生效。`
-            : `新版本 ${readyVer} 已下载并校验通过，点击「重启完成升级」即可生效。`);
-        return el("div", { class: "update-auto-banner is-ready" }, el("span", null, msg));
-      }
-      if (effectiveMode === "auto") {
-        const extra = updRes.autoDeferredUntil ? "（已检测到新版，正在按平滑削峰窗口排队后台下载；也可直接点击上方按钮立即下载）" : "";
-        return el("div", { class: "update-auto-banner" },
-          el("span", { class: "muted" }, `已开启无感自动更新：新版会在空闲时后台静默下载并校验 ed25519 签名，退出软件时自动完成升级。${extra}`)
-        );
-      }
-      return el("div", { class: "update-auto-banner row", style: { justifyContent: "space-between", alignItems: "center" } },
-        el("span", { class: "muted" }, "开启无感自动更新后，无需每次手动点击下载，新版本会在后台静默准备并在关闭软件时自动生效。"),
-        el("button", {
-          type: "button",
-          class: "btn btn-sm btn-primary",
-          onClick: async () => {
-            try {
-              await api("PATCH", "/api/settings", { autoUpdateMode: "auto", autoCheckUpdate: true });
-              toast("已开启无感自动更新");
-              renderSettings(root, ctx, { tab: "settings-updates", preserveScroll: true });
-            } catch (e) {
-              toast(e?.message || "切换失败");
-            }
-          },
-        }, "开启自动更新（推荐）")
-      );
-    })()
+    updActionsRow,
+    updBannerSlot
   );
+
+  renderUpdateDynamic(curUpdState);
+  if (curUpdState.downloading) {
+    startDownloadPoll();
+  }
+  const unsubUpdate = onEvent((msg) => {
+    if (!root.isConnected || root._settingsRenderSeq !== seq) {
+      unsubUpdate();
+      clearInterval(dlPollTimer);
+      return;
+    }
+    if (msg?.type === "update" && msg.data) {
+      renderUpdateDynamic(msg.data);
+      if (msg.data.downloading) {
+        startDownloadPoll();
+      } else {
+        clearInterval(dlPollTimer);
+      }
+    }
+  });
+  root._settingsUpdateUnsub = unsubUpdate;
 
   // Two-column settings shell: left tab list + single active panel on the right
   const tabDefs = [

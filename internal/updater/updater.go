@@ -487,6 +487,9 @@ func (u *Updater) Download(ctx context.Context) error {
 	u.status.Downloading = true
 	u.status.Progress = 0
 	u.status.Error = ""
+	u.status.Ready = false
+	u.status.AutoApplyOnQuit = false
+	u.status.StagedVersion = ""
 	onChange := u.OnChange
 	snap := u.status
 	u.mu.Unlock()
