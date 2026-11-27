@@ -209,7 +209,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) (any, err
 	}
 	if s.Updater != nil && (body.AutoUpdateMode != nil || body.AutoCheckUpdate != nil || (body.AcceptPrivacyConsent != nil && *body.AcceptPrivacyConsent)) {
 		s.Updater.SyncMode()
-		if updated.HasPrivacyConsent() && updated.EffectiveAutoUpdateMode() == "auto" {
+		if updated.HasPrivacyConsent() {
 			s.Updater.NudgeAuto()
 		}
 	}

@@ -18,11 +18,10 @@ export function openPrivacyConsentDialog(settingsObj = {}, { initialGate = false
     const s = settingsObj || {};
     const siteBase = String(s.siteBase || "https://handraw-style.com").replace(/\/+$/, "");
     // Before acceptance, backend gates still block telemetry/autostart/auto-update;
-    // in the first-run dialog itself, pre-check all three recommended preferences
-    // so users can accept with one click or uncheck any item before continuing (#197).
+    // in the first-run dialog itself, pre-check telemetry and launch-at-login so
+    // users can accept with one click or uncheck before continuing (#197, #198).
     const initTelemetry = initialGate ? true : !s.telemetryDisabled;
     const initLaunch = initialGate ? true : Boolean(s.launchAtLogin);
-    const initAutoUpdate = initialGate ? true : (s.autoUpdateMode || (s.autoCheckUpdate === false ? "off" : "auto")) !== "off";
 
     const telChk = el("input", {
       id: "consent-telemetry",
@@ -35,12 +34,6 @@ export function openPrivacyConsentDialog(settingsObj = {}, { initialGate = false
       name: "launchAtLogin",
       type: "checkbox",
       checked: initLaunch,
-    });
-    const updChk = el("input", {
-      id: "consent-autoupdate",
-      name: "autoUpdate",
-      type: "checkbox",
-      checked: initAutoUpdate,
     });
 
     const statusBox = el("div", {
@@ -111,8 +104,8 @@ export function openPrivacyConsentDialog(settingsObj = {}, { initialGate = false
             acceptPrivacyConsent: true,
             telemetryDisabled: !telChk.checked,
             launchAtLogin: launchChk.checked,
-            autoUpdateMode: updChk.checked ? "auto" : "off",
-            autoCheckUpdate: updChk.checked,
+            autoUpdateMode: "auto",
+            autoCheckUpdate: true,
           });
           if (!initialGate) toast("隐私与使用偏好已保存");
           finish(true, res?.settings || null);
@@ -131,7 +124,7 @@ export function openPrivacyConsentDialog(settingsObj = {}, { initialGate = false
         el("p", { class: "consent-sub" },
           initialGate
             ? "点击同意前不会发送任何数据；以下偏好随时可在「设置」修改。"
-            : "随时调整诊断、自启与更新偏好，保存后立即生效。"
+            : "随时调整诊断与开机自启偏好，保存后立即生效。"
         )
       ),
       el("div", { class: "consent-promises" },
@@ -158,7 +151,7 @@ export function openPrivacyConsentDialog(settingsObj = {}, { initialGate = false
             telChk,
             el("span", { class: "consent-opt-copy" },
               el("strong", null, "匿名使用统计与脱敏崩溃报告"),
-              el("small", null, "仅含版本与脱敏报错，不含提示词、图片与密钥，帮我们更快修 Bug")
+              el("small", null, "帮助我们更好地改善产品体验与修复问题；仅含版本与脱敏报错，不含提示词、图片与密钥")
             )
           ),
           el("label", { for: "consent-launch", class: "consent-opt" },
@@ -166,13 +159,6 @@ export function openPrivacyConsentDialog(settingsObj = {}, { initialGate = false
             el("span", { class: "consent-opt-copy" },
               el("strong", null, "开机静默启动"),
               el("small", null, "后台托盘待命，随时唤出快门窗")
-            )
-          ),
-          el("label", { for: "consent-autoupdate", class: "consent-opt" },
-            updChk,
-            el("span", { class: "consent-opt-copy" },
-              el("strong", null, "自动检查与静默更新"),
-              el("small", null, "空闲下载并校验数字签名，关闭时平滑升级")
             )
           )
         )

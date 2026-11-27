@@ -239,7 +239,8 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 		if !st.HasPrivacyConsent() {
 			return updater.AutoModeOff
 		}
-		return st.EffectiveAutoUpdateMode()
+		// Auto-check and silent background update is a built-in fixed capability (#198).
+		return updater.AutoModeAuto
 	}
 	upd.IsBusy = func() bool {
 		return jm.Active() > 0
