@@ -64,8 +64,38 @@
 .studio-choices-items {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
   min-width: 0;
+}
+.studio-resolution-hint-slot {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  margin-left: 2px;
+}
+.studio-resolution-hint-slot[hidden] {
+  display: none;
+}
+.studio-resolution-hint {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.studio-resolution-hint.is-insufficient {
+  color: var(--accent);
+}
+.studio-resolution-recharge {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.studio-resolution-recharge:hover {
+  color: var(--accent-hover, #99331b);
 }
 .studio-choice {
   position: relative;

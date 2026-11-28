@@ -23,11 +23,12 @@ export function parseEconomy(balRes) {
   const cashObj = rawEco?.cash && typeof rawEco.cash === "object" ? rawEco.cash : {};
 
   const rawBal = cashObj.balanceCents ?? rawEco?.balanceCents ?? rawEco?.walletBalanceCents ?? rawEco?.balance ?? null;
+  const cashBalanceCents = rawBal !== null && rawBal !== undefined && rawBal !== "" && Number.isFinite(Number(rawBal))
+    ? Number(rawBal)
+    : null;
   const rawCashTotalMicros = cashObj.totalMicros !== null && cashObj.totalMicros !== undefined && cashObj.totalMicros !== "" && Number.isFinite(Number(cashObj.totalMicros))
     ? Number(cashObj.totalMicros)
-    : (rawBal !== null && rawBal !== undefined && rawBal !== "" && Number.isFinite(Number(rawBal))
-      ? Number(rawBal) * 10000
-      : null);
+    : (cashBalanceCents !== null ? cashBalanceCents * 10000 : null);
   const cashHeldCentsMicros = (Number(cashObj.heldCents ?? rawEco?.heldCents ?? 0) || 0) * 10000;
   const cashHeldAiMicros = Number(cashObj.heldAiMicros ?? 0) || 0;
 
@@ -63,6 +64,7 @@ export function parseEconomy(balRes) {
         remaining: Number(q.remaining ?? 0) || 0,
         total: Number(q.total ?? 0) || 0,
         held: Number(q.held ?? 0) || 0,
+        policyUnits: Number(q.policyUnits ?? q.total ?? 0) || 0,
         claimableUnits: Number(q.claimableUnits ?? 0) || 0,
         eligibility: q.eligibility || "",
       });
@@ -71,12 +73,13 @@ export function parseEconomy(balRes) {
     const legacyFree = rawEco?.freeRemaining ?? rawEco?.dailyFreeRemaining ?? rawEco?.freeQuotaRemaining;
     if (legacyFree !== undefined && legacyFree !== null && Number.isFinite(Number(legacyFree))) {
       const n = Number(legacyFree);
-      quotaTiers.push({ resolution: "1K", remaining: n, total: n, held: 0, claimableUnits: 0, eligibility: "" });
+      quotaTiers.push({ resolution: "1K", remaining: n, total: n, held: 0, policyUnits: n, claimableUnits: 0, eligibility: "" });
     }
   }
 
   const tier1k = quotaTiers.find((q) => q.resolution === "1K") || quotaTiers[0] || null;
   const totalFreeRemaining = quotaTiers.reduce((sum, q) => sum + q.remaining, 0);
+  const specs = Array.isArray(rawEco?.specs) ? rawEco.specs : [];
 
   return {
     loggedIn: Boolean(balRes?.loggedIn),
@@ -89,6 +92,7 @@ export function parseEconomy(balRes) {
     availableMicros,
     heldMicros,
     balanceCents,
+    cashBalanceCents,
     heldCents,
     points,
     pendingPoints,
@@ -96,7 +100,102 @@ export function parseEconomy(balRes) {
     quotaTiers,
     tier1k,
     totalFreeRemaining,
+    specs,
   };
+}
+
+function matchEconomySpec(specs, modelRef, resolution, quality) {
+  const allowed = (Array.isArray(specs) ? specs : []).filter((s) => s && s.enabled !== false && s.verified !== false);
+  if (!allowed.length) return null;
+  const rawModel = String(modelRef || "").startsWith("site:")
+    ? String(modelRef).slice(5).trim().toLowerCase()
+    : String(modelRef || "").trim().toLowerCase();
+  const wantRes = String(resolution || "1k").trim().toLowerCase();
+  const wantQual = String(quality || "").trim().toLowerCase();
+  if (!rawModel) return null;
+
+  const byId = allowed.find((s) => String(s.id || "").trim().toLowerCase() === rawModel);
+  if (byId) return byId;
+
+  const sameModel = allowed.filter((s) => String(s.model || "").trim().toLowerCase() === rawModel);
+  if (!sameModel.length) return null;
+  if (wantRes && wantQual) {
+    const exact = sameModel.find(
+      (s) => String(s.resolution || "").trim().toLowerCase() === wantRes
+        && String(s.quality || "").trim().toLowerCase() === wantQual
+    );
+    if (exact) return exact;
+  }
+  if (wantRes) {
+    const byRes = sameModel.find((s) => String(s.resolution || "").trim().toLowerCase() === wantRes);
+    if (byRes) return byRes;
+  }
+  return sameModel[0] || null;
+}
+
+/**
+ * Computes the per-resolution inline hint shown after the 1K/2K/4K pills,
+ * aligned with handraw-web (#592):
+ *  - Shows "免费剩 N 张" when the active resolution has available free quota.
+ *  - Shows "验证邮箱领免费额度，去验证" when unpaid-only spec requires email verification.
+ *  - Shows "余额不足，去充值" when no free quota remains and cash balance is below the spec price.
+ *  - Returns null when balance is sufficient, user is logged out, or using a third-party provider.
+ */
+export function computeResolutionHint({
+  loggedIn = false,
+  modelRef = "",
+  resolution = "1k",
+  quality = "",
+  economy = null,
+  siteBase = "https://handraw-style.com",
+} = {}) {
+  if (!loggedIn || !String(modelRef || "").startsWith("site:")) return null;
+  if (!economy || !economy.hasData) return null;
+
+  const spec = matchEconomySpec(economy.specs, modelRef, resolution, quality);
+  const resKey = String(spec?.resolution || resolution || "1k").trim().toLowerCase();
+  const row = (Array.isArray(economy.quotaTiers) ? economy.quotaTiers : []).find(
+    (q) => String(q?.resolution || "").trim().toLowerCase() === resKey
+  );
+  const remaining = Number(row?.remaining || 0);
+  const claimableUnits = Number(row?.claimableUnits || 0);
+  const policyUnits = Number(row?.policyUnits ?? row?.total ?? 0);
+  const eligibility = String(row?.eligibility || "");
+  const freeAvail = remaining + (eligibility === "claim_required" ? claimableUnits : 0);
+
+  if (freeAvail > 0) {
+    return {
+      kind: "free",
+      text: `免费剩 ${freeAvail} 张`,
+    };
+  }
+
+  const walletUrl = `${String(siteBase || "https://handraw-style.com").replace(/\/+$/, "")}/?view=wallet`;
+  if (!spec || spec.priceCents === null || spec.priceCents === undefined) {
+    if (eligibility === "verification_required" && policyUnits > 0) {
+      return {
+        kind: "verify",
+        text: "验证邮箱领免费额度，",
+        actionText: "去验证",
+        actionTitle: "前往钱包验证邮箱（不丢当前内容）",
+        actionUrl: walletUrl,
+      };
+    }
+    return null;
+  }
+
+  const bal = economy.cashBalanceCents;
+  if (!economy.unavailable && typeof bal === "number" && Number.isFinite(bal) && bal < Number(spec.priceCents || 0)) {
+    return {
+      kind: "insufficient",
+      text: "余额不足，",
+      actionText: "去充值",
+      actionTitle: "前往钱包充值（不丢当前内容）",
+      actionUrl: walletUrl,
+    };
+  }
+
+  return null;
 }
 
 export function formatEconomyPillText(eco) {

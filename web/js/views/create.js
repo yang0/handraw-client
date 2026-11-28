@@ -1,5 +1,5 @@
-import { api, clear, closeModal, el, galleryImg, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
-import { maybeHandleInsufficientCashError } from "../economy.js";
+import { api, clear, closeModal, el, galleryImg, localImg, money, onEvent, openURL, packImg, showModal, toast } from "../api.js";
+import { computeResolutionHint, maybeHandleInsufficientCashError, parseEconomy } from "../economy.js";
 import { openRecipeEditor, openRecipeManagerModal } from "./recipes.js";
 import { mountSlotPanels } from "../plugins-host.js";
 import { createTextModelPicker } from "../skills-ui.js";
@@ -47,8 +47,7 @@ export function buildGroupedModelSelect(modelsData = {}, currentRef = "", opts =
     const ref = "site:" + id;
     if (seenRefs.has(ref)) continue;
     seenRefs.add(ref);
-    const note = m.supportsFreeQuota || m.freeQuota ? "可免额" : "";
-    const label = [m.label || m.name || id, note].filter(Boolean).join(" · ");
+    const label = m.label || m.name || id;
     gSite.appendChild(el("option", { value: ref }, label));
   }
   if (gSite.children.length > 0) sel.appendChild(gSite);
@@ -235,7 +234,7 @@ function runToTurn(run, fallbackRatio = "3:4", fallbackMode = "graphic-text") {
 export async function renderCreate(root, ctx, params = {}) {
   const host = studioMount(root);
 
-  const [stylesRes, layoutsRes, colorsRes, tonesRes, recRes, modRes, settRes, recentRes] = await Promise.all([
+  const [stylesRes, layoutsRes, colorsRes, tonesRes, recRes, modRes, settRes, recentRes, balRes] = await Promise.all([
     api("GET", "/api/resources/styles").catch(() => ({ items: [] })),
     api("GET", "/api/resources/layouts").catch(() => ({ items: [] })),
     api("GET", "/api/resources/colors").catch(() => ({ items: [] })),
@@ -244,6 +243,7 @@ export async function renderCreate(root, ctx, params = {}) {
     api("GET", "/api/models").catch(() => ({ site: [], providers: [] })),
     api("GET", "/api/settings").catch(() => ({ settings: {} })),
     api("GET", "/api/works?limit=12&hasImages=1").catch(() => ({ items: [] })),
+    api("GET", "/api/account/balance").catch(() => ({ loggedIn: false })),
   ]);
   if (!host.isConnected) return;
 
@@ -253,6 +253,9 @@ export async function renderCreate(root, ctx, params = {}) {
   const tones = tonesRes.items || [];
   let recipes = recRes.items || [];
   const settings = settRes.settings || {};
+  const siteBase = String(settings.siteBase || "https://handraw-style.com").replace(/\/+$/, "");
+  let economyState = parseEconomy(balRes);
+  let needsBalanceRefreshOnFocus = false;
 
   const p = params.preset || params.recipe || {};
   const session = studioSession(host, "studio", {
@@ -457,11 +460,17 @@ export async function renderCreate(root, ctx, params = {}) {
     session.persist();
   }, { hasDefaultStyle: false });
 
-  const resChoices = choices("清晰度", [["1k", "1K"], ["2k", "2K"], ["4k", "4K"]], state.resolution, (v) => {
+  const resChoices = choices("分辨率", [["1k", "1K"], ["2k", "2K"], ["4k", "4K"]], state.resolution, (v) => {
     state.resolution = v;
     refreshQuote();
     session.persist();
   }, { inline: true });
+  const resHintSlot = el("span", {
+    class: "studio-resolution-hint-slot",
+    "data-resolution-hint-slot": "",
+    hidden: true,
+  });
+  resChoices.querySelector(".studio-choices-items")?.appendChild(resHintSlot);
 
   const qualChoices = choices("质量", [["standard", "标准"], ["high", "高质量"]], state.quality, (v) => {
     state.quality = v;
@@ -942,8 +951,6 @@ export async function renderCreate(root, ctx, params = {}) {
     modelSel
   );
 
-  const quoteBadge = el("span", { class: "badge make-image-quote", title: "生成前预估费用" }, "计算中…");
-
   const clearBtn = el("button", {
     type: "button",
     class: "btn btn-sm make-image-clear-btn",
@@ -1106,7 +1113,7 @@ export async function renderCreate(root, ctx, params = {}) {
         planModelField,
         imageModelField
       ),
-      el("div", { class: "make-image-composer-actions" }, quoteBadge, clearBtn, stopBtn, submitBtn)
+      el("div", { class: "make-image-composer-actions" }, clearBtn, stopBtn, submitBtn)
     )
   );
   composer.addEventListener("submit", (e) => {
@@ -1836,35 +1843,59 @@ export async function renderCreate(root, ctx, params = {}) {
     ].filter(Boolean));
   }
 
-  // ---------- Actions: Quote, Dice, Recipe, Export, Cancel, Plan & Generate ----------
-  async function refreshQuote() {
-    const turn = currentTurn();
-    const count = state.composerMode === "image"
-      ? 1
-      : (turn && turn.items.length > 1 && state.composerMode !== "chat" ? turn.items.length : 1);
-    try {
-      const q = await api("POST", "/api/quote", {
-        modelRef: state.modelRef,
-        resolution: state.resolution,
-        quality: state.quality,
-        count,
-      });
-      quoteBadge.className = "badge make-image-quote" + (q.overLimit ? " badge-warn" : (q.freeCount > 0 || q.source === "provider" ? " badge-ok" : ""));
-      if (q.source === "provider") {
-        quoteBadge.textContent = "自带接口";
-        quoteBadge.title = "使用第三方接口直出，不消耗网站额度";
-      } else if (q.freeCount > 0 && q.totalCents === 0) {
-        quoteBadge.textContent = `免费 ${q.freeCount} 次`;
-        quoteBadge.title = `当前可用免费额度（${q.freeCount} 次）`;
-      } else {
-        quoteBadge.textContent = `约 ${money(q.totalCents)}/张`;
-        quoteBadge.title = `单张约 ${money(q.totalCents)}` + (q.freeCount > 0 ? `（含免费 ${q.freeCount} 次）` : "");
-      }
-    } catch {
-      quoteBadge.textContent = state.modelRef.startsWith("site:") && !modRes.loggedIn ? "需登录" : "待报价";
-      quoteBadge.title = state.modelRef.startsWith("site:") && !modRes.loggedIn ? "使用网站模型需先登录账号" : "生成前预估费用";
-      quoteBadge.className = "badge make-image-quote";
+  // ---------- Actions: Resolution Hint, Dice, Recipe, Export, Cancel, Plan & Generate ----------
+  function refreshQuote() {
+    clear(resHintSlot);
+    const hint = computeResolutionHint({
+      loggedIn: Boolean(economyState?.loggedIn),
+      modelRef: state.modelRef,
+      resolution: state.resolution,
+      quality: state.quality,
+      economy: economyState,
+      siteBase,
+    });
+    if (!hint) {
+      resHintSlot.hidden = true;
+      return;
     }
+    const span = el("span", {
+      class: `studio-resolution-hint ${hint.kind === "free" ? "is-free" : "is-insufficient"}`,
+      "data-resolution-quota-hint": "",
+      role: "status",
+      "aria-live": "polite",
+    }, hint.text);
+    if (hint.actionText && hint.actionUrl) {
+      const link = el("a", {
+        class: "studio-resolution-recharge",
+        href: hint.actionUrl,
+        title: hint.actionTitle || "",
+        "data-inline-recharge": "",
+        onClick: (e) => {
+          e.preventDefault();
+          needsBalanceRefreshOnFocus = true;
+          openURL(hint.actionUrl);
+        },
+      }, hint.actionText);
+      span.appendChild(link);
+    }
+    resHintSlot.appendChild(span);
+    resHintSlot.hidden = false;
+  }
+
+  let balanceRefreshInFlight = null;
+  async function refreshEconomyBalance() {
+    if (balanceRefreshInFlight) return balanceRefreshInFlight;
+    balanceRefreshInFlight = api("GET", "/api/account/balance")
+      .then((res) => {
+        if (!root.isConnected) return;
+        economyState = parseEconomy(res);
+        refreshQuote();
+      })
+      .catch(() => {})
+      .finally(() => {
+        balanceRefreshInFlight = null;
+      });
+    return balanceRefreshInFlight;
   }
 
   async function rollDice() {
@@ -2340,7 +2371,15 @@ export async function renderCreate(root, ctx, params = {}) {
       unsub();
       return;
     }
+    if (msg.type === "account") {
+      void refreshEconomyBalance();
+      return;
+    }
     if (msg.type !== "job" && msg.type !== "run") return;
+    const status = String(msg.data?.status || "").toLowerCase();
+    if (status === "done" || status === "failed" || status === "canceled" || status === "cancelled") {
+      void refreshEconomyBalance();
+    }
     const rid = msg.data?.runId || msg.data?.id;
     if (!rid) return;
     const tracked = (state.turns || []).some((t) => t.runIds?.includes(rid));
@@ -2351,6 +2390,17 @@ export async function renderCreate(root, ctx, params = {}) {
       syncRunFromServer(rid);
     }, 120));
   });
+
+  const onWindowFocus = () => {
+    if (!root.isConnected) {
+      window.removeEventListener("focus", onWindowFocus);
+      return;
+    }
+    if (!needsBalanceRefreshOnFocus) return;
+    needsBalanceRefreshOnFocus = false;
+    void refreshEconomyBalance();
+  };
+  window.addEventListener("focus", onWindowFocus);
 
   // Keyboard ← / → navigation for multi-image focused stage
   const onKeyDown = (e) => {
