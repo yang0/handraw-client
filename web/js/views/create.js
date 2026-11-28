@@ -946,33 +946,61 @@ export async function renderCreate(root, ctx, params = {}) {
 
   const clearBtn = el("button", {
     type: "button",
-    class: "make-image-clear-btn hidden",
-    title: "清空当前描述与参考图",
+    class: "btn btn-sm make-image-clear-btn",
+    title: "清空所有参数、参考图与输入内容并开启新创作",
     "aria-label": "清空表单",
     onClick: () => {
-      if (state.composerMode === "image") {
-        const item = currentItem();
-        if (item) item.subject = "";
-      } else {
-        state.draftInput = "";
-      }
+      if (isPlanning || isSubmitting) return;
+      state.recipeId = "";
+      state.style = "";
+      state.style2 = "";
+      state.fusion = false;
+      state.layout = "";
+      state.color = "";
+      state.tone = "";
+      state.mood = "";
+      state.whitespace = "";
+      state.audience = "";
+      state.businessScene = "";
+      state.extra = "";
+      state.mode = "graphic-text";
+      state.ratio = "3:4";
+      state.resolution = "1k";
+      state.quality = "standard";
+      state.directCount = 1;
+      state.redraw = false;
+      state.sc021Type = "";
+      state.sc022Name = "";
+      state.sc022Pinyin = "";
+      state.moreOpen = false;
+      state.forkOf = "";
+      state.forkTitle = "";
+      state.draftInput = "";
       state.refs = [];
+      state.refMeta = [];
       state.galleryRefs = [];
+      state.turns = [];
+      state.activeTurnIndex = -1;
+      state.selectedItemIndex = 0;
+      state.viewMode = "focused";
+      state.composerMode = "chat";
+      state.composerExpanded = false;
+      lastStageRenderKey = "";
       subjectInput.value = "";
-      autoResizeTextarea();
-      renderRefs();
-      syncClearBtn();
+      controls.resetMoreCollapse?.();
+      syncLeftControls();
+      renderForkBanner();
+      syncComposerExpand();
+      renderAll();
+      refreshQuote();
       session.persist();
+      toast("已清空表单并开启新创作");
+      subjectInput.focus();
     },
-  }, "清空");
+  }, "清空表单");
 
   syncClearBtn = () => {
-    const hasDraft = Boolean(
-      (subjectInput.value || "").trim()
-      || (state.refs && state.refs.length)
-      || (state.galleryRefs && state.galleryRefs.length)
-    );
-    clearBtn.classList.toggle("hidden", !hasDraft);
+    clearBtn.disabled = Boolean(isPlanning || isSubmitting);
   };
 
   const stopBtn = el("button", {
@@ -1154,7 +1182,7 @@ export async function renderCreate(root, ctx, params = {}) {
     resChoices.sync(state.resolution);
     qualChoices.sync(state.quality);
     redrawChk.checked = Boolean(state.redraw);
-    if (state.recipeId) recSel.value = state.recipeId;
+    recSel.value = state.recipeId || "";
   }
 
   function syncComposerExpand() {
@@ -1918,11 +1946,8 @@ export async function renderCreate(root, ctx, params = {}) {
     if (common.mode) state.mode = common.mode;
     if (common.ratio) state.ratio = common.ratio;
     if (!state.color && common.colors?.length) state.color = common.colors[0];
-    if (!state.tone && common.tones?.length) state.tone = common.tones[0];
-    if (!state.mood && common.moods?.length) state.mood = common.moods.join("，");
-    if (!state.whitespace && common.whitespace) state.whitespace = common.whitespace;
-    if (!state.audience && common.audience) state.audience = common.audience;
-    if (!state.businessScene && common.businessScene) state.businessScene = common.businessScene;
+    // User-only "More Settings" fields (tone/mood/whitespace/audience/businessScene)
+    // are never auto-populated by Skill planning (#204, handraw-web#588).
     syncLeftControls();
   }
 
@@ -2135,10 +2160,10 @@ export async function renderCreate(root, ctx, params = {}) {
       const effectiveStyle2 = state.fusion ? (state.style2 || "") : "";
       const effectiveMode = state.mode || common.mode || "graphic-text";
       const effectiveColor = state.color || (common.colors?.[0] || "");
-      const effectiveTone = state.tone || (common.tones?.[0] || "");
+      const effectiveTone = state.tone || "";
       const baseExtra = extraInstructions(state);
       payloadItems = targetItems.map((it) => {
-        const mergedMood = [state.mood, it.mood].filter(Boolean).join("，");
+        const mergedMood = state.mood || "";
         return {
           theme: it.subject || turn.userMessage || "手绘插画",
           style: effectiveStyle,

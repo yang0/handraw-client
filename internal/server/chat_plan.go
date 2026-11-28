@@ -290,6 +290,7 @@ func normalizeChatMode(m string) string {
 }
 
 var reValidRatio = regexp.MustCompile(`^\d+(?:\.\d+)?:\d+(?:\.\d+)?$`)
+var reStrayCopyLine = regexp.MustCompile(`(?m)(?:^|\n)\s*画面文字[：:][^\n]*`)
 
 func normalizeChatRatio(r, fallback string) string {
 	r = strings.TrimSpace(r)
@@ -331,7 +332,8 @@ func buildChatPlanMessages(p *resources.Pack, body chatPlanRequest) []providers.
 严格规则：
 1. 若用户描述包含明确张数（如“出4张”“一套”“九宫格”“封面+3张”“系列”）或多行分条清单，则输出多张 items（2~12 张）；否则输出 1 张。
 2. 若用户在 selected 中已经指定了 style1/style2/mode/ratio/colors/layout，必须尊重用户已选项；未指定时再从可选目录推荐最匹配的编号。
-3. 只返回严格 JSON，不要包含 Markdown 代码块或多余解释，结构如下：
+3. 影调（tones）、情绪（moods）、留白（whitespace）、目标受众（audience）、业务场景（businessScene）属于左侧「更多设置」的用户自选项，Skill 严禁代填；若用户已填写则作为创作参考，未填写时不要输出或编造这些字段。
+4. 只返回严格 JSON，不要包含 Markdown 代码块或多余解释，结构如下：
 {
   "kind": "single" | "multi",
   "reply": "简短中文设计说明（1-2 句）",
@@ -340,22 +342,16 @@ func buildChatPlanMessages(p *resources.Pack, body chatPlanRequest) []providers.
     "style2": "可选第二画风编号或空字符串",
     "mode": "graphic-text" | "pure-image" | "poster",
     "ratio": "3:4",
-    "colors": ["主题色编号"],
-    "tones": ["影调编号"],
-    "moods": ["温暖"],
-    "whitespace": "",
-    "audience": "",
-    "businessScene": ""
+    "colors": ["主题色编号"]
   },
   "items": [
     {
       "index": 1,
       "title": "短标题（12字内）",
-      "subject": "具体生动的中文画面主体与场景描述",
+      "subject": "具体生动的中文画面主体与场景描述（不含画面文字字段）",
       "displayCopy": "图文/海报模式下画面内显示的简短文案，纯图模式留空",
       "layout": "可选图型编号或空字符串",
-      "ratio": "3:4",
-      "mood": ""
+      "ratio": "3:4"
     }
   ]
 }
@@ -558,34 +554,23 @@ func finalizeChatPlan(resp *chatPlanResponse, p *resources.Pack, sel chatPlanSel
 	resp.Common.Colors = validColors
 	resp.Common.ColorNames = colorNames
 
-	// Tones.
-	rawTones := sel.Tones
-	if len(rawTones) == 0 {
-		rawTones = resp.Common.Tones
-	}
-	validTones := make([]string, 0, len(rawTones))
-	for _, tid := range rawTones {
+	// User-only "More Settings" fields (tones, moods, whitespace, audience, businessScene):
+	// Skill planner must NEVER auto-fill them; preserve ONLY what the user explicitly selected (#204, handraw-web#588).
+	validTones := make([]string, 0, len(sel.Tones))
+	for _, tid := range sel.Tones {
 		if t, ok := p.Tone(strings.TrimSpace(tid)); ok {
 			validTones = append(validTones, t.ID)
 		}
 	}
 	resp.Common.Tones = validTones
-
-	// Moods & optional fields.
 	if len(sel.Moods) > 0 {
-		resp.Common.Moods = sel.Moods
-	} else if resp.Common.Moods == nil {
+		resp.Common.Moods = append([]string{}, sel.Moods...)
+	} else {
 		resp.Common.Moods = []string{}
 	}
-	if sel.Whitespace != "" {
-		resp.Common.Whitespace = sel.Whitespace
-	}
-	if sel.Audience != "" {
-		resp.Common.Audience = sel.Audience
-	}
-	if sel.BusinessScene != "" {
-		resp.Common.BusinessScene = sel.BusinessScene
-	}
+	resp.Common.Whitespace = sel.Whitespace
+	resp.Common.Audience = sel.Audience
+	resp.Common.BusinessScene = sel.BusinessScene
 
 	// Items normalization.
 	if len(resp.Items) > 12 {
@@ -594,6 +579,8 @@ func finalizeChatPlan(resp *chatPlanResponse, p *resources.Pack, sel chatPlanSel
 	for i := range resp.Items {
 		it := &resp.Items[i]
 		it.Index = i + 1
+		it.Subject = strings.TrimSpace(reStrayCopyLine.ReplaceAllString(it.Subject, ""))
+		it.Mood = ""
 		if it.Title == "" {
 			if len(resp.Items) == 1 {
 				it.Title = firstStr(firstNRunes(origMsg, 14), "当前画面")

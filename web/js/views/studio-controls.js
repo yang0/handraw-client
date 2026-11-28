@@ -774,7 +774,22 @@ export function recipeControls(state, catalog, onChange = () => {}, { article = 
     input.addEventListener("input", () => { state[key] = input.value; change(); });
   }
 
-  const more = el("details", { class: "studio-more-card", open: Boolean(state.moreOpen) },
+  function hasNonDefaultMoreSettings() {
+    return Boolean(
+      String(state.tone || "").trim()
+      || String(state.mood || "").trim()
+      || String(state.whitespace || "").trim()
+      || String(state.audience || "").trim()
+      || String(state.businessScene || "").trim()
+      || String(state.extra || "").trim()
+    );
+  }
+
+  let moreUserCollapsed = false;
+  let lastHasNonDefaultMore = hasNonDefaultMoreSettings();
+  let syncingMoreOpen = false;
+
+  const more = el("details", { class: "studio-more-card", open: Boolean(state.moreOpen || lastHasNonDefaultMore) },
     el("summary", { class: "studio-more-summary" },
       el("span", null, "更多设置 · 影调、情绪、留白与受众"),
       el("span", { class: "studio-more-chevron", "aria-hidden": "true" })
@@ -786,14 +801,44 @@ export function recipeControls(state, catalog, onChange = () => {}, { article = 
         moodChipsWrap
       ),
       whitespace,
-      el("div", { class: "studio-duo-row" },
-        field("目标受众", audience),
-        field("业务场景", business)
-      ),
+      el("div", { class: "studio-more-row" }, el("span", { class: "studio-row-label" }, "目标受众"), audience),
+      el("div", { class: "studio-more-row" }, el("span", { class: "studio-row-label" }, "业务场景"), business),
       field("补充要求", extra)
     )
   );
-  more.addEventListener("toggle", () => { state.moreOpen = more.open; change(); });
+  more.addEventListener("toggle", () => {
+    if (syncingMoreOpen) return;
+    state.moreOpen = more.open;
+    moreUserCollapsed = !more.open && hasNonDefaultMoreSettings();
+    change();
+  });
+
+  function syncMoreDrawerOpen() {
+    const hasNonDefault = hasNonDefaultMoreSettings();
+    if (!hasNonDefault) {
+      moreUserCollapsed = false;
+    } else if (!lastHasNonDefaultMore) {
+      // Newly acquired non-default values (e.g. loading a recipe/work) -> auto-expand (#204).
+      moreUserCollapsed = false;
+    }
+    lastHasNonDefaultMore = hasNonDefault;
+    const wantOpen = hasNonDefault ? !moreUserCollapsed : Boolean(state.moreOpen);
+    if (more.open !== wantOpen) {
+      syncingMoreOpen = true;
+      more.open = wantOpen;
+      syncingMoreOpen = false;
+    }
+    state.moreOpen = more.open;
+  }
+
+  function resetMoreCollapse() {
+    moreUserCollapsed = false;
+    lastHasNonDefaultMore = false;
+    state.moreOpen = false;
+    syncingMoreOpen = true;
+    more.open = false;
+    syncingMoreOpen = false;
+  }
 
   const node = el("section", { class: "studio-recipe-controls", "aria-label": "配图设置" },
     topRow, pickersRow, note, sc021Wrap, sc022Wrap, article ? null : ratio, more
@@ -836,6 +881,7 @@ export function recipeControls(state, catalog, onChange = () => {}, { article = 
     business.value = state.businessScene || "";
     extra.value = state.extra || "";
     whitespace.sync(state.whitespace || "");
+    syncMoreDrawerOpen();
     applyDirectVisibility();
   }
 
@@ -849,6 +895,7 @@ export function recipeControls(state, catalog, onChange = () => {}, { article = 
     node,
     sync,
     setDirectMode,
+    resetMoreCollapse,
     validate: () => (article || ratio.validate()) && (directMode || !state.fusion || Boolean(state.style && state.style2)),
     layoutPicker,
     pickersRow,

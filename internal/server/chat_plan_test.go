@@ -202,3 +202,64 @@ func TestStudioChatPlanRoutingAndFallback(t *testing.T) {
 		t.Fatalf("expected 1 relay hit, got %d", relayHits.Load())
 	}
 }
+
+func TestStudioChatPlanNeverAutoFillsUserOnlyMoreSettings(t *testing.T) {
+	srv, _ := setupTestServer(t, "http://127.0.0.1:1")
+	p := srv.Pack()
+
+	// Even if an upstream LLM/site response tries to auto-populate tones, moods,
+	// whitespace, audience, businessScene, or per-item mood, finalizeChatPlan
+	// must keep all of them empty unless the user explicitly selected them (#204).
+	raw := json.RawMessage(`{
+		"ok": true,
+		"kind": "single",
+		"reply": "已规划",
+		"common": {
+			"style1": "FA-001",
+			"mode": "graphic-text",
+			"ratio": "3:4",
+			"colors": ["C-001"],
+			"tones": ["T-01"],
+			"moods": ["温柔怀旧", "青涩安静"],
+			"whitespace": "moderate",
+			"audience": "偏爱怀旧叙事的年轻文艺读者",
+			"businessScene": "情感类社媒图文"
+		},
+		"items": [
+			{"index": 1, "title": "踏青", "subject": "春日草地上的女孩\n画面文字：踏青时光", "displayCopy": "踏青时光", "mood": "治愈留白"}
+		]
+	}`)
+
+	// 1. User left all "More Settings" blank -> all must stay empty.
+	resEmpty, err := parseAndNormalizeChatPlan(raw, p, chatPlanSelected{Style1: "FA-001", Mode: "graphic-text"}, "provider")
+	if err != nil {
+		t.Fatalf("parseAndNormalizeChatPlan failed: %v", err)
+	}
+	if len(resEmpty.Common.Tones) != 0 || len(resEmpty.Common.Moods) != 0 ||
+		resEmpty.Common.Whitespace != "" || resEmpty.Common.Audience != "" || resEmpty.Common.BusinessScene != "" {
+		t.Fatalf("expected user-only More Settings to stay empty, got %+v", resEmpty.Common)
+	}
+	if resEmpty.Items[0].Mood != "" {
+		t.Fatalf("expected item mood to be empty, got %q", resEmpty.Items[0].Mood)
+	}
+	if strings.Contains(resEmpty.Items[0].Subject, "画面文字") {
+		t.Fatalf("expected stray 画面文字 line stripped from subject, got %q", resEmpty.Items[0].Subject)
+	}
+
+	// 2. User explicitly provided mood/audience/businessScene/whitespace -> all preserved.
+	resUser, err := parseAndNormalizeChatPlan(raw, p, chatPlanSelected{
+		Style1:        "FA-001",
+		Mode:          "graphic-text",
+		Moods:         []string{"明快"},
+		Whitespace:    "high",
+		Audience:      "亲子家庭",
+		BusinessScene: "周末出游海报",
+	}, "provider")
+	if err != nil {
+		t.Fatalf("parseAndNormalizeChatPlan with user settings failed: %v", err)
+	}
+	if len(resUser.Common.Moods) != 1 || resUser.Common.Moods[0] != "明快" ||
+		resUser.Common.Whitespace != "high" || resUser.Common.Audience != "亲子家庭" || resUser.Common.BusinessScene != "周末出游海报" {
+		t.Fatalf("expected explicit user More Settings preserved, got %+v", resUser.Common)
+	}
+}
