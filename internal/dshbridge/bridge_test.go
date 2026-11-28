@@ -68,6 +68,15 @@ export function apply(ctx) {
       return Response.json({ galleries: gals.map(g => g.id), reply, model: sel.model });
     }
   }));
+  ctx.effect(() => ctx.connection.fetch.register({
+    path: '/api/demo.hold',
+    methods: ['POST'],
+    async fetch(request) {
+      const text = await request.text();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return Response.json({ aborted: request.signal.aborted, text });
+    }
+  }));
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: '/demo-desk',
@@ -126,6 +135,17 @@ export function apply(ctx) {
 	sBody := string(body)
 	if !strings.Contains(sBody, "hairstyles") || !strings.Contains(sBody, "来自宿主模型的回复") || registeredGallery != "dsh-poses" {
 		t.Fatalf("unexpected exact route body=%s registeredGallery=%q", sBody, registeredGallery)
+	}
+
+	// 3b. A POST must keep running after the body is read. Treating request
+	// "close" as cancellation aborts planning (499) and generation (502).
+	rrHold := httptest.NewRecorder()
+	reqHold := httptest.NewRequest("POST", "http://127.0.0.1/api/demo.hold", strings.NewReader(`{"theme":"雨夜"}`))
+	reqHold.Header.Set("Content-Type", "application/json")
+	mgr.ServeHTTP(rrHold, reqHold)
+	holdBody, _ := io.ReadAll(rrHold.Result().Body)
+	if rrHold.Code != 200 || !strings.Contains(string(holdBody), `"aborted":false`) || !strings.Contains(string(holdBody), "雨夜") {
+		t.Fatalf("held POST was cancelled early: %d %s", rrHold.Code, string(holdBody))
 	}
 
 	// 4. Invoke webServer prefix route.

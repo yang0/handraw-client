@@ -588,8 +588,10 @@ async function handleProxiedRequest(req, res) {
 
   try {
     const ac = new AbortController();
-    req.on('close', () => {
-      if (!res.writableEnded) ac.abort();
+    // IncomingMessage "close" fires as soon as the body is consumed, while the
+    // browser is still waiting. Abort only when the response connection drops early.
+    res.on('close', () => {
+      if (!res.writableFinished) ac.abort();
     });
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) {
