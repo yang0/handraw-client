@@ -101,6 +101,7 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request) (any, error) {
 	if err != nil {
 		if site.IsAuthError(err) {
 			_ = secrets.Delete(secrets.SiteToken)
+			s.invalidateCommunityCache()
 			_ = s.DB.SetKV("account_user", map[string]any{})
 			_ = s.DB.SetKV("balance_cache", map[string]any{})
 			return map[string]any{
@@ -362,6 +363,7 @@ func (s *Server) tryExchangeDevice(ctx context.Context, deviceCode string) (bool
 		return true, 0
 	}
 	_ = s.DB.SetKV("account_user", res.User)
+	s.invalidateCommunityCache()
 
 	var okSnap map[string]any
 	s.login.mu.Lock()
@@ -579,6 +581,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) (any, error) {
 		}
 	}
 	_ = secrets.Delete(secrets.SiteToken)
+	s.invalidateCommunityCache()
 	_ = s.DB.SetKV("account_user", map[string]any{})
 	_ = s.DB.SetKV("balance_cache", map[string]any{})
 	s.Emit("account", map[string]any{"loggedIn": false})
@@ -595,6 +598,7 @@ func (s *Server) balance(w http.ResponseWriter, r *http.Request) (any, error) {
 	if err != nil {
 		if site.IsAuthError(err) {
 			_ = secrets.Delete(secrets.SiteToken)
+			s.invalidateCommunityCache()
 			_ = s.DB.SetKV("account_user", map[string]any{})
 			_ = s.DB.SetKV("balance_cache", map[string]any{})
 			return map[string]any{

@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -91,7 +90,7 @@ func (s *Server) communityCatalog(ctx context.Context, force bool) communityCata
 	if s.Site == nil {
 		return communityCatalogSnapshot{}
 	}
-	cacheKey := communityCatalogCacheKey + ":" + s.Site.Base() + ":" + fmt.Sprintf("%t", s.Site.LoggedIn())
+	cacheKey := communityCatalogCacheKey + ":" + s.Site.Base() + ":" + s.Site.TokenFingerprint()
 	if !force {
 		if raw, ok := s.getMarketCache(cacheKey, communityCatalogTTL); ok {
 			var snap communityCatalogSnapshot
@@ -108,15 +107,19 @@ func (s *Server) communityCatalog(ctx context.Context, force bool) communityCata
 		Items []communityRemoteItem `json:"items"`
 	}
 	var err error
-	if s.Site.LoggedIn() {
+	loggedIn := s.Site.LoggedIn()
+	if loggedIn {
 		err = s.Site.Do(fetchCtx, http.MethodGet, "/api/v1/community/resources", nil, &resp)
 	} else {
 		err = s.Site.Public(fetchCtx, http.MethodGet, "/api/v1/community/resources", nil, &resp)
 	}
+	unauthFallback := false
 	if err != nil {
 		// Fallback to public /api/boot?surface=catalog if /api/v1/community/resources fails.
 		// Never attach a desktop hwt_ token to /api/boot because /api/boot is web-session-only
 		// and rejects hwt_ tokens with 403 token_scope_denied (#187).
+		// Never cache this unauthenticated fallback under a logged-in key (#207).
+		unauthFallback = loggedIn
 		var boot struct {
 			CommunityResources []communityRemoteItem `json:"communityResources"`
 			ExclusiveResources []communityRemoteItem `json:"exclusiveResources"`
@@ -220,18 +223,24 @@ func (s *Server) communityCatalog(ctx context.Context, force bool) communityCata
 			})
 		}
 	}
-	if b, err := json.Marshal(snap); err == nil {
-		s.setMarketCache(cacheKey, b)
+	if !unauthFallback {
+		if b, err := json.Marshal(snap); err == nil {
+			s.setMarketCache(cacheKey, b)
+		}
 	}
 	return snap
 }
 
 func (s *Server) findCommunityStyle(ctx context.Context, id string) (resources.Style, bool) {
+	return s.findCommunityStyleWithRefresh(ctx, id, false)
+}
+
+func (s *Server) findCommunityStyleWithRefresh(ctx context.Context, id string, force bool) (resources.Style, bool) {
 	want := strings.ToUpper(strings.TrimSpace(id))
 	if want == "" {
 		return resources.Style{}, false
 	}
-	snap := s.communityCatalog(ctx, false)
+	snap := s.communityCatalog(ctx, force)
 	for _, st := range snap.Styles {
 		if strings.EqualFold(st.Number, want) {
 			return st, true
@@ -241,11 +250,15 @@ func (s *Server) findCommunityStyle(ctx context.Context, id string) (resources.S
 }
 
 func (s *Server) findCommunityLayout(ctx context.Context, id string) (resources.Layout, bool) {
+	return s.findCommunityLayoutWithRefresh(ctx, id, false)
+}
+
+func (s *Server) findCommunityLayoutWithRefresh(ctx context.Context, id string, force bool) (resources.Layout, bool) {
 	want := strings.ToUpper(strings.TrimSpace(id))
 	if want == "" {
 		return resources.Layout{}, false
 	}
-	snap := s.communityCatalog(ctx, false)
+	snap := s.communityCatalog(ctx, force)
 	for _, l := range snap.Layouts {
 		if strings.EqualFold(l.ID, want) {
 			return l, true
@@ -257,12 +270,20 @@ func (s *Server) findCommunityLayout(ctx context.Context, id string) (resources.
 // inspectProtectedResource checks if a style/layout code belongs to a community
 // or exclusive resource whose prompt is hidden and restricted to website models (#162).
 func (s *Server) inspectProtectedResource(ctx context.Context, kind, id string) (bool, protectedResourceMeta) {
+	return s.inspectProtectedResourceWithRefresh(ctx, kind, id, false)
+}
+
+func (s *Server) inspectProtectedResourceFresh(ctx context.Context, kind, id string) (bool, protectedResourceMeta) {
+	return s.inspectProtectedResourceWithRefresh(ctx, kind, id, true)
+}
+
+func (s *Server) inspectProtectedResourceWithRefresh(ctx context.Context, kind, id string, force bool) (bool, protectedResourceMeta) {
 	clean := strings.TrimSpace(id)
 	if clean == "" {
 		return false, protectedResourceMeta{}
 	}
 	if kind == "layout" {
-		if l, ok := s.findCommunityLayout(ctx, clean); ok {
+		if l, ok := s.findCommunityLayoutWithRefresh(ctx, clean, force); ok {
 			return true, protectedResourceMeta{
 				Code:       l.ID,
 				Kind:       "layout",
@@ -275,7 +296,7 @@ func (s *Server) inspectProtectedResource(ctx context.Context, kind, id string) 
 			}
 		}
 	} else {
-		if st, ok := s.findCommunityStyle(ctx, clean); ok {
+		if st, ok := s.findCommunityStyleWithRefresh(ctx, clean, force); ok {
 			return true, protectedResourceMeta{
 				Code:       st.Number,
 				Kind:       "style",

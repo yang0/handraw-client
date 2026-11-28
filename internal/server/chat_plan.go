@@ -498,6 +498,11 @@ func finalizeChatPlan(resp *chatPlanResponse, p *resources.Pack, sel chatPlanSel
 	if st, ok := p.Style(style1); ok {
 		resp.Common.Style1 = st.Number
 		resp.Common.Style1Name = firstStr(st.NameZh, st.GenerationName, st.Number)
+	} else if looksLikeProtectedCode(style1) {
+		// Preserve community/exclusive protected style codes that live outside the local pack (#207).
+		code := strings.ToUpper(strings.TrimSpace(style1))
+		resp.Common.Style1 = code
+		resp.Common.Style1Name = firstStr(resp.Common.Style1Name, code)
 	} else {
 		defStyle := defaultPackStyle(p)
 		resp.Common.Style1 = defStyle.Number
@@ -513,6 +518,10 @@ func finalizeChatPlan(resp *chatPlanResponse, p *resources.Pack, sel chatPlanSel
 		if st2, ok := p.Style(style2); ok {
 			resp.Common.Style2 = st2.Number
 			resp.Common.Style2Name = firstStr(st2.NameZh, st2.GenerationName, st2.Number)
+		} else if looksLikeProtectedCode(style2) {
+			code := strings.ToUpper(strings.TrimSpace(style2))
+			resp.Common.Style2 = code
+			resp.Common.Style2Name = firstStr(resp.Common.Style2Name, code)
 		} else {
 			resp.Common.Style2 = ""
 			resp.Common.Style2Name = ""
@@ -599,6 +608,10 @@ func finalizeChatPlan(resp *chatPlanResponse, p *resources.Pack, sel chatPlanSel
 				if l, ok := p.Layout(lid); ok {
 					it.Layout = l.ID
 					it.LayoutName = firstStr(l.Name, l.ID)
+				} else if looksLikeProtectedCode(lid) {
+					code := strings.ToUpper(strings.TrimSpace(lid))
+					it.Layout = code
+					it.LayoutName = firstStr(it.LayoutName, code)
 				} else {
 					it.Layout = ""
 					it.LayoutName = ""

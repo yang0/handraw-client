@@ -2394,10 +2394,34 @@ export async function renderCreate(root, ctx, params = {}) {
     }, 120));
   });
 
+  const refreshCommunityUnlockStatus = async () => {
+    try {
+      const fresh = await api("GET", "/api/resources/community?refresh=1");
+      const updateList = (targetList, incoming) => {
+        if (!Array.isArray(targetList) || !Array.isArray(incoming)) return;
+        const byCode = new Map(incoming.map((x) => [String(resourceId(x)).toUpperCase(), x]));
+        for (const item of targetList) {
+          const hit = byCode.get(String(resourceId(item)).toUpperCase());
+          if (hit) {
+            item.unlocked = Boolean(hit.unlocked || hit.isMine);
+            item.isMine = Boolean(hit.isMine);
+          }
+        }
+      };
+      updateList(styles, fresh?.styles);
+      updateList(layouts, fresh?.layouts);
+      syncSiteModelGuard();
+    } catch (_) {}
+  };
+
   const onWindowFocus = () => {
     if (!root.isConnected) {
       window.removeEventListener("focus", onWindowFocus);
       return;
+    }
+    const hasLockedProtected = findProtectedSelections().some((p) => p.item && !p.item.unlocked && !p.item.isMine);
+    if (hasLockedProtected) {
+      void refreshCommunityUnlockStatus();
     }
     if (!needsBalanceRefreshOnFocus) return;
     needsBalanceRefreshOnFocus = false;

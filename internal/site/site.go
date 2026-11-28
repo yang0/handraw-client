@@ -5,6 +5,8 @@ package site
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -122,6 +124,17 @@ func (c *Client) token() string {
 }
 
 func (c *Client) LoggedIn() bool { return c.token() != "" }
+
+// TokenFingerprint returns a short non-reversible hash of the current site token
+// (or "anon" when logged out) so per-user caches never bleed across account switches (#207).
+func (c *Client) TokenFingerprint() string {
+	tok := strings.TrimSpace(c.token())
+	if tok == "" {
+		return "anon"
+	}
+	sum := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(sum[:8])
+}
 
 // Do performs a JSON request. body may be nil. out may be nil.
 func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {

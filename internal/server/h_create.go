@@ -915,6 +915,13 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 				if !s.Site.LoggedIn() {
 					return nil, site.ErrNotLoggedIn
 				}
+				if !meta.Known || (!meta.Unlocked && !meta.IsMine) {
+					// Re-check live unlock status once so a purchase made on the website
+					// takes effect immediately instead of being blocked by a stale cache (#207).
+					if _, freshMeta := s.inspectProtectedResourceFresh(r.Context(), chk.kind, chk.id); freshMeta.Known {
+						meta = freshMeta
+					}
+				}
 				if meta.Known && !meta.Unlocked && !meta.IsMine {
 					label := "画风"
 					if chk.kind == "layout" {
