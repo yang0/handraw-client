@@ -671,11 +671,6 @@ export async function renderCreate(root, ctx, params = {}) {
     if (!currentTurn()) renderOutput();
     refreshQuote();
     session.persist();
-    toast(
-      next
-        ? "已切换为「图片直出」模式（跳过手绘 Skill 与智能解析，提示词直接发给生图模型）"
-        : "已切换为「手绘 Skill」模式（开启智能解析并结合画风/图型配方策划画面）"
-    );
   }
 
   const leftPane = el("section", { class: "make-image-properties", "aria-label": "画面属性" },
