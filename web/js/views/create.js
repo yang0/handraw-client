@@ -269,7 +269,7 @@ export async function renderCreate(root, ctx, params = {}) {
     color: "",
     tone: "",
     mood: "",
-    mode: "graphic-text",
+    mode: "",
     ratio: settings.defaultRatio || "3:4",
     whitespace: "",
     audience: "",
@@ -970,7 +970,7 @@ export async function renderCreate(root, ctx, params = {}) {
       state.audience = "";
       state.businessScene = "";
       state.extra = "";
-      state.mode = "graphic-text";
+      state.mode = "";
       state.ratio = "3:4";
       state.resolution = "1k";
       state.quality = "standard";
@@ -1472,11 +1472,11 @@ export async function renderCreate(root, ctx, params = {}) {
               ch.img ? el("img", { src: ch.img, alt: "" }) : null,
               el("span", null, ch.label)
             )),
-            el("span", { class: "badge" }, `${MODE_LABELS[state.mode] || "图文"} · ${state.ratio} · ${state.resolution.toUpperCase()}`)
+            el("span", { class: "badge" }, `${state.mode ? `${MODE_LABELS[state.mode] || state.mode} · ` : ""}${state.ratio} · ${state.resolution.toUpperCase()}`)
           )
         : el("div", { class: "row", style: { justifyContent: "center", gap: "6px" } },
             el("span", { class: "badge" }, "画风：AI 自动推荐（也可左侧自选）"),
-            el("span", { class: "badge" }, `${MODE_LABELS[state.mode] || "图文"} · ${state.ratio} · ${state.resolution.toUpperCase()}`)
+            el("span", { class: "badge" }, `${state.mode ? `${MODE_LABELS[state.mode] || state.mode} · ` : ""}${state.ratio} · ${state.resolution.toUpperCase()}`)
           ),
       exampleRow
     ));
@@ -2096,7 +2096,7 @@ export async function renderCreate(root, ctx, params = {}) {
           colors: state.color ? splitTokens(state.color) : [],
           tones: state.tone ? [state.tone] : [],
           moods: state.mood ? splitTokens(state.mood) : [],
-          mode: state.mode || "graphic-text",
+          mode: state.mode || "",
           ratio: state.ratio || "3:4",
           whitespace: state.whitespace || "",
           audience: state.audience || "",

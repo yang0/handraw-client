@@ -66,18 +66,40 @@ export function field(label, control, hint = "") {
   return el("div", { class: "field" }, el("label", { for: control.id }, label), control, help);
 }
 
-export function choices(label, options, value, onChange, { inline = false } = {}) {
+export function choices(label, options, value, onChange, { inline = false, allowEmpty = false } = {}) {
   const name = `studio-choice-${++fieldSequence}`;
   const legend = el("legend", null, label);
   const itemsWrap = el("div", { class: "studio-choices-items" });
   const box = el("fieldset", { class: "studio-choices" + (inline ? " is-inline" : "") }, legend, itemsWrap);
+  let current = value || "";
   options.forEach(([id, text]) => {
-    const input = el("input", { type: "radio", name, value: id, checked: id === value });
+    const input = el("input", { type: "radio", name, value: id, checked: id === current });
     const item = el("label", { class: "studio-choice" }, input, el("span", null, text));
-    input.addEventListener("change", () => { if (input.checked) onChange(id); });
+    if (allowEmpty) {
+      input.addEventListener("click", () => {
+        if (current === id) {
+          input.checked = false;
+          current = "";
+          onChange("");
+        } else {
+          current = id;
+          onChange(id);
+        }
+      });
+    } else {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          current = id;
+          onChange(id);
+        }
+      });
+    }
     itemsWrap.appendChild(item);
   });
-  box.sync = (next) => itemsWrap.querySelectorAll("input").forEach((input) => { input.checked = input.value === next; });
+  box.sync = (next) => {
+    current = next || "";
+    itemsWrap.querySelectorAll("input").forEach((input) => { input.checked = input.value === current; });
+  };
   return box;
 }
 
@@ -660,18 +682,18 @@ function moodTokens(raw) {
 
 // Shared website-parity form controls across Single, Series, and Article.
 export function recipeControls(state, catalog, onChange = () => {}, { article = false, layout = true, hasDefaultStyle = true } = {}) {
-  state.mode = state.mode === "pure" ? "pure-image" : (state.mode || "graphic-text");
+  state.mode = state.mode === "pure" ? "pure-image" : (state.mode || "");
   state.fusion = state.fusion ?? Boolean(state.style2);
   const change = () => onChange();
 
   const modes = choices("生成方式", [["graphic-text", "图文"], ["pure-image", "纯图"], ["poster", "海报"]], state.mode, (v) => {
     state.mode = v;
-    if (!article) {
+    if (!article && v) {
       state.ratio = v === "poster" ? "9:16" : "3:4";
       ratio.sync(state.ratio);
     }
     change();
-  }, { inline: true });
+  }, { inline: true, allowEmpty: true });
 
   const fusion = choices("画风模式", [["single", "单画风"], ["fusion", "双画风融合"]], state.fusion ? "fusion" : "single", (v) => {
     state.fusion = v === "fusion";
