@@ -223,3 +223,98 @@ func toolInDir(dir, name string) string {
 	}
 	return ""
 }
+
+// dshDesktopCliDirs returns candidate CLI directories for DeepSeek Harness (dsh),
+// including the bundled `resources/runtime/cli/bin` inside DeepSeek Harness Desktop
+// installations discovered via standard locations and Windows Uninstall registry (#203).
+func dshDesktopCliDirs() []string {
+	var dirs []string
+	seen := map[string]bool{}
+	add := func(d string) {
+		d = strings.TrimSpace(d)
+		if d == "" || !filepath.IsAbs(d) {
+			return
+		}
+		key := strings.ToLower(filepath.Clean(d))
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		dirs = append(dirs, d)
+	}
+	addDesktopRoot := func(root string) {
+		root = strings.TrimSpace(strings.Trim(root, `"`))
+		if root == "" || !filepath.IsAbs(root) {
+			return
+		}
+		add(filepath.Join(root, "resources", "runtime", "cli", "bin"))
+	}
+
+	if dshHome := strings.TrimSpace(os.Getenv("DSH_HOME")); filepath.IsAbs(dshHome) {
+		add(filepath.Join(dshHome, "bin"))
+		add(filepath.Join(dshHome, "cli", "bin"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		add(filepath.Join(home, ".dsh", "bin"))
+		add(filepath.Join(home, ".dsh", "cli", "bin"))
+	}
+	if localApp := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); filepath.IsAbs(localApp) {
+		addDesktopRoot(filepath.Join(localApp, "Programs", "DeepSeek Harness"))
+		addDesktopRoot(filepath.Join(localApp, "Programs", "dsh-desktop"))
+	}
+	if !isIsolated() {
+		for _, pf := range []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)")} {
+			if filepath.IsAbs(pf) {
+				addDesktopRoot(filepath.Join(pf, "DeepSeek Harness"))
+			}
+		}
+		for _, root := range dshRegistryInstallRoots() {
+			addDesktopRoot(root)
+		}
+	}
+	return dirs
+}
+
+func dshRegistryInstallRoots() []string {
+	var out []string
+	uninstallKeys := []struct {
+		root registry.Key
+		path string
+	}{
+		{registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Uninstall`},
+		{registry.LOCAL_MACHINE, `Software\Microsoft\Windows\CurrentVersion\Uninstall`},
+		{registry.LOCAL_MACHINE, `Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`},
+	}
+	for _, uk := range uninstallKeys {
+		k, err := registry.OpenKey(uk.root, uk.path, registry.ENUMERATE_SUB_KEYS)
+		if err != nil {
+			continue
+		}
+		subNames, err := k.ReadSubKeyNames(-1)
+		_ = k.Close()
+		if err != nil {
+			continue
+		}
+		for _, sub := range subNames {
+			sk, err := registry.OpenKey(uk.root, uk.path+`\`+sub, registry.QUERY_VALUE)
+			if err != nil {
+				continue
+			}
+			disp, _, _ := sk.GetStringValue("DisplayName")
+			low := strings.ToLower(strings.TrimSpace(disp))
+			if strings.Contains(low, "deepseek harness") || strings.Contains(low, "dsh-desktop") {
+				if loc, _, err := sk.GetStringValue("InstallLocation"); err == nil && strings.TrimSpace(loc) != "" {
+					out = append(out, strings.TrimSpace(loc))
+				} else if icon, _, err := sk.GetStringValue("DisplayIcon"); err == nil && strings.TrimSpace(icon) != "" {
+					iconPath := strings.TrimSpace(strings.Split(icon, ",")[0])
+					iconPath = strings.Trim(iconPath, `"`)
+					if filepath.IsAbs(iconPath) {
+						out = append(out, filepath.Dir(iconPath))
+					}
+				}
+			}
+			_ = sk.Close()
+		}
+	}
+	return out
+}

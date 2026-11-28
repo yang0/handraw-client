@@ -227,9 +227,10 @@ func BuiltinSpecs() []Spec {
 			Driver:        "dsh",
 			Core:          true,
 			Binaries:      []string{"dsh"},
+			ExtraDirs:     dshDesktopCliDirs,
 			ConfigDirs:    []string{".dsh"},
 			ConfigEnvVars: []string{"DSH_HOME"},
-			Description:   "DeepSeek Harness 本地 CLI（可在配置中指定可执行路径与参数）",
+			Description:   "DeepSeek Harness 本地 CLI（自动识别 DeepSeek Harness 桌面端内置 dsh，以 headless 模式运行）",
 			Homepage:      "https://github.com/deepseek-ai",
 		},
 
@@ -1037,8 +1038,37 @@ func BuildArgsWithImages(driver, model string, extraArgs []string, prompt, auxFi
 		if model != "" {
 			args = append(args, "--model", model)
 		}
+	case "dsh":
+		// DeepSeek Harness non-interactive headless profile (#203):
+		// `dsh --profile headless --approval-policy never [--add-dir ...] -`
+		// reads the prompt from stdin, writes the clean answer to stdout, and
+		// sends reasoning/diagnostics to stderr. Note: headless profile uses
+		// the model configured in ~/.dsh and does not accept --model.
+		args = []string{"--profile", "headless", "--approval-policy", "never"}
+		seenDir := map[string]bool{}
+		for _, img := range images {
+			dir := filepath.Dir(img)
+			if dir != "" && !seenDir[dir] {
+				seenDir[dir] = true
+				args = append(args, "--add-dir", dir)
+			}
+		}
+		hasPromptPlaceholder := false
+		for _, a := range extraArgs {
+			if strings.Contains(a, "{{prompt}}") {
+				args = append(args, strings.ReplaceAll(a, "{{prompt}}", prompt))
+				stdinPayload = ""
+				hasPromptPlaceholder = true
+			} else {
+				args = append(args, a)
+			}
+		}
+		if !hasPromptPlaceholder {
+			args = append(args, "-")
+		}
+		return args, stdinPayload
 	default:
-		// dsh / custom: pass user extraArgs; support optional {{prompt}} placeholder.
+		// custom: pass user extraArgs; support optional {{prompt}} placeholder.
 		for _, a := range extraArgs {
 			if strings.Contains(a, "{{prompt}}") {
 				args = append(args, strings.ReplaceAll(a, "{{prompt}}", prompt))

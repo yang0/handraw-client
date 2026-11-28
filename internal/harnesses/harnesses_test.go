@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -224,5 +225,44 @@ func TestParseAgyModelsAndFastFlags(t *testing.T) {
 		if !strings.Contains(clJoined, want) {
 			t.Fatalf("claude fast args missing %q: %s", want, clJoined)
 		}
+	}
+}
+
+func TestDSHHeadlessBuildArgsAndDiscovery(t *testing.T) {
+	imgPath := filepath.Join(t.TempDir(), "ref.png")
+	args, stdin := BuildArgsWithImages("dsh", "ignored-model", nil, "写一段文案", "", []string{imgPath})
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--profile headless", "--approval-policy never", "--add-dir " + filepath.Dir(imgPath)} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("dsh args missing %q: %s", want, joined)
+		}
+	}
+	if len(args) == 0 || args[len(args)-1] != "-" {
+		t.Fatalf("expected trailing '-' for stdin prompt, got %v", args)
+	}
+	if strings.Contains(joined, "--model") {
+		t.Fatalf("dsh headless must not pass unsupported --model flag: %s", joined)
+	}
+	if stdin != "写一段文案" {
+		t.Fatalf("expected stdin payload preserved, got %q", stdin)
+	}
+
+	// Verify DSH_HOME/bin discovery works in isolated mode too (#203).
+	dshHome := t.TempDir()
+	binDir := filepath.Join(dshHome, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DSH_HOME", dshHome)
+	dirs := dshDesktopCliDirs()
+	found := false
+	for _, d := range dirs {
+		if filepath.Clean(d) == filepath.Clean(binDir) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected dshDesktopCliDirs to include %q, got %v", binDir, dirs)
 	}
 }

@@ -210,3 +210,33 @@ func toolInDir(dir, name string) string {
 	}
 	return ""
 }
+
+// dshDesktopCliDirs returns candidate CLI directories for DeepSeek Harness (dsh),
+// including the bundled CLI inside macOS / Linux DeepSeek Harness desktop apps (#203).
+func dshDesktopCliDirs() []string {
+	var dirs []string
+	seen := map[string]bool{}
+	add := func(d string) {
+		d = strings.TrimSpace(d)
+		if d == "" || !filepath.IsAbs(d) || seen[d] {
+			return
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
+	}
+	if dshHome := strings.TrimSpace(os.Getenv("DSH_HOME")); filepath.IsAbs(dshHome) {
+		add(filepath.Join(dshHome, "bin"))
+		add(filepath.Join(dshHome, "cli", "bin"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		add(filepath.Join(home, ".dsh", "bin"))
+		add(filepath.Join(home, ".dsh", "cli", "bin"))
+		add(filepath.Join(home, "Applications", "DeepSeek Harness.app", "Contents", "Resources", "runtime", "cli", "bin"))
+		add(filepath.Join(home, ".local", "share", "DeepSeek Harness", "resources", "runtime", "cli", "bin"))
+	}
+	if !isIsolated() {
+		add("/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin")
+		add("/opt/DeepSeek Harness/resources/runtime/cli/bin")
+	}
+	return dirs
+}
