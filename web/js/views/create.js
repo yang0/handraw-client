@@ -472,12 +472,6 @@ export async function renderCreate(root, ctx, params = {}) {
   });
   resChoices.querySelector(".studio-choices-items")?.appendChild(resHintSlot);
 
-  const qualChoices = choices("质量", [["standard", "标准"], ["high", "高质量"]], state.quality, (v) => {
-    state.quality = v;
-    refreshQuote();
-    session.persist();
-  }, { inline: true });
-
   const redrawChk = el("input", { type: "checkbox", checked: Boolean(state.redraw) });
   redrawChk.addEventListener("change", () => {
     state.redraw = redrawChk.checked;
@@ -622,22 +616,24 @@ export async function renderCreate(root, ctx, params = {}) {
 
   const modeSkillBtn = el("button", {
     type: "button",
-    class: "mode-seg-btn",
+    class: "sc-engine-mode-btn",
+    "data-sc-composer-engine": "skill",
     "data-studio-mode": "skill",
     onClick: () => setStudioDirectMode(false),
   }, "🎨 手绘 Skill");
 
   const modeDirectBtn = el("button", {
     type: "button",
-    class: "mode-seg-btn",
+    class: "sc-engine-mode-btn",
+    "data-sc-composer-engine": "direct",
     "data-studio-mode": "direct",
     onClick: () => setStudioDirectMode(true),
-  }, "⚡ 直出（不用 Skill）");
+  }, "⚡ 图片直出");
 
   const studioModeSwitch = el("div", {
-    class: "mode-seg-switch",
+    class: "sc-engine-mode-switch is-compact",
     role: "group",
-    "aria-label": "生图引擎模式",
+    "aria-label": "生图模式切换",
   }, modeSkillBtn, modeDirectBtn);
 
   const directHintCard = el("div", { class: "direct-mode-callout hidden" },
@@ -675,16 +671,19 @@ export async function renderCreate(root, ctx, params = {}) {
     if (!currentTurn()) renderOutput();
     refreshQuote();
     session.persist();
+    toast(
+      next
+        ? "已切换为「图片直出」模式（跳过手绘 Skill 与智能解析，提示词直接发给生图模型）"
+        : "已切换为「手绘 Skill」模式（开启智能解析并结合画风/图型配方策划画面）"
+    );
   }
 
   const leftPane = el("section", { class: "make-image-properties", "aria-label": "画面属性" },
-    studioModeSwitch,
     directHintCard,
     recipeRow,
     controls.node,
     directCountChoices,
     resChoices,
-    qualChoices,
     redrawRow,
     selectedSlotBox,
     el("details", { class: "studio-more-card" },
@@ -845,11 +844,17 @@ export async function renderCreate(root, ctx, params = {}) {
     },
   }, "当前画面提示词");
 
-  const composerModesBar = el("div", {
-    class: "sc-composer-modes hidden",
+  const composerTabs = el("div", {
+    class: "sc-composer-tabs hidden",
     role: "group",
     "aria-label": "输入范围",
   }, modeChatBtn, modeImageBtn);
+
+  const composerModesBar = el("div", {
+    class: "sc-composer-modes is-compact",
+    role: "toolbar",
+    "aria-label": "提示词与输入选项",
+  }, composerTabs, studioModeSwitch);
 
   const subjectInput = el("textarea", {
     class: "make-image-composer-subject",
@@ -1187,7 +1192,6 @@ export async function renderCreate(root, ctx, params = {}) {
     controls.sync();
     directCountChoices.sync(String(state.directCount || 1));
     resChoices.sync(state.resolution);
-    qualChoices.sync(state.quality);
     redrawChk.checked = Boolean(state.redraw);
     recSel.value = state.recipeId || "";
   }
@@ -1207,13 +1211,17 @@ export async function renderCreate(root, ctx, params = {}) {
     const item = currentItem();
     if (!turn || !item) {
       state.composerMode = "chat";
-      composerModesBar.classList.add("hidden");
+      composerTabs.classList.add("hidden");
+      composerModesBar.classList.add("is-compact");
     } else {
-      composerModesBar.classList.remove("hidden");
+      composerTabs.classList.remove("hidden");
+      composerModesBar.classList.remove("is-compact");
       const isMulti = turn.items.length > 1;
       modeImageBtn.textContent = isMulti ? `图 ${state.selectedItemIndex + 1} 提示词` : "当前画面提示词";
       modeChatBtn.classList.toggle("is-active", state.composerMode === "chat");
       modeImageBtn.classList.toggle("is-active", state.composerMode === "image");
+      modeChatBtn.setAttribute("aria-pressed", String(state.composerMode === "chat"));
+      modeImageBtn.setAttribute("aria-pressed", String(state.composerMode === "image"));
     }
 
     const isDirect = Boolean(state.directPrompt);

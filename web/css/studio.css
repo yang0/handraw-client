@@ -692,33 +692,96 @@ dialog.modal-picker .modal-body {
   background: var(--paper);
 }
 .sc-composer-modes {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px;
-  border-radius: 9px;
-  background: var(--paper);
-  border: 1px solid var(--line);
-  width: fit-content;
-  max-width: calc(100% - 36px);
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 0 36px 5px 2px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 2px;
 }
-.sc-composer-mode-btn {
+.sc-composer-modes.is-compact {
+  border-bottom-color: color-mix(in srgb, var(--line) 60%, transparent);
+}
+.sc-composer-tabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  min-width: 0;
+}
+.sc-composer-tabs > .sc-composer-mode-btn {
+  appearance: none;
   border: 0;
-  border-radius: 6px;
-  padding: 4px 10px;
+  background: transparent;
+  min-height: 28px;
+  padding: 3px 1px 5px;
   font: inherit;
   font-size: 12px;
-  font-weight: 600;
-  background: transparent;
+  font-weight: 500;
   color: var(--ink-muted);
   cursor: pointer;
   white-space: nowrap;
-  transition: background-color 0.14s ease, color 0.14s ease;
+  transition: color 0.14s ease, border-color 0.14s ease;
 }
-.sc-composer-mode-btn:hover { color: var(--ink); }
-.sc-composer-mode-btn.is-active {
+.sc-composer-tabs > .sc-composer-mode-btn:hover {
+  color: var(--ink);
+}
+.sc-composer-tabs > .sc-composer-mode-btn.is-active {
+  font-weight: 700;
+  color: var(--ink);
+  border-bottom: 2px solid var(--accent);
+  margin-bottom: -1px;
+}
+.sc-composer-tabs > .sc-composer-mode-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.sc-engine-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--surface-2, var(--paper));
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.sc-engine-mode-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-muted);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.14s ease, color 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
+}
+.sc-engine-mode-btn:hover {
+  color: var(--ink);
+}
+.sc-engine-mode-btn.is-active {
+  background: var(--surface, #fffdf9);
+  color: var(--ink);
+  border-color: var(--line);
+  box-shadow: 0 1px 3px rgba(30, 27, 24, 0.08);
+}
+.sc-engine-mode-btn[data-sc-composer-engine="direct"].is-active,
+.sc-engine-mode-btn[data-sc-composer-engine="direct"].is-active:hover {
   background: var(--accent);
-  color: #fff;
+  color: #fffdf9;
+  border-color: var(--accent);
+  box-shadow: 0 1px 4px rgba(183, 66, 39, 0.24);
+}
+.sc-engine-mode-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .make-image-composer-attachments {
   display: flex;
@@ -6129,6 +6192,7 @@ dialog.modal-recipe-mgr {
   .make-image-composer,
   .sc-composer-expand-btn,
   .sc-composer-mode-btn,
+  .sc-engine-mode-btn,
   .sc-turn-pill,
   .sc-example-btn,
   .sc-nav-btn,
