@@ -12,103 +12,19 @@
       "traits_activation": "strong",
       "note": "Use the style name when it is strong; otherwise use positive core traits when available. Empty-trait styles keep the image fallback.",
       "styles": {
-        "FA-001": {
-          "name_activation": "strong"
-        },
         "FA-002": {
-          "name_activation": "strong"
-        },
-        "FA-003": {
-          "name_activation": "strong"
-        },
-        "FA-004": {
-          "name_activation": "strong"
-        },
-        "FA-005": {
           "name_activation": "strong"
         },
         "FA-006": {
           "name_activation": "strong"
         },
-        "FA-007": {
-          "name_activation": "strong"
-        },
-        "FA-008": {
-          "name_activation": "strong"
-        },
-        "FA-009": {
-          "name_activation": "strong"
-        },
-        "FA-010": {
-          "name_activation": "strong"
-        },
-        "FA-011": {
-          "name_activation": "strong"
-        },
-        "FA-012": {
-          "name_activation": "strong"
-        },
-        "FA-013": {
-          "name_activation": "strong"
-        },
-        "FA-017": {
-          "name_activation": "strong"
-        },
         "FA-018": {
-          "name_activation": "strong"
-        },
-        "FA-019": {
-          "name_activation": "strong"
-        },
-        "FA-020": {
-          "name_activation": "strong"
-        },
-        "FA-021": {
-          "name_activation": "strong"
-        },
-        "FA-025": {
-          "name_activation": "strong"
-        },
-        "FA-026": {
-          "name_activation": "strong"
-        },
-        "FA-027": {
-          "name_activation": "strong"
-        },
-        "FA-028": {
-          "name_activation": "strong"
-        },
-        "FA-029": {
-          "name_activation": "strong"
-        },
-        "FA-030": {
-          "name_activation": "strong"
-        },
-        "FA-031": {
-          "name_activation": "strong"
-        },
-        "FA-032": {
           "name_activation": "strong"
         },
         "FA-033": {
           "name_activation": "strong"
         },
-        "FA-034": {
-          "name_activation": "strong"
-        },
-        "FA-035": {
-          "name_activation": "strong"
-        },
-        "FB-001": {
-          "name_activation": "strong"
-        },
-        "FB-002": {
-          "name_activation": "strong"
-        },
         "FB-003": {
-          "name_activation": "strong"
-        },
-        "FB-004": {
           "name_activation": "strong"
         },
         "FB-005": {
@@ -123,64 +39,16 @@
         "FB-008": {
           "name_activation": "strong"
         },
-        "FB-009": {
-          "name_activation": "strong"
-        },
-        "FB-010": {
-          "name_activation": "strong"
-        },
-        "FB-011": {
-          "name_activation": "strong"
-        },
-        "FB-012": {
-          "name_activation": "strong"
-        },
-        "FB-013": {
-          "name_activation": "strong"
-        },
-        "FB-014": {
-          "name_activation": "strong"
-        },
-        "FB-015": {
-          "name_activation": "strong"
-        },
-        "FB-016": {
-          "name_activation": "strong"
-        },
-        "FB-017": {
-          "name_activation": "strong"
-        },
         "FB-018": {
           "name_activation": "strong"
         },
-        "FB-019": {
-          "name_activation": "strong"
-        },
-        "FC-001": {
-          "name_activation": "strong"
-        },
-        "FC-005": {
-          "name_activation": "strong"
-        },
-        "FC-006": {
-          "name_activation": "strong"
-        },
-        "FC-007": {
-          "name_activation": "strong"
-        },
         "FC-008": {
-          "name_activation": "strong"
-        },
-        "FC-009": {
           "name_activation": "strong"
         },
         "FC-010": {
           "name_activation": "strong"
         },
         "FC-011": {
-          "name_activation": "strong"
-        },
-        "FC-012": {
           "name_activation": "strong"
         },
         "FC-014": {
@@ -190,12 +58,6 @@
           "name_activation": "strong"
         },
         "FC-016": {
-          "name_activation": "strong"
-        },
-        "FC-017": {
-          "name_activation": "strong"
-        },
-        "FC-018": {
           "name_activation": "strong"
         },
         "FC-021": {
@@ -210,43 +72,13 @@
         "FC-024": {
           "name_activation": "strong"
         },
-        "FC-025": {
-          "name_activation": "strong"
-        },
         "FC-026": {
-          "name_activation": "strong"
-        },
-        "FD-001": {
-          "name_activation": "strong"
-        },
-        "FD-006": {
-          "name_activation": "strong"
-        },
-        "FD-008": {
           "name_activation": "strong"
         },
         "FD-009": {
           "name_activation": "strong"
         },
-        "FD-010": {
-          "name_activation": "strong"
-        },
-        "FD-012": {
-          "name_activation": "strong"
-        },
-        "FE-004": {
-          "name_activation": "strong"
-        },
-        "FE-024": {
-          "name_activation": "strong"
-        },
         "FE-025": {
-          "name_activation": "strong"
-        },
-        "FE-039": {
-          "name_activation": "strong"
-        },
-        "FE-041": {
           "name_activation": "strong"
         },
         "FF-001": {
@@ -397,17 +229,9 @@
           "name_activation": "none",
           "traits_activation": "none"
         },
-        "FB-031": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
         "FH-041": {
           "name_activation": "none",
           "traits_activation": "none"
-        },
-        "FE-058": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
         },
         "FE-059": {
           "name_activation": "weak",
@@ -513,22 +337,6 @@
           "name_activation": "strong",
           "traits_activation": "none"
         },
-        "FG-013": {
-          "name_activation": "strong",
-          "traits_activation": "none"
-        },
-        "FG-014": {
-          "name_activation": "strong",
-          "traits_activation": "none"
-        },
-        "FG-015": {
-          "name_activation": "strong",
-          "traits_activation": "none"
-        },
-        "FG-016": {
-          "name_activation": "strong",
-          "traits_activation": "none"
-        },
         "FC-030": {
           "name_activation": "weak",
           "traits_activation": "strong"
@@ -545,131 +353,11 @@
           "name_activation": "strong",
           "traits_activation": "none"
         },
-        "FB-035": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-036": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-037": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-038": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-039": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-040": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-041": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-042": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-043": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-044": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-045": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-046": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-047": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-048": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-049": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-050": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-051": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-052": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
         "FB-053": {
           "name_activation": "weak",
           "traits_activation": "strong"
         },
-        "FB-054": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-055": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-056": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-057": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-058": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
         "FB-059": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-060": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-061": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-062": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-063": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-064": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-065": {
-          "name_activation": "weak",
-          "traits_activation": "strong"
-        },
-        "FB-066": {
           "name_activation": "weak",
           "traits_activation": "strong"
         },
@@ -700,10 +388,6 @@
         "FG-023": {
           "name_activation": "weak",
           "traits_activation": "strong"
-        },
-        "FH-044": {
-          "name_activation": "strong",
-          "traits_activation": "none"
         },
         "FI-001": {
           "name_activation": "strong"
@@ -750,43 +434,16 @@
         "FI-015": {
           "name_activation": "strong"
         },
-        "FI-016": {
-          "name_activation": "strong"
-        },
-        "FI-017": {
-          "name_activation": "strong"
-        },
-        "FI-018": {
-          "name_activation": "strong"
-        },
         "FI-019": {
           "name_activation": "strong"
         },
         "FI-020": {
           "name_activation": "strong"
         },
-        "FI-021": {
-          "name_activation": "strong"
-        },
-        "FI-022": {
-          "name_activation": "strong"
-        },
-        "FI-023": {
-          "name_activation": "strong"
-        },
         "FI-024": {
           "name_activation": "strong"
         },
-        "FI-025": {
-          "name_activation": "strong"
-        },
-        "FI-026": {
-          "name_activation": "strong"
-        },
         "FI-027": {
-          "name_activation": "strong"
-        },
-        "FI-028": {
           "name_activation": "strong"
         },
         "FI-029": {
@@ -857,9 +514,5 @@
   "FG-023": {
     "name_activation": "weak",
     "traits_activation": "strong"
-  },
-  "FH-044": {
-    "name_activation": "strong",
-    "traits_activation": "none"
   }
 }

@@ -410,7 +410,7 @@ export async function openRecipeEditor(initial = {}, onSaved, onCancel, opts = {
   });
   const nameErr = el("span", { class: "rcp-field-err hidden", role: "alert" }, "请填写配方名称");
 
-  const styleIn = el("input", { class: "input", value: (initial.styleIds || []).join(","), placeholder: "FA-013（双画风用逗号分隔，如 FA-013,FI-001）" });
+  const styleIn = el("input", { class: "input", value: (initial.styleIds || []).join(","), placeholder: "FA-002（双画风用逗号分隔，如 FA-002,FI-001）" });
   const layoutIn = el("input", { class: "input", value: initial.layoutId || "", placeholder: "可选，如 SC-001" });
   const colorIn = el("input", { class: "input", value: (initial.colors || []).join(","), placeholder: "可选，如 C-15" });
   const toneIn = el("input", { class: "input", value: (initial.tones || []).join(","), placeholder: "可选，如 T-01" });

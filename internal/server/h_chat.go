@@ -146,7 +146,8 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 
 	if route.Mode == "harness" {
 		p, _ := s.pack()
-		sysPrompt := buildChatSystemPrompt(p, activeSkills, invokedSkillID, req.DirectPrompt)
+		snap := s.communityCatalog(r.Context(), false)
+		sysPrompt := buildChatSystemPrompt(p, snap, activeSkills, invokedSkillID, req.DirectPrompt)
 		msgs := make([]providers.ChatMessage, 0, len(req.Messages)+2)
 		msgs = append(msgs, providers.ChatMessage{Role: "system", Content: sysPrompt})
 		start := 0
@@ -215,7 +216,8 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 			resp.TextModel = tp.ID + ":" + textModel
 		}
 		p, _ := s.pack()
-		sysPrompt := buildChatSystemPrompt(p, activeSkills, invokedSkillID, req.DirectPrompt)
+		snap := s.communityCatalog(r.Context(), false)
+		sysPrompt := buildChatSystemPrompt(p, snap, activeSkills, invokedSkillID, req.DirectPrompt)
 		msgs := make([]providers.ChatMessage, 0, len(req.Messages)+2)
 		msgs = append(msgs, providers.ChatMessage{Role: "system", Content: sysPrompt})
 
@@ -549,30 +551,70 @@ func resolveActiveSkills(all []skills.Skill, explicitIDs []string, userText stri
 	return active, invokedID, cleaned
 }
 
-func buildCompactCatalogBlock(p *resources.Pack) string {
-	if p == nil {
+func buildCompactCatalogBlock(p *resources.Pack, snap communityCatalogSnapshot) string {
+	if p == nil && len(snap.Styles) == 0 && len(snap.Layouts) == 0 {
 		return ""
 	}
 	var sections []string
-	if len(p.Styles) > 0 {
-		items := append([]resources.Style(nil), p.Styles...)
-		sort.Slice(items, func(i, j int) bool { return items[i].Number < items[j].Number })
-		parts := make([]string, 0, len(items))
-		for _, st := range items {
+	// Merge online exclusive/community overrides over static pack entries (#212).
+	overriddenStyles := map[string]bool{}
+	var mergedStyles []resources.Style
+	for _, st := range snap.Styles {
+		k := strings.ToUpper(strings.TrimSpace(st.Number))
+		if k == "" || overriddenStyles[k] {
+			continue
+		}
+		overriddenStyles[k] = true
+		mergedStyles = append(mergedStyles, st)
+	}
+	if p != nil {
+		for _, st := range p.Styles {
+			k := strings.ToUpper(strings.TrimSpace(st.Number))
+			if k == "" || overriddenStyles[k] {
+				continue
+			}
+			mergedStyles = append(mergedStyles, st)
+		}
+	}
+	if len(mergedStyles) > 0 {
+		sort.Slice(mergedStyles, func(i, j int) bool { return mergedStyles[i].Number < mergedStyles[j].Number })
+		parts := make([]string, 0, len(mergedStyles))
+		for _, st := range mergedStyles {
 			nm := firstStr(st.NameZh, st.GenerationName)
 			nm = strings.ReplaceAll(strings.TrimSpace(nm), "|", " ")
 			if len([]rune(nm)) > 24 {
 				nm = string([]rune(nm)[:24])
 			}
+			if (st.Source == "exclusive" || st.Source == "community") && !st.Unlocked && !st.IsMine {
+				nm += "(需解锁)"
+			}
 			parts = append(parts, st.Number+":"+nm)
 		}
-		sections = append(sections, "可选画风编号（generate_images 的 style 必须从此目录挑选）：\n"+strings.Join(parts, "|"))
+		sections = append(sections, "可选画风编号（generate_images 的 style 必须从此目录挑选；未指定时优先选免费画风，不要默认挑标有「需解锁」的画风）：\n"+strings.Join(parts, "|"))
 	}
-	if len(p.Layouts) > 0 {
-		items := append([]resources.Layout(nil), p.Layouts...)
-		sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
-		parts := make([]string, 0, len(items))
-		for _, l := range items {
+	overriddenLayouts := map[string]bool{}
+	var mergedLayouts []resources.Layout
+	for _, l := range snap.Layouts {
+		k := strings.ToUpper(strings.TrimSpace(l.ID))
+		if k == "" || overriddenLayouts[k] {
+			continue
+		}
+		overriddenLayouts[k] = true
+		mergedLayouts = append(mergedLayouts, l)
+	}
+	if p != nil {
+		for _, l := range p.Layouts {
+			k := strings.ToUpper(strings.TrimSpace(l.ID))
+			if k == "" || overriddenLayouts[k] {
+				continue
+			}
+			mergedLayouts = append(mergedLayouts, l)
+		}
+	}
+	if len(mergedLayouts) > 0 {
+		sort.Slice(mergedLayouts, func(i, j int) bool { return mergedLayouts[i].ID < mergedLayouts[j].ID })
+		parts := make([]string, 0, len(mergedLayouts))
+		for _, l := range mergedLayouts {
 			nm := strings.ReplaceAll(strings.TrimSpace(l.Name), "|", " ")
 			if len([]rune(nm)) > 18 {
 				nm = string([]rune(nm)[:18])
@@ -581,7 +623,7 @@ func buildCompactCatalogBlock(p *resources.Pack) string {
 		}
 		sections = append(sections, "可选图型编号（layout，纯意境自由构图或纯图模式可留空）：\n"+strings.Join(parts, "|"))
 	}
-	if len(p.Colors) > 0 {
+	if p != nil && len(p.Colors) > 0 {
 		items := append([]resources.Color(nil), p.Colors...)
 		sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 		parts := make([]string, 0, len(items))
@@ -594,7 +636,7 @@ func buildCompactCatalogBlock(p *resources.Pack) string {
 		}
 		sections = append(sections, "可选主题色编号（color，可选）：\n"+strings.Join(parts, "|"))
 	}
-	if len(p.Tones) > 0 {
+	if p != nil && len(p.Tones) > 0 {
 		items := append([]resources.Tone(nil), p.Tones...)
 		sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 		parts := make([]string, 0, len(items))
@@ -613,7 +655,7 @@ func buildCompactCatalogBlock(p *resources.Pack) string {
 // buildChatSystemPrompt keeps the static rules and sorted Handraw resource catalog
 // byte-identical at the start of the system message to maximize upstream relay
 // Prompt Cache hit rates across turns and tool-call steps (#61).
-func buildChatSystemPrompt(p *resources.Pack, activeSkills []skills.Skill, invokedID string, directPrompt bool) string {
+func buildChatSystemPrompt(p *resources.Pack, snap communityCatalogSnapshot, activeSkills []skills.Skill, invokedID string, directPrompt bool) string {
 	var sb strings.Builder
 	if directPrompt {
 		sb.WriteString(`你是「手绘风」桌面工作台的 AI 会话助手。
@@ -644,7 +686,7 @@ func buildChatSystemPrompt(p *resources.Pack, activeSkills []skills.Skill, invok
 - 用户以中文提出需求且未明确要求英文或双语时，海报/图文模式的 items[].text 必须全部使用简体中文文案（不要擅自在主标题前加英文大字）；海报/社媒卡模式务必把需要呈现在画面中的中文文案完整填入 items[].text。
 - 回复简洁清晰，使用中文 Markdown 排版。`)
 
-		if catalog := buildCompactCatalogBlock(p); catalog != "" {
+		if catalog := buildCompactCatalogBlock(p, snap); catalog != "" {
 			sb.WriteString("\n\n## Handraw 本地视觉资源目录（直接选编号即可）\n\n")
 			sb.WriteString(catalog)
 		}
@@ -744,7 +786,7 @@ func chatAgentToolDefs(directPrompt bool) []providers.ToolDef {
 									"type": "object",
 									"properties": map[string]any{
 										"theme":  map[string]any{"type": "string", "description": "具体生动的画面主体与场景描述"},
-										"style":  map[string]any{"type": "string", "description": "画风编号，如 FA-013"},
+										"style":  map[string]any{"type": "string", "description": "画风编号，如 FA-002"},
 										"style2": map[string]any{"type": "string", "description": "可选第二画风编号"},
 										"layout": map[string]any{"type": "string", "description": "可选图型编号，如 SC-001"},
 										"color":  map[string]any{"type": "string", "description": "可选主题色编号"},
@@ -917,9 +959,28 @@ func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (st
 			}
 			return sc
 		}
+		snap := c.srv.communityCatalog(ctx, false)
 		switch strings.ToLower(args.Kind) {
 		case "layouts":
+			seen := map[string]bool{}
+			for _, l := range snap.Layouts {
+				k := strings.ToUpper(strings.TrimSpace(l.ID))
+				if k == "" || seen[k] {
+					continue
+				}
+				seen[k] = true
+				m := map[string]string{"id": l.ID, "name": l.Name, "category": l.Category, "source": l.Source}
+				if len(fallback) < args.Limit {
+					fallback = append(fallback, m)
+				}
+				if sc := scoreText(l.ID + " " + l.Name + " " + l.Description + " " + l.Category); sc > 0 {
+					scored = append(scored, scoredHit{score: sc, item: m})
+				}
+			}
 			for _, l := range p.Layouts {
+				if seen[strings.ToUpper(strings.TrimSpace(l.ID))] {
+					continue
+				}
 				m := map[string]string{"id": l.ID, "name": l.Name, "category": l.Category}
 				if len(fallback) < args.Limit {
 					fallback = append(fallback, m)
@@ -949,7 +1010,29 @@ func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (st
 				}
 			}
 		default:
+			seen := map[string]bool{}
+			for _, st := range snap.Styles {
+				k := strings.ToUpper(strings.TrimSpace(st.Number))
+				if k == "" || seen[k] {
+					continue
+				}
+				seen[k] = true
+				m := map[string]string{
+					"id":     st.Number,
+					"name":   firstStr(st.NameZh, st.GenerationName),
+					"source": st.Source,
+				}
+				if len(fallback) < args.Limit {
+					fallback = append(fallback, m)
+				}
+				if sc := scoreText(st.Number + " " + st.NameZh + " " + st.GenerationName + " " + st.Description + " " + st.GroupZh); sc > 0 {
+					scored = append(scored, scoredHit{score: sc, item: m})
+				}
+			}
 			for _, st := range p.Styles {
+				if seen[strings.ToUpper(strings.TrimSpace(st.Number))] {
+					continue
+				}
 				m := map[string]string{
 					"id":     st.Number,
 					"name":   firstStr(st.NameZh, st.GenerationName),

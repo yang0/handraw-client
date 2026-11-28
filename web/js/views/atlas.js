@@ -125,7 +125,7 @@ export async function renderAtlas(root, ctx, params = {}) {
     class: "input",
     type: "search",
     value: state.q,
-    placeholder: "搜索编号（FA-013）、名称、作者或特征…",
+    placeholder: "搜索编号（FA-002）、名称、作者或特征…",
     style: { width: "260px" },
   });
   let timer = null;

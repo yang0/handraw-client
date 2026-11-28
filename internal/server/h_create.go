@@ -72,20 +72,30 @@ func (s *Server) buildPrompt(w http.ResponseWriter, r *http.Request) (any, error
 	localIn := in
 	preview := map[string]string{}
 	siteModelOnly := false
-	if prot, meta := s.inspectProtectedResource(r.Context(), "style", localIn.Style); prot {
+	hasExclusive := false
+	hasCommunity := false
+	markProtected := func(meta protectedResourceMeta) {
 		siteModelOnly = true
+		if meta.Source == "exclusive" {
+			hasExclusive = true
+		} else {
+			hasCommunity = true
+		}
+	}
+	if prot, meta := s.inspectProtectedResource(r.Context(), "style", localIn.Style); prot {
+		markProtected(meta)
 		preview["styleImage"] = meta.Image
 		preview["styleName"] = firstStr(meta.Name, meta.Code)
 		localIn.Style = ""
 	}
 	if prot, meta := s.inspectProtectedResource(r.Context(), "style", localIn.Style2); prot {
-		siteModelOnly = true
+		markProtected(meta)
 		preview["style2Image"] = meta.Image
 		preview["style2Name"] = firstStr(meta.Name, meta.Code)
 		localIn.Style2 = ""
 	}
 	if prot, meta := s.inspectProtectedResource(r.Context(), "layout", localIn.Layout); prot {
-		siteModelOnly = true
+		markProtected(meta)
 		preview["layoutImage"] = meta.Image
 		preview["layoutName"] = firstStr(meta.Name, meta.Code)
 		localIn.Layout = ""
@@ -134,7 +144,13 @@ func (s *Server) buildPrompt(w http.ResponseWriter, r *http.Request) (any, error
 	out := map[string]any{"result": res, "preview": preview}
 	if siteModelOnly {
 		out["siteModelOnly"] = true
-		out["siteModelOnlyNotice"] = "已选社区受保护画风/图型，提示词已加密隐藏，仅支持使用网站模型云端生图。"
+		notice := "已选社区受保护画风/图型，提示词已加密隐藏，仅支持使用网站模型云端生图。"
+		if hasExclusive && !hasCommunity {
+			notice = "已选官网独占画风/图型，提示词已加密隐藏，仅支持使用网站模型云端生图。"
+		} else if hasExclusive && hasCommunity {
+			notice = "已选官网独占/社区受保护画风/图型，提示词已加密隐藏，仅支持使用网站模型云端生图。"
+		}
+		out["siteModelOnlyNotice"] = notice
 	}
 	return out, nil
 }
@@ -851,6 +867,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 	var built []prompt.Result
 	var itemPrompts []string
 	var itemBuiltLocally []bool
+	var itemUsesProtected []bool
 	var itemRatios []string
 	var itemThemes []string
 	var itemRefsList [][]string
@@ -874,6 +891,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			built = append(built, pr)
 			itemPrompts = append(itemPrompts, rawPrompt)
 			itemBuiltLocally = append(itemBuiltLocally, false)
+			itemUsesProtected = append(itemUsesProtected, false)
 			itemRatios = append(itemRatios, firstStr(it.Ratio, body.Input.Ratio, "3:4"))
 			itemThemes = append(itemThemes, firstStr(strings.TrimSpace(it.Theme), rawPrompt))
 			continue
@@ -949,6 +967,10 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			pr.Primary, pr.Zh = it.Prompt, it.Prompt
 		} else if body.PromptCustomized && strings.TrimSpace(body.CustomPrompt) != "" {
 			pr.Primary, pr.Zh = body.CustomPrompt, body.CustomPrompt
+		} else if usesProtectedResource {
+			// Delegate full Skill prompt composition (layout, colors, dual-style fusion
+			// with black-box exclusive/community styles) to handraw-web server-side (#212).
+			pr.Primary, pr.Zh = it.Theme, it.Theme
 		} else if localBuildIn.Style != "" || localBuildIn.Layout != "" || localBuildIn.Color != "" {
 			res, err := prompt.Build(p, s.Rules(), localBuildIn)
 			if err != nil {
@@ -959,9 +981,8 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		} else {
 			pr.Primary, pr.Zh = it.Theme, it.Theme
 		}
-		_ = usesProtectedResource
 		finalPrompt := prompt.ForGeneration(pr, s.Rules())
-		if !body.PromptCustomized && strings.TrimSpace(it.Prompt) == "" && body.Mode != "edit" {
+		if !body.PromptCustomized && strings.TrimSpace(it.Prompt) == "" && body.Mode != "edit" && !usesProtectedResource {
 			finalPrompt = appendChineseTypographyDirective(finalPrompt, it.Mode, firstStr(it.Layout, galCtx.Layout), it.Theme, it.Text)
 		}
 		if len(galCtx.PromptCues) > 0 {
@@ -1003,6 +1024,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 		built = append(built, pr)
 		itemPrompts = append(itemPrompts, finalPrompt)
 		itemBuiltLocally = append(itemBuiltLocally, builtLocally)
+		itemUsesProtected = append(itemUsesProtected, usesProtectedResource)
 		itemRatios = append(itemRatios, firstStr(it.Ratio, "3:4"))
 		itemThemes = append(itemThemes, firstStr(it.Theme, body.Input.Theme))
 	}
@@ -1200,6 +1222,15 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			if body.Mode == "edit" {
 				siteMode = "edit"
 				siteTheme = itemPrompts[i]
+			} else if itemUsesProtected[i] && !body.PromptCustomized && strings.TrimSpace(it.Prompt) == "" {
+				// Preserve gallery cues / reference-image directives when website composes
+				// the full Skill prompt server-side for protected exclusive/community resources (#212).
+				if len(galCtx.PromptCues) > 0 {
+					siteTheme = strings.TrimSpace(siteTheme + "\n" + strings.Join(galCtx.PromptCues, "\n"))
+				}
+				if itemRefDirectives[i] != "" {
+					siteTheme = strings.TrimSpace(siteTheme + "\n\n" + itemRefDirectives[i])
+				}
 			}
 			siteCreationSource := body.Mode
 			// Local desktop Markdown articles and local canvases do not have cloud articleId/canvasBatchId bindings;
@@ -1258,8 +1289,10 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 				// Skill prompt locally (including local custom styles/layouts MY-S-*/MY-L-*),
 				// so the website does not overwrite it with a second server-side compose
 				// that drops unknown local custom style codes (#200, handraw-web#587).
-				// Any protected community resources remain injected server-side via injected_notes.
-				if body.Mode == "edit" || body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" || itemRefDirectives[i] != "" || itemBuiltLocally[i] {
+				// When a protected exclusive/community resource is selected without a
+				// custom/edit prompt override, keep promptFromSkill unset so the website
+				// performs full Skill + black-box prompt composition server-side (#212).
+				if body.Mode == "edit" || body.PromptCustomized || strings.TrimSpace(it.Prompt) != "" || (!itemUsesProtected[i] && (itemRefDirectives[i] != "" || itemBuiltLocally[i])) {
 					sb["promptFromSkill"] = true
 				}
 			}

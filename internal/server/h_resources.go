@@ -361,9 +361,57 @@ func (s *Server) resSimilar(w http.ResponseWriter, r *http.Request) (any, error)
 		return nil, err
 	}
 	n := qint(r, "n", 12)
-	out := p.SimilarStyles(r.PathValue("id"), n)
-	if out == nil {
-		out = []resources.Style{}
+	id := strings.TrimSpace(r.PathValue("id"))
+	snap := s.communityCatalog(r.Context(), false)
+	raw := p.SimilarStyles(id, n)
+	seen := map[string]bool{strings.ToUpper(id): true}
+	out := make([]resources.Style, 0, n)
+	for _, st := range raw {
+		eff, ok := resolveStyleFromSnapshot(p, snap, st.Number)
+		if !ok {
+			continue
+		}
+		key := strings.ToUpper(strings.TrimSpace(eff.Number))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, eff)
+		if len(out) >= n {
+			break
+		}
+	}
+	if len(out) < n {
+		// When the queried style is an online exclusive/community style absent from the
+		// static pack, fall back to styles in the same group (preferring online overrides).
+		targetGroup := ""
+		if cur, ok := resolveStyleFromSnapshot(p, snap, id); ok {
+			targetGroup = strings.ToUpper(strings.TrimSpace(cur.GroupCode))
+		}
+		if targetGroup != "" {
+			for _, st := range snap.Styles {
+				if len(out) >= n {
+					break
+				}
+				key := strings.ToUpper(strings.TrimSpace(st.Number))
+				if seen[key] || !strings.EqualFold(st.GroupCode, targetGroup) {
+					continue
+				}
+				seen[key] = true
+				out = append(out, st)
+			}
+			for _, st := range p.Styles {
+				if len(out) >= n {
+					break
+				}
+				key := strings.ToUpper(strings.TrimSpace(st.Number))
+				if seen[key] || !strings.EqualFold(st.GroupCode, targetGroup) {
+					continue
+				}
+				seen[key] = true
+				out = append(out, st)
+			}
+		}
 	}
 	return map[string]any{"items": out}, nil
 }

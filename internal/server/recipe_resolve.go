@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -184,6 +185,43 @@ func stripParenEn(s string) string {
 	return s
 }
 
+func matchStyleInPackWithSnap(p *resources.Pack, snap communityCatalogSnapshot, q string) (string, string) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return "", ""
+	}
+	ql := strings.ToLower(q)
+	qShort := strings.ToLower(stripParenEn(q))
+	for _, st := range snap.Styles {
+		for _, cand := range []string{st.Number, st.NameZh, st.GenerationName} {
+			cl := strings.ToLower(strings.TrimSpace(cand))
+			if cl != "" && (cl == ql || cl == qShort) {
+				return st.Number, firstStr(st.NameZh, st.GenerationName, st.Number)
+			}
+		}
+	}
+	return matchStyleInPack(p, q)
+}
+
+func matchLayoutInPackWithSnap(p *resources.Pack, snap communityCatalogSnapshot, q string) (string, string) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return "", ""
+	}
+	ql := strings.ToLower(q)
+	qHead := strings.TrimSpace(strings.Split(ql, "/")[0])
+	for _, l := range snap.Layouts {
+		if strings.EqualFold(l.ID, q) {
+			return l.ID, firstStr(l.Name, l.ID)
+		}
+		nl := strings.ToLower(strings.TrimSpace(l.Name))
+		if nl != "" && (nl == ql || (qHead != "" && (nl == qHead || strings.HasPrefix(nl, qHead)))) {
+			return l.ID, firstStr(l.Name, l.ID)
+		}
+	}
+	return matchLayoutInPack(p, q)
+}
+
 func matchStyleInPack(p *resources.Pack, q string) (string, string) {
 	q = strings.TrimSpace(q)
 	if q == "" {
@@ -357,8 +395,10 @@ func (s *Server) resolveRunRecipe(run store.Run, versions []store.Run) map[strin
 	}
 
 	var p *resources.Pack
+	var snap communityCatalogSnapshot
 	if s != nil {
 		p = s.Pack()
+		snap = s.communityCatalog(context.Background(), false)
 	}
 
 	// Collect current run + ancestors (closest first).
@@ -467,7 +507,7 @@ func (s *Server) resolveRunRecipe(run store.Run, versions []store.Run) map[strin
 	styleItems := make([]map[string]string, 0, len(styles))
 	resolvedStyleIDs := make([]string, 0, len(styles))
 	for _, sRaw := range styles {
-		id, name := matchStyleInPack(p, sRaw)
+		id, name := matchStyleInPackWithSnap(p, snap, sRaw)
 		if id != "" {
 			resolvedStyleIDs = append(resolvedStyleIDs, id)
 		}
@@ -477,7 +517,7 @@ func (s *Server) resolveRunRecipe(run store.Run, versions []store.Run) map[strin
 	var layoutItem map[string]string
 	resolvedLayoutID := ""
 	if layoutRaw != "" {
-		lid, lname := matchLayoutInPack(p, layoutRaw)
+		lid, lname := matchLayoutInPackWithSnap(p, snap, layoutRaw)
 		resolvedLayoutID = lid
 		layoutItem = map[string]string{"id": lid, "name": firstStr(lname, layoutRaw)}
 	}

@@ -184,8 +184,10 @@ func (s *Server) studioChatPlan(w http.ResponseWriter, r *http.Request) (any, er
 		return resp, nil
 	}
 
+	snap := s.communityCatalog(r.Context(), false)
+
 	planWithProvider := func(tp settings.Provider, model string) (*chatPlanResponse, error) {
-		msgs := buildChatPlanMessages(p, body)
+		msgs := buildChatPlanMessages(p, snap, body)
 		reply, err := providers.Chat(r.Context(), tp, model, msgs, true)
 		if err != nil {
 			return nil, err
@@ -199,7 +201,7 @@ func (s *Server) studioChatPlan(w http.ResponseWriter, r *http.Request) (any, er
 	}
 
 	planWithHarness := func() (*chatPlanResponse, error) {
-		msgs := buildChatPlanMessages(p, body)
+		msgs := buildChatPlanMessages(p, snap, body)
 		res, err := s.callHarnessText(r.Context(), route, msgs, true)
 		if err != nil {
 			return nil, err
@@ -212,7 +214,6 @@ func (s *Server) studioChatPlan(w http.ResponseWriter, r *http.Request) (any, er
 		return resp, nil
 	}
 
-	snap := s.communityCatalog(r.Context(), false)
 	applyOverrides := func(res *chatPlanResponse, err error) (*chatPlanResponse, error) {
 		if err != nil || res == nil {
 			return res, err
@@ -313,12 +314,39 @@ func normalizeChatRatio(r, fallback string) string {
 	return "3:4"
 }
 
-func buildChatPlanMessages(p *resources.Pack, body chatPlanRequest) []providers.ChatMessage {
+func buildChatPlanMessages(p *resources.Pack, snap communityCatalogSnapshot, body chatPlanRequest) []providers.ChatMessage {
+	overridden := map[string]bool{}
+	snapByCode := map[string]resources.Style{}
+	for _, st := range snap.Styles {
+		k := strings.ToUpper(strings.TrimSpace(st.Number))
+		if k != "" {
+			overridden[k] = true
+			snapByCode[k] = st
+		}
+	}
 	var styleCatalog []string
-	for i, st := range p.Styles {
-		if i >= 40 {
+	added := map[string]bool{}
+	// Always include user-selected exclusive/community styles with their live name
+	// so the planner recognizes them without leaking stale static names (#212).
+	for _, selCode := range []string{body.Selected.Style1, body.Selected.Style2} {
+		k := strings.ToUpper(strings.TrimSpace(selCode))
+		if k == "" || added[k] {
+			continue
+		}
+		if st, ok := snapByCode[k]; ok {
+			added[k] = true
+			styleCatalog = append(styleCatalog, fmt.Sprintf("%s(%s)", st.Number, firstStr(st.NameZh, st.GenerationName)))
+		}
+	}
+	for _, st := range p.Styles {
+		if len(styleCatalog) >= 40 {
 			break
 		}
+		k := strings.ToUpper(strings.TrimSpace(st.Number))
+		if overridden[k] || added[k] {
+			continue
+		}
+		added[k] = true
 		name := firstStr(st.NameZh, st.GenerationName)
 		styleCatalog = append(styleCatalog, fmt.Sprintf("%s(%s)", st.Number, name))
 	}

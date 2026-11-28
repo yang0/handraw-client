@@ -1513,14 +1513,24 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
 
 	styleHint := ""
 	if p := s.Pack(); p != nil && len(p.Styles) > 0 {
+		snap := s.communityCatalog(ctx, false)
+		overridden := map[string]bool{}
+		for _, st := range snap.Styles {
+			overridden[strings.ToUpper(strings.TrimSpace(st.Number))] = true
+		}
 		var sample []string
-		for i, st := range p.Styles {
-			if i >= 40 {
+		for _, st := range p.Styles {
+			if len(sample) >= 40 {
 				break
+			}
+			if overridden[strings.ToUpper(strings.TrimSpace(st.Number))] {
+				continue
 			}
 			sample = append(sample, st.Number+":"+firstStr(st.NameZh, st.GenerationName))
 		}
-		styleHint = "\n部分可选手绘风画风编号参考：" + strings.Join(sample, " | ")
+		if len(sample) > 0 {
+			styleHint = "\n部分可选手绘风画风编号参考：" + strings.Join(sample, " | ")
+		}
 	}
 
 	existingFolders := s.loadSavedInspirationFolders()
@@ -1542,7 +1552,7 @@ func (s *Server) organizeInspirationItem(ctx context.Context, item inspirationIt
   ],
   "folder": "",
   "tags": ["标签1", "标签2", "标签3"],
-  "suggestedStyle": "仅当原提示词明确属于手绘/水彩/插画且高度匹配下方编号时才填写如 FA-013；若原提示词为 3D/写实摄影/电影/通用外部风格，请务必留空字符串 \"\""
+  "suggestedStyle": "仅当原提示词明确属于手绘/水彩/插画且高度匹配下方编号时才填写如 FA-002；若原提示词为 3D/写实摄影/电影/通用外部风格，请务必留空字符串 \"\""
 }
 要求：slots 提炼 1~4 个最值得用户「做同款」时替换的关键变量；tags 提炼 2~4 个简洁可复用的中文多维标签（如画风/题材/用途，2~5 字，不带#），避免造生僻词；folder 仅在提供了用户现有分组列表且高度匹配时填写精确分组名，否则留空字符串 ""。` + folderHint + styleHint
 

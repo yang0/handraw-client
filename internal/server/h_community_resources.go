@@ -14,6 +14,7 @@ import (
 
 const (
 	communityCatalogCacheKey = "community_resources_v2"
+	communityCatalogKVPrefix = "community_catalog_v2:"
 	communityCatalogTTL      = 2 * time.Minute
 )
 
@@ -121,11 +122,52 @@ func (s *Server) invalidateCommunityCache() {
 	s.cacheMu.Unlock()
 }
 
+func sanitizePublicCommunitySnapshot(snap communityCatalogSnapshot) communityCatalogSnapshot {
+	out := communityCatalogSnapshot{
+		Styles:  make([]resources.Style, 0, len(snap.Styles)),
+		Layouts: make([]resources.Layout, 0, len(snap.Layouts)),
+	}
+	for _, st := range snap.Styles {
+		st.Unlocked = false
+		st.IsMine = false
+		st.PersonalResourceID = ""
+		out.Styles = append(out.Styles, st)
+	}
+	for _, l := range snap.Layouts {
+		l.Unlocked = false
+		l.IsMine = false
+		l.PersonalResourceID = ""
+		out.Layouts = append(out.Layouts, l)
+	}
+	return out
+}
+
+func (s *Server) loadPersistedCommunityCatalog(kvKey, publicKVKey string) (communityCatalogSnapshot, bool) {
+	if s.DB == nil {
+		return communityCatalogSnapshot{}, false
+	}
+	var persisted communityCatalogSnapshot
+	if err := s.DB.GetKV(kvKey, &persisted); err == nil && (len(persisted.Styles) > 0 || len(persisted.Layouts) > 0) {
+		return persisted, true
+	}
+	if publicKVKey != "" && publicKVKey != kvKey {
+		var pub communityCatalogSnapshot
+		if err := s.DB.GetKV(publicKVKey, &pub); err == nil && (len(pub.Styles) > 0 || len(pub.Layouts) > 0) {
+			return pub, true
+		}
+	}
+	return communityCatalogSnapshot{}, false
+}
+
 func (s *Server) communityCatalog(ctx context.Context, force bool) communityCatalogSnapshot {
 	if s.Site == nil {
 		return communityCatalogSnapshot{}
 	}
-	cacheKey := communityCatalogCacheKey + ":" + s.Site.Base() + ":" + s.Site.TokenFingerprint()
+	base := s.Site.Base()
+	fp := s.Site.TokenFingerprint()
+	cacheKey := communityCatalogCacheKey + ":" + base + ":" + fp
+	kvKey := communityCatalogKVPrefix + base + ":" + fp
+	publicKVKey := communityCatalogKVPrefix + base + ":public"
 	if !force {
 		if raw, ok := s.getMarketCache(cacheKey, communityCatalogTTL); ok {
 			var snap communityCatalogSnapshot
@@ -170,6 +212,9 @@ func (s *Server) communityCatalog(ctx context.Context, force bool) communityCata
 				if json.Unmarshal(raw, &stale) == nil {
 					return stale
 				}
+			}
+			if persisted, ok := s.loadPersistedCommunityCatalog(kvKey, publicKVKey); ok {
+				return persisted
 			}
 			return communityCatalogSnapshot{}
 		}
@@ -269,6 +314,12 @@ func (s *Server) communityCatalog(ctx context.Context, force bool) communityCata
 		if b, err := json.Marshal(snap); err == nil {
 			s.setMarketCache(cacheKey, b)
 		}
+		if s.DB != nil && (len(snap.Styles) > 0 || len(snap.Layouts) > 0) {
+			_ = s.DB.SetKV(kvKey, snap)
+			_ = s.DB.SetKV(publicKVKey, sanitizePublicCommunitySnapshot(snap))
+		}
+	} else if s.DB != nil && (len(snap.Styles) > 0 || len(snap.Layouts) > 0) {
+		_ = s.DB.SetKV(publicKVKey, sanitizePublicCommunitySnapshot(snap))
 	}
 	return snap
 }

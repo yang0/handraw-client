@@ -23,19 +23,16 @@ const BuiltinHandrawSkillID = "handraw-skill"
 var builtinFS embed.FS
 
 // BuiltinHandrawMirrors defines ordered remote sources for dynamic hot-updates
-// of the built-in Handraw Skill (GitHub Raw primary + jsDelivr CDN fallback).
+// of the built-in client Handraw Skill, maintained together with handraw-web
+// (decoupled from the open-source yang0/handraw-style Skill repository, #212).
 // Exported as var so tests can point it at an httptest.Server.
 var BuiltinHandrawMirrors = []struct {
 	SkillURL   string
 	VersionURL string
 }{
 	{
-		SkillURL:   "https://raw.githubusercontent.com/yang0/handraw-style/main/skills/handdraw-style-prompter/SKILL.md",
-		VersionURL: "https://raw.githubusercontent.com/yang0/handraw-style/main/version.json",
-	},
-	{
-		SkillURL:   "https://cdn.jsdelivr.net/gh/yang0/handraw-style@main/skills/handdraw-style-prompter/SKILL.md",
-		VersionURL: "https://cdn.jsdelivr.net/gh/yang0/handraw-style@main/version.json",
+		SkillURL:   "https://handraw-style.com/static/client/handraw-skill/SKILL.md",
+		VersionURL: "https://handraw-style.com/static/client/handraw-skill/version.json",
 	},
 }
 
@@ -110,7 +107,7 @@ func (m *Manager) EnsureBuiltin() error {
 			Enabled:     true,
 			Builtin:     true,
 			Version:     bundledVer,
-			Source:      "builtin:yang0/handraw-style",
+			Source:      "builtin:handraw-client",
 			ContentSHA:  bundledHash,
 			InstalledAt: now,
 			UpdatedAt:   now,
@@ -134,7 +131,7 @@ func (m *Manager) EnsureBuiltin() error {
 			Enabled:     true,
 			Builtin:     true,
 			Version:     bundledVer,
-			Source:      "builtin:yang0/handraw-style",
+			Source:      "builtin:handraw-client",
 			ContentSHA:  bundledHash,
 			InstalledAt: now,
 			UpdatedAt:   now,
@@ -145,8 +142,8 @@ func (m *Manager) EnsureBuiltin() error {
 			existingMeta.Builtin = true
 			dirty = true
 		}
-		if existingMeta.Source == "" {
-			existingMeta.Source = "builtin:yang0/handraw-style"
+		if existingMeta.Source == "" || existingMeta.Source == "builtin:yang0/handraw-style" {
+			existingMeta.Source = "builtin:handraw-client"
 			dirty = true
 		}
 		if existingMeta.Version == "" {
@@ -390,8 +387,8 @@ func (m *Manager) Update(ctx context.Context, id string) (Skill, bool, error) {
 		meta.UpdateAvailable = false
 		meta.Customized = false
 		meta.UpdatedAt = time.Now().UnixMilli()
-		if meta.Source == "" {
-			meta.Source = "builtin:yang0/handraw-style"
+		if meta.Source == "" || meta.Source == "builtin:yang0/handraw-style" {
+			meta.Source = "builtin:handraw-client"
 		}
 		if err := writeMeta(dest, meta); err != nil {
 			return sk, false, err

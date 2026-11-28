@@ -1655,7 +1655,15 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 			res["model"] = modelName
 		}
 		if kind == "style" {
-			res["matches"] = p.SearchStyles(desc, 5)
+			snap := s.communityCatalog(r.Context(), false)
+			rawMatches := p.SearchStyles(desc, 5)
+			matches := make([]resources.Style, 0, len(rawMatches))
+			for _, st := range rawMatches {
+				if eff, ok := resolveStyleFromSnapshot(p, snap, st.Number); ok {
+					matches = append(matches, eff)
+				}
+			}
+			res["matches"] = matches
 			res["violations"] = prompt.CheckTraitViolations(desc)
 		} else {
 			res["violations"] = []string{}
@@ -1852,7 +1860,15 @@ func (s *Server) mineDistillFromPrompt(ctx context.Context, kind, sourceText, mo
 			res["model"] = modelName
 		}
 		if kind == "style" {
-			res["matches"] = p.SearchStyles(desc, 5)
+			snap := s.communityCatalog(ctx, false)
+			rawMatches := p.SearchStyles(desc, 5)
+			matches := make([]resources.Style, 0, len(rawMatches))
+			for _, st := range rawMatches {
+				if eff, ok := resolveStyleFromSnapshot(p, snap, st.Number); ok {
+					matches = append(matches, eff)
+				}
+			}
+			res["matches"] = matches
 			res["violations"] = prompt.CheckTraitViolations(desc)
 		} else {
 			res["violations"] = []string{}

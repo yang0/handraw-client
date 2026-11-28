@@ -97,8 +97,19 @@ func TestBuiltinHandrawSkillAndDynamicUpdate(t *testing.T) {
 	if sk.Name != "手绘skill" {
 		t.Fatalf("expected display_name 手绘skill, got %q", sk.Name)
 	}
-	if sk.Version == "" || !strings.Contains(sk.Body, "Hand-drawn Style Prompter") {
+	if sk.Version == "" || !strings.Contains(sk.Body, "客户端 × 官网一体版") {
 		t.Fatalf("unexpected bundled content/version: ver=%q len=%d", sk.Version, len(sk.Body))
+	}
+	if sk.Source != "builtin:handraw-client" {
+		t.Fatalf("expected decoupled builtin source builtin:handraw-client, got %q", sk.Source)
+	}
+	for _, m := range BuiltinHandrawMirrors {
+		if strings.Contains(m.SkillURL, "yang0/handraw-style") || strings.Contains(m.VersionURL, "yang0/handraw-style") {
+			t.Fatalf("BuiltinHandrawMirrors must not pull from open-source yang0/handraw-style: %+v", m)
+		}
+		if !strings.Contains(m.SkillURL, "handraw-style.com/static/client/handraw-skill/") {
+			t.Fatalf("expected client-managed website mirror URL, got %+v", m)
+		}
 	}
 
 	// Custom skill installed later must still sort after built-in skill.

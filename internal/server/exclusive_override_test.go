@@ -1,14 +1,17 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/yang0/handraw-client/internal/jobs"
 	"github.com/yang0/handraw-client/internal/secrets"
 	"github.com/yang0/handraw-client/internal/settings"
+	"github.com/yang0/handraw-client/internal/store"
 )
 
 func TestExclusiveStyleOverridesStaticPackCodes(t *testing.T) {
@@ -244,5 +247,132 @@ func TestExclusiveStyleOverridesStaticPackCodes(t *testing.T) {
 	})
 	if rrLocked.Code != http.StatusForbidden || !strings.Contains(rrLocked.Body.String(), "asset_locked") || !strings.Contains(rrLocked.Body.String(), "官网独占") {
 		t.Fatalf("expected 403 asset_locked with 官网独占 wording for locked site model, got %d %s", rrLocked.Code, rrLocked.Body.String())
+	}
+
+	// 7. Similar styles, buildPrompt notice, chat catalog, chat-plan prompt, and recipe resolution all respect exclusive override (#212).
+	rrPrompt := doReq(t, h, srv.Token, http.MethodPost, "/api/prompt", map[string]any{
+		"style": "FA-001",
+		"theme": "窗台小猫",
+	})
+	if rrPrompt.Code != http.StatusOK || !strings.Contains(rrPrompt.Body.String(), "官网独占") {
+		t.Fatalf("expected /api/prompt to report 官网独占 notice, got %d %s", rrPrompt.Code, rrPrompt.Body.String())
+	}
+
+	rrSim := doReq(t, h, srv.Token, http.MethodGet, "/api/resources/styles/FA-002/similar?n=5", nil)
+	if rrSim.Code != http.StatusOK {
+		t.Fatalf("GET /api/resources/styles/FA-002/similar failed: %d %s", rrSim.Code, rrSim.Body.String())
+	}
+	if strings.Contains(rrSim.Body.String(), "Gemma Correll") || !strings.Contains(rrSim.Body.String(), "松散黑线冷幽默涂鸦") {
+		t.Fatalf("similar styles leaked static name or missed exclusive override: %s", rrSim.Body.String())
+	}
+
+	p := srv.Pack()
+	snap := srv.communityCatalog(context.Background(), false)
+	compact := buildCompactCatalogBlock(p, snap)
+	if strings.Contains(compact, "Gemma Correll") || !strings.Contains(compact, "FA-001:松散黑线冷幽默涂鸦(需解锁)") {
+		t.Fatalf("buildCompactCatalogBlock leaked static name or missed override: %s", compact)
+	}
+	planMsgsDefault := buildChatPlanMessages(p, snap, chatPlanRequest{Message: "画一只猫"})
+	if strings.Contains(planMsgsDefault[0].Content.(string), "Gemma Correll") || strings.Contains(planMsgsDefault[0].Content.(string), "FA-001(") {
+		t.Fatalf("buildChatPlanMessages should omit locked overridden FA-001 when unselected: %s", planMsgsDefault[0].Content)
+	}
+	planMsgsSelected := buildChatPlanMessages(p, snap, chatPlanRequest{
+		Message:  "画一只猫",
+		Selected: chatPlanSelected{Style1: "FA-001"},
+	})
+	if !strings.Contains(planMsgsSelected[0].Content.(string), "FA-001(松散黑线冷幽默涂鸦)") {
+		t.Fatalf("buildChatPlanMessages should include selected exclusive name: %s", planMsgsSelected[0].Content)
+	}
+	resolvedRec := srv.resolveRunRecipe(store.Run{Recipe: json.RawMessage(`{"styleIds":["FA-001"]}`)}, nil)
+	if stylesSlice, ok := resolvedRec["styles"].([]map[string]string); !ok || len(stylesSlice) != 1 || stylesSlice[0]["name"] != "松散黑线冷幽默涂鸦" {
+		t.Fatalf("resolveRunRecipe missed exclusive override: %+v", resolvedRec["styles"])
+	}
+
+	// 8. SQLite KV persistence retains exclusive overrides after memory cache clear & site outage (#212).
+	fakeSite.Close()
+	srv.invalidateCommunityCache()
+	rrOffline := doReq(t, h, srv.Token, http.MethodGet, "/api/resources/styles/FA-001", nil)
+	if rrOffline.Code != http.StatusOK {
+		t.Fatalf("offline GET /api/resources/styles/FA-001 failed: %d %s", rrOffline.Code, rrOffline.Body.String())
+	}
+	if strings.Contains(rrOffline.Body.String(), "Gemma Correll") || !strings.Contains(rrOffline.Body.String(), "松散黑线冷幽默涂鸦") {
+		t.Fatalf("offline detail did not fall back to SQLite-persisted exclusive catalog: %s", rrOffline.Body.String())
+	}
+}
+
+func TestExclusiveStyleWithLayoutOmitsPromptFromSkill(t *testing.T) {
+	fakeSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/community/resources" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"items": []map[string]any{
+					{
+						"id":            "FA-001",
+						"code":          "FA-001",
+						"kind":          "style",
+						"sourceType":    "exclusive",
+						"group":         "FA 国际社论幽默 / Editorial & Humor Doodle",
+						"name":          "松散黑线冷幽默涂鸦",
+						"image":         "/uploads/EXCL-FA-001.webp",
+						"unlockCost":    2,
+						"unlocked":      true,
+						"promptHidden":  true,
+						"siteModelOnly": true,
+					},
+				},
+			})
+		case r.URL.Path == "/api/economy/public-models" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"specifications": []map[string]any{
+					{"id": "spec-1", "model": "seedream-4.5", "resolution": "1k", "quality": "standard", "enabled": true, "verified": true},
+				},
+			})
+		case r.URL.Path == "/api/studio/quote" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"quoteId": "q_excl_1", "totalCents": 0, "freeCount": 1, "affordable": true,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer fakeSite.Close()
+
+	srv, cancel := setupTestServer(t, fakeSite.URL)
+	defer cancel()
+	h := srv.Handler()
+	_ = secrets.Set(secrets.SiteToken, "tok_test_excl_unlocked")
+	t.Cleanup(func() { _ = secrets.Delete(secrets.SiteToken) })
+
+	// Select unlocked exclusive FA-001 + bundled layout SC-001 + color C-01.
+	rr := doReq(t, h, srv.Token, http.MethodPost, "/api/generate", map[string]any{
+		"mode":     "single",
+		"modelRef": "site:seedream-4.5",
+		"input": map[string]any{
+			"style":  "FA-001",
+			"layout": "SC-001",
+			"color":  "C-01",
+			"theme":  "窗台小猫喝咖啡",
+		},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /api/generate failed: %d %s", rr.Code, rr.Body.String())
+	}
+	var genResp struct {
+		Images []store.Image `json:"images"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &genResp); err != nil || len(genResp.Images) != 1 {
+		t.Fatalf("decode generate response: err=%v len=%d body=%s", err, len(genResp.Images), rr.Body.String())
+	}
+	var spec jobs.Spec
+	if err := json.Unmarshal(genResp.Images[0].Meta, &spec); err != nil {
+		t.Fatalf("unmarshal spec meta: %v", err)
+	}
+	if v, ok := spec.SiteBody["promptFromSkill"].(bool); ok && v {
+		t.Fatalf("expected promptFromSkill to be omitted/false when exclusive style is paired with layout/color, got SiteBody=%+v", spec.SiteBody)
+	}
+	if spec.SiteBody["style1"] != "FA-001" || spec.SiteBody["layout"] != "SC-001" || spec.SiteBody["theme"] != "窗台小猫喝咖啡" {
+		t.Fatalf("unexpected SiteBody fields for server-side composition: %+v", spec.SiteBody)
 	}
 }

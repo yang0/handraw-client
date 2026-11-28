@@ -865,6 +865,11 @@ func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) (any, error
 	if plan, pErr := s.Updater.PlanResources(r.Context(), s.PackDir); pErr == nil && plan != nil {
 		st = s.Updater.Status()
 	}
+	// Refresh online website exclusive/community catalog in lockstep with client update checks (#212).
+	s.invalidateCommunityCache()
+	if snap := s.communityCatalog(r.Context(), true); len(snap.Styles) > 0 || len(snap.Layouts) > 0 {
+		s.Emit("resources_changed", map[string]any{"communityStyles": len(snap.Styles), "communityLayouts": len(snap.Layouts)})
+	}
 	var skillRes *skills.UpdateCheckResult
 	if res, sErr := s.skillsManager().CheckUpdate(r.Context(), skills.BuiltinHandrawSkillID); sErr == nil {
 		skillRes = &res
@@ -1027,6 +1032,16 @@ func (s *Server) updateResources(w http.ResponseWriter, r *http.Request) (any, e
 			s.Emit("pack", map[string]any{"version": p.Version, "styles": len(p.Styles)})
 		}
 	}
+	// Always refresh online website exclusive/community style overrides alongside resource sync (#212).
+	s.invalidateCommunityCache()
+	catalogSnap := s.communityCatalog(r.Context(), true)
+	catalogSynced := len(catalogSnap.Styles) > 0 || len(catalogSnap.Layouts) > 0
+	if catalogSynced {
+		s.Emit("resources_changed", map[string]any{
+			"communityStyles":  len(catalogSnap.Styles),
+			"communityLayouts": len(catalogSnap.Layouts),
+		})
+	}
 	skillUpdated := false
 	skillVersion := ""
 	if sk, changed, sErr := s.skillsManager().Update(r.Context(), skills.BuiltinHandrawSkillID); sErr == nil {
@@ -1037,10 +1052,11 @@ func (s *Server) updateResources(w http.ResponseWriter, r *http.Request) (any, e
 		}
 	}
 	return map[string]any{
-		"updated":      resChanged > 0 || skillUpdated,
-		"changed":      resChanged,
-		"skillUpdated": skillUpdated,
-		"skillVersion": skillVersion,
-		"status":       s.Updater.Status(),
+		"updated":       resChanged > 0 || skillUpdated || catalogSynced,
+		"changed":       resChanged,
+		"catalogSynced": catalogSynced,
+		"skillUpdated":  skillUpdated,
+		"skillVersion":  skillVersion,
+		"status":        s.Updater.Status(),
 	}, nil
 }

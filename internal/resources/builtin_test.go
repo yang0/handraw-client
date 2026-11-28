@@ -19,8 +19,8 @@ func TestEnsureBuiltinMaterializesAndLoadsPack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(dir) failed: %v", err)
 	}
-	if len(p.Styles) < 300 {
-		t.Fatalf("expected >= 300 embedded styles, got %d", len(p.Styles))
+	if len(p.Styles) < 200 {
+		t.Fatalf("expected >= 200 embedded styles, got %d", len(p.Styles))
 	}
 	if len(p.Layouts) < 100 {
 		t.Fatalf("expected >= 100 embedded layouts, got %d", len(p.Layouts))
@@ -31,8 +31,15 @@ func TestEnsureBuiltinMaterializesAndLoadsPack(t *testing.T) {
 	if len(p.Tones) < 5 {
 		t.Fatalf("expected >= 5 embedded tones, got %d", len(p.Tones))
 	}
-	if _, ok := p.Style("FA-001"); !ok {
-		t.Fatalf("expected FA-001 in embedded styles")
+	if _, ok := p.Style("FA-002"); !ok {
+		t.Fatalf("expected FA-002 in embedded styles")
+	}
+	// Copyrighted styles replaced by closed-source exclusive styles on handraw-web
+	// must never be bundled in the public client resource pack (#212).
+	for _, purged := range []string{"FA-001", "FA-013", "FB-001", "FC-001", "FD-001", "FE-001", "FG-013", "FH-044", "FI-016"} {
+		if _, ok := p.Style(purged); ok {
+			t.Fatalf("expected purged copyrighted style %s to be absent from embedded pack", purged)
+		}
 	}
 	if l, ok := p.Layout("SB-001"); !ok || l.PromptZh == "" {
 		t.Fatalf("expected SB-001 layout with hydrated PromptZh, got ok=%v len=%d", ok, len(l.PromptZh))
@@ -40,7 +47,7 @@ func TestEnsureBuiltinMaterializesAndLoadsPack(t *testing.T) {
 
 	// Simulate an older builtin marker + cached image: upgrade must refresh references
 	// while keeping any cached image intact.
-	cachedImg := filepath.Join(dir, "images", "individual", "FA", "FA-001.webp")
+	cachedImg := filepath.Join(dir, "images", "individual", "FA", "FA-002.webp")
 	if err := os.MkdirAll(filepath.Dir(cachedImg), 0o755); err != nil {
 		t.Fatal(err)
 	}

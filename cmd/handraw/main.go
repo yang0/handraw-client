@@ -137,7 +137,6 @@ func bootBackend(ctx context.Context) (*server.Server, func(), error) {
 		userPackDir,
 		bundledDir,
 	}
-	locateCandidates = append(locateCandidates, findDevSkillCheckouts()...)
 	if packDir, err := resources.Locate(locateCandidates...); err == nil {
 		if pack, lErr := resources.Load(packDir); lErr == nil {
 			resources.SetCurrent(pack)
@@ -311,14 +310,10 @@ func findBundledPack(userPackDir string) string {
 		)
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(cwd, "resources"),
-			filepath.Join(cwd, "..", "handraw-style", "dist", "client-resources"),
-		)
+		candidates = append(candidates, filepath.Join(cwd, "resources"))
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".handraw-style", "client-resources"))
-	}
+	// Note: Do not auto-load open-source ../handraw-style or ~/.handraw-style/client-resources
+	// into the client pack; open-source Skill is maintained independently from client+web (#212).
 	// When Windows data dir moved off C: (#125), seed from any previously downloaded
 	// %APPDATA%\handraw-client\resources pack so styles/layouts/colors/tones appear immediately.
 	if appdata := strings.TrimSpace(os.Getenv("APPDATA")); appdata != "" {
@@ -333,15 +328,4 @@ func findBundledPack(userPackDir string) string {
 		}
 	}
 	return ""
-}
-
-func findDevSkillCheckouts() []string {
-	var out []string
-	if cwd, err := os.Getwd(); err == nil {
-		out = append(out, filepath.Join(cwd, "..", "handraw-style"))
-	}
-	if exe, err := os.Executable(); err == nil {
-		out = append(out, filepath.Join(filepath.Dir(exe), "..", "handraw-style"))
-	}
-	return out
 }
