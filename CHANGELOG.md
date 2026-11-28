@@ -2,6 +2,24 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.17 (2026-11-28)
+
+### Copyright Cleanup & Web-Integrated Catalog
+- **Purged 151 Replaced Copyrighted Styles from Bundled Resource Pack (#212)**:
+  - Removed all 151 copyrighted style codes replaced by closed-source exclusive styles on `handraw-web` from `internal/resources/builtin/references/styles.json` (372 → 221 free styles), pruned 103 stale entries from `model_capabilities.json` and 8 removed artists from `attribution.json`, and bumped the bundled reference pack to `v2.0.0` so existing installations upgrade cleanly on next launch.
+  - Replaced `FA-013` UI example placeholders in the command palette, Atlas search, and recipe editor with free style `FA-002`.
+- **Online Exclusive Style Overrides & Deduplication (#211, #212)**:
+  - Prioritized online `exclusive` and `community` style overrides across Atlas, style detail, similar styles, random style dice, chat catalog/search, chat-plan, style analysis/distillation, inspiration organization, and recipe resolution — avoiding paid styles as default recommendations and deduplicating group counts.
+  - Persisted online `communityCatalog` snapshots (including sanitized public fallbacks) to SQLite KV so exclusive overrides and `siteModelOnly` / `promptHidden` protection gates survive offline restarts.
+- **Server-Side Composition for Protected Exclusive Styles (#212)**:
+  - Fixed `promptFromSkill` handling when a protected `exclusive` / `community` style or layout is paired with bundled layouts, colors, or a second style: skips local `prompt.Build()` and omits `promptFromSkill: true` so `handraw-web` performs full Skill + black-box prompt composition server-side.
+  - Differentiated `官网独占` vs `社区受保护` notices in `/api/prompt` and generation lock/model error messages.
+
+### Client + Web Unified Skill & Resource Sync
+- **Decoupled Built-in Client Skill & Resource Sync from Open-Source `yang0/handraw-style` (#212)**:
+  - Pointed built-in Skill update mirrors to `https://handraw-style.com/static/client/handraw-skill/{SKILL.md,version.json}` (`source: builtin:handraw-client`), rewrote the bundled `handraw-skill` (`v2.0.0`) for the integrated client + web product, and removed auto-loading of local open-source `../handraw-style` / `~/.handraw-style/client-resources` directories.
+  - Wired Settings → Check Updates / Update Resources to proactively invalidate and refresh the live website exclusive/community catalog.
+
 ## v0.6.16 (2026-11-28)
 
 ### Fixes
