@@ -15,7 +15,7 @@ async function startQuick() {
 
   const recipes = (Array.isArray(recRes.items) && recRes.items.length)
     ? recRes.items
-    : [{ id: "default", name: "默认画风", styleIds: ["FA-013"], ratio: "3:4", mode: "graphic-text" }];
+    : [{ id: "default", name: "默认画风", styleIds: ["FA-002"], ratio: "3:4", mode: "graphic-text" }];
   let recipeIdx = 0;
   let activeRunId = "";
 
@@ -40,7 +40,7 @@ async function startQuick() {
 
   function updateRecipeBtn() {
     const r = recipes[recipeIdx % recipes.length];
-    if (recBtn) recBtn.textContent = `配方：${r.name} (${(r.styleIds || ["FA-013"]).join("+")})`;
+    if (recBtn) recBtn.textContent = `配方：${r.name} (${(r.styleIds || ["FA-002"]).join("+")})`;
   }
   updateRecipeBtn();
 
@@ -92,7 +92,7 @@ async function startQuick() {
         count: 1,
         confirmed,
         input: {
-          style: r.styleIds?.[0] || "FA-013",
+          style: r.styleIds?.[0] || "FA-002",
           style2: r.styleIds?.[1] || "",
           layout: r.layoutId || "",
           color: r.colors?.[0] || "",

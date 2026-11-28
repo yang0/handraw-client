@@ -1069,8 +1069,9 @@ export async function renderCreate(root, ctx, params = {}) {
     const lockedEntry = protectedList.find((p) => p.item && !p.item.unlocked && !p.item.isMine);
     if (lockedEntry) {
       const cost = Math.max(1, Number(lockedEntry.item.unlockCost || 1));
+      const scopeLabel = lockedEntry.item.source === "exclusive" ? "官网限定收费" : "社区收费";
       siteGuardBanner.append(
-        el("span", null, `🔒 已选社区收费${lockedEntry.kindLabel}《${lockedEntry.name}》（需 ${cost} 积分解锁 · 提示词已隐藏 · 仅支持网站生图模型）`),
+        el("span", null, `🔒 已选${scopeLabel}${lockedEntry.kindLabel}《${lockedEntry.name}》（需 ${cost} 积分解锁 · 提示词已隐藏 · 仅支持网站生图模型）`),
         el("button", {
           type: "button",
           class: "btn btn-sm btn-primary",
@@ -1093,8 +1094,9 @@ export async function renderCreate(root, ctx, params = {}) {
       );
     } else {
       const names = protectedList.map((p) => `《${p.name}》`).join("、");
+      const allExclusive = protectedList.every((p) => p.item?.source === "exclusive");
       siteGuardBanner.append(
-        el("span", null, `☁ 社区受保护资源 ${names} 已隐藏提示词，出图已自动锁定仅使用网站生图模型。`)
+        el("span", null, `☁ ${allExclusive ? "官网限定画风" : "受保护资源"} ${names} 已隐藏提示词，出图已自动锁定仅使用网站生图模型。`)
       );
     }
   };
@@ -2190,7 +2192,8 @@ export async function renderCreate(root, ctx, params = {}) {
       });
       payloadRecipe = {};
     } else {
-      const effectiveStyle = state.style || common.style1 || "FA-013";
+      const freeFallbackStyle = (styles || []).find((s) => s && !s.promptHidden && !s.siteModelOnly && s.source !== "community" && s.source !== "exclusive")?.number || "FA-002";
+      const effectiveStyle = state.style || common.style1 || freeFallbackStyle;
       const effectiveStyle2 = state.fusion ? (state.style2 || "") : "";
       const effectiveMode = state.mode || common.mode || "graphic-text";
       const effectiveColor = state.color || (common.colors?.[0] || "");

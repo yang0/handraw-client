@@ -173,6 +173,11 @@ export function ratioControl(label, value, onChange, { compact = false } = {}) {
 }
 
 export function resourceId(item) { return item?.number || item?.id || ""; }
+export function defaultFreeStyleCode(styles, fallback = "FA-002") {
+  const list = Array.isArray(styles) ? styles : [];
+  const free = list.find((s) => s && !s.promptHidden && !s.siteModelOnly && s.source !== "community" && s.source !== "exclusive" && (s.number || s.id));
+  return free ? (free.number || free.id) : fallback;
+}
 export function resourceName(item) { return item?.nameZh || item?.name_zh || item?.name || item?.generation_name || item?.name_en || resourceId(item); }
 export function resourceThumbUrl(item) {
   const raw = String(item?.image || "").trim();

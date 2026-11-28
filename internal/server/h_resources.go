@@ -137,24 +137,70 @@ func (s *Server) resSummary(w http.ResponseWriter, r *http.Request) (any, error)
 		toneCats[t.Category] = t.CategoryZh
 	}
 	snap := s.communityCatalog(r.Context(), false)
+	own := s.ownCommunityAliases(snap)
+	packStyleCodes := map[string]bool{}
+	for _, st := range p.Styles {
+		packStyleCodes[strings.ToUpper(strings.TrimSpace(st.Number))] = true
+	}
 	groups := append([]resources.Group{}, p.Groups...)
-	if len(snap.Styles) > 0 {
-		hasUSR := false
-		for i := range groups {
-			if groups[i].Code == "USR" {
-				groups[i].Count += len(snap.Styles)
-				hasUSR = true
-				break
+	groupIdx := map[string]int{}
+	for i := range groups {
+		groupIdx[strings.ToUpper(groups[i].Code)] = i
+	}
+	exclusiveCount := 0
+	communityCount := 0
+	extraRemoteStyles := 0
+	seenRemote := map[string]bool{}
+	for _, st := range snap.Styles {
+		code := strings.ToUpper(strings.TrimSpace(st.Number))
+		if code == "" || seenRemote[code] {
+			continue
+		}
+		if local, ok := own.lookup("style", st.Number); ok {
+			if _, has := p.Style(local); has {
+				continue
 			}
 		}
-		if !hasUSR {
-			groups = append([]resources.Group{{
+		seenRemote[code] = true
+		if st.Source == "exclusive" {
+			exclusiveCount++
+			if !packStyleCodes[code] {
+				extraRemoteStyles++
+				gc := strings.ToUpper(strings.TrimSpace(st.GroupCode))
+				if idx, ok := groupIdx[gc]; ok {
+					groups[idx].Count++
+				}
+			}
+		} else {
+			communityCount++
+			if !packStyleCodes[code] {
+				extraRemoteStyles++
+			}
+		}
+	}
+	var prefixGroups []resources.Group
+	if exclusiveCount > 0 {
+		prefixGroups = append(prefixGroups, resources.Group{
+			Code:  "EXCLUSIVE",
+			Zh:    "官网限定",
+			En:    "Exclusive",
+			Count: exclusiveCount,
+		})
+	}
+	if communityCount > 0 {
+		if idx, ok := groupIdx["USR"]; ok {
+			groups[idx].Count += communityCount
+		} else {
+			prefixGroups = append(prefixGroups, resources.Group{
 				Code:  "USR",
 				Zh:    "社区共享",
 				En:    "Community",
-				Count: len(snap.Styles),
-			}}, groups...)
+				Count: communityCount,
+			})
 		}
+	}
+	if len(prefixGroups) > 0 {
+		groups = append(prefixGroups, groups...)
 	}
 	if len(snap.Layouts) > 0 {
 		layoutCats["community"] += len(snap.Layouts)
@@ -163,7 +209,7 @@ func (s *Server) resSummary(w http.ResponseWriter, r *http.Request) (any, error)
 		"version": p.Version, "groups": groups, "layoutCategories": layoutCats,
 		"colorCategories": colorCats, "toneCategories": toneCats,
 		"counts": map[string]int{
-			"styles":  len(p.Styles) + len(snap.Styles),
+			"styles":  len(p.Styles) + extraRemoteStyles,
 			"layouts": len(p.Layouts) + len(snap.Layouts),
 			"colors":  len(p.Colors),
 			"tones":   len(p.Tones),
@@ -196,23 +242,37 @@ func (s *Server) resStyles(w http.ResponseWriter, r *http.Request) (any, error) 
 	var out []resources.Style
 	snap := s.communityCatalog(r.Context(), false)
 	own := s.ownCommunityAliases(snap)
-	// An exact id typed into search jumps straight to it.
+	// An exact id typed into search jumps straight to it; online exclusive/community
+	// overrides take precedence over bundled static styles (#211).
 	if q != "" {
 		if local, ok := own.lookup("style", q); ok {
 			if st, ok := p.Style(local); ok {
 				return map[string]any{"items": []resources.Style{st}, "total": 1}, nil
 			}
 		}
-		if st, ok := p.Style(q); ok && (strings.ContainsAny(q, "-_") || len(q) <= 4) {
-			return map[string]any{"items": []resources.Style{st}, "total": 1}, nil
-		}
 		for _, st := range snap.Styles {
 			if strings.EqualFold(st.Number, q) {
 				return map[string]any{"items": []resources.Style{st}, "total": 1}, nil
 			}
 		}
+		if st, ok := p.Style(q); ok && (strings.ContainsAny(q, "-_") || len(q) <= 4) {
+			return map[string]any{"items": []resources.Style{st}, "total": 1}, nil
+		}
 	}
-	seen := map[string]bool{}
+	// Mark ALL online overridden style codes up front so group filters (e.g. group=FA)
+	// never leak stale bundled static versions behind an online exclusive override (#211).
+	overridden := map[string]bool{}
+	for _, st := range snap.Styles {
+		if local, ok := own.lookup("style", st.Number); ok {
+			if _, has := p.Style(local); has {
+				continue
+			}
+		}
+		code := strings.ToUpper(strings.TrimSpace(st.Number))
+		if code != "" {
+			overridden[code] = true
+		}
+	}
 	for _, st := range snap.Styles {
 		// The user's own published style is listed once, as the local copy (#170).
 		if local, ok := own.lookup("style", st.Number); ok {
@@ -220,8 +280,21 @@ func (s *Server) resStyles(w http.ResponseWriter, r *http.Request) (any, error) 
 				continue
 			}
 		}
-		if group != "" && st.GroupCode != group {
-			continue
+		if group != "" {
+			switch strings.ToUpper(group) {
+			case "EXCLUSIVE":
+				if st.Source != "exclusive" {
+					continue
+				}
+			case "USR":
+				if st.Source == "exclusive" {
+					continue
+				}
+			default:
+				if !strings.EqualFold(st.GroupCode, group) {
+					continue
+				}
+			}
 		}
 		if source != "" && st.Source != source {
 			continue
@@ -229,14 +302,13 @@ func (s *Server) resStyles(w http.ResponseWriter, r *http.Request) (any, error) 
 		if !match(q, st.Number, st.GenerationName, st.NameZh, st.Description, st.Author, st.AuthorName, st.GroupZh) {
 			continue
 		}
-		seen[strings.ToUpper(st.Number)] = true
 		out = append(out, st)
 	}
 	for _, st := range p.Styles {
-		if seen[strings.ToUpper(st.Number)] {
+		if overridden[strings.ToUpper(strings.TrimSpace(st.Number))] {
 			continue
 		}
-		if group != "" && st.GroupCode != group {
+		if group != "" && !strings.EqualFold(st.GroupCode, group) {
 			continue
 		}
 		if source != "" && st.Source != source {
@@ -258,8 +330,11 @@ func (s *Server) resStyle(w http.ResponseWriter, r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	id := s.resolveOwnCode(r.Context(), "style", r.PathValue("id"))
-	if st, ok := p.Style(id); ok {
+	rawID := r.PathValue("id")
+	id := s.resolveOwnCode(r.Context(), "style", rawID)
+	// User's own local copy always resolves locally; otherwise online exclusive/community
+	// overrides take precedence over bundled static styles (#211).
+	if st, ok := p.Style(id); ok && (st.Source == "mine" || !strings.EqualFold(id, rawID)) {
 		model := r.URL.Query().Get("model")
 		return map[string]any{"style": st, "decision": promptDecision(s, p, model, st)}, nil
 	}
@@ -272,6 +347,10 @@ func (s *Server) resStyle(w http.ResponseWriter, r *http.Request) (any, error) {
 				"promptHidden":  true,
 			},
 		}, nil
+	}
+	if st, ok := p.Style(id); ok {
+		model := r.URL.Query().Get("model")
+		return map[string]any{"style": st, "decision": promptDecision(s, p, model, st)}, nil
 	}
 	return nil, notFound("找不到画风 " + id)
 }
@@ -390,13 +469,28 @@ func (s *Server) resRandom(w http.ResponseWriter, r *http.Request) (any, error) 
 		return nil, err
 	}
 	q := r.URL.Query()
+	snap := s.communityCatalog(r.Context(), false)
 	out := map[string]any{}
 	if v := q.Get("style"); v != "" {
-		if st, ok := p.Style(v); ok {
+		if st, ok := resolveStyleFromSnapshot(p, snap, v); ok {
 			out["style"] = st
 		}
 	} else if len(p.Styles) > 0 {
-		out["style"] = p.Styles[rand.Intn(len(p.Styles))]
+		overridden := map[string]bool{}
+		for _, st := range snap.Styles {
+			overridden[strings.ToUpper(strings.TrimSpace(st.Number))] = true
+		}
+		freePool := make([]resources.Style, 0, len(p.Styles))
+		for _, st := range p.Styles {
+			if !overridden[strings.ToUpper(strings.TrimSpace(st.Number))] {
+				freePool = append(freePool, st)
+			}
+		}
+		if len(freePool) > 0 {
+			out["style"] = freePool[rand.Intn(len(freePool))]
+		} else {
+			out["style"] = p.Styles[rand.Intn(len(p.Styles))]
+		}
 	}
 	if v := q.Get("layout"); v != "" {
 		if l, ok := p.Layout(v); ok {

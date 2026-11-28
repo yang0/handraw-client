@@ -212,35 +212,44 @@ func (s *Server) studioChatPlan(w http.ResponseWriter, r *http.Request) (any, er
 		return resp, nil
 	}
 
+	snap := s.communityCatalog(r.Context(), false)
+	applyOverrides := func(res *chatPlanResponse, err error) (*chatPlanResponse, error) {
+		if err != nil || res == nil {
+			return res, err
+		}
+		finalizeChatPlanWithOverrides(res, p, snap, body.Selected, body.Message)
+		return res, nil
+	}
+
 	switch route.Mode {
 	case "harness":
-		return planWithHarness()
+		return applyOverrides(planWithHarness())
 	case "provider":
-		return planWithProvider(route.Provider, route.Model)
+		return applyOverrides(planWithProvider(route.Provider, route.Model))
 	case "site":
 		if !s.Site.LoggedIn() {
 			return nil, site.ErrNotLoggedIn
 		}
-		return planWithSite()
+		return applyOverrides(planWithSite())
 	default:
 		if s.Site.LoggedIn() {
 			if res, err := planWithSite(); err == nil {
-				return res, nil
+				return applyOverrides(res, nil)
 			}
 		}
 		if tp, model, ok := findTextProviderFor("text"); ok {
 			if res, err := planWithProvider(tp, model); err == nil {
-				return res, nil
+				return applyOverrides(res, nil)
 			}
 		}
 		if s.Site.LoggedIn() {
 			if cnt, lines := detectMultiIntent(body.Message); cnt >= 2 && len(lines) == 0 {
 				if res, err := planWithSiteBatch(cnt); err == nil {
-					return res, nil
+					return applyOverrides(res, nil)
 				}
 			}
 		}
-		return buildLocalChatPlan(p, body.Message, body.Selected), nil
+		return applyOverrides(buildLocalChatPlan(p, body.Message, body.Selected), nil)
 	}
 }
 
@@ -487,24 +496,35 @@ func parseAndNormalizeChatPlan(raw json.RawMessage, p *resources.Pack, sel chatP
 }
 
 func finalizeChatPlan(resp *chatPlanResponse, p *resources.Pack, sel chatPlanSelected, origMsg string) {
+	finalizeChatPlanWithOverrides(resp, p, communityCatalogSnapshot{}, sel, origMsg)
+}
+
+func finalizeChatPlanWithOverrides(resp *chatPlanResponse, p *resources.Pack, snap communityCatalogSnapshot, sel chatPlanSelected, origMsg string) {
 	resp.OK = true
 	resp.StyleLocked = sel.Style1 != ""
 
-	// Resolve style1 (locked by user if provided).
+	// Resolve style1 (locked by user if provided). Online exclusive overrides win over bundled pack (#211).
 	style1 := sel.Style1
 	if style1 == "" {
 		style1 = resp.Common.Style1
 	}
-	if st, ok := p.Style(style1); ok {
-		resp.Common.Style1 = st.Number
-		resp.Common.Style1Name = firstStr(st.NameZh, st.GenerationName, st.Number)
+	if st, ok := resolveStyleFromSnapshot(p, snap, style1); ok {
+		// If the user did NOT lock a style, never auto-assign a locked paid exclusive/community style.
+		if sel.Style1 == "" && (st.PromptHidden || st.SiteModelOnly || st.Source == "exclusive" || st.Source == "community") && !st.Unlocked && !st.IsMine {
+			defStyle := defaultFreePackStyle(p, snap)
+			resp.Common.Style1 = defStyle.Number
+			resp.Common.Style1Name = firstStr(defStyle.NameZh, defStyle.GenerationName, defStyle.Number)
+		} else {
+			resp.Common.Style1 = st.Number
+			resp.Common.Style1Name = firstStr(st.NameZh, st.GenerationName, st.Number)
+		}
 	} else if looksLikeProtectedCode(style1) {
 		// Preserve community/exclusive protected style codes that live outside the local pack (#207).
 		code := strings.ToUpper(strings.TrimSpace(style1))
 		resp.Common.Style1 = code
 		resp.Common.Style1Name = firstStr(resp.Common.Style1Name, code)
 	} else {
-		defStyle := defaultPackStyle(p)
+		defStyle := defaultFreePackStyle(p, snap)
 		resp.Common.Style1 = defStyle.Number
 		resp.Common.Style1Name = firstStr(defStyle.NameZh, defStyle.GenerationName, defStyle.Number)
 	}
@@ -515,7 +535,7 @@ func finalizeChatPlan(resp *chatPlanResponse, p *resources.Pack, sel chatPlanSel
 		style2 = resp.Common.Style2
 	}
 	if style2 != "" {
-		if st2, ok := p.Style(style2); ok {
+		if st2, ok := resolveStyleFromSnapshot(p, snap, style2); ok {
 			resp.Common.Style2 = st2.Number
 			resp.Common.Style2Name = firstStr(st2.NameZh, st2.GenerationName, st2.Number)
 		} else if looksLikeProtectedCode(style2) {
@@ -635,13 +655,15 @@ func finalizeChatPlan(resp *chatPlanResponse, p *resources.Pack, sel chatPlanSel
 }
 
 func defaultPackStyle(p *resources.Pack) resources.Style {
-	if st, ok := p.Style("FA-013"); ok {
-		return st
+	for _, code := range []string{"FA-002", "FA-006", "FA-018"} {
+		if st, ok := p.Style(code); ok {
+			return st
+		}
 	}
 	if len(p.Styles) > 0 {
 		return p.Styles[0]
 	}
-	return resources.Style{Number: "FA-013", NameZh: "手绘插画"}
+	return resources.Style{Number: "FA-002", NameZh: "手绘插画"}
 }
 
 var (

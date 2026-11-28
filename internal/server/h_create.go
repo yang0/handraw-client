@@ -905,11 +905,17 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 			}
 			if prot, meta := s.inspectProtectedResource(r.Context(), chk.kind, chk.id); prot {
 				usesProtectedResource = true
+				scopeLabel := "社区受保护"
+				scopeShort := "社区"
+				if meta.Source == "exclusive" {
+					scopeLabel = "官网独占"
+					scopeShort = "官网独占"
+				}
 				if !isSite {
 					return nil, &apiError{
 						Status: http.StatusForbidden,
 						Code:   "site_model_required",
-						Msg:    fmt.Sprintf("社区受保护资源 %s《%s》已隐藏提示词，仅支持通过网站生图模型生成，请切换为网站模型后再试", meta.Code, meta.Name),
+						Msg:    fmt.Sprintf("%s资源 %s《%s》已隐藏提示词，仅支持通过网站生图模型生成，请切换为网站模型后再试", scopeLabel, meta.Code, meta.Name),
 					}
 				}
 				if !s.Site.LoggedIn() {
@@ -930,7 +936,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) (any, error) {
 					return nil, &apiError{
 						Status: http.StatusForbidden,
 						Code:   "asset_locked",
-						Msg:    fmt.Sprintf("尚未解锁社区%s %s《%s》（需 %d 积分），请先解锁后再使用网站模型生图", label, meta.Code, meta.Name, max(1, meta.UnlockCost)),
+						Msg:    fmt.Sprintf("尚未解锁%s%s %s《%s》（需 %d 积分），请先解锁后再使用网站模型生图", scopeShort, label, meta.Code, meta.Name, max(1, meta.UnlockCost)),
 					}
 				}
 				// Never build or concatenate hidden community prompt locally; website injects it server-side.

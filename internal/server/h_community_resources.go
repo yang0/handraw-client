@@ -22,6 +22,7 @@ type communityRemoteItem struct {
 	Code          string `json:"code"`
 	Kind          string `json:"kind"`
 	SourceType    string `json:"sourceType"`
+	Group         string `json:"group"`
 	Name          string `json:"name"`
 	Description   string `json:"description"`
 	Image         string `json:"image"`
@@ -44,12 +45,46 @@ type communityCatalogSnapshot struct {
 type protectedResourceMeta struct {
 	Code       string
 	Kind       string
+	Source     string
 	Name       string
 	Image      string
 	UnlockCost int
 	Unlocked   bool
 	IsMine     bool
 	Known      bool
+}
+
+func parseExclusiveStyleGroup(rawGroup, code string) (group, groupCode, groupZh, groupEn string) {
+	raw := strings.TrimSpace(rawGroup)
+	upperCode := strings.ToUpper(strings.TrimSpace(code))
+	prefix := ""
+	if i := strings.IndexByte(upperCode, '-'); i > 0 {
+		prefix = upperCode[:i]
+	}
+	if raw != "" {
+		group = raw
+		parts := strings.SplitN(raw, "/", 2)
+		left := strings.TrimSpace(parts[0])
+		if len(parts) == 2 {
+			groupEn = strings.TrimSpace(parts[1])
+		}
+		fields := strings.SplitN(left, " ", 2)
+		if len(fields) == 2 && len(fields[0]) >= 2 && len(fields[0]) <= 4 {
+			groupCode = strings.ToUpper(strings.TrimSpace(fields[0]))
+			groupZh = strings.TrimSpace(fields[1])
+		} else {
+			groupCode = firstStr(prefix, "EXCLUSIVE")
+			groupZh = left
+		}
+		if groupEn == "" {
+			groupEn = groupZh
+		}
+		return group, groupCode, groupZh, groupEn
+	}
+	if prefix != "" && len(prefix) <= 4 {
+		return prefix + " 官网限定画风 / Exclusive", prefix, "官网限定", "Exclusive"
+	}
+	return "EXCLUSIVE 官网限定画风 / Exclusive", "EXCLUSIVE", "官网限定", "Exclusive"
 }
 
 func communityThumbProxyURL(rawImage string) string {
@@ -198,12 +233,19 @@ func (s *Server) communityCatalog(ctx context.Context, force bool) communityCata
 				PersonalResourceID: strings.TrimSpace(it.PersonalResourceID),
 			})
 		} else {
+			group := "USR 社区共享画风 / Community"
+			groupCode := "USR"
+			groupZh := "社区共享"
+			groupEn := "Community"
+			if src == "exclusive" {
+				group, groupCode, groupZh, groupEn = parseExclusiveStyleGroup(it.Group, code)
+			}
 			snap.Styles = append(snap.Styles, resources.Style{
 				Number:             code,
-				Group:              "USR 社区共享画风 / Community",
-				GroupCode:          "USR",
-				GroupZh:            "社区共享",
-				GroupEn:            "Community",
+				Group:              group,
+				GroupCode:          groupCode,
+				GroupZh:            groupZh,
+				GroupEn:            groupEn,
 				GenerationName:     firstStr(it.Name, code),
 				NameZh:             firstStr(it.Name, code),
 				Description:        strings.TrimSpace(it.Description),
@@ -287,6 +329,7 @@ func (s *Server) inspectProtectedResourceWithRefresh(ctx context.Context, kind, 
 			return true, protectedResourceMeta{
 				Code:       l.ID,
 				Kind:       "layout",
+				Source:     l.Source,
 				Name:       l.Name,
 				Image:      l.Image,
 				UnlockCost: l.UnlockCost,
@@ -300,6 +343,7 @@ func (s *Server) inspectProtectedResourceWithRefresh(ctx context.Context, kind, 
 			return true, protectedResourceMeta{
 				Code:       st.Number,
 				Kind:       "style",
+				Source:     st.Source,
 				Name:       firstStr(st.NameZh, st.GenerationName, st.Number),
 				Image:      st.Image,
 				UnlockCost: st.UnlockCost,
@@ -365,6 +409,51 @@ func (s *Server) resCommunityUnlock(w http.ResponseWriter, r *http.Request) (any
 		return out, nil
 	}
 	return map[string]any{"ok": true, "targetId": code, "promptHidden": true, "siteModelOnly": true}, nil
+}
+
+func resolveStyleFromSnapshot(p *resources.Pack, snap communityCatalogSnapshot, id string) (resources.Style, bool) {
+	want := strings.ToUpper(strings.TrimSpace(id))
+	if want == "" {
+		return resources.Style{}, false
+	}
+	for _, st := range snap.Styles {
+		if strings.EqualFold(st.Number, want) {
+			return st, true
+		}
+	}
+	if p != nil {
+		if st, ok := p.Style(id); ok {
+			return st, true
+		}
+	}
+	return resources.Style{}, false
+}
+
+func defaultFreePackStyle(p *resources.Pack, snap communityCatalogSnapshot) resources.Style {
+	overridden := map[string]bool{}
+	for _, st := range snap.Styles {
+		overridden[strings.ToUpper(strings.TrimSpace(st.Number))] = true
+	}
+	if p != nil {
+		for _, pref := range []string{"FA-002", "FA-006", "FA-018"} {
+			if !overridden[pref] {
+				if st, ok := p.Style(pref); ok {
+					return st
+				}
+			}
+		}
+		for _, st := range p.Styles {
+			if !overridden[strings.ToUpper(strings.TrimSpace(st.Number))] {
+				return st
+			}
+		}
+	}
+	return defaultPackStyle(p)
+}
+
+func (s *Server) defaultFreeStyle(ctx context.Context, p *resources.Pack) resources.Style {
+	snap := s.communityCatalog(ctx, false)
+	return defaultFreePackStyle(p, snap)
 }
 
 func isNotFoundAPIError(err error, out **site.APIError) bool {

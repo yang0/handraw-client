@@ -331,7 +331,7 @@ func (s *Server) chatTurn(w http.ResponseWriter, r *http.Request) (any, error) {
 			// a redundant 2nd text LLM round-trip and extra AI billing (#64).
 			if allGenOK && (len(resp.Runs) > 0 || resp.PendingConfirm != nil) {
 				p, _ := s.pack()
-				resp.Reply = buildChatGenerateSummary(p, turnRes.Content, execCtx.lastGenTitle, execCtx.lastGenItems, imageModelRef, resp.PendingConfirm, execCtx.directPrompt)
+				resp.Reply = s.buildChatGenerateSummary(r.Context(), p, turnRes.Content, execCtx.lastGenTitle, execCtx.lastGenItems, imageModelRef, resp.PendingConfirm, execCtx.directPrompt)
 				s.refreshChatRuns(resp)
 				return resp, nil
 			}
@@ -374,7 +374,7 @@ func (s *Server) refreshChatRuns(resp *chatTurnResponse) {
 	}
 }
 
-func buildChatGenerateSummary(p *resources.Pack, modelContent, title string, items []map[string]any, modelRef string, pendingConfirm map[string]any, directPrompt bool) string {
+func (s *Server) buildChatGenerateSummary(ctx context.Context, p *resources.Pack, modelContent, title string, items []map[string]any, modelRef string, pendingConfirm map[string]any, directPrompt bool) string {
 	if pendingConfirm != nil {
 		return "本次生图预计费用超过了你设置的确认阈值，请点击下方「确认继续生成」。"
 	}
@@ -407,16 +407,15 @@ func buildChatGenerateSummary(p *resources.Pack, modelContent, title string, ite
 		}
 		return strings.TrimSpace(sb.String())
 	}
+	snap := s.communityCatalog(ctx, false)
 	styleLabel := func(id string) string {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			return "-"
 		}
-		if p != nil {
-			if st, ok := p.Style(id); ok {
-				if nm := firstStr(st.NameZh, st.GenerationName); nm != "" {
-					return id + " " + nm
-				}
+		if st, ok := resolveStyleFromSnapshot(p, snap, id); ok {
+			if nm := firstStr(st.NameZh, st.GenerationName); nm != "" {
+				return id + " " + nm
 			}
 		}
 		return id
@@ -1040,10 +1039,8 @@ func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (st
 			}
 		} else {
 			p, _ := c.srv.pack()
-			defStyle := "FA-013"
-			if p != nil {
-				defStyle = defaultPackStyle(p).Number
-			}
+			snap := c.srv.communityCatalog(ctx, false)
+			defStyle := defaultFreePackStyle(p, snap).Number
 			baseMode := normalizeChatMode(args.Mode)
 			for _, it := range args.Items {
 				m := baseMode
@@ -1051,8 +1048,8 @@ func (c *chatExecContext) runTool(ctx context.Context, name, rawArgs string) (st
 					m = normalizeChatMode(it.Mode)
 				}
 				stID := strings.TrimSpace(it.Style)
-				if p != nil && stID != "" {
-					if found, ok := p.Style(stID); ok {
+				if stID != "" {
+					if found, ok := resolveStyleFromSnapshot(p, snap, stID); ok {
 						stID = found.Number
 					} else {
 						stID = defStyle

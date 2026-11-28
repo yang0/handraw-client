@@ -12,6 +12,7 @@ import {
   DEFAULT_MOODS,
   RATIOS,
   WHITESPACE_OPTIONS,
+  defaultFreeStyleCode,
   field,
   openResourceDialog,
   resourceId,
@@ -233,7 +234,7 @@ function mergeRowPieces(base, piece) {
 }
 
 function initialCandidate(field, catalog) {
-  if (field === "style1") return catalog?.styles?.[0]?.number || "FA-013";
+  if (field === "style1") return defaultFreeStyleCode(catalog?.styles);
   if (field === "ratio") return "3:4";
   if (field === "mode") return "graphic-text";
   if (field === "whitespace") return "";
@@ -243,7 +244,7 @@ function initialCandidate(field, catalog) {
 }
 
 function blankGraph(catalog) {
-  const s1 = catalog?.styles?.[0]?.number || "FA-013";
+  const s1 = defaultFreeStyleCode(catalog?.styles);
   return {
     format: 2,
     nodes: [
@@ -340,7 +341,7 @@ function normalizeGraphData(raw, catalog, recipes) {
     if (n.type === "themes") {
       migratedNodes.push({ id: n.id, type: "parameter", parameter: "prompt", values: n.data?.items?.length ? n.data.items : [""], x: n.x ?? 40, y: n.y ?? 40 });
     } else if (n.type === "styles") {
-      migratedNodes.push({ id: n.id, type: "parameter", parameter: "style1", values: n.data?.items?.length ? n.data.items : ["FA-013"], x: n.x ?? 40, y: n.y ?? 260 });
+      migratedNodes.push({ id: n.id, type: "parameter", parameter: "style1", values: n.data?.items?.length ? n.data.items : ["FA-002"], x: n.x ?? 40, y: n.y ?? 260 });
     } else if (n.type === "recipe") {
       const rec = n.data?.recipeId ? recipes.find((r) => r.id === n.data.recipeId) : null;
       migratedNodes.push({
@@ -351,7 +352,7 @@ function normalizeGraphData(raw, catalog, recipes) {
         y: n.y ?? 360,
         fieldOrder: ["style1", "layout", "ratio"],
         fields: {
-          style1: [rec?.styleIds?.[0] || n.data?.style || "FA-013"],
+          style1: [rec?.styleIds?.[0] || n.data?.style || "FA-002"],
           layout: [rec?.layoutId || n.data?.layout || ""],
           ratio: [rec?.ratio || n.data?.ratio || "3:4"],
         },
@@ -662,7 +663,7 @@ export async function renderCanvas(host, ctx, params = {}) {
   }
 
   function rowToGenerateItem(row) {
-    const s1 = typeof row.style1 === "object" && row.style1 ? (row.style1.style1 || "") : (row.style1 || "FA-013");
+    const s1 = typeof row.style1 === "object" && row.style1 ? (row.style1.style1 || "") : (row.style1 || defaultFreeStyleCode(catalog?.styles));
     const s2 = typeof row.style1 === "object" && row.style1 ? (row.style1.style2 || "") : "";
     const color = Array.isArray(row.colors) ? (row.colors[0] || "") : (row.colors || "");
     const tone = Array.isArray(row.tones) ? (row.tones[0] || "") : (row.tones || "");

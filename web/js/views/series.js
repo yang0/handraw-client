@@ -2,7 +2,7 @@ import { api, clear, closeModal, el, localImg, money, onEvent, showModal, toast 
 import { maybeHandleInsufficientCashError } from "../economy.js";
 import { buildGroupedModelSelect } from "./create.js";
 import { createTextModelPicker } from "../skills-ui.js";
-import { choices, extraInstructions, field, ratioToCss, recipeControls, resourceId, resourcePicker, studioMount, studioSession } from "./studio-controls.js";
+import { choices, defaultFreeStyleCode, extraInstructions, field, ratioToCss, recipeControls, resourceId, resourcePicker, studioMount, studioSession } from "./studio-controls.js";
 
 export async function renderSeries(host, ctx, params = {}) {
   host = studioMount(host);
@@ -19,7 +19,7 @@ export async function renderSeries(host, ctx, params = {}) {
   let drafts = draftsRes.items || [];
 
   const session = studioSession(host, "series", {
-    docId: "", title: "", topic: "", count: 3, style: styles[0]?.number || "FA-013", style2: "",
+    docId: "", title: "", topic: "", count: 3, style: defaultFreeStyleCode(styles), style2: "",
     layout: "", layoutMode: "ai", layoutRequirement: "", color: "", tone: "", mood: "",
     ratio: "3:4", mode: "graphic-text", resolution: "1k", modelRef: modRes.defaultModel || "",
     textModelRef: modRes.sceneModels?.studioPlan || modRes.defaultTextModel || "",

@@ -1676,14 +1676,19 @@ func (s *Server) mineAnalyze(w http.ResponseWriter, r *http.Request) (any, error
 				_ = json.Unmarshal(raw, &parsed)
 				desc := strings.TrimSpace(firstStr(parsed.TraitsZh, parsed.TraitsEn))
 				if desc != "" {
+					snap := s.communityCatalog(r.Context(), false)
 					var matched []resources.Style
 					for _, id := range parsed.Matches {
-						if st, ok := p.Style(id); ok {
+						if st, ok := resolveStyleFromSnapshot(p, snap, id); ok {
 							matched = append(matched, st)
 						}
 					}
 					if len(matched) == 0 {
-						matched = p.SearchStyles(desc, 5)
+						for _, st := range p.SearchStyles(desc, 5) {
+							if eff, ok := resolveStyleFromSnapshot(p, snap, st.Number); ok {
+								matched = append(matched, eff)
+							}
+						}
 					}
 					return map[string]any{
 						"source":      "site",

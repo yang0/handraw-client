@@ -20,6 +20,7 @@ import {
 import { buildGroupedModelSelect } from "./create.js";
 import {
   choices,
+  defaultFreeStyleCode,
   extraInstructions,
   field,
   openResourceDialog,
@@ -67,7 +68,7 @@ export async function renderArticle(root, ctx, params = {}) {
     dirty: false,
     title: "",
     content: "",
-    style: styles[0]?.number || "FA-013",
+    style: defaultFreeStyleCode(styles),
     color: "",
     tone: "",
     mode: "graphic-text",
@@ -3689,7 +3690,7 @@ export async function renderArticle(root, ctx, params = {}) {
         dirty: false,
         title: meta.title || res.title || "",
         content: res.content || "",
-        style: meta.style || state.style || styles[0]?.number || "FA-013",
+        style: meta.style || state.style || defaultFreeStyleCode(styles),
         style2: meta.style2 || "",
         fusion: meta.fusion ?? Boolean(meta.style2),
         layout: meta.layout || "",
@@ -4049,7 +4050,7 @@ export async function renderArticle(root, ctx, params = {}) {
     } else {
       styleBadgeImg.classList.add("hidden");
     }
-    styleBadgeId.textContent = `#${state.style || "FA-013"}`;
+    styleBadgeId.textContent = `#${state.style || defaultFreeStyleCode(styles)}`;
     styleBadgeName.textContent = stObj ? resourceName(stObj) : "选择画风";
 
     const pendingCount = state.slots.filter((sl) => sl.selected !== false && !sl.imagePath && !isSlotGenerating(sl.id)).length;

@@ -226,7 +226,7 @@ async function drawStyles(stage, groups, ctx) {
     onClick: () => { state.group = key; drawStylesWrap(); },
   }, el("span", null, label), el("span", { class: "muted" }, String(count)));
   const groupNav = el("div", { class: "atlas-groups" },
-    groupBtn("", "全部流派", groups.filter((g) => g.code !== "MY").reduce((total, g) => total + g.count, 0) + mineAll.length),
+    groupBtn("", "全部流派", groups.filter((g) => g.code !== "MY" && g.code !== "EXCLUSIVE").reduce((total, g) => total + g.count, 0) + mineAll.length),
     groupBtn(MINE, "我的画风", mineAll.length, " group-mine")
   );
   groups.filter((g) => g.code !== "MY").forEach((g) => {
@@ -274,7 +274,9 @@ async function drawStyles(stage, groups, ctx) {
           ),
           el("div", { class: "style-name" }, s.nameZh || s.generation_name),
           isProtected
-            ? el("div", { class: "style-traits muted" }, `${s.authorName ? `by ${s.authorName} · ` : ""}🔒 提示词已隐藏 · 仅限网站模型生图`)
+            ? el("div", { class: "style-traits muted" }, s.source === "exclusive"
+                ? "官网限定 · 🔒 提示词已隐藏 · 仅限网站模型生图"
+                : `${s.authorName ? `by ${s.authorName} · ` : ""}🔒 提示词已隐藏 · 仅限网站模型生图`)
             : el("div", { class: "style-traits" }, s.traits || s.reference)
         ),
         el("div", { class: "style-actions" },
@@ -368,9 +370,11 @@ async function openStyleDetail(id, ctx, onRefresh) {
       ),
       isProtected
         ? el("div", { class: "card", style: { padding: "12px", background: "var(--surface-2)", borderStyle: "dashed" } },
-            el("strong", { style: { fontSize: "13px" } }, "🔒 特征描述词已加密隐藏"),
+            el("strong", { style: { fontSize: "13px" } }, st.source === "exclusive" ? "🔒 官网限定画风 · 提示词云端黑盒保护" : "🔒 特征描述词已加密隐藏"),
             el("p", { class: "muted", style: { margin: "6px 0 0", fontSize: "12.5px", lineHeight: 1.6 } },
-              st.description || "网友分享的收费画风受提示词保护，不会在任何位置展示明文特征词；解锁后仅支持在客户端选择「网站生图模型」由云端自动注入出图。"
+              st.description || (st.source === "exclusive"
+                ? "官网限定收费画风受云端黑盒保护，不会在任何位置展示明文特征词；解锁后仅支持在客户端选择「网站生图模型」由云端自动注入出图。"
+                : "网友分享的收费画风受提示词保护，不会在任何位置展示明文特征词；解锁后仅支持在客户端选择「网站生图模型」由云端自动注入出图。")
             )
           )
         : el("p", { style: { margin: "4px 0" } }, st.traits),

@@ -109,7 +109,7 @@ export function initPalette(ctx) {
         run: async () => {
           const recRes = await api("GET", "/api/mine/recipes").catch(() => ({ items: [] }));
           const rec = (recRes.items || []).find((x) => x.name.includes(rName) || x.id === rName);
-          const inputObj = rec ? { style: rec.styleIds?.[0] || "", style2: rec.styleIds?.[1] || "", layout: rec.layoutId || "", color: (rec.colors || []).join(","), ratio: rec.ratio || "3:4", mode: rec.mode || "graphic-text", theme } : { style: "FA-013", theme };
+          const inputObj = rec ? { style: rec.styleIds?.[0] || "", style2: rec.styleIds?.[1] || "", layout: rec.layoutId || "", color: (rec.colors || []).join(","), ratio: rec.ratio || "3:4", mode: rec.mode || "graphic-text", theme } : { style: "FA-002", theme };
           await api("POST", "/api/generate", { mode: "quick", title: theme, input: inputObj });
           toast("已加入后台生成队列");
           ctx.go("works");
