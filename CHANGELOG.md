@@ -2,6 +2,13 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.15 (2026-11-28)
+
+### Features
+- **Auto-Discover DeepSeek Harness Desktop CLI & `dsh` Headless Driver (#203)**:
+  - Automatically discovered the bundled `resources/runtime/cli/bin/dsh(.cmd)` inside DeepSeek Harness Desktop installations on Windows (default locations + Windows Uninstall registry lookup for custom install directories) and macOS/Linux (`.app` bundle & `$DSH_HOME/bin`).
+  - Added dedicated `dsh` headless driver support (`dsh --profile headless --approval-policy never [--add-dir ...] -` with stdin prompt passing) so DeepSeek Harness works out of the box in Chat and Studio planning.
+
 ## v0.6.14 (2026-11-28)
 
 ### Features & UX
