@@ -2,6 +2,25 @@
 
 All notable changes to `handraw-client` are documented in this file.
 
+## v0.6.16 (2026-11-28)
+
+### Fixes
+- **macOS 12 Monterey (WebKit / Safari 15) Compatibility (#209)**:
+  - Removed all 9 regex negative lookbehinds (`(?<!...)`) in `web/js/views/article-typeset.js` and `web/js/views/article-live.js` that caused a module parse-time `SyntaxError` on Safari < 16.4 (leaving the window blank and unclickable).
+  - Added synchronous `html.no-popover` / `html.no-dialog` feature detection, CSS hiding rules, and a complete `installPopoverFallback()` click/outside/Escape handler so `+ 新建` and balance popovers stay closed on boot and toggle reliably on macOS 12–13 (Safari < 17).
+  - Replaced all CSS `light-dark(...)` declarations in `web/css/app.css` with standard light/dark custom properties (`@media (prefers-color-scheme: dark)` + `data-color-scheme`) so warm-paper surfaces, borders, and vermilion accents render properly on macOS 12–14.4 (Safari < 17.5).
+  - Added safe `<dialog>` (`openDialogModal`/`closeDialogModal`) and ES2022 (`cloneData`, `hasOwn`, `randomId`) fallbacks for Safari 15.0–15.3 plus a permanent Go test guard (`TestWebAssetsCompatibleWithMacOS12WebKit15`).
+- **Community Style Unlock Cache & Chat-Plan Preservation (#207)**:
+  - Refreshed stale community unlock cache on generation and preserved selected community styles in chat-plan.
+
+### Studio UX & Parity with Web
+- **More Settings & Clear-Form Polish (#204)**:
+  - Split 「目标受众」 and 「业务场景」 into separate inline rows, auto-expanded 「更多设置」 when non-default advanced values are set, restored the always-visible **「清空表单」** button, and stopped Skill planning from auto-filling user-only fields (`tones`, `moods`, `whitespace`, `audience`, `businessScene`).
+- **Cleaner Composer & Per-Resolution Quota Hint (#205)**:
+  - Removed quota/pricing badge and `可免额` suffixes from the right-hand composer, renamed the left resolution control to **「分辨率」**, and added the Web-aligned inline small-text hint (`免费剩 N 张` / `余额不足，去充值` / `验证邮箱领免费额度，去验证` / hidden when sufficient).
+- **Streamlined Controls & Composer Engine Switch (#206, #208)**:
+  - Removed the redundant 「质量」 selector from the left panel, moved the **「🎨 手绘 Skill / ⚡ 图片直出」** pill switch into the right composer top toolbar (without an obscuring toast), and left generation mode unselected by default with toggle-off support.
+
 ## v0.6.15 (2026-11-28)
 
 ### Features
