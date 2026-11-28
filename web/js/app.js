@@ -135,9 +135,58 @@ function installGlobalErrorHandlers() {
   });
 }
 
+function installPopoverFallback() {
+  if (typeof HTMLElement !== "undefined" && "popover" in HTMLElement.prototype) return;
+  document.documentElement.classList.add("no-popover");
+  const allPopovers = () => Array.from(document.querySelectorAll("[popover]"));
+  const closeAll = (except = null) => {
+    for (const p of allPopovers()) {
+      if (p !== except) p.classList.remove("is-popover-open");
+    }
+  };
+  const wirePopover = (p) => {
+    if (!p || p._popoverFallbacked) return;
+    p._popoverFallbacked = true;
+    p.showPopover = () => {
+      closeAll(p);
+      p.classList.add("is-popover-open");
+    };
+    p.hidePopover = () => {
+      p.classList.remove("is-popover-open");
+    };
+    p.togglePopover = (force) => {
+      const next = typeof force === "boolean" ? force : !p.classList.contains("is-popover-open");
+      if (next) p.showPopover();
+      else p.hidePopover();
+      return next;
+    };
+  };
+  for (const p of allPopovers()) wirePopover(p);
+  document.addEventListener("click", (ev) => {
+    const trigger = ev.target?.closest?.("[popovertarget]");
+    if (trigger) {
+      const targetId = trigger.getAttribute("popovertarget");
+      const target = targetId ? document.getElementById(targetId) : null;
+      if (target) {
+        wirePopover(target);
+        ev.preventDefault();
+        ev.stopPropagation();
+        target.togglePopover();
+        return;
+      }
+    }
+    const insidePopover = ev.target?.closest?.("[popover].is-popover-open");
+    if (!insidePopover) closeAll();
+  });
+  window.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") closeAll();
+  });
+}
+
 async function start() {
   installGlobalErrorHandlers();
   installDialogLightDismiss();
+  installPopoverFallback();
 
   const boot = await api("GET", "/api/boot").catch(() => ({}));
   if (boot.token) setToken(boot.token);
@@ -661,15 +710,6 @@ async function start() {
         try { popEl.hidePopover(); } catch {}
       }
     }));
-  }
-
-  const ecoBtnEl = document.getElementById("btn-economy");
-  const ecoPopEl = document.getElementById("economy-popover");
-  if (ecoBtnEl && ecoPopEl && !("popover" in HTMLElement.prototype)) {
-    ecoBtnEl.addEventListener("click", () => {
-      const clone = el("div", { class: "col" }, ...Array.from(ecoPopEl.childNodes).map((n) => n.cloneNode(true)));
-      showModal("账户资产明细", clone, [el("button", { type: "button", class: "btn btn-primary", onClick: closeModal }, "关闭")]);
-    });
   }
 
   async function runImmediateUpdate() {

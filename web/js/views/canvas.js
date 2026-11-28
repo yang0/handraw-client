@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
+import { api, clear, cloneData, closeModal, el, hasOwn, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
 import { maybeHandleInsufficientCashError } from "../economy.js";
 import { createTextModelPicker, openSharedSkillPickerModal } from "../skills-ui.js";
 import { buildGroupedModelSelect } from "./create.js";
@@ -277,8 +277,8 @@ function blankGraph(catalog) {
 
 // Convert legacy v1 canvas nodes (themes/styles/recipe/generate/export) into parameter-canvas v2 nodes cleanly
 function normalizeGraphData(raw, catalog, recipes) {
-  const nodes = Array.isArray(raw?.nodes) ? structuredClone(raw.nodes) : [];
-  const edges = Array.isArray(raw?.edges) ? structuredClone(raw.edges) : [];
+  const nodes = Array.isArray(raw?.nodes) ? cloneData(raw.nodes) : [];
+  const edges = Array.isArray(raw?.edges) ? cloneData(raw.edges) : [];
   const hasV2 = nodes.some((n) => ["parameters", "parameter", "reference", "combine", "output", "copy", "post"].includes(n.type));
   if (hasV2 || !nodes.length) {
     const cleanNodes = (nodes.length ? nodes : blankGraph(catalog).nodes).map((n) => {
@@ -582,7 +582,7 @@ export async function renderCanvas(host, ctx, params = {}) {
       } else if (src.type === "parameters") {
         const order = src.fieldOrder || Object.keys(src.fields || {});
         const fieldSources = order
-          .filter((f) => Object.hasOwn(src.fields || {}, f))
+          .filter((f) => hasOwn(src.fields || {}, f))
           .map((f) => {
             const rawVals = src.fields[f] || [];
             return {
@@ -1836,7 +1836,7 @@ export async function renderCanvas(host, ctx, params = {}) {
   function buildMatchingBlock(node, isGuided = false) {
     const outInfo = node.type === "output" ? expandOutputNode(node) : null;
     const sources = node.type === "parameters"
-      ? (node.fieldOrder || Object.keys(node.fields || {})).filter((f) => Object.hasOwn(node.fields || {}, f)).map((f) => ({
+      ? (node.fieldOrder || Object.keys(node.fields || {})).filter((f) => hasOwn(node.fields || {}, f)).map((f) => ({
           field: f,
           name: PARAM_LABELS[f] || f,
           values: f === "refs"
@@ -1879,7 +1879,7 @@ export async function renderCanvas(host, ctx, params = {}) {
         const li = el("li", null, el("span", { class: "muted mono" }, `${idx + 1}.`));
         const valsWrap = el("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", minWidth: "0" } });
         Object.keys(PARAM_LABELS).forEach((fk) => {
-          if (!Object.hasOwn(row, fk)) return;
+          if (!hasOwn(row, fk)) return;
           const info = formatValueSummary(fk, row[fk]);
           if (!info.text) return;
           valsWrap.appendChild(el("span", { style: { display: "inline-flex", alignItems: "center", gap: "3px" } },
@@ -1897,7 +1897,7 @@ export async function renderCanvas(host, ctx, params = {}) {
 
   // ==================== Node Card Renderer ====================
   function duplicateNode(node) {
-    const copy = structuredClone(node);
+    const copy = cloneData(node);
     copy.id = uid(node.type);
     copy.x = Math.round((node.x || 40) + 36);
     copy.y = Math.round((node.y || 40) + 36);
@@ -2120,7 +2120,7 @@ export async function renderCanvas(host, ctx, params = {}) {
         ));
       }
     } else if (node.type === "parameters") {
-      const order = (node.fieldOrder || Object.keys(node.fields || {})).filter((f) => Object.hasOwn(node.fields || {}, f));
+      const order = (node.fieldOrder || Object.keys(node.fields || {})).filter((f) => hasOwn(node.fields || {}, f));
       const activeField = order.includes(state.activeFieldTabs.get(node.id)) ? state.activeFieldTabs.get(node.id) : (order[0] || "prompt");
       state.activeFieldTabs.set(node.id, activeField);
 
@@ -2162,7 +2162,7 @@ export async function renderCanvas(host, ctx, params = {}) {
       }, "📋 套用配方"));
 
       body.appendChild(tabsBar);
-      if (Object.hasOwn(node.fields || {}, activeField)) {
+      if (hasOwn(node.fields || {}, activeField)) {
         body.appendChild(renderFieldEditor(node, activeField, node.fields[activeField]));
         if (order.length > 1 && activeField !== "prompt") {
           body.appendChild(el("button", {

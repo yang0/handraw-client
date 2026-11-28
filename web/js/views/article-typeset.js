@@ -217,7 +217,8 @@ function renderInlineHTML(rawText, cfg, accent) {
   s = escHtml(s);
 
   // Wikilinks [[target|alias]] -> clean text or subtle underlined accent (no ugly [[ ]] brackets in WeChat!)
-  s = s.replace(/(?<!!)\[\[([^\[\]\r\n]+)\]\]/g, (_, inner) => {
+  s = s.replace(/\[\[([^\[\]\r\n]+)\]\]/g, (match, inner, offset, str) => {
+    if (offset > 0 && str.charCodeAt(offset - 1) === 33) return match;
     const parts = inner.split("|");
     const label = (parts[1] || parts[0] || "").trim();
     if (cfg.linkMode === "accent") {
@@ -227,9 +228,10 @@ function renderInlineHTML(rawText, cfg, accent) {
   });
 
   // External links [label](url)
-  s = s.replace(/(?<!!)\[([^\[\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, lbl, url) =>
-    `<a href="${url}" style="color:${accent};text-decoration:underline;">${lbl}</a>`
-  );
+  s = s.replace(/\[([^\[\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (match, lbl, url, offset, str) => {
+    if (offset > 0 && str.charCodeAt(offset - 1) === 33) return match;
+    return `<a href="${url}" style="color:${accent};text-decoration:underline;">${lbl}</a>`;
+  });
 
   // Inline code `...`
   s = s.replace(/`([^`\r\n]+)`/g, (_, code) =>
@@ -252,9 +254,10 @@ function renderInlineHTML(rawText, cfg, accent) {
   );
 
   // Italic *...*
-  s = s.replace(/(?<!\*)\*([^\*\r\n]+)\*(?!\*)/g, (_, em) =>
-    `<em style="font-style:italic;">${em}</em>`
-  );
+  s = s.replace(/\*([^\*\r\n]+)\*(?!\*)/g, (match, em, offset, str) => {
+    if (offset > 0 && str.charCodeAt(offset - 1) === 42) return match;
+    return `<em style="font-style:italic;">${em}</em>`;
+  });
 
   // Strip Obsidian %%comments%% from published output
   s = s.replace(/%%[^%\r\n]+%%/g, "");

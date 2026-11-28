@@ -1,4 +1,4 @@
-import { api, clear, closeModal, copyText, el, money, onEvent, openURL, setColorScheme, showModal, toast } from "../api.js";
+import { api, clear, cloneData, closeModal, copyText, el, money, onEvent, openURL, setColorScheme, showModal, toast } from "../api.js";
 import { economySyncHint, formatQuotaSummary, formatYuanMicros, parseEconomy } from "../economy.js";
 import { openPrivacyConsentDialog } from "../consent.js";
 import { createTextModelPicker } from "../skills-ui.js";
@@ -1852,7 +1852,7 @@ function resolveModelKind(prov, model) {
 
 function openProviderModal(existing, onSaved) {
   const isNew = !existing;
-  const prov = existing ? structuredClone(existing) : { id: "", name: "", kind: "openai", purpose: "all", baseUrl: "", enabled: true, models: [] };
+  const prov = existing ? cloneData(existing) : { id: "", name: "", kind: "openai", purpose: "all", baseUrl: "", enabled: true, models: [] };
   if (!Array.isArray(prov.models)) prov.models = [];
   // Normalize existing models so each carries explicit kind ("image" | "text")
   prov.models = prov.models.map((m) => {

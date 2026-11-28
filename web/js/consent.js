@@ -1,4 +1,4 @@
-import { api, clear, el, openURL, toast } from "./api.js";
+import { api, clear, closeDialogModal, el, openDialogModal, openURL, toast } from "./api.js";
 
 /**
  * First-run & reviewable Privacy / Usage Notice modal (#191).
@@ -11,7 +11,7 @@ export function openPrivacyConsentDialog(settingsObj = {}, { initialGate = false
   return new Promise((resolve) => {
     const existing = document.getElementById("privacy-consent-dialog");
     if (existing) {
-      try { existing.close(); } catch {}
+      try { closeDialogModal(existing, "cancel"); } catch {}
       existing.remove();
     }
 
@@ -60,7 +60,7 @@ export function openPrivacyConsentDialog(settingsObj = {}, { initialGate = false
 
     const finish = (accepted, updatedSettings = null) => {
       try {
-        if (dlg.open) dlg.close(accepted ? "accept" : "cancel");
+        closeDialogModal(dlg, accepted ? "accept" : "cancel");
       } catch {}
       dlg.remove();
       if (accepted && typeof onAccepted === "function") {
@@ -184,7 +184,7 @@ export function openPrivacyConsentDialog(settingsObj = {}, { initialGate = false
 
     dlg.appendChild(el("div", { class: "modal-inner consent-inner" }, form));
     document.body.appendChild(dlg);
-    dlg.showModal();
+    openDialogModal(dlg);
     requestAnimationFrame(() => acceptBtn.focus());
   });
 }

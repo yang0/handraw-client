@@ -281,19 +281,91 @@ export function openURL(url) {
   return api("POST", "/api/open", { url });
 }
 
+export function cloneData(val) {
+  if (typeof structuredClone === "function") return structuredClone(val);
+  return val === undefined ? undefined : JSON.parse(JSON.stringify(val));
+}
+
+export function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+export function randomId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
 export function setColorScheme(mode) {
   const meta = document.querySelector('meta[name="color-scheme"]');
   if (mode === "light" || mode === "dark") {
     try { localStorage.setItem("color-scheme", mode); } catch {}
     if (meta) meta.content = mode;
+    document.documentElement.setAttribute("data-color-scheme", mode);
   } else {
     try { localStorage.removeItem("color-scheme"); } catch {}
     if (meta) meta.content = "light dark";
+    document.documentElement.removeAttribute("data-color-scheme");
   }
 }
 
+export function openDialogModal(dlg) {
+  if (!dlg) return;
+  if (typeof dlg.showModal === "function") {
+    if (!dlg.open) dlg.showModal();
+    return;
+  }
+  dlg.setAttribute("open", "");
+  if (!dlg._fallbackBackdrop) {
+    const bd = document.createElement("div");
+    bd.className = "dialog-fallback-backdrop";
+    bd.addEventListener("click", () => {
+      if (dlg.getAttribute("closedby") !== "none") closeDialogModal(dlg, "");
+    });
+    document.body.appendChild(bd);
+    dlg._fallbackBackdrop = bd;
+  }
+  if (!dlg._fallbackKeydown) {
+    dlg._fallbackKeydown = (e) => {
+      if (e.key !== "Escape") return;
+      if (!dlg.hasAttribute("open")) return;
+      if (dlg.getAttribute("closedby") === "none") {
+        dlg.dispatchEvent(new Event("cancel", { cancelable: true }));
+        return;
+      }
+      e.preventDefault();
+      closeDialogModal(dlg, "");
+    };
+    window.addEventListener("keydown", dlg._fallbackKeydown);
+  }
+}
+
+export function closeDialogModal(dlg, returnValue = "") {
+  if (!dlg) return;
+  if (typeof dlg.close === "function") {
+    if (dlg.open) dlg.close(returnValue);
+    return;
+  }
+  if (!dlg.hasAttribute("open")) return;
+  dlg.returnValue = returnValue;
+  dlg.removeAttribute("open");
+  if (dlg._fallbackBackdrop) {
+    dlg._fallbackBackdrop.remove();
+    dlg._fallbackBackdrop = null;
+  }
+  if (dlg._fallbackKeydown) {
+    window.removeEventListener("keydown", dlg._fallbackKeydown);
+    dlg._fallbackKeydown = null;
+  }
+  dlg.dispatchEvent(new Event("close"));
+}
+
 export function installDialogLightDismiss() {
-  if ("closedBy" in HTMLDialogElement.prototype) return;
+  if (typeof HTMLDialogElement !== "undefined" && "closedBy" in HTMLDialogElement.prototype) return;
   const outside = (e, dialog) => {
     const r = dialog.getBoundingClientRect();
     return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
@@ -302,8 +374,17 @@ export function installDialogLightDismiss() {
     let pressedOutside = false;
     dialog.addEventListener("pointerdown", (e) => { pressedOutside = outside(e, dialog); });
     dialog.addEventListener("pointerup", (e) => {
-      if (pressedOutside && outside(e, dialog)) dialog.close("");
+      if (pressedOutside && outside(e, dialog)) closeDialogModal(dialog, "");
     });
+    // Fallback for <form method="dialog"> submit buttons when HTMLDialogElement is unavailable
+    if (typeof dialog.close !== "function") {
+      dialog.addEventListener("submit", (e) => {
+        if (e.target && e.target.getAttribute("method") === "dialog") {
+          e.preventDefault();
+          closeDialogModal(dialog, "");
+        }
+      });
+    }
   }
 }
 
@@ -342,21 +423,21 @@ export function showModal(title, bodyNode, footerNodes = [], opts = {}) {
     dlg.addEventListener("close", handler, { once: true });
   }
   dlg.returnValue = "";
-  if (!dlg.open) dlg.showModal();
+  openDialogModal(dlg);
   return dlg;
 }
 
 export function closeModal() {
   const dlg = document.getElementById("app-dialog");
-  if (dlg && dlg.open) {
+  if (dlg && (dlg.open || dlg.hasAttribute("open"))) {
     dlg.returnValue = "";
-    dlg.close();
+    closeDialogModal(dlg, "");
   }
 }
 
 export function showStackedModal(title, bodyNode, footerNodes = [], opts = {}) {
   const dlg = el("dialog", { class: "modal" + (opts.className ? " " + opts.className : "") });
-  const closeSelf = () => { if (dlg.open) dlg.close(); };
+  const closeSelf = () => { closeDialogModal(dlg, ""); };
   const closeBtn = el("button", { type: "button", class: "icon-btn modal-close", "aria-label": "关闭", onClick: closeSelf }, "✕");
   const head = el("header", { class: "modal-head" },
     el("h2", { class: "modal-title" }, title || ""),
@@ -374,7 +455,7 @@ export function showStackedModal(title, bodyNode, footerNodes = [], opts = {}) {
     dlg.remove();
   }, { once: true });
   document.body.appendChild(dlg);
-  dlg.showModal();
+  openDialogModal(dlg);
   dlg._closeSelf = closeSelf;
   return dlg;
 }

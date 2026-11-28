@@ -1,4 +1,4 @@
-import { api, clear, el, toast } from "./api.js";
+import { api, clear, closeDialogModal, el, openDialogModal, toast } from "./api.js";
 import { openLayoutEditorModal, openStyleEditorModal } from "./views/resource-editor.js";
 import { openExtensionSubmitModal } from "./views/plugins-channels.js";
 
@@ -30,7 +30,7 @@ export function initPalette(ctx) {
 
   const open = async () => {
     dlg.returnValue = "";
-    dlg.showModal();
+    openDialogModal(dlg);
     input.value = "";
     input.focus();
     await ensureCatalog();
@@ -41,7 +41,7 @@ export function initPalette(ctx) {
   window.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
-      if (dlg.open) dlg.close("");
+      if (dlg.open || dlg.hasAttribute("open")) closeDialogModal(dlg, "");
       else open();
     }
   });
@@ -177,7 +177,7 @@ export function initPalette(ctx) {
           type: "button",
           class: "cmd-row" + (idx === selected ? " selected" : ""),
           onClick: () => {
-            dlg.close("");
+            closeDialogModal(dlg, "");
             row.run();
           },
         },
@@ -201,7 +201,7 @@ export function initPalette(ctx) {
     } else if (e.key === "Enter" && rows[selected]) {
       e.preventDefault();
       const fn = rows[selected].run;
-      dlg.close("");
+      closeDialogModal(dlg, "");
       fn();
     }
   });

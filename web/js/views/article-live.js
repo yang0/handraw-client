@@ -798,9 +798,10 @@ function decorateInlineLine(text, lineFrom, sel, sourcePath, linksCtrl, onOpenNo
 
   // 1. Wikilinks [[target|alias]] (non-embed)
   {
-    const re = /(?<!!)\[\[([^\[\]\r\n]+)\]\]/g;
+    const re = /\[\[([^\[\]\r\n]+)\]\]/g;
     let m;
     while ((m = re.exec(text)) !== null) {
+      if (m.index > 0 && text.charCodeAt(m.index - 1) === 33) continue;
       const f = lineFrom + m.index;
       const t = f + m[0].length;
       if (isClaimed(f, t)) continue;
@@ -819,9 +820,10 @@ function decorateInlineLine(text, lineFrom, sel, sourcePath, linksCtrl, onOpenNo
 
   // 2. External links [label](https://...)
   {
-    const re = /(?<!!)\[([^\[\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
+    const re = /\[([^\[\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
     let m;
     while ((m = re.exec(text)) !== null) {
+      if (m.index > 0 && text.charCodeAt(m.index - 1) === 33) continue;
       const f = lineFrom + m.index;
       const t = f + m[0].length;
       if (isClaimed(f, t)) continue;
@@ -929,9 +931,10 @@ function decorateInlineLine(text, lineFrom, sel, sourcePath, linksCtrl, onOpenNo
 
   // 8. Italic *...*
   {
-    const re = /(?<!\*)\*([^\*\r\n]+)\*(?!\*)/g;
+    const re = /\*([^\*\r\n]+)\*(?!\*)/g;
     let m;
     while ((m = re.exec(text)) !== null) {
+      if (m.index > 0 && text.charCodeAt(m.index - 1) === 42) continue;
       const f = lineFrom + m.index;
       const t = f + m[0].length;
       if (isClaimed(f, t)) continue;
@@ -947,9 +950,10 @@ function decorateInlineLine(text, lineFrom, sel, sourcePath, linksCtrl, onOpenNo
 
   // 9. Inline Math $...$
   {
-    const re = /(?<!\$)\$([^$\r\n]+)\$(?!\$)/g;
+    const re = /\$([^$\r\n]+)\$(?!\$)/g;
     let m;
     while ((m = re.exec(text)) !== null) {
+      if (m.index > 0 && text.charCodeAt(m.index - 1) === 36) continue;
       const f = lineFrom + m.index;
       const t = f + m[0].length;
       if (isClaimed(f, t)) continue;
@@ -1076,9 +1080,9 @@ export function createArticleLiveEditor(opts) {
     const cleaned = sel
       .replace(/<\/?mark(?:\s+[^>]*)?>/gi, "")
       .replace(/(\*\*|__|~~|==|%%)/g, "")
-      .replace(/(?<!\*)\*([^\*\r\n]+)\*(?!\*)/g, "$1")
+      .replace(/\*([^\*\r\n]+)\*(?!\*)/g, (m, inner, offset, str) => (offset > 0 && str.charCodeAt(offset - 1) === 42 ? m : inner))
       .replace(/`([^`\r\n]+)`/g, "$1")
-      .replace(/(?<!\$)\$([^$\r\n]+)\$(?!\$)/g, "$1");
+      .replace(/\$([^$\r\n]+)\$(?!\$)/g, (m, inner, offset, str) => (offset > 0 && str.charCodeAt(offset - 1) === 36 ? m : inner));
     cmView.dispatch({
       changes: { from, to, insert: cleaned },
       selection: EditorSelection.range(from, from + cleaned.length),

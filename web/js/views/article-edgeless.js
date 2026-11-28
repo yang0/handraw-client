@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, getToken, localImg, showModal, toast } from "../api.js";
+import { api, clear, cloneData, closeModal, el, getToken, localImg, showModal, toast } from "../api.js";
 import { openArticleContextMenu } from "./article-links.js";
 
 const NODE_COLORS = {
@@ -864,7 +864,7 @@ export function createArticleEdgelessController(opts) {
             label: "复制一份",
             onClick: () => {
               pushUndo();
-              const copy = structuredClone(node);
+              const copy = cloneData(node);
               copy.id = uid("n");
               copy.x = Number(node.x || 0) + 32;
               copy.y = Number(node.y || 0) + 32;

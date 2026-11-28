@@ -1,4 +1,4 @@
-import { api, clear, closeModal, el, localImg, money, onEvent, packImg, showModal, toast } from "../api.js";
+import { api, clear, closeModal, el, localImg, money, onEvent, packImg, randomId, showModal, toast } from "../api.js";
 import { maybeHandleInsufficientCashError } from "../economy.js";
 import { createTextModelPicker, openSharedSkillPickerModal } from "../skills-ui.js";
 import { computeParagraphDiff, mergeAcceptedHunks, renderCopilotMarkdown, renderInlineWordDiff } from "./article-diff.js";
@@ -4121,7 +4121,7 @@ export async function renderArticle(root, ctx, params = {}) {
   function insertSlotAt(anchorText, role = "inline") {
     const isCover = role === "cover";
     const slot = {
-      id: crypto.randomUUID(),
+      id: randomId(),
       role: isCover ? "cover" : "inline",
       anchor: isCover ? "" : anchorText,
       title: isCover ? "文章封面" : `插图 ${state.slots.length + 1}`,
@@ -4263,7 +4263,7 @@ export async function renderArticle(root, ctx, params = {}) {
   }
 
   function renderSlotCard(sl, inlineNo, anchorDesc, isOrphan = false) {
-    if (!sl.id) sl.id = crypto.randomUUID();
+    if (!sl.id) sl.id = randomId();
     if (!Array.isArray(sl.variants)) sl.variants = sl.imagePath ? [sl.imagePath] : [];
     else if (sl.imagePath && !sl.variants.includes(sl.imagePath)) sl.variants.unshift(sl.imagePath);
 
@@ -4624,7 +4624,7 @@ export async function renderArticle(root, ctx, params = {}) {
         planNotice.textContent = "文章已修改，请按当前正文重新规划。";
         return;
       }
-      const fresh = (res.slots || []).map((sl) => ({ ...sl, id: crypto.randomUUID(), imagePath: "", variants: [], selected: true }));
+      const fresh = (res.slots || []).map((sl) => ({ ...sl, id: randomId(), imagePath: "", variants: [], selected: true }));
       const viaModel = res.model ? `（${res.model}）` : (res.source === "harness" ? "（本地 Harness）" : (res.source === "site" ? "（官方智能文字服务）" : (res.source === "provider" ? "（自定义文本模型）" : "")));
       const noticeMsg = res.source === "local"
         ? (res.fallbackReason

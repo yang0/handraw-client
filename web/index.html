@@ -7,7 +7,18 @@
   <script>
     try {
       var s = localStorage.getItem("color-scheme");
-      if (s === "light" || s === "dark") document.querySelector('meta[name="color-scheme"]').content = s;
+      if (s === "light" || s === "dark") {
+        document.querySelector('meta[name="color-scheme"]').content = s;
+        document.documentElement.setAttribute("data-color-scheme", s);
+      }
+    } catch (e) {}
+    try {
+      if (typeof HTMLElement === "undefined" || !("popover" in HTMLElement.prototype)) {
+        document.documentElement.classList.add("no-popover");
+      }
+      if (typeof HTMLDialogElement === "undefined" || !("showModal" in HTMLDialogElement.prototype)) {
+        document.documentElement.classList.add("no-dialog");
+      }
     } catch (e) {}
   </script>
   <title>手绘风生图工作台</title>
